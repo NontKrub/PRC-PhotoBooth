@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>$(DEVELOPMENT_LANGUAGE)</string>
+	<key>CFBundleDisplayName</key>
+	<string>PRC PhotoBooth</string>
+	<key>CFBundleExecutable</key>
+	<string>$(EXECUTABLE_NAME)</string>
+	<key>CFBundleIdentifier</key>
+	<string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundleName</key>
+	<string>$(PRODUCT_NAME)</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>1.0</string>
+	<key>CFBundleVersion</key>
+	<string>1</string>
+	<key>NSBonjourServices</key>
+	<array>
+		<string>_prc-photobooth._tcp</string>
+		<string>_prc-photobooth._udp</string>
+		<string>_prc-hq._tcp</string>
+	</array>
+	<key>NSCameraUsageDescription</key>
+	<string>PRC PhotoBooth needs camera access to capture photos for the booth.</string>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>PRC PhotoBooth connects to the iPad over local network to stream the camera preview and sync session state.</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>PRC PhotoBooth uses the microphone as part of the camera session.</string>
+</dict>
+</plist>

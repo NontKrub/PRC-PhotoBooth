@@ -1,0 +1,192 @@
+name: PRC-PhotoBooth
+
+options:
+  bundleIdPrefix: com.nont.prcphoto
+  createIntermediateGroups: true
+  deploymentTarget:
+    macOS: "15.0"
+    iOS: "18.0"
+  swift: "6.0"
+  xcodeVersion: "27"
+  generateEmptyDirectories: true
+  indentWidth: 4
+
+targets:
+
+  # ───────────────────────────────────────────────
+  # Mac: operator brain
+  # ───────────────────────────────────────────────
+  PRC-PhotoBooth-Mac:
+    type: application
+    platform: macOS
+    deploymentTarget: "15.0"
+    sources:
+      - path: Shared
+        excludes:
+          - "**/.DS_Store"
+      - path: Mac
+        excludes:
+          - "**/.DS_Store"
+    resources:
+      - path: Mac/Assets.xcassets
+        optional: true
+    info:
+      path: Mac/Info.plist
+      properties:
+        CFBundleDisplayName: PRC PhotoBooth
+        CFBundleShortVersionString: "1.0"
+        CFBundleVersion: "1"
+        NSCameraUsageDescription: PRC PhotoBooth needs camera access to capture photos for the booth.
+        NSMicrophoneUsageDescription: PRC PhotoBooth uses the microphone as part of the camera session.
+        NSLocalNetworkUsageDescription: PRC PhotoBooth connects to the iPad over local network to stream the camera preview and sync session state.
+        NSBonjourServices:
+          - _prc-photobooth._tcp
+          - _prc-photobooth._udp
+          - _prc-hq._tcp
+    entitlements:
+      path: Mac/PRC-PhotoBooth-Mac.entitlements
+      properties:
+        com.apple.security.app-sandbox: false
+        com.apple.security.device.camera: true
+        com.apple.security.device.microphone: true
+        com.apple.security.network.client: true
+        com.apple.security.network.server: true
+        com.apple.security.files.user-selected.read-write: true
+        com.apple.security.files.downloads.read-write: true
+        com.apple.security.print: true
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.nont.prcphoto.mac
+        SWIFT_VERSION: 6.0
+        # Ship one universal Mac app for Apple Silicon and Intel Macs.
+        ARCHS: "arm64 x86_64"
+        ONLY_ACTIVE_ARCH: NO
+        MACOSX_DEPLOYMENT_TARGET: "15.0"
+        CODE_SIGN_STYLE: Automatic
+        DEVELOPMENT_TEAM: ""
+        ENABLE_HARDENED_RUNTIME: YES
+        SWIFT_STRICT_CONCURRENCY: targeted
+        OTHER_SWIFT_FLAGS: ""
+        INFOPLIST_FILE: Mac/Info.plist
+        CODE_SIGN_ENTITLEMENTS: Mac/PRC-PhotoBooth-Mac.entitlements
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+      configs:
+        Debug:
+          SWIFT_ACTIVE_COMPILATION_CONDITIONS: DEBUG
+        Release:
+          SWIFT_ACTIVE_COMPILATION_CONDITIONS: ""
+    dependencies:
+      - sdk: MultipeerConnectivity.framework
+      - sdk: AVFoundation.framework
+      - sdk: CoreImage.framework
+      - sdk: CoreGraphics.framework
+      - sdk: ImageIO.framework
+      - sdk: ImageCaptureCore.framework
+      - sdk: UniformTypeIdentifiers.framework
+      - sdk: SwiftData.framework
+      - sdk: Charts.framework
+      - sdk: Network.framework
+
+  # ───────────────────────────────────────────────
+  # iPad: customer screen
+  # ───────────────────────────────────────────────
+  PRC-PhotoBooth-iPad:
+    type: application
+    platform: iOS
+    deploymentTarget: "18.0"
+    sources:
+      - path: Shared
+        excludes:
+          - "**/.DS_Store"
+      - path: iPad
+        excludes:
+          - "**/.DS_Store"
+    resources:
+      - path: iPad/Assets.xcassets
+        optional: true
+    info:
+      path: iPad/Info.plist
+      properties:
+        CFBundleDisplayName: PRC PhotoBooth
+        CFBundleShortVersionString: "1.0"
+        CFBundleVersion: "1"
+        NSLocalNetworkUsageDescription: PRC PhotoBooth connects to the operator Mac over local network for camera preview and session control.
+        NSBonjourServices:
+          - _prc-photobooth._tcp
+          - _prc-photobooth._udp
+          - _prc-hq._tcp
+        UIRequiresFullScreen: true
+        UIStatusBarHidden: true
+    entitlements:
+      path: iPad/PRC-PhotoBooth-iPad.entitlements
+      properties:
+        com.apple.security.network.client: true
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.nont.prcphoto.ipad
+        SWIFT_VERSION: 6.0
+        IPHONEOS_DEPLOYMENT_TARGET: "18.0"
+        TARGETED_DEVICE_FAMILY: "2"
+        CODE_SIGN_STYLE: Automatic
+        DEVELOPMENT_TEAM: ""
+        SWIFT_STRICT_CONCURRENCY: targeted
+        OTHER_SWIFT_FLAGS: ""
+        INFOPLIST_FILE: iPad/Info.plist
+        CODE_SIGN_ENTITLEMENTS: iPad/PRC-PhotoBooth-iPad.entitlements
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+      configs:
+        Debug:
+          SWIFT_ACTIVE_COMPILATION_CONDITIONS: DEBUG
+        Release:
+          SWIFT_ACTIVE_COMPILATION_CONDITIONS: ""
+    dependencies:
+      - sdk: MultipeerConnectivity.framework
+      - sdk: Network.framework
+      - sdk: CoreImage.framework
+      - sdk: CoreGraphics.framework
+      - sdk: ImageIO.framework
+
+  # ───────────────────────────────────────────────
+  # Unit Tests (Mac host)
+  # ───────────────────────────────────────────────
+  PRC-PhotoBoothTests:
+    type: bundle.unit-test
+    platform: macOS
+    deploymentTarget: "15.0"
+    sources:
+      - Tests
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.nont.prcphoto.tests
+        SWIFT_VERSION: 6.0
+        # Keep the test bundle compatible with the universal Mac app host.
+        ARCHS: "arm64 x86_64"
+        ONLY_ACTIVE_ARCH: NO
+        GENERATE_INFOPLIST_FILE: YES
+    dependencies:
+      - target: PRC-PhotoBooth-Mac
+
+schemes:
+  PRC-PhotoBooth-Mac:
+    build:
+      targets:
+        PRC-PhotoBooth-Mac: all
+    run:
+      config: Debug
+
+  PRC-PhotoBooth-iPad:
+    build:
+      targets:
+        PRC-PhotoBooth-iPad: all
+    run:
+      config: Debug
+
+  PRC-PhotoBoothTests:
+    build:
+      targets:
+        PRC-PhotoBooth-Mac: all
+        PRC-PhotoBoothTests: [test]
+    test:
+      config: Debug
+      targets:
+        - PRC-PhotoBoothTests
