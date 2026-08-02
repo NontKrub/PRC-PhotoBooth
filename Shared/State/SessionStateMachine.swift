@@ -8,17 +8,33 @@ public final class SessionStateMachine {
     public var config: EventConfig = EventConfig()
     public private(set) var keptShots: [Int: Data] = [:]   // photoIndex → JPEG thumbnail
     public private(set) var currentSessionID: String = ""
+    public private(set) var nextPhotoIndex: Int = 0
 
     public init() {}
 
-    public func startSession(config: EventConfig) {
+    public func startSession(config: EventConfig, sessionID: String? = nil) {
         self.config = config
         self.keptShots = [:]
-        self.currentSessionID = UUID().uuidString
+        self.currentSessionID = sessionID ?? UUID().uuidString
+        self.nextPhotoIndex = 0
+        phase = .readyToStart
+    }
+
+    public func restoreSession(
+        sessionID: String,
+        config: EventConfig,
+        keptShots: [Int: Data],
+        nextPhotoIndex: Int
+    ) {
+        self.config = config
+        self.currentSessionID = sessionID
+        self.keptShots = keptShots
+        self.nextPhotoIndex = nextPhotoIndex
         phase = .readyToStart
     }
 
     public func beginCountdown(photoIndex: Int) {
+        nextPhotoIndex = photoIndex
         phase = .countdown(photoIndex: photoIndex, secondsRemaining: config.countdownSeconds)
     }
 
@@ -38,6 +54,7 @@ public final class SessionStateMachine {
 
     public func keepShot(photoIndex: Int) {
         let next = photoIndex + 1
+        nextPhotoIndex = next
         if next < config.photoCount {
             phase = .countdown(photoIndex: next, secondsRemaining: config.countdownSeconds)
         } else {
@@ -47,6 +64,7 @@ public final class SessionStateMachine {
 
     public func retakeShot(photoIndex: Int) {
         keptShots.removeValue(forKey: photoIndex)
+        nextPhotoIndex = photoIndex
         phase = .countdown(photoIndex: photoIndex, secondsRemaining: config.countdownSeconds)
     }
 
@@ -58,6 +76,7 @@ public final class SessionStateMachine {
         phase = .idle
         keptShots = [:]
         currentSessionID = ""
+        nextPhotoIndex = 0
     }
 
     // Direct phase override — used by coordinators to tick countdowns.

@@ -111,6 +111,10 @@ final class CaptureService {
         capturedStills = [:]
     }
 
+    func restoreStills(_ images: [Int: CGImage]) {
+        capturedStills = images
+    }
+
     func thumbnail(for cgImage: CGImage, maxDim: Int = 200) -> Data? {
         let scale = min(1.0, Double(maxDim) / Double(max(cgImage.width, cgImage.height)))
         let w = Int(Double(cgImage.width) * scale)

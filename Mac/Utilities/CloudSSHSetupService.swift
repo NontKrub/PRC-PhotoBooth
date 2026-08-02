@@ -229,6 +229,18 @@ final class CloudSSHSetupService {
         refreshChecks()
     }
 
+    func checkConnection() async -> Bool {
+        guard state == .complete else { return false }
+        do {
+            try await testConnection()
+            refreshChecks()
+            return true
+        } catch {
+            refreshChecks()
+            return false
+        }
+    }
+
     func skip() {
         state = state.transitioning(for: .skip)
         defaults.set(state.rawValue, forKey: Keys.state)

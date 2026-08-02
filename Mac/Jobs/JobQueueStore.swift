@@ -123,6 +123,20 @@ actor JobQueueStore {
         try persist()
     }
 
+    func cancelJobs(sessionID: String) throws {
+        try ensureLoaded()
+        var changed = false
+        for index in jobs.indices where jobs[index].sessionID == sessionID {
+            guard jobs[index].status != .succeeded, jobs[index].status != .cancelled else { continue }
+            jobs[index].status = .cancelled
+            jobs[index].lastError = "Session cancelled"
+            jobs[index].nextAttemptAt = nil
+            jobs[index].updatedAt = Date()
+            changed = true
+        }
+        if changed { try persist() }
+    }
+
     func cancelOptionalJobs(sessionID: String) throws {
         try ensureLoaded()
         let optionalKinds = Set(SessionJobKind.allCases.filter(\.isOptional))
@@ -157,6 +171,13 @@ actor JobQueueStore {
         try ensureLoaded()
         let oldCount = jobs.count
         jobs.removeAll { $0.status == .succeeded && $0.updatedAt < date }
+        if jobs.count != oldCount { try persist() }
+    }
+
+    func deleteJobs(sessionID: String) throws {
+        try ensureLoaded()
+        let oldCount = jobs.count
+        jobs.removeAll { $0.sessionID == sessionID }
         if jobs.count != oldCount { try persist() }
     }
 

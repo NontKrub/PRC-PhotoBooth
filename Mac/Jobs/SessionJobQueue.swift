@@ -13,10 +13,12 @@ final class SessionJobQueue {
     private let executor: any SessionJobExecuting
     private var workerTask: Task<Void, Never>?
     private var wakeContinuation: AsyncStream<Void>.Continuation?
+    private var persistentQueueError: String?
 
     private(set) var jobs: [SessionJob] = []
     private(set) var isRunning = false
     private(set) var lastQueueError: String?
+    var onJobsChanged: (() -> Void)?
 
     init(store: JobQueueStore, executor: any SessionJobExecuting) {
         self.store = store
@@ -59,6 +61,10 @@ final class SessionJobQueue {
         enqueue(kinds: [.autoPrint], sessionID: manifest.id)
     }
 
+    func enqueueCloudUpload(for manifest: SessionManifest) {
+        enqueue(kinds: [.cloudUpload], sessionID: manifest.id)
+    }
+
     func retry(jobID: String) {
         Task { [weak self] in
             guard let self else { return }
@@ -84,6 +90,18 @@ final class SessionJobQueue {
         }
     }
 
+    func cancelJobs(sessionID: String) {
+        Task { [weak self] in
+            guard let self else { return }
+            do {
+                try await store.cancelJobs(sessionID: sessionID)
+                await reload()
+            } catch {
+                lastQueueError = error.localizedDescription
+            }
+        }
+    }
+
     func retryAllFailed() {
         Task { [weak self] in
             guard let self else { return }
@@ -92,6 +110,30 @@ final class SessionJobQueue {
                 for job in failed { try await store.retry(jobID: job.id) }
                 await reload()
                 wakeContinuation?.yield(())
+            } catch {
+                lastQueueError = error.localizedDescription
+            }
+        }
+    }
+
+    func purgeOldSucceededJobs(olderThan date: Date) {
+        Task { [weak self] in
+            guard let self else { return }
+            do {
+                try await store.purgeOldSucceededJobs(olderThan: date)
+                await reload()
+            } catch {
+                lastQueueError = error.localizedDescription
+            }
+        }
+    }
+
+    func deleteJobs(sessionID: String) {
+        Task { [weak self] in
+            guard let self else { return }
+            do {
+                try await store.deleteJobs(sessionID: sessionID)
+                await reload()
             } catch {
                 lastQueueError = error.localizedDescription
             }
@@ -119,7 +161,8 @@ final class SessionJobQueue {
             try await store.resetInterruptedJobs()
             await reload()
         } catch {
-            lastQueueError = error.localizedDescription
+            persistentQueueError = error.localizedDescription
+            lastQueueError = persistentQueueError
             await reloadFromSnapshot()
         }
 
@@ -152,20 +195,28 @@ final class SessionJobQueue {
         running.attemptCount += 1
         running.lastAttemptAt = Date()
         running.nextAttemptAt = nil
+        running.updatedAt = Date()
         do {
             try await store.update(running)
             await reload()
+            if await store.snapshot().first(where: { $0.id == running.id })?.status == .cancelled {
+                return true
+            }
             try await executor.execute(running)
             running.status = .succeeded
             running.lastError = nil
             running.nextAttemptAt = nil
+            running.updatedAt = Date()
         } catch let error as JobExecutionError {
             apply(error, to: &running)
         } catch {
             apply(.retryable(error.localizedDescription), to: &running)
         }
         do {
-            try await store.update(running)
+            let persisted = await store.snapshot().first { $0.id == running.id }
+            if persisted?.status != .cancelled {
+                try await store.update(running)
+            }
             await reload()
         } catch {
             lastQueueError = error.localizedDescription
@@ -176,9 +227,12 @@ final class SessionJobQueue {
     private func apply(_ error: JobExecutionError, to job: inout SessionJob) {
         let message = error.localizedDescription
         job.lastError = message
+        job.updatedAt = Date()
         switch error {
         case .permanent:
-            job.status = .failed
+            job.status = message == "Cloud upload disabled in Settings" && job.kind == .cloudUpload
+                ? .cancelled
+                : .failed
             job.nextAttemptAt = nil
         case .retryable:
             if job.attemptCount >= SessionJobRetryPolicy.maximumAutomaticAttempts(for: job.kind) {
@@ -250,14 +304,17 @@ final class SessionJobQueue {
     private func reload() async {
         do {
             jobs = try await store.load()
-            lastQueueError = nil
+            lastQueueError = persistentQueueError
+            onJobsChanged?()
         } catch {
-            lastQueueError = error.localizedDescription
+            persistentQueueError = error.localizedDescription
+            lastQueueError = persistentQueueError
             await reloadFromSnapshot()
         }
     }
 
     private func reloadFromSnapshot() async {
         jobs = await store.snapshot()
+        onJobsChanged?()
     }
 }

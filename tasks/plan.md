@@ -17,48 +17,48 @@ Add restart-safe session manifests and workspaces, a persistent single-worker jo
 
 ### Phase 1: Runtime persistence foundations
 
-- [ ] Add manifest models/store with atomic JSON persistence and corrupt-file reporting.
-- [ ] Add session workspace creation, safe event names, atomic accepted-shot writes, frame snapshot, and image loading.
-- [ ] Add focused manifest/store/workspace tests.
+- [x] Add manifest models/store with atomic JSON persistence and corrupt-file reporting.
+- [x] Add session workspace creation, safe event names, atomic accepted-shot writes, frame snapshot, and image loading.
+- [x] Add focused manifest/store/workspace tests.
 
 ### Phase 2: Accepted capture and data correctness
 
-- [ ] Add DataStore session lookup/restore/delete and shot upsert helpers.
-- [ ] Create workspace + manifest during session start, including event snapshot and token.
-- [ ] Persist Keep before state advancement; route guest/operator retakes through one counter path.
-- [ ] Extend state-machine restoration and add retake/recovery behavior tests.
+- [x] Add DataStore session lookup/restore/delete and shot upsert helpers.
+- [x] Create workspace + manifest during session start, including event snapshot and token.
+- [x] Persist Keep before state advancement; route guest/operator retakes through one counter path.
+- [x] Extend state-machine restoration and add retake/recovery behavior tests.
 
 ### Checkpoint: Capture persistence
 
-- [ ] Mac build and full test suite pass.
-- [ ] Existing capture flow still compiles and preserves Multipeer messages.
+- [x] Mac build and full test suite pass.
+- [x] Existing capture flow still compiles and preserves Multipeer messages.
 
 ### Phase 3: Persistent queue and job execution
 
-- [ ] Add job models, retry policy, atomic queue store, and startup repair.
-- [ ] Add serial queue service and executor with required-job priority/dependencies.
-- [ ] Move strip/GIF/download registration into queued jobs; reconcile completion idempotently.
-- [ ] Add queue store and queue execution tests.
+- [x] Add job models, retry policy, atomic queue store, and startup repair.
+- [x] Add serial queue service and executor with required-job priority/dependencies.
+- [x] Move strip/GIF/download registration into queued jobs; reconcile completion idempotently.
+- [x] Add queue store and queue execution tests.
 
 ### Phase 4: Downloads, cloud, and printing
 
-- [ ] Make local server state/token mappings persistent-source compatible and secure; add health route.
-- [ ] Restore valid QR mappings on startup.
-- [ ] Extract structured cloud upload service with retries and `.work` exclusion.
-- [ ] Add AppKit printer service, test page, settings, automatic-print queue path, and retry state.
+- [x] Make local server state/token mappings persistent-source compatible and secure; add health route.
+- [x] Restore valid QR mappings on startup.
+- [x] Extract structured cloud upload service with retries and `.work` exclusion.
+- [x] Add AppKit printer service, test page, settings, automatic-print queue path, and retry state.
 
 ### Phase 5: Recovery and operations
 
-- [ ] Add startup recovery classification, Resume/Discard, and finalizing-session job repair.
-- [ ] Add preflight models/service with safe/full checks and readiness calculation.
-- [ ] Add Operations tab, recovery/queue/printer/server panels, readiness banner, and start gating.
-- [ ] Add focused recovery, router, preflight, and printer tests where platform seams permit.
+- [x] Add startup recovery classification, Resume/Discard, and finalizing-session job repair.
+- [x] Add preflight models/service with safe/full checks and readiness calculation.
+- [x] Add Operations tab, recovery/queue/printer/server panels, readiness banner, and start gating.
+- [x] Add focused recovery, router, preflight, and printer tests where platform seams permit.
 
 ### Phase 6: Cleanup and release
 
-- [ ] Update cleanup, version metadata, README, and recovery limitation documentation.
-- [ ] Run Mac/iPad builds, full tests, diff review, and manual checks that hardware permits.
-- [ ] Commit intentional slices, push branch, and open a draft pull request.
+- [x] Update cleanup, version metadata, README, and recovery limitation documentation.
+- [x] Run final Mac/iPad builds, full tests, and diff review. Hardware checks remain for the booth operator.
+- [x] Commit intentional slices, push branch, and open a draft pull request.
 
 ## Risks and Mitigations
 

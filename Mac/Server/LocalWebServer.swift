@@ -18,9 +18,6 @@ actor LocalWebServer {
     let port: UInt16
     private var tokenMap: [String: URL] = [:]
 
-    // Kept only while older coordinator code still supplies relative paths.
-    var sessionsDirectory: URL?
-
     private var state: LocalWebServerState = .stopped
 
     init(port: UInt16 = 8585) {
@@ -43,14 +40,21 @@ actor LocalWebServer {
         }
     }
 
-    // Compatibility for completed sessions created before absolute token maps.
-    func registerToken(_ token: String, sessionID: String) {
-        guard let sessionsDirectory else { return }
-        registerToken(token, sessionDirectory: sessionsDirectory.appendingPathComponent(sessionID))
-    }
-
     func statusSnapshot() -> LocalWebServerStatus {
         LocalWebServerStatus(state: state, registeredTokenCount: tokenMap.count)
+    }
+
+    func waitUntilReady(timeout: TimeInterval = 5) async -> LocalWebServerStatus {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            switch state {
+            case .ready, .failed, .stopped:
+                return statusSnapshot()
+            case .starting:
+                try? await Task.sleep(for: .milliseconds(50))
+            }
+        }
+        return statusSnapshot()
     }
 
     func start() throws {

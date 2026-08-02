@@ -61,6 +61,10 @@ struct SessionWorkspace: Sendable {
             sessionDirectory = eventDirectory.appendingPathComponent("\(baseName)-\(suffix)", isDirectory: true)
             suffix += 1
         }
+        var completed = false
+        defer {
+            if !completed { try? fileManager.removeItem(at: sessionDirectory) }
+        }
 
         let workDirectory = sessionDirectory.appendingPathComponent(".work", isDirectory: true)
         try createDirectory(workDirectory.appendingPathComponent("gif", isDirectory: true))
@@ -72,6 +76,7 @@ struct SessionWorkspace: Sendable {
             }
             let destination = workDirectory.appendingPathComponent("frame.png")
             let temporary = workDirectory.appendingPathComponent(".frame-\(UUID().uuidString).tmp")
+            defer { try? fileManager.removeItem(at: temporary) }
             try fileManager.copyItem(at: frameSourceURL, to: temporary)
             try fileManager.moveItem(at: temporary, to: destination)
             frameSnapshotFileName = ".work/frame.png"
@@ -82,6 +87,7 @@ struct SessionWorkspace: Sendable {
         let relative = sessionPath.hasPrefix(rootPath + "/")
             ? String(sessionPath.dropFirst(rootPath.count + 1))
             : sessionDirectory.lastPathComponent
+        completed = true
         return SessionWorkspaceDescriptor(
             outputRootPath: rootPath,
             relativeDirectoryPath: relative,
@@ -102,10 +108,12 @@ struct SessionWorkspace: Sendable {
         guard let imageData = jpegData(from: image, quality: 0.90) else {
             throw SessionWorkspaceError.imageEncodingFailed
         }
-        try imageData.write(to: sessionDirectory.appendingPathComponent(imageFileName), options: [.atomic])
 
         let gifRoot = sessionDirectory.appendingPathComponent(".work/gif", isDirectory: true)
         try createDirectory(gifRoot)
+        let temporaryImage = sessionDirectory.appendingPathComponent(".shot_\(photoIndex)-\(UUID().uuidString).tmp")
+        try imageData.write(to: temporaryImage, options: [.atomic])
+        defer { try? fileManager.removeItem(at: temporaryImage) }
         let temporaryDirectory = gifRoot.appendingPathComponent(".photo_\(photoIndex)-\(UUID().uuidString)", isDirectory: true)
         let destinationDirectory = gifRoot.appendingPathComponent("photo_\(photoIndex)", isDirectory: true)
         try createDirectory(temporaryDirectory)
@@ -120,7 +128,29 @@ struct SessionWorkspace: Sendable {
             try data.write(to: temporaryDirectory.appendingPathComponent(fileName), options: [.atomic])
             frameFileNames.append(".work/gif/photo_\(photoIndex)/\(fileName)")
         }
-        try replaceDirectory(at: destinationDirectory, with: temporaryDirectory)
+        let imageDestination = sessionDirectory.appendingPathComponent(imageFileName)
+        let imageBackup = sessionDirectory.appendingPathComponent(".old-shot-\(UUID().uuidString)")
+        let frameBackup = gifRoot.appendingPathComponent(".old-photo-\(UUID().uuidString)")
+        let hadImage = fileManager.fileExists(atPath: imageDestination.path)
+        let hadFrames = fileManager.fileExists(atPath: destinationDirectory.path)
+        do {
+            if hadImage { try fileManager.moveItem(at: imageDestination, to: imageBackup) }
+            if hadFrames { try fileManager.moveItem(at: destinationDirectory, to: frameBackup) }
+            try fileManager.moveItem(at: temporaryImage, to: imageDestination)
+            try fileManager.moveItem(at: temporaryDirectory, to: destinationDirectory)
+            if hadImage { try? fileManager.removeItem(at: imageBackup) }
+            if hadFrames { try? fileManager.removeItem(at: frameBackup) }
+        } catch {
+            try? fileManager.removeItem(at: imageDestination)
+            try? fileManager.removeItem(at: destinationDirectory)
+            if hadImage, fileManager.fileExists(atPath: imageBackup.path) {
+                try? fileManager.moveItem(at: imageBackup, to: imageDestination)
+            }
+            if hadFrames, fileManager.fileExists(atPath: frameBackup.path) {
+                try? fileManager.moveItem(at: frameBackup, to: destinationDirectory)
+            }
+            throw error
+        }
         return SavedCaptureFiles(imageFileName: imageFileName, gifFrameFileNames: frameFileNames)
     }
 
@@ -151,7 +181,7 @@ struct SessionWorkspace: Sendable {
         let invalid = CharacterSet(charactersIn: "/:\\*?\"<>|")
         let safe = name.unicodeScalars.map { invalid.contains($0) ? "-" : String($0) }.joined()
             .trimmingCharacters(in: .whitespacesAndNewlines)
-        return safe.isEmpty ? "Event" : safe
+        return safe.isEmpty || safe == "." || safe == ".." ? "Event" : safe
     }
 
     private func sessionDirectory(for descriptor: SessionWorkspaceDescriptor) throws -> URL {
@@ -177,20 +207,4 @@ struct SessionWorkspace: Sendable {
         }
     }
 
-    private func replaceDirectory(at destination: URL, with temporary: URL) throws {
-        let backup = destination.deletingLastPathComponent().appendingPathComponent(".old-\(UUID().uuidString)")
-        let hadDestination = fileManager.fileExists(atPath: destination.path)
-        if hadDestination { try fileManager.moveItem(at: destination, to: backup) }
-        do {
-            try fileManager.moveItem(at: temporary, to: destination)
-            if hadDestination { try? fileManager.removeItem(at: backup) }
-        } catch {
-            if hadDestination,
-               !fileManager.fileExists(atPath: destination.path),
-               fileManager.fileExists(atPath: backup.path) {
-                try? fileManager.moveItem(at: backup, to: destination)
-            }
-            throw error
-        }
-    }
 }

@@ -63,8 +63,11 @@ struct LocalDownloadRouter: Sendable {
         guard components[2] == "strip.png" || components[2] == "booth.gif" else {
             return notFound()
         }
-        let fileURL = sessionDirectory.appendingPathComponent(components[2]).standardizedFileURL
-        guard fileURL.path.hasPrefix(sessionDirectory.path + "/"),
+        let registeredDirectory = sessionDirectory.resolvingSymlinksInPath().standardizedFileURL
+        let fileURL = sessionDirectory.appendingPathComponent(components[2])
+            .resolvingSymlinksInPath()
+            .standardizedFileURL
+        guard fileURL.path.hasPrefix(registeredDirectory.path + "/"),
               let body = try? Data(contentsOf: fileURL) else {
             return notFound()
         }
