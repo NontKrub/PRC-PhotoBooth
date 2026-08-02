@@ -23,14 +23,10 @@ struct MacContentView: View {
             AdminDashboardView(onPINReset: beginPINReset)
                 .tabItem { Label("Analytics", systemImage: "chart.bar") }
                 .tag(2)
-
-            SettingsView()
-                .tabItem { Label("Settings", systemImage: "gear") }
-                .tag(3)
         }
         .frame(minWidth: 940, minHeight: 640)
         .onChange(of: selectedTab) { old, new in
-            if new == 1 || new == 2 || new == 3 {
+            if new == 1 || new == 2 {
                 guard !isAdminUnlocked else { return }
                 selectedTab = old  // revert immediately
                 pendingTab = new
@@ -85,9 +81,9 @@ struct MacContentView: View {
     }
 }
 
-// MARK: - Settings tab
+// MARK: - Settings
 
-private struct SettingsView: View {
+struct SettingsView: View {
     @Environment(BoothCoordinator.self) private var coordinator
 
     @AppStorage("selphyPaperSize")       private var paperSize      = SelphyPaperSize.postcard.rawValue
