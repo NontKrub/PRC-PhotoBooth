@@ -46,6 +46,14 @@ struct StateMachineTests {
         #expect(sm.keptShots[0] == nil)
     }
 
+    @Test("session preparation waits for an explicit countdown")
+    func sessionPreparationWaitsForCountdown() async {
+        let sm = SessionStateMachine()
+        sm.startSession(config: EventConfig(photoCount: 1, countdownSeconds: 3))
+
+        #expect(sm.phase == .readyToStart)
+    }
+
     @Test("operator cancel returns to idle")
     func operatorCancel() async {
         let sm = SessionStateMachine()

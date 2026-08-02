@@ -25,6 +25,8 @@ final class iPadViewModel {
     private var usbEndpointIndex = 0
     private var usbReconnectTask: Task<Void, Never>?
     private var recvBuf = Data()
+    private var pendingPreviewJPEG: Data?
+    private var previewDecodeTask: Task<Void, Never>?
 
     init() {
         previewTransport = PreviewTransport(
@@ -79,7 +81,7 @@ final class iPadViewModel {
             }
 
         case .sessionFinished(let qr, let stripData, _):
-            if let data = stripData { stripThumbImage = cgImage(from: data) }
+            if let data = stripData { stripThumbImage = Self.cgImage(from: data) }
             stateMachine.finishSession(qrPayload: qr)
 
         case .operatorOverride(let action):
@@ -99,22 +101,39 @@ final class iPadViewModel {
     }
 
     private func updatePreview(_ jpegData: Data) {
-        guard let src = CGImageSourceCreateWithData(jpegData as CFData, nil),
-              let img = CGImageSourceCreateImageAtIndex(src, 0, nil)
-        else { return }
-        latestPreviewImage = img
+        pendingPreviewJPEG = jpegData
+        guard previewDecodeTask == nil else { return }
+
+        previewDecodeTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            while let jpeg = self.pendingPreviewJPEG {
+                self.pendingPreviewJPEG = nil
+                let image = await Task.detached(priority: .userInitiated) {
+                    Self.cgImage(from: jpeg)
+                }.value
+                guard !Task.isCancelled else { return }
+                self.latestPreviewImage = image
+            }
+            self.previewDecodeTask = nil
+        }
     }
 
-    private func cgImage(from data: Data) -> CGImage? {
+    private nonisolated static func cgImage(from data: Data) -> CGImage? {
         guard let src = CGImageSourceCreateWithData(data as CFData, nil) else { return nil }
         return CGImageSourceCreateImageAtIndex(src, 0, nil)
     }
 
     // MARK: - Customer decisions
 
-    func customerTappedStart() {
-        multipeer.sendControl(.sessionStart)
+    func customerTappedToBegin() {
+        // The first tap only opens the confirmation page. The Mac must not
+        // start capturing until the customer confirms on that page.
         stateMachine.startSession(config: eventConfig)
+    }
+
+    func customerTappedStart() {
+        guard stateMachine.phase == .readyToStart else { return }
+        multipeer.sendControl(.sessionStart)
     }
 
     func customerKeep(photoIndex: Int) {

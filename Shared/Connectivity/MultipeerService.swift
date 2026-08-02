@@ -49,8 +49,8 @@ public final class MultipeerService: NSObject {
     public private(set) var connectedPeerNames: [String] = []
     public var activePeerName: String? = nil
 
-    // Received packets are decoded on this service's main actor, so handlers
-    // can update UI state directly instead of creating another task per packet.
+    // Control packets are decoded before hopping to the main actor. Preview
+    // packets are disposable and coalesced so they cannot starve controls.
     public var onControlMessage: (@MainActor (Message) -> Void)?
     public var onPreviewFrame:   (@MainActor (Data) -> Void)?
 
@@ -69,6 +69,8 @@ public final class MultipeerService: NSObject {
     private var lastHeartbeatReceived: Date = .distantPast
     private var reconnectAttempt = 0
     private let maxReconnectDelay: TimeInterval = 30
+    private var latestPreviewFrame: Data?
+    private var previewDeliveryTask: Task<Void, Never>?
 
     public init(role: DeviceRole) {
         self.role = role
@@ -208,15 +210,29 @@ public final class MultipeerService: NSObject {
 
     // MARK: - Receive
 
-    private func handleReceived(_ data: Data) {
-        guard let (channel, payload) = data.unpackedPacket() else { return }
-        switch channel {
-        case .control:
-            guard let msg = try? Message.decoded(from: payload) else { return }
-            if case .heartbeat = msg { lastHeartbeatReceived = Date(); return }
-            onControlMessage?(msg)
-        case .preview:
-            onPreviewFrame?(payload)
+    private func handleControlMessage(_ message: Message) {
+        if case .heartbeat = message {
+            lastHeartbeatReceived = Date()
+            return
+        }
+        onControlMessage?(message)
+    }
+
+    private func enqueuePreviewFrame(_ jpegData: Data) {
+        // Preview is disposable. Never let old frames build a queue ahead of
+        // control messages; the next delivery uses only the newest frame.
+        latestPreviewFrame = jpegData
+        guard previewDeliveryTask == nil else { return }
+
+        previewDeliveryTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            self.previewDeliveryTask = nil
+            guard let frame = self.latestPreviewFrame else { return }
+            self.latestPreviewFrame = nil
+            self.onPreviewFrame?(frame)
+            if let pending = self.latestPreviewFrame {
+                self.enqueuePreviewFrame(pending)
+            }
         }
     }
 }
@@ -267,7 +283,14 @@ extension MultipeerService: MCSessionDelegate {
     }
 
     nonisolated public func session(_ session: MCSession, didReceive data: Data, fromPeer peerID: MCPeerID) {
-        Task { @MainActor [weak self] in self?.handleReceived(data) }
+        guard let (channel, payload) = data.unpackedPacket() else { return }
+        switch channel {
+        case .control:
+            guard let message = try? Message.decoded(from: payload) else { return }
+            Task { @MainActor [weak self] in self?.handleControlMessage(message) }
+        case .preview:
+            Task { @MainActor [weak self] in self?.enqueuePreviewFrame(payload) }
+        }
     }
 
     nonisolated public func session(_ session: MCSession, didReceive stream: InputStream, withName streamName: String, fromPeer peerID: MCPeerID) {}
