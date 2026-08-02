@@ -8,12 +8,15 @@
 
 /* Begin PBXBuildFile section */
 		01372D290CBCE91EF8933945 /* MacApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1277D5F99824D66627D593C2 /* MacApp.swift */; };
+		0290520093718EFB9045ED46 /* SessionWorkspaceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3A624C16E0BE73D12C1BEE77 /* SessionWorkspaceTests.swift */; };
 		061B8A6BAAC97D0554975F74 /* CloudSSHSetupTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 68AD6CCBF1B3CB849C8CA5A9 /* CloudSSHSetupTests.swift */; };
 		0980BF9D451D1A70DFE9E86F /* CaptureService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 29E6360321A719FBEC169D31 /* CaptureService.swift */; };
+		184CF8230CB2FC21F436CB29 /* SessionManifestStoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 70E2D58E1F5981D3BE3AE72D /* SessionManifestStoreTests.swift */; };
 		19E14CC16590B7CC5A0A4ED6 /* AVFoundation.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = C2CA83F7AD79B9E79F7505F5 /* AVFoundation.framework */; };
 		1B3527CA7D8FBF85B868E2A3 /* MultipeerService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 74CCEE6D0B13FC072FBD0CF7 /* MultipeerService.swift */; };
 		1B9774A2DB37298968ACE621 /* CountdownView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C019EF4C1161A49ADFD551E3 /* CountdownView.swift */; };
 		1E9B5F2CD017E9DCF82273B8 /* BoothPhase.swift in Sources */ = {isa = PBXBuildFile; fileRef = C7A0F0599F8265D1CA4DEB93 /* BoothPhase.swift */; };
+		1F2C36D954F030ADE624872F /* SessionManifestStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 860318C816C6AF142AAA03D0 /* SessionManifestStore.swift */; };
 		21BC288DECD3C609104AA4D6 /* RollingVideoBuffer.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0211854C0C9B012A71C374A /* RollingVideoBuffer.swift */; };
 		2A732086C34391D40E371E06 /* EventSetupView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2239A5B42C13F0EE56D456C8 /* EventSetupView.swift */; };
 		2B34466B29882AB55B2C0A2B /* SharedTypes.swift in Sources */ = {isa = PBXBuildFile; fileRef = BFCFA54B6E66E2691037E7B2 /* SharedTypes.swift */; };
@@ -59,12 +62,14 @@
 		B1C4D9F03E7D2AF13C28B1C9 /* DSLRProtocolTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 81C75149E40C584806CE6AAC /* DSLRProtocolTests.swift */; };
 		B3A574E3ADEB92EB690F877B /* DSLRCameraSource.swift in Sources */ = {isa = PBXBuildFile; fileRef = C40CF806C1383C040686AE0A /* DSLRCameraSource.swift */; };
 		BD5BDBC424543A8F68010D1A /* iPadContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F05BE9FC91D033A918857113 /* iPadContentView.swift */; };
+		C348B164EC05BEAB13B967A3 /* SessionWorkspace.swift in Sources */ = {isa = PBXBuildFile; fileRef = BE900AB03E23351DE24FCDF5 /* SessionWorkspace.swift */; };
 		C3A3634089482D67AD1257EA /* AdminDashboardView.swift in Sources */ = {isa = PBXBuildFile; fileRef = E596BF2721604EA8661A2334 /* AdminDashboardView.swift */; };
 		C56A8B06B7BD083168BF2DEA /* iPadViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 89A63D5235B6E51BAE12E4B4 /* iPadViewModel.swift */; };
 		C6094A872CAD1F2892FD9E0B /* Message.swift in Sources */ = {isa = PBXBuildFile; fileRef = 296A07AF6CCBA2CF6A6704FE /* Message.swift */; };
 		C7999C8B196E99D2E0781EBC /* SwiftData.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 553249FDB48038050181108D /* SwiftData.framework */; };
 		C7DA80E3C424D8747F452D79 /* CoreImage.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 6C6EDC69CE235E6A5844DF8C /* CoreImage.framework */; };
 		C8EE361D70461D0EC09063BA /* BoothCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = BAC8DA4D4460820944539DA5 /* BoothCoordinator.swift */; };
+		CD57E5805639C6D964EC0114 /* SessionManifest.swift in Sources */ = {isa = PBXBuildFile; fileRef = F2F57B804D0159946475A3A5 /* SessionManifest.swift */; };
 		CECE8F6D5B5C9584E1C7768E /* IdleView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BA7432A74A00A4633737170C /* IdleView.swift */; };
 		D526551917762A80696D1632 /* MultipeerService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 74CCEE6D0B13FC072FBD0CF7 /* MultipeerService.swift */; };
 		D59A98D8BE2CD74F1058E7DC /* CoreImage.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 6C6EDC69CE235E6A5844DF8C /* CoreImage.framework */; };
@@ -87,7 +92,7 @@
 /* Begin PBXFileReference section */
 		035DF22C80686690C8B74B53 /* CompositorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CompositorTests.swift; sourceTree = "<group>"; };
 		05795F20E3C7D6B35E9C9DAB /* PreviewMirrorView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PreviewMirrorView.swift; sourceTree = "<group>"; };
-		070A45D59F694AF5D3BC129D /* PRC-PhotoBooth-iPad.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "PRC-PhotoBooth-iPad.app"; sourceTree = BUILT_PRODUCTS_DIR; };
+		070A45D59F694AF5D3BC129D /* PRC-PhotoBooth-iPad.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = "PRC-PhotoBooth-iPad.app"; sourceTree = BUILT_PRODUCTS_DIR; };
 		0CA7A136FB013F70C6B06E5B /* FinishView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FinishView.swift; sourceTree = "<group>"; };
 		0E5ADA00B3D2BBC816AD5690 /* FrameSlotEditor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FrameSlotEditor.swift; sourceTree = "<group>"; };
 		1277D5F99824D66627D593C2 /* MacApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MacApp.swift; sourceTree = "<group>"; };
@@ -97,19 +102,22 @@
 		24B980C65250404308C88BB0 /* USBPreviewServer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = USBPreviewServer.swift; sourceTree = "<group>"; };
 		296A07AF6CCBA2CF6A6704FE /* Message.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Message.swift; sourceTree = "<group>"; };
 		29E6360321A719FBEC169D31 /* CaptureService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CaptureService.swift; sourceTree = "<group>"; };
-		2B555DBC71B145823AD802CE /* .gitkeep */ = {isa = PBXFileReference; lastKnownFileType = text; path = .gitkeep; sourceTree = "<group>"; };
+		2B555DBC71B145823AD802CE /* .gitkeep */ = {isa = PBXFileReference; path = .gitkeep; sourceTree = "<group>"; };
 		3541A8DDD5DC749D1B31FDB8 /* iPadApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = iPadApp.swift; sourceTree = "<group>"; };
+		3A624C16E0BE73D12C1BEE77 /* SessionWorkspaceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionWorkspaceTests.swift; sourceTree = "<group>"; };
 		4AA33DBA424BED93245726E5 /* ReviewView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReviewView.swift; sourceTree = "<group>"; };
 		553249FDB48038050181108D /* SwiftData.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = SwiftData.framework; path = System/Library/Frameworks/SwiftData.framework; sourceTree = SDKROOT; };
 		636F46208E1900AED0290A66 /* Network.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Network.framework; path = System/Library/Frameworks/Network.framework; sourceTree = SDKROOT; };
 		68AD6CCBF1B3CB849C8CA5A9 /* CloudSSHSetupTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CloudSSHSetupTests.swift; sourceTree = "<group>"; };
 		6C445DECFA620BD53963FDAA /* Charts.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Charts.framework; path = System/Library/Frameworks/Charts.framework; sourceTree = SDKROOT; };
 		6C6EDC69CE235E6A5844DF8C /* CoreImage.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = CoreImage.framework; path = System/Library/Frameworks/CoreImage.framework; sourceTree = SDKROOT; };
+		70E2D58E1F5981D3BE3AE72D /* SessionManifestStoreTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionManifestStoreTests.swift; sourceTree = "<group>"; };
 		74CCEE6D0B13FC072FBD0CF7 /* MultipeerService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MultipeerService.swift; sourceTree = "<group>"; };
 		75606E48A4F7E3709E669668 /* ImageIO.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = ImageIO.framework; path = System/Library/Frameworks/ImageIO.framework; sourceTree = SDKROOT; };
 		80D782C414B2B9C61614EEF6 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		81C75149E40C584806CE6AAC /* DSLRProtocolTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DSLRProtocolTests.swift; sourceTree = "<group>"; };
 		82D1ACB7B1239F03487E9DB6 /* PINGateView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PINGateView.swift; sourceTree = "<group>"; };
+		860318C816C6AF142AAA03D0 /* SessionManifestStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionManifestStore.swift; sourceTree = "<group>"; };
 		89A63D5235B6E51BAE12E4B4 /* iPadViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = iPadViewModel.swift; sourceTree = "<group>"; };
 		8D1CDA95743E9BDD01DF6771 /* OperatorConsoleView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OperatorConsoleView.swift; sourceTree = "<group>"; };
 		9BE361332EDFD431A0529E97 /* BoothModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BoothModels.swift; sourceTree = "<group>"; };
@@ -122,6 +130,7 @@
 		BA7432A74A00A4633737170C /* IdleView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IdleView.swift; sourceTree = "<group>"; };
 		BAC8DA4D4460820944539DA5 /* BoothCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BoothCoordinator.swift; sourceTree = "<group>"; };
 		BB886D7A88555FB8EDE49CC3 /* CloudSSHSetupService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CloudSSHSetupService.swift; sourceTree = "<group>"; };
+		BE900AB03E23351DE24FCDF5 /* SessionWorkspace.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionWorkspace.swift; sourceTree = "<group>"; };
 		BEB333AA893BB0250EB77EB2 /* CoreGraphics.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = CoreGraphics.framework; path = System/Library/Frameworks/CoreGraphics.framework; sourceTree = SDKROOT; };
 		BFCFA54B6E66E2691037E7B2 /* SharedTypes.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SharedTypes.swift; sourceTree = "<group>"; };
 		C019EF4C1161A49ADFD551E3 /* CountdownView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CountdownView.swift; sourceTree = "<group>"; };
@@ -142,6 +151,7 @@
 		EFCA2984EED1538D9FBA8EC9 /* CameraSource.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CameraSource.swift; sourceTree = "<group>"; };
 		F05BE9FC91D033A918857113 /* iPadContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = iPadContentView.swift; sourceTree = "<group>"; };
 		F21740EA8E15E465FDDD5338 /* PRC-PhotoBooth-Mac.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = "PRC-PhotoBooth-Mac.entitlements"; sourceTree = "<group>"; };
+		F2F57B804D0159946475A3A5 /* SessionManifest.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionManifest.swift; sourceTree = "<group>"; };
 		F54735ABBDD6F6A004E9824C /* MacContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MacContentView.swift; sourceTree = "<group>"; };
 		F6D47A403827BD31C62EE113 /* AVFoundationCameraSource.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AVFoundationCameraSource.swift; sourceTree = "<group>"; };
 		F9A7C06C221109D35478F517 /* CloudSSHSetupView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CloudSSHSetupView.swift; sourceTree = "<group>"; };
@@ -227,6 +237,16 @@
 				E327BDC89E3420021EF0EB8F /* Products */,
 			);
 			indentWidth = 4;
+			sourceTree = "<group>";
+		};
+		4AA90C68C2AA28ECB4E5266A /* Runtime */ = {
+			isa = PBXGroup;
+			children = (
+				F2F57B804D0159946475A3A5 /* SessionManifest.swift */,
+				860318C816C6AF142AAA03D0 /* SessionManifestStore.swift */,
+				BE900AB03E23351DE24FCDF5 /* SessionWorkspace.swift */,
+			);
+			path = Runtime;
 			sourceTree = "<group>";
 		};
 		4D85F3877228D9648303A83C /* Shared */ = {
@@ -322,6 +342,7 @@
 				151B70DFB95DEABDD1CEF7D6 /* Capture */,
 				7995C5694733161E83482F3D /* Output */,
 				907E72919BB5B1C937B21455 /* Persistence */,
+				4AA90C68C2AA28ECB4E5266A /* Runtime */,
 				1CA8F98A553E035B8CD9C2D1 /* Server */,
 				A12B8D9504168AFA461FCA84 /* UI */,
 				606AFD0A9C44FB257B483EFC /* Utilities */,
@@ -372,6 +393,8 @@
 				81C75149E40C584806CE6AAC /* DSLRProtocolTests.swift */,
 				FA071381067EC2A9AB33A262 /* MessageTests.swift */,
 				D28FE311CF2E0A52B4AE5299 /* RollingVideoBufferTests.swift */,
+				70E2D58E1F5981D3BE3AE72D /* SessionManifestStoreTests.swift */,
+				3A624C16E0BE73D12C1BEE77 /* SessionWorkspaceTests.swift */,
 				E23851FA3C9B8D0B7E0763B5 /* StateMachineTests.swift */,
 			);
 			path = Tests;
@@ -470,6 +493,7 @@
 						ProvisioningStyle = Automatic;
 					};
 					912C90C828FBD383405B23CF = {
+						DevelopmentTeam = "";
 						ProvisioningStyle = Automatic;
 					};
 				};
@@ -544,7 +568,10 @@
 				3B9C2359A5DA6896DAB90A0C /* OperatorConsoleView.swift in Sources */,
 				FBF1D4A725065B19C6493A5A /* PINGateView.swift in Sources */,
 				21BC288DECD3C609104AA4D6 /* RollingVideoBuffer.swift in Sources */,
+				CD57E5805639C6D964EC0114 /* SessionManifest.swift in Sources */,
+				1F2C36D954F030ADE624872F /* SessionManifestStore.swift in Sources */,
 				AADB203D08D7A741293A07E9 /* SessionStateMachine.swift in Sources */,
+				C348B164EC05BEAB13B967A3 /* SessionWorkspace.swift in Sources */,
 				79AA6DA6C5A48800F30B9906 /* SharedTypes.swift in Sources */,
 				E7F1277532E131CF5071E3B7 /* USBPreviewServer.swift in Sources */,
 			);
@@ -559,6 +586,8 @@
 				B1C4D9F03E7D2AF13C28B1C9 /* DSLRProtocolTests.swift in Sources */,
 				7DB80D8633AC8EE2A110F43E /* MessageTests.swift in Sources */,
 				4DBD05E3C9868500F567C5F7 /* RollingVideoBufferTests.swift in Sources */,
+				184CF8230CB2FC21F436CB29 /* SessionManifestStoreTests.swift in Sources */,
+				0290520093718EFB9045ED46 /* SessionWorkspaceTests.swift in Sources */,
 				478292FD10CA50D854EE4993 /* StateMachineTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -598,10 +627,7 @@
 		0157A7BAE23EC2ED9A295ECB /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
-				ARCHS = (
-					arm64,
-					x86_64,
-				);
+				ARCHS = "arm64 x86_64";
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_ENTITLEMENTS = "Mac/PRC-PhotoBooth-Mac.entitlements";
 				CODE_SIGN_STYLE = Automatic;
@@ -627,10 +653,7 @@
 		056DD5BB99CA0ACB88EE8646 /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
-				ARCHS = (
-					arm64,
-					x86_64,
-				);
+				ARCHS = "arm64 x86_64";
 				BUNDLE_LOADER = "$(TEST_HOST)";
 				COMBINE_HIDPI_IMAGES = YES;
 				GENERATE_INFOPLIST_FILE = YES;
@@ -651,10 +674,7 @@
 		264AFD3EB79EC0A7780E066A /* Release */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
-				ARCHS = (
-					arm64,
-					x86_64,
-				);
+				ARCHS = "arm64 x86_64";
 				BUNDLE_LOADER = "$(TEST_HOST)";
 				COMBINE_HIDPI_IMAGES = YES;
 				GENERATE_INFOPLIST_FILE = YES;
@@ -679,7 +699,7 @@
 				CODE_SIGN_ENTITLEMENTS = "iPad/PRC-PhotoBooth-iPad.entitlements";
 				CODE_SIGN_IDENTITY = "iPhone Developer";
 				CODE_SIGN_STYLE = Automatic;
-				DEVELOPMENT_TEAM = TU4ZF9TTY9;
+				DEVELOPMENT_TEAM = "";
 				INFOPLIST_FILE = iPad/Info.plist;
 				IPHONEOS_DEPLOYMENT_TARGET = 18.0;
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -822,7 +842,7 @@
 				CODE_SIGN_ENTITLEMENTS = "iPad/PRC-PhotoBooth-iPad.entitlements";
 				CODE_SIGN_IDENTITY = "iPhone Developer";
 				CODE_SIGN_STYLE = Automatic;
-				DEVELOPMENT_TEAM = TU4ZF9TTY9;
+				DEVELOPMENT_TEAM = "";
 				INFOPLIST_FILE = iPad/Info.plist;
 				IPHONEOS_DEPLOYMENT_TARGET = 18.0;
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -842,10 +862,7 @@
 		F7A4C60F918D6B4FED38E065 /* Release */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
-				ARCHS = (
-					arm64,
-					x86_64,
-				);
+				ARCHS = "arm64 x86_64";
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_ENTITLEMENTS = "Mac/PRC-PhotoBooth-Mac.entitlements";
 				CODE_SIGN_STYLE = Automatic;
