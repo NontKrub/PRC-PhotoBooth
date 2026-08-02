@@ -98,6 +98,7 @@ private struct SettingsView: View {
     @AppStorage("cloudSSHHost")          private var sshHost        = ""
     @AppStorage("cloudRemotePath")       private var remotePath     = "/bk1/prc/photobooth"
     @AppStorage("publicBaseURL")         private var publicBaseURL  = ""
+    @AppStorage(BoothCoordinator.eventFolderPathKey) private var eventFolderPath = ""
     @State private var selectedScreenIndex = 0
     @State private var showCloudSSHSetup = false
 
@@ -107,6 +108,7 @@ private struct SettingsView: View {
                 cameraFeatureStatusSection
                 ipadSection
                 externalDisplaySection
+                eventFolderSection
                 printerSection
                 cloudSection
             }
@@ -279,6 +281,40 @@ private struct SettingsView: View {
     }
 
     // MARK: Cloud upload
+
+    private var eventFolderSection: some View {
+        GroupBox {
+            VStack(alignment: .leading, spacing: 12) {
+                LabeledContent("Event folder") {
+                    Text(eventFolderPath.isEmpty ? coordinator.eventFolderPath : eventFolderPath)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                        .textSelection(.enabled)
+                }
+
+                Button("Choose Event Folder…", action: chooseEventFolder)
+                    .buttonStyle(.bordered)
+
+                Text("New sessions save here. Existing files are not moved.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            .padding(4)
+        } label: {
+            Label("Event Output", systemImage: "folder")
+                .font(.headline)
+        }
+    }
+
+    private func chooseEventFolder() {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.allowsMultipleSelection = false
+        panel.prompt = "Choose Folder"
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        coordinator.setEventFolder(url)
+    }
 
     private var cloudSection: some View {
         GroupBox {

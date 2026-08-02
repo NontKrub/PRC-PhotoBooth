@@ -1,8 +1,19 @@
+import Foundation
 import Testing
 @testable import PRC_PhotoBooth_Mac
 
 @Suite("Cloud SSH setup")
 struct CloudSSHSetupTests {
+    @Test("uses a chosen event folder and falls back to Pictures")
+    func resolvesEventFolder() {
+        let fallback = URL(fileURLWithPath: "/Users/test/Pictures/PRC-PhotoBooth", isDirectory: true)
+
+        #expect(BoothCoordinator.eventFolderURL(storedPath: "/Volumes/Events", fallback: fallback)
+            == URL(fileURLWithPath: "/Volumes/Events", isDirectory: true))
+        #expect(BoothCoordinator.eventFolderURL(storedPath: nil, fallback: fallback) == fallback)
+        #expect(BoothCoordinator.eventFolderURL(storedPath: "", fallback: fallback) == fallback)
+    }
+
     @Test("setup state transitions cover first run, retry, skip, and reopen")
     func stateTransitions() {
         #expect(CloudSSHSetupState.notStarted.transitioning(for: .begin) == .incomplete)
