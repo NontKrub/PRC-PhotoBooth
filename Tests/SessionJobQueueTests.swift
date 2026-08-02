@@ -77,7 +77,8 @@ struct SessionJobQueueTests {
     }
 }
 
-private actor TestJobExecutor: SessionJobExecuting {
+@MainActor
+private final class TestJobExecutor: SessionJobExecuting {
     struct Snapshot: Sendable {
         var kinds: [SessionJobKind] = []
         var maximumConcurrentExecutions = 0

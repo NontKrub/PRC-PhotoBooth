@@ -1,7 +1,8 @@
 import Foundation
 import Observation
 
-protocol SessionJobExecuting: Sendable {
+@MainActor
+protocol SessionJobExecuting: AnyObject {
     func execute(_ job: SessionJob) async throws
 }
 
