@@ -16,12 +16,12 @@ PRC PhotoBooth is a SwiftUI photo-booth system for macOS and iPad. The Mac app r
 ## Architecture
 
 ```text
-┌─────────────────────┐       MultipeerConnectivity       ┌─────────────────────┐
+┌─────────────────────┐       MultipeerConnectivity        ┌─────────────────────┐
 │  macOS operator app │ ─────────────────────────────────▶ │  iPad kiosk app     │
 │                     │   control + wireless preview       │                     │
-│ camera / capture    │ ◀──────── optional USB preview ─── │ start / review / QR  │
-│ persistence / output│                                     │                     │
-└──────────┬──────────┘                                     └─────────────────────┘
+│ camera / capture    │ ◀──────── optional USB preview ─── │ start / review / QR │
+│ persistence / output│                                    │                     │
+└──────────┬──────────┘                                    └─────────────────────┘
            │
            └── Shared models, session state machine, and message protocol
 ```
@@ -44,7 +44,7 @@ The Mac target is configured as a universal application for Apple Silicon and In
 Clone the repository and open the generated project:
 
 ```bash
-git clone <repository-url>
+git clone [<repository-url>](https://github.com/NontKrub/PRC-PhotoBooth)
 cd PRC-PhotoBooth
 
 # Needed after changing project.yml, or if the generated project is absent.
