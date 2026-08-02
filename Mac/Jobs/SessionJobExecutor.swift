@@ -160,7 +160,8 @@ final class SessionJobExecutor: SessionJobExecuting {
         }
         let configuration = CloudUploadConfiguration(
             sshHost: defaults.string(forKey: "cloudSSHHost") ?? "",
-            remoteBasePath: defaults.string(forKey: "cloudRemotePath") ?? "",
+            remoteBasePath: defaults.string(forKey: "cloudRemotePath")
+                ?? CloudUploadConfiguration.defaultRemoteBasePath,
             publicBaseURL: defaults.string(forKey: "publicBaseURL") ?? ""
         )
         try await cloudUpload.upload(manifest: manifest, configuration: configuration)

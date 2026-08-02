@@ -1,6 +1,8 @@
 import Foundation
 
 struct CloudUploadConfiguration: Sendable {
+    static let defaultRemoteBasePath = "/bk1/prc/photobooth"
+
     var sshHost: String
     var remoteBasePath: String
     var publicBaseURL: String

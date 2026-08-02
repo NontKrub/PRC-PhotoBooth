@@ -98,7 +98,7 @@ struct SettingsView: View {
 
     @AppStorage("cloudUploadEnabled")    private var cloudEnabled   = false
     @AppStorage("cloudSSHHost")          private var sshHost        = ""
-    @AppStorage("cloudRemotePath")       private var remotePath     = "/bk1/prc/photobooth"
+    @AppStorage("cloudRemotePath")       private var remotePath     = CloudUploadConfiguration.defaultRemoteBasePath
     @AppStorage("publicBaseURL")         private var publicBaseURL  = ""
     @AppStorage(BoothCoordinator.eventFolderPathKey) private var eventFolderPath = ""
     @State private var selectedScreenIndex = 0
@@ -368,7 +368,7 @@ struct SettingsView: View {
                             .textFieldStyle(.roundedBorder)
                             .frame(width: 280)
                     }
-                    Text("Used in QR codes. Leave blank to use LAN IP instead.")
+                    Text("Used in QR codes after cloud upload succeeds. Leave blank to use the LAN server.")
                         .font(.caption).foregroundStyle(.secondary)
                 }
             }

@@ -48,6 +48,18 @@ enum SelphyPaperSize: String, CaseIterable {
 final class BoothCoordinator {
     static let eventFolderPathKey = "eventFolderPath"
 
+    nonisolated static func downloadURL(
+        publicBaseURL: String?,
+        localBaseURL: String,
+        token: String,
+        cloudUploadSucceeded: Bool
+    ) -> String {
+        let publicBase = publicBaseURL?.trimmingCharacters(in: CharacterSet(charactersIn: "/ ")) ?? ""
+        let localBase = localBaseURL.trimmingCharacters(in: CharacterSet(charactersIn: "/ "))
+        let base = cloudUploadSucceeded && !publicBase.isEmpty ? publicBase : localBase
+        return "\(base)/s/\(token)/"
+    }
+
     let multipeer: MultipeerService
     let capture: CaptureService
     let stateMachine: SessionStateMachine
@@ -899,7 +911,12 @@ final class BoothCoordinator {
         let publicBase = UserDefaults.standard.string(forKey: "publicBaseURL")?
             .trimmingCharacters(in: CharacterSet(charactersIn: "/ "))
         let ip = LocalWebServer.lanIPAddress() ?? "localhost"
-        let qr = publicBase.map { "\($0)/s/\(token)/" } ?? "http://\(ip):8585/s/\(token)/"
+        let qr = Self.downloadURL(
+            publicBaseURL: publicBase,
+            localBaseURL: "http://\(ip):8585",
+            token: token,
+            cloudUploadSucceeded: jobs.first(where: { $0.kind == .cloudUpload })?.status == .succeeded
+        )
         let stripThumb = loadCGImage(from: directory.appendingPathComponent("strip.png"))
             .flatMap { jpegData(from: $0, quality: 0.4) }
         currentStripPreview = loadCGImage(from: directory.appendingPathComponent("strip.png"))
