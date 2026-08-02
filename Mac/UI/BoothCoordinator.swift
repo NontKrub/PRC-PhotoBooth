@@ -46,6 +46,8 @@ enum SelphyPaperSize: String, CaseIterable {
 @MainActor
 @Observable
 final class BoothCoordinator {
+    static let eventFolderPathKey = "eventFolderPath"
+
     let multipeer: MultipeerService
     let capture: CaptureService
     let stateMachine: SessionStateMachine
@@ -533,6 +535,24 @@ final class BoothCoordinator {
 
     // MARK: - Directories
 
+    nonisolated static func eventFolderURL(storedPath: String?, fallback: URL) -> URL {
+        guard let storedPath, !storedPath.isEmpty else { return fallback }
+        return URL(fileURLWithPath: storedPath, isDirectory: true)
+    }
+
+    var eventFolderPath: String { picturesOutputDir()?.path ?? "Unavailable" }
+
+    func setEventFolder(_ url: URL) {
+        do {
+            try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+        } catch {
+            errorMessage = "Cannot use this event folder: \(error.localizedDescription)"
+            return
+        }
+        UserDefaults.standard.set(url.path, forKey: Self.eventFolderPathKey)
+        Task { await server.setSessDir(url) }
+    }
+
     func appSupportDir() -> URL? {
         let d = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)
             .first?.appendingPathComponent("PRC-PhotoBooth")
@@ -541,10 +561,19 @@ final class BoothCoordinator {
     }
 
     func picturesOutputDir() -> URL? {
-        let d = FileManager.default.urls(for: .picturesDirectory, in: .userDomainMask)
-            .first?.appendingPathComponent("PRC-PhotoBooth")
-        if let d { try? FileManager.default.createDirectory(at: d, withIntermediateDirectories: true) }
-        return d
+        guard let fallback = FileManager.default.urls(for: .picturesDirectory, in: .userDomainMask)
+            .first?.appendingPathComponent("PRC-PhotoBooth") else { return nil }
+        let d = Self.eventFolderURL(
+            storedPath: UserDefaults.standard.string(forKey: Self.eventFolderPathKey),
+            fallback: fallback
+        )
+        do {
+            try FileManager.default.createDirectory(at: d, withIntermediateDirectories: true)
+            return d
+        } catch {
+            errorMessage = "Cannot use the event folder: \(error.localizedDescription)"
+            return nil
+        }
     }
 
     private func safeFolderName(_ s: String) -> String {
