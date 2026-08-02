@@ -17,8 +17,29 @@ struct MacApp: App {
 
         #if os(macOS)
         Settings {
-            Text("Settings").padding()
+            ProtectedSettingsView()
+                .environment(coordinator)
         }
         #endif
+    }
+}
+
+private struct ProtectedSettingsView: View {
+    @Environment(\.dismiss) private var dismiss
+    @State private var isUnlocked = false
+
+    var body: some View {
+        Group {
+            if isUnlocked {
+                SettingsView()
+            } else {
+                PINGateView(
+                    mode: isPINSet() ? .verify : .setup,
+                    onSuccess: { isUnlocked = true },
+                    onCancel: { dismiss() }
+                )
+            }
+        }
+        .frame(minWidth: 940, minHeight: 640)
     }
 }
