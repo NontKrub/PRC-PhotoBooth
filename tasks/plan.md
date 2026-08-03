@@ -1,75 +1,28 @@
-# Implementation Plan: PRC PhotoBooth 1.1 Reliability and Operations
+# Implementation Plan: PRC PhotoBooth 1.2 Guest Experience
 
-## Overview
+## Goal
 
-Add restart-safe session manifests and workspaces, a persistent single-worker job queue, recovery and QR restoration, correct retake persistence, queued cloud/print work, preflight diagnostics, and an operator Operations tab while preserving the existing Mac-authoritative architecture and wire protocol.
+Add JSON-backed event experiences, guest template/filter/language selection, pose prompts, local moderated galleries, and hardware-free Debug testing while preserving V1.1 manifests, accepted originals, queue semantics, and legacy messages.
 
-## Architecture Decisions
+## Ordered slices
 
-- Runtime JSON is the recovery source of truth; existing SwiftData models remain unchanged.
-- Accepted JPEGs and GIF source frames are written before the state machine advances.
-- Queue execution is serial and idempotent by `sessionID + job kind`; required jobs gate guest completion, optional jobs do not.
-- Local download tokens resolve directly to persisted absolute session directories so output-root changes do not break old links.
-- Existing AppKit, Network, SwiftData, compositor, GIF encoder, and MultipeerConnectivity code remain the platform primitives.
-- New files are picked up through `project.yml`; generated Xcode project files are never hand-edited.
+1. Shared contracts: localized text, languages, filters, templates, catalogs, selections, presentations, and backward-compatible `EventConfig`.
+2. Core Image filters: one reusable pipeline, deterministic samples, tolerant tests.
+3. Experience storage: atomic JSON packages, legacy migration, validation, asset imports, previews, and legacy mirror.
+4. Selection transport: catalog/assets, stale-selection validation, `selectingExperience`, iPad flow, and external-display draft flow.
+5. Session integration: selected config, presentation snapshot, filtered review/strip/GIF, and recovery.
+6. Gallery: index store, thumbnails, optional queue job, local routes, localized pages, and moderation.
+7. Operator/customer polish: template editor, prompts, language settings/catalog localization, demo camera/seeding/kiosk, docs, and version 1.2 build 3.
 
-## Task List
+## Verification gates
 
-### Phase 1: Runtime persistence foundations
+- Run focused Swift Testing after each slice, then full Mac tests and Mac/iPad builds.
+- Preserve pre-existing dirty generated/user-state files; stage only intentional source/config/docs changes.
+- Run Debug demo apps through Computer Use after automated checks; capture screenshots and record defects.
+- Review diff for data-loss, path traversal, HTML escaping, unsupported filters, audio additions, and SwiftData schema changes before PR.
 
-- [x] Add manifest models/store with atomic JSON persistence and corrupt-file reporting.
-- [x] Add session workspace creation, safe event names, atomic accepted-shot writes, frame snapshot, and image loading.
-- [x] Add focused manifest/store/workspace tests.
+## Known simplifications
 
-### Phase 2: Accepted capture and data correctness
-
-- [x] Add DataStore session lookup/restore/delete and shot upsert helpers.
-- [x] Create workspace + manifest during session start, including event snapshot and token.
-- [x] Persist Keep before state advancement; route guest/operator retakes through one counter path.
-- [x] Extend state-machine restoration and add retake/recovery behavior tests.
-
-### Checkpoint: Capture persistence
-
-- [x] Mac build and full test suite pass.
-- [x] Existing capture flow still compiles and preserves Multipeer messages.
-
-### Phase 3: Persistent queue and job execution
-
-- [x] Add job models, retry policy, atomic queue store, and startup repair.
-- [x] Add serial queue service and executor with required-job priority/dependencies.
-- [x] Move strip/GIF/download registration into queued jobs; reconcile completion idempotently.
-- [x] Add queue store and queue execution tests.
-
-### Phase 4: Downloads, cloud, and printing
-
-- [x] Make local server state/token mappings persistent-source compatible and secure; add health route.
-- [x] Restore valid QR mappings on startup.
-- [x] Extract structured cloud upload service with retries and `.work` exclusion.
-- [x] Add AppKit printer service, test page, settings, automatic-print queue path, and retry state.
-
-### Phase 5: Recovery and operations
-
-- [x] Add startup recovery classification, Resume/Discard, and finalizing-session job repair.
-- [x] Add preflight models/service with safe/full checks and readiness calculation.
-- [x] Add Operations tab, recovery/queue/printer/server panels, readiness banner, and start gating.
-- [x] Add focused recovery, router, preflight, and printer tests where platform seams permit.
-
-### Phase 6: Cleanup and release
-
-- [x] Update cleanup, version metadata, README, and recovery limitation documentation.
-- [x] Run final Mac/iPad builds, full tests, and diff review. Hardware checks remain for the booth operator.
-- [x] Commit intentional slices, push branch, and open a draft pull request.
-
-## Risks and Mitigations
-
-| Risk | Impact | Mitigation |
-| --- | --- | --- |
-| Swift 6 actor isolation around `CGImage` and AppKit | High | Keep UI services `@MainActor`; perform file/image work in existing Mac target patterns; compile after each slice. |
-| Existing DataStore singleton and generated model behavior | High | Add methods only; do not add model types/properties; use manifest restoration for missing records. |
-| Network listener readiness is asynchronous | Medium | Track explicit server state and expose health/status; restore mappings after startup. |
-| Physical camera/printer unavailable in CI | Medium | Keep checks behind existing services and add deterministic platform-boundary tests. |
-| Existing unrelated xcuserdata change | Low | Never stage it; use explicit paths for commits. |
-
-## Open Questions
-
-- None blocking. When existing code conflicts with the requested contract, the requested Version 1.1 behavior takes precedence while preserving the current wire format.
+- Use existing SwiftUI/AppKit controls and synthetic Core Graphics samples; no new dependencies.
+- Keep the existing frame-slot editor behavior while adapting its data boundary incrementally.
+- Keep gallery local-only and optional; individual session downloads remain authoritative.

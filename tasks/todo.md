@@ -1,9 +1,12 @@
-# PRC PhotoBooth 1.1 TODO
+# PRC PhotoBooth 1.2 TODO
 
-- [x] Phase 1: Runtime persistence foundations
-- [x] Phase 2: Accepted capture and data correctness
-- [x] Checkpoint: capture persistence build/tests
-- [x] Phase 3: Persistent queue and job execution
-- [x] Phase 4: Downloads, cloud, and printing
-- [x] Phase 5: Recovery and operations
-- [x] Phase 6: Cleanup, docs, validation, and draft PR
+- [ ] Shared Codable contracts and compatibility tests
+- [ ] Filter pipeline and tests
+- [ ] Event experience store, migration, validation, previews, and tests
+- [ ] Catalog sync and customer selection flow
+- [ ] Selected session config, snapshots, filtered outputs, recovery
+- [ ] Gallery store, queue job, server routes, moderation
+- [ ] Localization, demos, documentation, version 1.2 build 3
+- [ ] Mac/iPad builds and full tests
+- [ ] Computer GUI tests and screenshots
+- [ ] Code review, push branch, open pull request
