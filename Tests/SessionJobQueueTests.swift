@@ -48,8 +48,9 @@ struct SessionJobQueueTests {
             return
         }
         queue.retry(jobID: job.id)
-        try await waitUntil { await executor.snapshot().kinds.count >= 2 }
-        #expect(await queue.job(status: .succeeded, kind: .renderStrip) != nil)
+        try await waitUntil {
+            await queue.job(status: .succeeded, kind: .renderStrip) != nil
+        }
     }
 
     @Test("permanent optional failure does not block required completion")
