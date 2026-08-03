@@ -99,6 +99,7 @@ struct MacContentView: View {
 
 struct SettingsView: View {
     @Environment(BoothCoordinator.self) private var coordinator
+    @Environment(\.locale) private var locale
 
     @AppStorage("selphyPaperSize")       private var paperSize      = SelphyPaperSize.postcard.rawValue
     @AppStorage("selphyCopies")          private var copies         = 1
@@ -183,13 +184,13 @@ struct SettingsView: View {
         }
     }
 
-    private func featureStatusRow(_ title: String, ready: Bool) -> some View {
+    private func featureStatusRow(_ title: LocalizedStringKey, ready: Bool) -> some View {
         HStack(spacing: 8) {
             Image(systemName: ready ? "checkmark.circle.fill" : "xmark.circle.fill")
                 .foregroundStyle(ready ? .green : .orange)
             Text(title)
             Spacer()
-            Text(ready ? "Ready" : "Unavailable")
+            Text(LocalizedStringKey(ready ? "Ready" : "Unavailable"))
                 .foregroundStyle(.secondary)
         }
         .font(.subheadline)
@@ -226,7 +227,7 @@ struct SettingsView: View {
                         set: { coordinator.previewConnectionMode = $0 }
                     )) {
                         ForEach(PreviewConnectionMode.allCases) { mode in
-                            Text(mode.rawValue).tag(mode)
+                            Text(operatorPreviewModeName(mode, locale: locale)).tag(mode)
                         }
                     }
                     .pickerStyle(.segmented)
@@ -374,8 +375,11 @@ struct SettingsView: View {
                     Divider()
 
                     LabeledContent("SSH Host") {
-                        Text(sshHost.isEmpty ? "Not configured" : sshHost)
-                            .textSelection(.enabled)
+                        if sshHost.isEmpty {
+                            Text("Not configured")
+                        } else {
+                            Text(sshHost)
+                        }
                     }
                     Text("Managed by Cloud SSH Setup in ~/.ssh/config, using Cloudflare Access.")
                         .font(.caption).foregroundStyle(.secondary)
@@ -421,7 +425,7 @@ struct SettingsView: View {
 
                 Picker("Paper Size", selection: $paperSize) {
                     ForEach(SelphyPaperSize.allCases, id: \.rawValue) {
-                        Text($0.rawValue).tag($0.rawValue)
+                        Text(operatorPaperSizeName($0, locale: locale)).tag($0.rawValue)
                     }
                 }
                 .frame(width: 280)
@@ -466,9 +470,9 @@ struct SettingsView: View {
 
     private var printerStatusText: String {
         switch coordinator.printer.configuredPrinterStatus() {
-        case .systemDefault: return "Using the macOS System Default printer."
-        case .available(let name): return "Configured printer: \(name)"
-        case .unavailable(let name): return "Configured printer unavailable: \(name)"
+        case .systemDefault: return operatorString("Using the macOS System Default printer.", locale: locale)
+        case .available(let name): return operatorFormat("Configured printer: %@", locale: locale, name)
+        case .unavailable(let name): return operatorFormat("Configured printer unavailable: %@", locale: locale, name)
         }
     }
 

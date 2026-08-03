@@ -791,13 +791,14 @@ final class BoothCoordinator {
             )
         } catch {
             if requestedSelection != nil {
-                multipeer.sendControl(.sessionRequestRejected(reason: error.localizedDescription))
+                let reason = (error as? CustomerSelectionError)?.message(for: selection.language) ?? error.localizedDescription
+                multipeer.sendControl(.sessionRequestRejected(reason: reason))
                 if let selectionError = error as? CustomerSelectionError,
                    selectionError == .staleCatalog {
                     sendExperienceCatalog()
                 }
             }
-            errorMessage = error.localizedDescription
+            errorMessage = (error as? CustomerSelectionError)?.message(for: .english) ?? error.localizedDescription
             return
         }
         guard isCustomerDisplayReady else {
@@ -1477,7 +1478,10 @@ final class BoothCoordinator {
             }
         case .customerSessionRequest(let selection):
             guard stateMachine.phase == .idle || stateMachine.phase == .selectingExperience || stateMachine.phase == .readyToStart else {
-                multipeer.sendControl(.sessionRequestRejected(reason: "A session is already in progress."))
+                multipeer.sendControl(.sessionRequestRejected(reason: LocalizedText(
+                    english: "A session is already in progress.",
+                    thai: "มีเซสชันกำลังดำเนินการอยู่แล้ว"
+                ).value(for: selection.language)))
                 return
             }
             startSession(selection: selection)

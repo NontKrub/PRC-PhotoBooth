@@ -24,11 +24,11 @@ struct FinishAndQRView: View {
 
                 // Headline
                 VStack(spacing: 6) {
-                    Text(isThai ? "เสร็จเรียบร้อย!" : "All done!")
+                    Text("All done!")
                         .font(.system(size: 52, weight: .black, design: .rounded))
                         .foregroundStyle(.white)
                         .tracking(-1)
-                    Text(isThai ? "สแกนเพื่อรับรูปภาพของคุณ" : "Scan to get your photos")
+                    Text("Scan to get your photos")
                         .font(.system(size: 16, weight: .medium))
                         .foregroundStyle(.white.opacity(0.4))
                         .tracking(0.3)
@@ -68,7 +68,7 @@ struct FinishAndQRView: View {
 
                 // Next Session button
                 Button(action: { vm.customerDone() }) {
-                    Text(isThai ? "เซสชันถัดไป" : "Next session")
+                    Text("Next session")
                         .font(.system(size: 17, weight: .bold))
                         .foregroundStyle(.black)
                         .frame(width: 220, height: 58)

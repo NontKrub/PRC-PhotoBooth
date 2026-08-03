@@ -8,6 +8,7 @@ struct AdminDashboardView: View {
 
     @Environment(BoothCoordinator.self) private var coordinator
     @Environment(\.modelContext) private var modelContext
+    @Environment(\.locale) private var locale
     @Query(sort: \BoothSession.startedAt, order: .reverse) private var allSessions: [BoothSession]
     @Query(sort: \BoothEvent.createdAt, order: .reverse)   private var allEvents: [BoothEvent]
 
@@ -65,21 +66,33 @@ struct AdminDashboardView: View {
         filteredSessions.compactMap { manifests[$0.id] }
     }
 
+    private var operatorLanguage: CustomerLanguage {
+        operatorCustomerLanguage(for: locale)
+    }
+
     private var templateRows: [(label: String, count: Int)] {
         groupedExperienceRows { analyticsTemplateName($0) }
     }
 
     private var filterRows: [(label: String, count: Int)] {
-        groupedExperienceRows { $0.eventConfig.selectedFilterID.rawValue }
+        groupedExperienceRows { $0.eventConfig.selectedFilterID.displayName(for: operatorLanguage) }
     }
 
     private var languageRows: [(label: String, count: Int)] {
-        groupedExperienceRows { $0.eventConfig.customerLanguage == .thai ? "Thai" : "English" }
+        groupedExperienceRows {
+            operatorString(
+                $0.eventConfig.customerLanguage == .thai ? "Thai" : "English",
+                locale: locale
+            )
+        }
     }
 
     private var galleryRows: [(label: String, count: Int)] {
         Dictionary(grouping: filteredSessions) { session in
-            galleryStatuses[session.id]?.rawValue ?? "not registered"
+            if let status = galleryStatuses[session.id] {
+                return operatorGalleryStatusName(status, locale: locale)
+            }
+            return operatorString("Not registered", locale: locale)
         }
         .map { ($0.key, $0.value.count) }
         .sorted { $0.label < $1.label }
@@ -338,7 +351,7 @@ struct AdminDashboardView: View {
             let date = s.startedAt.formatted(.dateTime.year().month().day())
             let time = s.startedAt.formatted(.dateTime.hour().minute().second())
             let manifest = manifests[s.id]
-            let template = manifest.map { analyticsTemplateName($0) } ?? "Legacy"
+            let template = manifest.map { csvTemplateName($0) } ?? "Legacy"
             let filter = manifest?.eventConfig.selectedFilterID.rawValue ?? PhotoFilterID.original.rawValue
             let language = manifest?.eventConfig.customerLanguage == .thai ? "Thai" : "English"
             let gallery = galleryStatuses[s.id]?.rawValue ?? "not registered"
@@ -357,6 +370,13 @@ struct AdminDashboardView: View {
     }
 
     private func analyticsTemplateName(_ manifest: SessionManifest) -> String {
+        let name = manifest.eventConfig.templateName.value(for: operatorLanguage)
+        return manifest.eventConfig.templateID == "legacy-default" || name == "Untitled" || name == "ไม่มีชื่อ"
+            ? operatorString("Legacy", locale: locale)
+            : name
+    }
+
+    private func csvTemplateName(_ manifest: SessionManifest) -> String {
         let name = manifest.eventConfig.templateName.value(for: .english)
         return manifest.eventConfig.templateID == "legacy-default" || name == "Untitled" ? "Legacy" : name
     }

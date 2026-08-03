@@ -4,6 +4,7 @@ struct PreflightStatusRow: View {
     let result: PreflightCheckResult
     var actionTitle: String?
     var action: (() -> Void)?
+    @Environment(\.locale) private var locale
 
     var body: some View {
         HStack(alignment: .top, spacing: 10) {
@@ -12,13 +13,13 @@ struct PreflightStatusRow: View {
                 .frame(width: 18)
             VStack(alignment: .leading, spacing: 3) {
                 HStack {
-                    Text(result.title).font(.headline)
+                    Text(operatorPreflightTitle(result.id, locale: locale)).font(.headline)
                     Spacer()
-                    Text(result.status.rawValue.capitalized)
+                    Text(operatorPreflightStatusName(result.status, locale: locale))
                         .font(.caption)
                         .foregroundStyle(iconColor)
                 }
-                Text(result.detail)
+                Text(operatorPreflightDetail(result, locale: locale))
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 Text(result.checkedAt, style: .time)

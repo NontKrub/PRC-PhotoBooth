@@ -18,18 +18,18 @@ struct StartView: View {
 
                 // Heading
                 VStack(spacing: 10) {
-                    Text(isThai ? "ถึงตาคุณแล้ว!" : "You're up!")
+                    Text("You're up!")
                         .font(.system(size: 60, weight: .black, design: .rounded))
                         .foregroundStyle(.white)
                         .tracking(-1)
 
                     // Event info pill
                     HStack(spacing: 10) {
-                        Label(isThai ? "\(vm.eventConfig.photoCount) รูปภาพ" : "\(vm.eventConfig.photoCount) photos", systemImage: "photo.stack")
+                        Label("\(vm.eventConfig.photoCount) photos", systemImage: "photo.stack")
                         Rectangle()
                             .fill(.white.opacity(0.25))
                             .frame(width: 1, height: 12)
-                        Label(isThai ? "นับถอยหลัง \(vm.eventConfig.countdownSeconds) วินาที" : "\(vm.eventConfig.countdownSeconds)s countdown", systemImage: "timer")
+                        Label("\(vm.eventConfig.countdownSeconds)s countdown", systemImage: "timer")
                     }
                     .font(.system(size: 14, weight: .medium))
                     .foregroundStyle(.white.opacity(0.7))
@@ -42,7 +42,7 @@ struct StartView: View {
                         Text(vm.eventConfig.templateName.value(for: vm.selectedLanguage))
                             .font(.headline)
                             .foregroundStyle(.white.opacity(0.85))
-                        Text(filterName(vm.eventConfig.selectedFilterID))
+                        Text(vm.eventConfig.selectedFilterID.displayName(for: vm.selectedLanguage))
                             .font(.subheadline)
                             .foregroundStyle(.white.opacity(0.6))
                     }
@@ -53,7 +53,7 @@ struct StartView: View {
                 Button {
                     vm.customerTappedStart()
                 } label: {
-                    Text(isThai ? "เริ่ม" : "START")
+                    Text("START")
                         .font(.system(size: 28, weight: .black, design: .rounded))
                         .tracking(4)
                         .foregroundStyle(.black)
@@ -71,7 +71,7 @@ struct StartView: View {
                 )
 
                 if vm.experienceCatalog != nil {
-                    Button(isThai ? "กลับไปที่ตัวเลือก" : "Back to Options") {
+                    Button("Back to Options") {
                         vm.returnToExperienceSelection()
                     }
                     .foregroundStyle(.white.opacity(0.8))
@@ -80,7 +80,7 @@ struct StartView: View {
                 }
 
                 if vm.isSessionRequestPending {
-                    ProgressView(isThai ? "กำลังรอผู้ควบคุม…" : "Waiting for operator…")
+                    ProgressView("Waiting for operator…")
                         .tint(.white)
                         .foregroundStyle(.white)
                         .padding(.top, 18)
@@ -97,26 +97,4 @@ struct StartView: View {
         }
     }
 
-    private func filterName(_ filter: PhotoFilterID) -> String {
-        if isThai {
-            switch filter {
-            case .original: return "ต้นฉบับ"
-            case .monochrome: return "ขาวดำ"
-            case .warm: return "โทนอุ่น"
-            case .cool: return "โทนเย็น"
-            case .highContrast: return "คอนทราสต์สูง"
-            case .soft: return "นุ่มนวล"
-            case .vintage: return "วินเทจ"
-            }
-        }
-        switch filter {
-        case .original: return "Original"
-        case .monochrome: return "Monochrome"
-        case .warm: return "Warm"
-        case .cool: return "Cool"
-        case .highContrast: return "High Contrast"
-        case .soft: return "Soft"
-        case .vintage: return "Vintage"
-        }
-    }
 }

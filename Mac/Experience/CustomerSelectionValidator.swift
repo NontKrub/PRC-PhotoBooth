@@ -46,6 +46,32 @@ enum CustomerSelectionError: LocalizedError, Equatable {
         case .unsupportedLanguage: return "The selected language is not supported."
         }
     }
+
+    func message(for language: CustomerLanguage) -> String {
+        switch self {
+        case .wrongEvent:
+            return LocalizedText(english: "This selection belongs to another event.", thai: "ตัวเลือกนี้เป็นของงานอื่น")
+                .value(for: language)
+        case .staleCatalog:
+            return LocalizedText(english: "The event options changed. Please choose again.", thai: "ตัวเลือกของงานเปลี่ยนแปลงแล้ว กรุณาเลือกใหม่อีกครั้ง")
+                .value(for: language)
+        case .missingTemplate:
+            return LocalizedText(english: "The selected template is no longer available.", thai: "เทมเพลตที่เลือกไม่พร้อมใช้งานแล้ว")
+                .value(for: language)
+        case .disabledTemplate:
+            return LocalizedText(english: "The selected template is disabled.", thai: "เทมเพลตที่เลือกถูกปิดใช้งาน")
+                .value(for: language)
+        case .disallowedFilter:
+            return LocalizedText(english: "The selected filter is not available for this event.", thai: "ฟิลเตอร์ที่เลือกไม่พร้อมใช้งานสำหรับงานนี้")
+                .value(for: language)
+        case .invalidTemplate:
+            return LocalizedText(english: "The selected template is invalid.", thai: "เทมเพลตที่เลือกไม่ถูกต้อง")
+                .value(for: language)
+        case .unsupportedLanguage:
+            return LocalizedText(english: "The selected language is not supported.", thai: "ไม่รองรับภาษาที่เลือก")
+                .value(for: language)
+        }
+    }
 }
 
 struct CustomerSelectionValidator {

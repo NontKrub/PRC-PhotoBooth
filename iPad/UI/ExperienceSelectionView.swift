@@ -15,7 +15,7 @@ struct ExperienceSelectionView: View {
                             .font(.system(size: 38, weight: .black, design: .rounded))
                             .foregroundStyle(.white)
                             .lineLimit(2)
-                        Text(language == .thai ? "เลือกรูปแบบของคุณ" : "Choose your experience")
+                        Text("Choose your experience")
                             .font(.title3.weight(.medium))
                             .foregroundStyle(.white.opacity(0.65))
                     }
@@ -27,7 +27,7 @@ struct ExperienceSelectionView: View {
 
                 if let catalog, catalog.guestTemplateSelectionEnabled, catalog.templates.count > 1 {
                     VStack(alignment: .leading, spacing: 12) {
-                        Text(language == .thai ? "เทมเพลต" : "Template")
+                        Text("Template")
                             .font(.title2.bold())
                             .foregroundStyle(.white)
                         LazyVGrid(columns: [GridItem(.adaptive(minimum: 190), spacing: 16)], spacing: 16) {
@@ -47,7 +47,7 @@ struct ExperienceSelectionView: View {
 
                 if let catalog, catalog.guestFilterSelectionEnabled, catalog.allowedFilterIDs.count > 1 {
                     VStack(alignment: .leading, spacing: 12) {
-                        Text(language == .thai ? "ฟิลเตอร์" : "Filter")
+                        Text("Filter")
                             .font(.title2.bold())
                             .foregroundStyle(.white)
                         LazyVGrid(columns: [GridItem(.adaptive(minimum: 150), spacing: 12)], spacing: 12) {
@@ -67,13 +67,13 @@ struct ExperienceSelectionView: View {
                 }
 
                 HStack(spacing: 14) {
-                    Button(language == .thai ? "ย้อนกลับ" : "Back") {
+                    Button("Back") {
                         vm.customerDone()
                     }
                     .buttonStyle(.bordered)
                     .tint(.white)
 
-                    Button(language == .thai ? "ดำเนินการต่อ" : "Continue") {
+                    Button("Continue") {
                         vm.confirmExperienceSelection()
                     }
                     .buttonStyle(.borderedProminent)

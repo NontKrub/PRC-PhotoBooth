@@ -14,6 +14,12 @@ struct ExperienceTypesTests {
         #expect(LocalizedText().value(for: .thai) == "ไม่มีชื่อ")
     }
 
+    @Test("photo filter names use the selected language")
+    func photoFilterNamesUseSelectedLanguage() {
+        #expect(PhotoFilterID.warm.displayName(for: .english) == "Warm")
+        #expect(PhotoFilterID.warm.displayName(for: .thai) == "โทนอุ่น")
+    }
+
     @Test("Version 1.1 EventConfig decodes with V1.2 defaults")
     func decodesLegacyEventConfig() throws {
         let data = Data(#"{"eventID":"event-1","eventName":"Legacy","photoCount":2,"countdownSeconds":4,"canvasWidth":900,"canvasHeight":1200,"slots":[]}"#.utf8)

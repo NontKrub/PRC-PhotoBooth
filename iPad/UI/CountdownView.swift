@@ -82,9 +82,7 @@ struct CountdownView: View {
                 Spacer()
 
                 // Caption
-                Text(isThai
-                     ? "ภาพที่ \(photoIndex + 1) จาก \(vm.eventConfig.photoCount)"
-                     : "Photo \(photoIndex + 1) of \(vm.eventConfig.photoCount)")
+                Text("Photo \(photoIndex + 1) of \(vm.eventConfig.photoCount)")
                     .font(.system(size: 15, weight: .semibold))
                     .foregroundStyle(.white.opacity(0.5))
                     .tracking(1)

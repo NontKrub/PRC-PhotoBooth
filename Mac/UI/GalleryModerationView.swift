@@ -3,6 +3,7 @@ import AppKit
 
 struct GalleryModerationView: View {
     @Environment(BoothCoordinator.self) private var coordinator
+    @Environment(\.locale) private var locale
     @State private var indexes: [EventGalleryIndex] = []
     @State private var selectedEventID = ""
     @State private var statusFilter: GalleryApprovalStatus?
@@ -14,19 +15,23 @@ struct GalleryModerationView: View {
         indexes.first { $0.eventID == selectedEventID } ?? indexes.first
     }
 
+    private var operatorLanguage: CustomerLanguage {
+        operatorCustomerLanguage(for: locale)
+    }
+
     var body: some View {
         GroupBox("Gallery Moderation") {
             VStack(alignment: .leading, spacing: 12) {
                 HStack {
                     Picker("Event", selection: $selectedEventID) {
                         ForEach(indexes, id: \.eventID) { index in
-                            Text(index.title.value(for: .english)).tag(index.eventID)
+                            Text(index.title.value(for: operatorLanguage)).tag(index.eventID)
                         }
                     }
                     Picker("Status", selection: $statusFilter) {
                         Text("All").tag(GalleryApprovalStatus?.none)
                         ForEach(GalleryApprovalStatus.allCases, id: \.self) {
-                            Text($0.rawValue.capitalized).tag(Optional($0))
+                            Text(operatorGalleryStatusName($0, locale: locale)).tag(Optional($0))
                         }
                     }
                     Button("Refresh") { load() }
@@ -96,10 +101,10 @@ struct GalleryModerationView: View {
                 .labelsHidden()
                 Text(entry.startedAt, style: .date).font(.headline)
             }
-            Text("\(entry.templateName.value(for: .english)) · \(entry.filterID.rawValue)")
+            Text("\(entry.templateName.value(for: operatorLanguage)) · \(entry.filterID.displayName(for: operatorLanguage))")
                 .font(.caption)
                 .foregroundStyle(.secondary)
-            Text(entry.approvalStatus.rawValue.capitalized)
+            Text(operatorGalleryStatusName(entry.approvalStatus, locale: locale))
                 .font(.caption.bold())
                 .foregroundStyle(entry.approvalStatus == .approved ? .green : entry.approvalStatus == .hidden ? .red : .orange)
             HStack {

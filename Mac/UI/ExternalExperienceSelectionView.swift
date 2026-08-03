@@ -4,6 +4,8 @@ struct ExternalExperienceSelectionView: View {
     @Environment(BoothCoordinator.self) private var coordinator
     @Environment(SessionStateMachine.self) private var stateMachine
 
+    private var language: CustomerLanguage { coordinator.externalSelection.language }
+
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 22) {
@@ -32,7 +34,7 @@ struct ExternalExperienceSelectionView: View {
                                     coordinator.externalSelection.templateID = template.id
                                 } label: {
                                     VStack(alignment: .leading, spacing: 6) {
-                                        Text(template.name.value(for: coordinator.externalSelection.language))
+                                        Text(template.name.value(for: language))
                                         Text("\(template.photoCount) photos")
                                             .font(.caption)
                                             .foregroundStyle(.white.opacity(0.65))
@@ -65,7 +67,7 @@ struct ExternalExperienceSelectionView: View {
                                 Button {
                                     coordinator.externalSelection.filterID = filter
                                 } label: {
-                                    Text(filterName(filter))
+                                    Text(filter.displayName(for: language))
                                         .foregroundStyle(.white)
                                         .frame(maxWidth: .infinity)
                                         .padding(14)
@@ -91,17 +93,6 @@ struct ExternalExperienceSelectionView: View {
             .padding(60)
         }
         .background(Color.black)
-    }
-
-    private func filterName(_ filter: PhotoFilterID) -> String {
-        switch filter {
-        case .original: return "Original"
-        case .monochrome: return "Monochrome"
-        case .warm: return "Warm"
-        case .cool: return "Cool"
-        case .highContrast: return "High Contrast"
-        case .soft: return "Soft"
-        case .vintage: return "Vintage"
-        }
+        .environment(\.locale, Locale(identifier: language.localeIdentifier))
     }
 }

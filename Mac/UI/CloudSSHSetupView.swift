@@ -118,9 +118,11 @@ struct CloudSSHSetupView: View {
             }
 
             HStack {
-                Button(setup.state == .complete ? "Close" : "Skip for Now") {
+                Button {
                     if setup.state != .complete { setup.skip() }
                     dismiss()
+                } label: {
+                    Text(LocalizedStringKey(setup.state == .complete ? "Close" : "Skip for Now"))
                 }
                 .disabled(setup.isWorking)
 
@@ -132,9 +134,11 @@ struct CloudSSHSetupView: View {
                 }
                 .disabled(setup.isWorking)
 
-                Button(setup.state == .complete ? "Test Connection Again" : "Set Up & Test") {
+                Button {
                     setup.configuration = configuration
                     Task { await setup.prepareAuthenticateAndTest() }
+                } label: {
+                    Text(LocalizedStringKey(setup.state == .complete ? "Test Connection Again" : "Set Up & Test"))
                 }
                 .buttonStyle(.borderedProminent)
                 .disabled(setup.isWorking)

@@ -4,6 +4,7 @@ import ImageIO
 struct EventExperienceEditorView: View {
     @Environment(BoothCoordinator.self) private var coordinator
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.locale) private var locale
     let event: BoothEvent
 
     @State private var document = EventExperienceDocument(
@@ -52,12 +53,12 @@ struct EventExperienceEditorView: View {
 
                     Section("Filters") {
                         ForEach(PhotoFilterID.allCases) { filter in
-                            Toggle(filterName(filter), isOn: filterBinding(filter))
+                            Toggle(filter.displayName(for: operatorLanguage), isOn: filterBinding(filter))
                                 .disabled(filter == .original)
                         }
                         Picker("Default filter", selection: $document.defaultFilterID) {
                             ForEach(document.allowedFilterIDs) { filter in
-                                Text(filterName(filter)).tag(filter)
+                                Text(filter.displayName(for: operatorLanguage)).tag(filter)
                             }
                         }
                     }
@@ -84,7 +85,9 @@ struct EventExperienceEditorView: View {
                     .disabled(isSaving)
             }
             ToolbarItem(placement: .confirmationAction) {
-                Button(isSaving ? "Saving…" : "Save") { save() }
+                Button { save() } label: {
+                    Text(LocalizedStringKey(isSaving ? "Saving…" : "Save"))
+                }
                     .disabled(isLoading || isSaving)
             }
         }
@@ -110,7 +113,7 @@ struct EventExperienceEditorView: View {
                     } onImportPromptImage: { photoIndex, url in
                         importPromptImage(url, templateID: template.id, photoIndex: photoIndex)
                     }
-                    .navigationTitle(template.name.value(for: .english))
+                    .navigationTitle(template.name.value(for: operatorLanguage))
                 }
                 .frame(minWidth: 560, minHeight: 620)
             }
@@ -269,15 +272,7 @@ struct EventExperienceEditorView: View {
         }
     }
 
-    private func filterName(_ filter: PhotoFilterID) -> String {
-        switch filter {
-        case .original: return "Original"
-        case .monochrome: return "Monochrome"
-        case .warm: return "Warm"
-        case .cool: return "Cool"
-        case .highContrast: return "High Contrast"
-        case .soft: return "Soft"
-        case .vintage: return "Vintage"
-        }
+    private var operatorLanguage: CustomerLanguage {
+        locale.identifier.lowercased().hasPrefix("th") ? .thai : .english
     }
 }

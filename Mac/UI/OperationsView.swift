@@ -3,6 +3,7 @@ import AppKit
 
 struct OperationsView: View {
     @Environment(BoothCoordinator.self) private var coordinator
+    @Environment(\.locale) private var locale
     @State private var showPrinterConfirmation = false
     @State private var showDiscardConfirmation = false
     @State private var serverStatus = LocalWebServerStatus(state: .stopped, registeredTokenCount: 0)
@@ -155,10 +156,10 @@ struct OperationsView: View {
                 ForEach(coordinator.jobQueue.jobs) { job in
                     VStack(alignment: .leading, spacing: 5) {
                         HStack {
-                            Text("\(job.kind.rawValue) · \(job.sessionID.prefix(8))")
+                            Text("\(operatorJobKindName(job.kind, locale: locale)) · \(job.sessionID.prefix(8))")
                                 .font(.subheadline.bold())
                             Spacer()
-                            Text(job.status.rawValue)
+                            Text(operatorJobStatusName(job.status, locale: locale))
                                 .foregroundStyle(job.status == .failed ? .red : .secondary)
                             if job.status == .failed || job.status == .cancelled {
                                 Button("Retry") { coordinator.jobQueue.retry(jobID: job.id) }
@@ -168,7 +169,7 @@ struct OperationsView: View {
                             }
                             Button("Open Folder") { openFolder(for: job.sessionID) }
                         }
-                        Text("Attempts: \(job.attemptCount)" + (job.lastError.map { " · \($0)" } ?? ""))
+                        Text("\(operatorString("Attempts", locale: locale)): \(job.attemptCount)" + (job.lastError.map { " · \($0)" } ?? ""))
                             .font(.caption).foregroundStyle(.secondary)
                         if let next = job.nextAttemptAt {
                             (Text("Next attempt ") + Text(next, style: .relative))
@@ -186,7 +187,7 @@ struct OperationsView: View {
         GroupBox("Printer Diagnostics") {
             VStack(alignment: .leading, spacing: 8) {
                 Text(printerStatusText)
-                Text("Paper: \(UserDefaults.standard.string(forKey: "selphyPaperSize") ?? SelphyPaperSize.postcard.rawValue) · Copies: \(max(1, UserDefaults.standard.integer(forKey: "selphyCopies")))")
+                Text("\(operatorString("Paper", locale: locale)): \(UserDefaults.standard.string(forKey: "selphyPaperSize") ?? SelphyPaperSize.postcard.rawValue) · \(operatorString("Copies", locale: locale)): \(max(1, UserDefaults.standard.integer(forKey: "selphyCopies")))")
                     .font(.caption).foregroundStyle(.secondary)
                 if let result = coordinator.printer.lastTestResult {
                     Label(result.message, systemImage: result.isSuccess ? "checkmark.circle" : "xmark.circle")
@@ -225,10 +226,10 @@ struct OperationsView: View {
 
     private var readinessTitle: String {
         switch coordinator.preflight.readiness {
-        case .ready: return "Ready"
-        case .readyWithWarnings: return "Ready with Warnings"
-        case .notReady: return "Not Ready"
-        case .checking: return "Checking…"
+        case .ready: return operatorString("Ready", locale: locale)
+        case .readyWithWarnings: return operatorString("Ready with Warnings", locale: locale)
+        case .notReady: return operatorString("Not Ready", locale: locale)
+        case .checking: return operatorString("Checking…", locale: locale)
         }
     }
 
@@ -252,18 +253,18 @@ struct OperationsView: View {
 
     private var printerStatusText: String {
         switch coordinator.printer.configuredPrinterStatus() {
-        case .systemDefault: return "Selected printer: System Default"
-        case .available(let name): return "Selected printer: \(name)"
-        case .unavailable(let name): return "Configured printer unavailable: \(name)"
+        case .systemDefault: return operatorString("Selected printer: System Default", locale: locale)
+        case .available(let name): return operatorFormat("Selected printer: %@", locale: locale, name)
+        case .unavailable(let name): return operatorFormat("Configured printer unavailable: %@", locale: locale, name)
         }
     }
 
     private var serverStatusText: String {
         switch serverStatus.state {
-        case .stopped: return "Stopped"
-        case .starting: return "Starting…"
-        case .ready(let port): return "Ready on port \(port)"
-        case .failed(let message): return "Failed: \(message)"
+        case .stopped: return operatorString("Stopped", locale: locale)
+        case .starting: return operatorString("Starting…", locale: locale)
+        case .ready(let port): return operatorFormat("Ready on port %@", locale: locale, String(port))
+        case .failed(let message): return operatorFormat("Failed: %@", locale: locale, message)
         }
     }
 
@@ -280,7 +281,7 @@ struct OperationsView: View {
     private func queueCount(_ title: String, _ count: Int) -> some View {
         VStack(spacing: 2) {
             Text("\(count)").font(.title3.bold())
-            Text(title).font(.caption2).foregroundStyle(.secondary)
+            Text(operatorString(title, locale: locale)).font(.caption2).foregroundStyle(.secondary)
         }
     }
 

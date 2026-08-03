@@ -1,23 +1,5476 @@
 {
-  "sourceLanguage" : "en",
-  "strings" : {
-    "Application Language" : { "localizations" : { "th" : { "stringUnit" : { "state" : "translated", "value" : "ภาษาของแอปพลิเคชัน" } } } },
-    "Event Setup" : { "localizations" : { "th" : { "stringUnit" : { "state" : "translated", "value" : "ตั้งค่างาน" } } } },
-    "Gallery Moderation" : { "localizations" : { "th" : { "stringUnit" : { "state" : "translated", "value" : "ตรวจสอบแกลเลอรี" } } } },
-    "Guest Experience" : { "localizations" : { "th" : { "stringUnit" : { "state" : "translated", "value" : "ประสบการณ์ผู้เข้าร่วมงาน" } } } },
-    "Templates" : { "localizations" : { "th" : { "stringUnit" : { "state" : "translated", "value" : "เทมเพลต" } } } },
-    "Filters" : { "localizations" : { "th" : { "stringUnit" : { "state" : "translated", "value" : "ฟิลเตอร์" } } } },
-    "Event Gallery" : { "localizations" : { "th" : { "stringUnit" : { "state" : "translated", "value" : "แกลเลอรีงาน" } } } },
-    "Approval required" : { "localizations" : { "th" : { "stringUnit" : { "state" : "translated", "value" : "ต้องอนุมัติ" } } } },
-    "Automatic" : { "localizations" : { "th" : { "stringUnit" : { "state" : "translated", "value" : "อัตโนมัติ" } } } },
-    "Disabled" : { "localizations" : { "th" : { "stringUnit" : { "state" : "translated", "value" : "ปิดใช้งาน" } } } },
-    "Original" : { "localizations" : { "th" : { "stringUnit" : { "state" : "translated", "value" : "ต้นฉบับ" } } } },
-    "Monochrome" : { "localizations" : { "th" : { "stringUnit" : { "state" : "translated", "value" : "ขาวดำ" } } } },
-    "Warm" : { "localizations" : { "th" : { "stringUnit" : { "state" : "translated", "value" : "โทนอุ่น" } } } },
-    "Cool" : { "localizations" : { "th" : { "stringUnit" : { "state" : "translated", "value" : "โทนเย็น" } } } },
-    "High Contrast" : { "localizations" : { "th" : { "stringUnit" : { "state" : "translated", "value" : "คอนทราสต์สูง" } } } },
-    "Soft" : { "localizations" : { "th" : { "stringUnit" : { "state" : "translated", "value" : "นุ่มนวล" } } } },
-    "Vintage" : { "localizations" : { "th" : { "stringUnit" : { "state" : "translated", "value" : "วินเทจ" } } } }
+  "sourceLanguage": "en",
+  "strings": {
+    " ago": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": " ที่แล้ว"
+          }
+        }
+      }
+    },
+    "%@": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$@"
+          }
+        }
+      }
+    },
+    "%@ is open — it may block the camera session.": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$@ เปิดอยู่ — อาจรบกวนการใช้กล้อง"
+          }
+        }
+      }
+    },
+    "%@ of %@ photos accepted · next photo %@": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$@ จาก %2$@ รูปที่ยอมรับ · รูปถัดไป %3$@"
+          }
+        }
+      }
+    },
+    "%@ photos": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$@ รูป"
+          }
+        }
+      }
+    },
+    "%@ photos · %@": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$@ รูป · %2$@"
+          }
+        }
+      }
+    },
+    "%@ photos · %@s countdown": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$@ รูป · นับถอยหลัง %2$@ วินาที"
+          }
+        }
+      }
+    },
+    "%@ sessions": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$@ เซสชัน"
+          }
+        }
+      }
+    },
+    "%@ slots · %@ capture indexes": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$@ ช่อง · ดัชนีภาพ %2$@"
+          }
+        }
+      }
+    },
+    "%@ · %@": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$@ · %2$@"
+          }
+        }
+      }
+    },
+    "0° (default)": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "0° (ค่าเริ่มต้น)"
+          }
+        }
+      }
+    },
+    "180°": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "180°"
+          }
+        }
+      }
+    },
+    "270° CW": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "270° ตามเข็มนาฬิกา"
+          }
+        }
+      }
+    },
+    "90° CW": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "90° ตามเข็มนาฬิกา"
+          }
+        }
+      }
+    },
+    "A printer test submits one diagnostic page and does not use a guest session.": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "การทดสอบเครื่องพิมพ์จะส่งหน้าทดสอบหนึ่งหน้าและไม่ใช้เซสชันผู้เข้าร่วม"
+          }
+        }
+      }
+    },
+    "Accepted files and the unfinished SwiftData session will be removed. The cancelled manifest remains for diagnostics.": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ไฟล์ที่ยอมรับและเซสชัน SwiftData ที่ยังไม่เสร็จจะถูกลบ ส่วน manifest ที่ยกเลิกจะยังคงอยู่เพื่อการตรวจสอบ"
+          }
+        }
+      }
+    },
+    "Active": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "กำลังใช้งาน"
+          }
+        }
+      }
+    },
+    "Active Event": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "งานที่ใช้งานอยู่"
+          }
+        }
+      }
+    },
+    "Active iPad": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "iPad ที่ใช้งานอยู่"
+          }
+        }
+      }
+    },
+    "Add Slot": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "เพิ่มช่องภาพ"
+          }
+        }
+      }
+    },
+    "Add Template": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "เพิ่มเทมเพลต"
+          }
+        }
+      }
+    },
+    "Add this public key to the server user’s ~/.ssh/authorized_keys, then run the connection test again.": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "เพิ่มคีย์สาธารณะนี้ให้ผู้ใช้เซิร์ฟเวอร์ใน ~/.ssh/authorized_keys แล้วทดสอบการเชื่อมต่ออีกครั้ง"
+          }
+        }
+      }
+    },
+    "Admin Access": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "การเข้าถึงผู้ดูแล"
+          }
+        }
+      }
+    },
+    "All": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ทั้งหมด"
+          }
+        }
+      }
+    },
+    "All Events": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ทุกงาน"
+          }
+        }
+      }
+    },
+    "All done!": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "เสร็จเรียบร้อย!"
+          }
+        }
+      }
+    },
+    "Allow filter selection": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "อนุญาตให้ผู้เข้าร่วมเลือกฟิลเตอร์"
+          }
+        }
+      }
+    },
+    "Allow language selection": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "อนุญาตให้ผู้เข้าร่วมเลือกภาษา"
+          }
+        }
+      }
+    },
+    "Allow template selection": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "อนุญาตให้ผู้เข้าร่วมเลือกเทมเพลต"
+          }
+        }
+      }
+    },
+    "Analytics": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "การวิเคราะห์"
+          }
+        }
+      }
+    },
+    "Aperture": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "รูรับแสง"
+          }
+        }
+      }
+    },
+    "Application Language": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ภาษาของแอปพลิเคชัน"
+          }
+        }
+      }
+    },
+    "Apply to Camera": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "นำไปใช้กับกล้อง"
+          }
+        }
+      }
+    },
+    "Approval required": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ต้องอนุมัติ"
+          }
+        }
+      }
+    },
+    "Approve": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "อนุมัติ"
+          }
+        }
+      }
+    },
+    "Approve All Pending": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "อนุมัติรายการที่รอทั้งหมด"
+          }
+        }
+      }
+    },
+    "Authorize this Mac on the server": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "อนุญาต Mac เครื่องนี้บนเซิร์ฟเวอร์"
+          }
+        }
+      }
+    },
+    "Auto": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "อัตโนมัติ"
+          }
+        }
+      }
+    },
+    "Auto picture mode": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "โหมดถ่ายภาพอัตโนมัติ"
+          }
+        }
+      }
+    },
+    "Automatic": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "อัตโนมัติ"
+          }
+        }
+      }
+    },
+    "Automatic Printing": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "พิมพ์อัตโนมัติ"
+          }
+        }
+      }
+    },
+    "Avg Duration": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ระยะเวลาเฉลี่ย"
+          }
+        }
+      }
+    },
+    "Avg Retakes": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "จำนวนถ่ายซ้ำเฉลี่ย"
+          }
+        }
+      }
+    },
+    "Booth Not Ready": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "บูธยังไม่พร้อม"
+          }
+        }
+      }
+    },
+    "Booth Ready": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "บูธพร้อมแล้ว"
+          }
+        }
+      }
+    },
+    "Busiest Hours": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ช่วงเวลาที่มีการใช้งานมากที่สุด"
+          }
+        }
+      }
+    },
+    "By Event": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ตามงาน"
+          }
+        }
+      }
+    },
+    "By Filter": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ตามฟิลเตอร์"
+          }
+        }
+      }
+    },
+    "By Language": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ตามภาษา"
+          }
+        }
+      }
+    },
+    "By Template": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ตามเทมเพลต"
+          }
+        }
+      }
+    },
+    "Cable (USB)": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "สาย (USB)"
+          }
+        }
+      }
+    },
+    "Camera": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "กล้อง"
+          }
+        }
+      }
+    },
+    "Camera Access Required": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ต้องอนุญาตการเข้าถึงกล้อง"
+          }
+        }
+      }
+    },
+    "Camera Only": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "กล้องเท่านั้น"
+          }
+        }
+      }
+    },
+    "Camera Settings": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "การตั้งค่ากล้อง"
+          }
+        }
+      }
+    },
+    "Camera Source": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "แหล่งกล้อง"
+          }
+        }
+      }
+    },
+    "Camera error: %@": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ข้อผิดพลาดของกล้อง: %1$@"
+          }
+        }
+      }
+    },
+    "Camera not running": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "กล้องไม่ได้ทำงาน"
+          }
+        }
+      }
+    },
+    "Camera permission required": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ต้องอนุญาตกล้อง"
+          }
+        }
+      }
+    },
+    "Cancel": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ยกเลิก"
+          }
+        }
+      }
+    },
+    "Canvas": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ผืนงาน"
+          }
+        }
+      }
+    },
+    "Canvas Size": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ขนาดผืนงาน"
+          }
+        }
+      }
+    },
+    "Capture": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ถ่ายภาพ"
+          }
+        }
+      }
+    },
+    "Capturing...": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "กำลังถ่ายภาพ…"
+          }
+        }
+      }
+    },
+    "Checking Booth…": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "กำลังตรวจสอบบูธ…"
+          }
+        }
+      }
+    },
+    "Checking…": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "กำลังตรวจสอบ…"
+          }
+        }
+      }
+    },
+    "Choose Event Folder…": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "เลือกโฟลเดอร์งาน…"
+          }
+        }
+      }
+    },
+    "Choose Folder": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "เลือกโฟลเดอร์"
+          }
+        }
+      }
+    },
+    "Choose a 4-digit PIN to protect operator settings.": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "เลือก PIN 4 หลักเพื่อปกป้องการตั้งค่าผู้ดูแล"
+          }
+        }
+      }
+    },
+    "Choose your experience": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "เลือกรูปแบบของคุณ"
+          }
+        }
+      }
+    },
+    "Clear Selection": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ล้างการเลือก"
+          }
+        }
+      }
+    },
+    "Click anywhere to begin": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "คลิกที่ใดก็ได้เพื่อเริ่ม"
+          }
+        }
+      }
+    },
+    "Close": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ปิด"
+          }
+        }
+      }
+    },
+    "Cloud SSH Setup…": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ตั้งค่า Cloud SSH…"
+          }
+        }
+      }
+    },
+    "Cloud SSH setup": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ตั้งค่า Cloud SSH"
+          }
+        }
+      }
+    },
+    "Cloud Upload (Cloudflare Tunnel)": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "อัปโหลดคลาวด์ (Cloudflare Tunnel)"
+          }
+        }
+      }
+    },
+    "Cloud upload pending": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "รออัปโหลดขึ้นคลาวด์"
+          }
+        }
+      }
+    },
+    "Completed": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "เสร็จแล้ว"
+          }
+        }
+      }
+    },
+    "Configured printer unavailable: %@": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "เครื่องพิมพ์ที่ตั้งค่าไม่พร้อมใช้งาน: %1$@"
+          }
+        }
+      }
+    },
+    "Configured printer: %@": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "เครื่องพิมพ์ที่ตั้งค่า: %1$@"
+          }
+        }
+      }
+    },
+    "Confirm PIN": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ยืนยัน PIN"
+          }
+        }
+      }
+    },
+    "Connect": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "เชื่อมต่อ"
+          }
+        }
+      }
+    },
+    "Connect Camera": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "เชื่อมต่อกล้อง"
+          }
+        }
+      }
+    },
+    "Connect DSLR camera first": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "เชื่อมต่อกล้อง DSLR ก่อน"
+          }
+        }
+      }
+    },
+    "Connect a second display to use it as a customer-facing viewer instead of an iPad.": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "เชื่อมต่อจอที่สองเพื่อใช้เป็นหน้าจอสำหรับผู้เข้าร่วมแทน iPad"
+          }
+        }
+      }
+    },
+    "Connect an iPad or activate the external viewer": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "เชื่อมต่อ iPad หรือเปิดใช้งานหน้าจอภายนอก"
+          }
+        }
+      }
+    },
+    "Connect an iPad or activate the external viewer before starting a session.": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "เชื่อมต่อ iPad หรือเปิดหน้าจอภายนอกก่อนเริ่มเซสชัน"
+          }
+        }
+      }
+    },
+    "Connect camera via USB and set USB mode to PC Remote.": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "เชื่อมต่อกล้องผ่าน USB และตั้งโหมด USB เป็น PC Remote"
+          }
+        }
+      }
+    },
+    "Connect the camera to start Sony PTP live view.": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "เชื่อมต่อกล้องเพื่อเริ่มภาพสด Sony PTP"
+          }
+        }
+      }
+    },
+    "Connecting to iPad…": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "กำลังเชื่อมต่อ iPad…"
+          }
+        }
+      }
+    },
+    "Connecting…": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "กำลังเชื่อมต่อ…"
+          }
+        }
+      }
+    },
+    "Connection details": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "รายละเอียดการเชื่อมต่อ"
+          }
+        }
+      }
+    },
+    "Console": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "คอนโซล"
+          }
+        }
+      }
+    },
+    "Cool": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "โทนเย็น"
+          }
+        }
+      }
+    },
+    "Copy": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "คัดลอก"
+          }
+        }
+      }
+    },
+    "Copy Public Key": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "คัดลอกคีย์สาธารณะ"
+          }
+        }
+      }
+    },
+    "Copy URL": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "คัดลอก URL"
+          }
+        }
+      }
+    },
+    "Create": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "สร้าง"
+          }
+        }
+      }
+    },
+    "Create Admin PIN": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "สร้าง PIN ผู้ดูแล"
+          }
+        }
+      }
+    },
+    "Create an event with + or select one from the list.": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "สร้างงานด้วยปุ่ม + หรือเลือกงานจากรายการ"
+          }
+        }
+      }
+    },
+    "Credit Card": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "บัตรเครดิต"
+          }
+        }
+      }
+    },
+    "DSLR Control Active": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "การควบคุม DSLR ทำงานอยู่"
+          }
+        }
+      }
+    },
+    "DSLR Live Preview": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ภาพตัวอย่างสด DSLR"
+          }
+        }
+      }
+    },
+    "DSLR Standby": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "DSLR พร้อมใช้งาน"
+          }
+        }
+      }
+    },
+    "Date": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "วันที่"
+          }
+        }
+      }
+    },
+    "Date,Time,Event,Photos,Duration (s),Strip,GIF,Template,Filter,Customer Language,Gallery Status": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Date,Time,Event,Photos,Duration (s),Strip,GIF,Template,Filter,Customer Language,Gallery Status"
+          }
+        }
+      }
+    },
+    "Default": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ค่าเริ่มต้น"
+          }
+        }
+      }
+    },
+    "Default customer language": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ภาษาลูกค้าเริ่มต้น"
+          }
+        }
+      }
+    },
+    "Default filter": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ฟิลเตอร์เริ่มต้น"
+          }
+        }
+      }
+    },
+    "Delete": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ลบ"
+          }
+        }
+      }
+    },
+    "Disable": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ปิดใช้งาน"
+          }
+        }
+      }
+    },
+    "Disabled": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ปิดใช้งาน"
+          }
+        }
+      }
+    },
+    "Discard": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ละทิ้ง"
+          }
+        }
+      }
+    },
+    "Discard Session": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ละทิ้งเซสชัน"
+          }
+        }
+      }
+    },
+    "Discard unfinished session?": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ละทิ้งเซสชันที่ยังไม่เสร็จหรือไม่?"
+          }
+        }
+      }
+    },
+    "Disconnect": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ตัดการเชื่อมต่อ"
+          }
+        }
+      }
+    },
+    "Done": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "เสร็จสิ้น"
+          }
+        }
+      }
+    },
+    "Download Server": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "เซิร์ฟเวอร์ดาวน์โหลด"
+          }
+        }
+      }
+    },
+    "Download ready": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ดาวน์โหลดพร้อมแล้ว"
+          }
+        }
+      }
+    },
+    "Duplicate": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ทำสำเนา"
+          }
+        }
+      }
+    },
+    "EV": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "EV"
+          }
+        }
+      }
+    },
+    "Edit": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "แก้ไข"
+          }
+        }
+      }
+    },
+    "Edit Photo Slots…": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "แก้ไขช่องภาพ…"
+          }
+        }
+      }
+    },
+    "Edit Slots…": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "แก้ไขช่อง…"
+          }
+        }
+      }
+    },
+    "Edit Templates, Filters & Gallery": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "แก้ไขเทมเพลต ฟิลเตอร์ และแกลเลอรี"
+          }
+        }
+      }
+    },
+    "Enable": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "เปิดใช้งาน"
+          }
+        }
+      }
+    },
+    "Enabled": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "เปิดใช้งานแล้ว"
+          }
+        }
+      }
+    },
+    "Enabled template slots are valid.": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ช่องของเทมเพลตที่เปิดใช้งานถูกต้อง"
+          }
+        }
+      }
+    },
+    "English": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "อังกฤษ"
+          }
+        }
+      }
+    },
+    "English name": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ชื่อภาษาอังกฤษ"
+          }
+        }
+      }
+    },
+    "English prompt": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "พรอมต์ภาษาอังกฤษ"
+          }
+        }
+      }
+    },
+    "English subtitle": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "คำบรรยายภาษาอังกฤษ"
+          }
+        }
+      }
+    },
+    "Enter the same PIN again.": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "กรอก PIN เดิมอีกครั้ง"
+          }
+        }
+      }
+    },
+    "Enter your 4-digit PIN to continue.": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "กรอก PIN 4 หลักเพื่อดำเนินการต่อ"
+          }
+        }
+      }
+    },
+    "Error": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ข้อผิดพลาด"
+          }
+        }
+      }
+    },
+    "Event": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "งาน"
+          }
+        }
+      }
+    },
+    "Event Gallery": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "แกลเลอรีงาน"
+          }
+        }
+      }
+    },
+    "Event Info": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ข้อมูลงาน"
+          }
+        }
+      }
+    },
+    "Event Name": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ชื่องาน"
+          }
+        }
+      }
+    },
+    "Event Output": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ผลลัพธ์งาน"
+          }
+        }
+      }
+    },
+    "Event Setup": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ตั้งค่างาน"
+          }
+        }
+      }
+    },
+    "Event experience could not load: %@": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ไม่สามารถโหลดประสบการณ์งาน: %1$@"
+          }
+        }
+      }
+    },
+    "Event experience is still loading.": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ประสบการณ์งานยังโหลดไม่เสร็จ"
+          }
+        }
+      }
+    },
+    "Event folder": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "โฟลเดอร์งาน"
+          }
+        }
+      }
+    },
+    "Events (%@)": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "งาน (%1$@)"
+          }
+        }
+      }
+    },
+    "Events Run": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "จำนวนงานที่ทำ"
+          }
+        }
+      }
+    },
+    "Experience breakdown": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "สรุปประสบการณ์"
+          }
+        }
+      }
+    },
+    "Export CSV": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ส่งออก CSV"
+          }
+        }
+      }
+    },
+    "External Monitor Viewer": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "หน้าจอภายนอกสำหรับผู้เข้าร่วม"
+          }
+        }
+      }
+    },
+    "Failed": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ล้มเหลว"
+          }
+        }
+      }
+    },
+    "Failed: %@": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ล้มเหลว: %1$@"
+          }
+        }
+      }
+    },
+    "Feature Status": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "สถานะฟีเจอร์"
+          }
+        }
+      }
+    },
+    "Filter": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ฟิลเตอร์"
+          }
+        }
+      }
+    },
+    "Filters": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ฟิลเตอร์"
+          }
+        }
+      }
+    },
+    "Flash": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "แฟลช"
+          }
+        }
+      }
+    },
+    "Frame": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "เฟรม"
+          }
+        }
+      }
+    },
+    "Frame Template": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "เทมเพลตเฟรม"
+          }
+        }
+      }
+    },
+    "From": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ตั้งแต่"
+          }
+        }
+      }
+    },
+    "GIF processing": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "กำลังประมวลผล GIF"
+          }
+        }
+      }
+    },
+    "Gallery": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "แกลเลอรี"
+          }
+        }
+      }
+    },
+    "Gallery Moderation": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ตรวจสอบแกลเลอรี"
+          }
+        }
+      }
+    },
+    "Gallery URL unavailable: no LAN address": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "URL แกลเลอรีใช้ไม่ได้: ไม่มีที่อยู่ LAN"
+          }
+        }
+      }
+    },
+    "Gallery is disabled.": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ปิดใช้งานแกลเลอรี"
+          }
+        }
+      }
+    },
+    "Gallery language": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ภาษาแกลเลอรี"
+          }
+        }
+      }
+    },
+    "Gallery storage is writable.": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "พื้นที่จัดเก็บแกลเลอรีเขียนได้"
+          }
+        }
+      }
+    },
+    "Gallery storage warning: %@": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "คำเตือนพื้นที่จัดเก็บแกลเลอรี: %1$@"
+          }
+        }
+      }
+    },
+    "Gallery title (English)": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ชื่อแกลเลอรี (ภาษาอังกฤษ)"
+          }
+        }
+      }
+    },
+    "Gallery title (Thai)": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ชื่อแกลเลอรี (ภาษาไทย)"
+          }
+        }
+      }
+    },
+    "Grant camera access in System Settings → Privacy & Security → Camera.": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "อนุญาตการเข้าถึงกล้องในการตั้งค่าระบบ → ความเป็นส่วนตัวและความปลอดภัย → กล้อง"
+          }
+        }
+      }
+    },
+    "Grid overlay": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "แสดงเส้นตาราง"
+          }
+        }
+      }
+    },
+    "Guest Experience": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ประสบการณ์ผู้เข้าร่วม"
+          }
+        }
+      }
+    },
+    "Guest Selection": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "การเลือกของผู้เข้าร่วม"
+          }
+        }
+      }
+    },
+    "Height": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ความสูง"
+          }
+        }
+      }
+    },
+    "Hide": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ซ่อน"
+          }
+        }
+      }
+    },
+    "Hide Selected": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ซ่อนรายการที่เลือก"
+          }
+        }
+      }
+    },
+    "Hide Viewer": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ซ่อนหน้าจอผู้ชม"
+          }
+        }
+      }
+    },
+    "High Contrast": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "คอนทราสต์สูง"
+          }
+        }
+      }
+    },
+    "Hour": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ชั่วโมง"
+          }
+        }
+      }
+    },
+    "How did it look?": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ภาพเป็นอย่างไรบ้าง?"
+          }
+        }
+      }
+    },
+    "ISO": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ISO"
+          }
+        }
+      }
+    },
+    "Ignored by cameras with no flash hardware (most webcams).": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "กล้องที่ไม่มีฮาร์ดแวร์แฟลชจะไม่ใช้ค่านี้ (เว็บแคมส่วนใหญ่)"
+          }
+        }
+      }
+    },
+    "Image Capture": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Image Capture"
+          }
+        }
+      }
+    },
+    "Import Image…": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "นำเข้ารูปภาพ…"
+          }
+        }
+      }
+    },
+    "Import PNG…": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "นำเข้า PNG…"
+          }
+        }
+      }
+    },
+    "Inactive": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ไม่ได้ใช้งาน"
+          }
+        }
+      }
+    },
+    "Incorrect PIN. Try again.": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "PIN ไม่ถูกต้อง ลองอีกครั้ง"
+          }
+        }
+      }
+    },
+    "Individual download pages will remain available.": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "หน้าดาวน์โหลดแต่ละเซสชันยังใช้งานได้"
+          }
+        }
+      }
+    },
+    "Inspector": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ตัวตรวจสอบ"
+          }
+        }
+      }
+    },
+    "Keep & finish": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "เก็บและเสร็จสิ้น"
+          }
+        }
+      }
+    },
+    "Keep & next": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "เก็บและถัดไป"
+          }
+        }
+      }
+    },
+    "LAN URL: %@": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "URL LAN: %1$@"
+          }
+        }
+      }
+    },
+    "Language": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ภาษา"
+          }
+        }
+      }
+    },
+    "Last Capture Preview": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ภาพตัวอย่างการถ่ายล่าสุด"
+          }
+        }
+      }
+    },
+    "Last Run": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ทำงานล่าสุด"
+          }
+        }
+      }
+    },
+    "Last checked ": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ตรวจสอบล่าสุด "
+          }
+        }
+      }
+    },
+    "Layout": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "เค้าโครง"
+          }
+        }
+      }
+    },
+    "Legacy": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "เดิม"
+          }
+        }
+      }
+    },
+    "Live Preview": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ภาพตัวอย่างสด"
+          }
+        }
+      }
+    },
+    "Live preview device: %@": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "อุปกรณ์ภาพตัวอย่างสด: %1$@"
+          }
+        }
+      }
+    },
+    "Live preview: Sony ZV-E10 PTP stream": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ภาพตัวอย่างสด: สตรีม PTP จาก Sony ZV-E10"
+          }
+        }
+      }
+    },
+    "Live preview: not exposed by this USB mode": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ภาพตัวอย่างสด: โหมด USB นี้ไม่เปิดให้ใช้งาน"
+          }
+        }
+      }
+    },
+    "Loading": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "กำลังโหลด"
+          }
+        }
+      }
+    },
+    "Loading experience…": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "กำลังโหลดประสบการณ์…"
+          }
+        }
+      }
+    },
+    "Loading gallery…": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "กำลังโหลดแกลเลอรี…"
+          }
+        }
+      }
+    },
+    "Local Download Server": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "เซิร์ฟเวอร์ดาวน์โหลดภายในเครื่อง"
+          }
+        }
+      }
+    },
+    "Local network only. Regenerating the token invalidates old gallery links.": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ใช้ได้เฉพาะเครือข่ายท้องถิ่น การสร้างโทเค็นใหม่จะทำให้ลิงก์แกลเลอรีเดิมใช้ไม่ได้"
+          }
+        }
+      }
+    },
+    "Mac: cable preview ready": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Mac: ภาพตัวอย่างผ่านสายพร้อมแล้ว"
+          }
+        }
+      }
+    },
+    "Mac: cable preview service unavailable": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Mac: บริการภาพตัวอย่างผ่านสายไม่พร้อมใช้งาน"
+          }
+        }
+      }
+    },
+    "Managed by Cloud SSH Setup in ~/.ssh/config, using Cloudflare Access.": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "จัดการโดย Cloud SSH Setup ใน ~/.ssh/config และใช้ Cloudflare Access"
+          }
+        }
+      }
+    },
+    "Mirror camera": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "กลับด้านภาพกล้อง"
+          }
+        }
+      }
+    },
+    "Mirrors the idle/countdown/review/finish screens the iPad shows, driven by this Mac directly.": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "จำลองหน้าจอพัก นับถอยหลัง ตรวจรูป และเสร็จสิ้นแบบเดียวกับ iPad โดยควบคุมจาก Mac โดยตรง"
+          }
+        }
+      }
+    },
+    "Mode": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "โหมด"
+          }
+        }
+      }
+    },
+    "Monitor": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "จอภาพ"
+          }
+        }
+      }
+    },
+    "Monochrome": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ขาวดำ"
+          }
+        }
+      }
+    },
+    "Move Down": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "เลื่อนลง"
+          }
+        }
+      }
+    },
+    "Move Up": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "เลื่อนขึ้น"
+          }
+        }
+      }
+    },
+    "Name": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ชื่อ"
+          }
+        }
+      }
+    },
+    "Names": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ชื่อ"
+          }
+        }
+      }
+    },
+    "New Event": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "งานใหม่"
+          }
+        }
+      }
+    },
+    "New Template": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "เทมเพลตใหม่"
+          }
+        }
+      }
+    },
+    "New sessions save here. Existing files are not moved.": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "เซสชันใหม่จะบันทึกที่นี่ ไฟล์เดิมจะไม่ถูกย้าย"
+          }
+        }
+      }
+    },
+    "Next attempt ": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ลองครั้งถัดไป "
+          }
+        }
+      }
+    },
+    "No Event Selected": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ยังไม่ได้เลือกงาน"
+          }
+        }
+      }
+    },
+    "No Sessions": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ไม่มีเซสชัน"
+          }
+        }
+      }
+    },
+    "No active event": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ไม่มีงานที่ใช้งานอยู่"
+          }
+        }
+      }
+    },
+    "No active event — go to Event Setup": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ไม่มีงานที่ใช้งานอยู่ — ไปที่ตั้งค่างาน"
+          }
+        }
+      }
+    },
+    "No active event — set one up on the operator Mac": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ยังไม่มีงานที่ใช้งานอยู่ — ตั้งค่างานบน Mac ของผู้ควบคุมก่อน"
+          }
+        }
+      }
+    },
+    "No cameras found": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ไม่พบกล้อง"
+          }
+        }
+      }
+    },
+    "No checks have run yet.": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ยังไม่ได้ตรวจสอบ"
+          }
+        }
+      }
+    },
+    "No data": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ไม่มีข้อมูล"
+          }
+        }
+      }
+    },
+    "No external monitor detected": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ไม่พบจอภาพภายนอก"
+          }
+        }
+      }
+    },
+    "No frame imported": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ยังไม่ได้นำเข้าเฟรม"
+          }
+        }
+      }
+    },
+    "No gallery indexes yet. Complete a session with gallery enabled.": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ยังไม่มีดัชนีแกลเลอรี ทำเซสชันที่เปิดใช้แกลเลอรีให้เสร็จก่อน"
+          }
+        }
+      }
+    },
+    "No gallery sessions match this filter.": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ไม่มีเซสชันแกลเลอรีที่ตรงกับตัวกรองนี้"
+          }
+        }
+      }
+    },
+    "No iPads connected": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ไม่มี iPad เชื่อมต่อ"
+          }
+        }
+      }
+    },
+    "No photo slots defined": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ยังไม่ได้กำหนดช่องภาพ"
+          }
+        }
+      }
+    },
+    "No prompt image": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ไม่มีรูปภาพพรอมต์"
+          }
+        }
+      }
+    },
+    "No slots defined — import a frame and use Edit Photo Slots.": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ยังไม่ได้กำหนดช่อง — นำเข้าเฟรมแล้วเลือกแก้ไขช่องภาพ"
+          }
+        }
+      }
+    },
+    "No tethered camera detected": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ไม่พบกล้องที่เชื่อมต่อสาย"
+          }
+        }
+      }
+    },
+    "Not Ready": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ยังไม่พร้อม"
+          }
+        }
+      }
+    },
+    "Not available (no LAN IP)": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ไม่พร้อมใช้งาน (ไม่มี IP ของ LAN)"
+          }
+        }
+      }
+    },
+    "Not configured": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ยังไม่ได้ตั้งค่า"
+          }
+        }
+      }
+    },
+    "OK": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ตกลง"
+          }
+        }
+      }
+    },
+    "Off": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ปิด"
+          }
+        }
+      }
+    },
+    "Old gallery links will stop working after you save this event experience.": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ลิงก์แกลเลอรีเดิมจะใช้ไม่ได้หลังจากบันทึกประสบการณ์ของงานนี้"
+          }
+        }
+      }
+    },
+    "On": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "เปิด"
+          }
+        }
+      }
+    },
+    "Only the selected iPad receives session controls.": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "เฉพาะ iPad ที่เลือกเท่านั้นที่จะได้รับคำสั่งควบคุมเซสชัน"
+          }
+        }
+      }
+    },
+    "Open Folder": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "เปิดโฟลเดอร์"
+          }
+        }
+      }
+    },
+    "Open Gallery": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "เปิดแกลเลอรี"
+          }
+        }
+      }
+    },
+    "Open Individual Page": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "เปิดหน้ารูปภาพ"
+          }
+        }
+      }
+    },
+    "Open Session Folder": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "เปิดโฟลเดอร์เซสชัน"
+          }
+        }
+      }
+    },
+    "Open System Print Settings…": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "เปิดการตั้งค่าการพิมพ์ระบบ…"
+          }
+        }
+      }
+    },
+    "Open System Settings": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "เปิดการตั้งค่าระบบ"
+          }
+        }
+      }
+    },
+    "Operations": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "การปฏิบัติการ"
+          }
+        }
+      }
+    },
+    "Operator Override": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "การควบคุมแทนผู้ดำเนินการ"
+          }
+        }
+      }
+    },
+    "Original": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ต้นฉบับ"
+          }
+        }
+      }
+    },
+    "Output saved": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "บันทึกผลลัพธ์แล้ว"
+          }
+        }
+      }
+    },
+    "P%@": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "P%1$@"
+          }
+        }
+      }
+    },
+    "PINs don't match. Start over.": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "PIN ไม่ตรงกัน เริ่มใหม่อีกครั้ง"
+          }
+        }
+      }
+    },
+    "PRC PhotoBooth": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "PRC PhotoBooth"
+          }
+        }
+      }
+    },
+    "PRC-PhotoBooth": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "PRC-PhotoBooth"
+          }
+        }
+      }
+    },
+    "Paper Size": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ขนาดกระดาษ"
+          }
+        }
+      }
+    },
+    "Paper: %@ · Copies: %@": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "กระดาษ: %1$@ · จำนวน: %2$@"
+          }
+        }
+      }
+    },
+    "Pending": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "รอดำเนินการ"
+          }
+        }
+      }
+    },
+    "Persistent Queue": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "คิวถาวร"
+          }
+        }
+      }
+    },
+    "Photo %@": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ภาพที่ %1$@"
+          }
+        }
+      }
+    },
+    "Photo %@ of %@": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ภาพที่ %1$@ จาก %2$@"
+          }
+        }
+      }
+    },
+    "Photo Slots": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ช่องภาพ"
+          }
+        }
+      }
+    },
+    "Photos": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "รูปภาพ"
+          }
+        }
+      }
+    },
+    "Photos: %@": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "รูปภาพ: %1$@"
+          }
+        }
+      }
+    },
+    "Pose Prompts": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "พรอมต์ท่าทาง"
+          }
+        }
+      }
+    },
+    "Postcard (4×6\")": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "โปสการ์ด (4×6 นิ้ว)"
+          }
+        }
+      }
+    },
+    "Preflight Results": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ผลการตรวจสอบก่อนเริ่ม"
+          }
+        }
+      }
+    },
+    "Prepare this Mac to back up completed photo sessions through Cloudflare Access.": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "เตรียม Mac เครื่องนี้เพื่อสำรองเซสชันภาพที่เสร็จแล้วผ่าน Cloudflare Access"
+          }
+        }
+      }
+    },
+    "Preparing download…": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "กำลังเตรียมดาวน์โหลด…"
+          }
+        }
+      }
+    },
+    "Preview frame rate": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "อัตราเฟรมภาพตัวอย่าง"
+          }
+        }
+      }
+    },
+    "Preview via": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ภาพตัวอย่างผ่าน"
+          }
+        }
+      }
+    },
+    "Print": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "พิมพ์"
+          }
+        }
+      }
+    },
+    "Print Again": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "พิมพ์อีกครั้ง"
+          }
+        }
+      }
+    },
+    "Print Photo Strip?": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "พิมพ์โฟโต้สตริปหรือไม่?"
+          }
+        }
+      }
+    },
+    "Print Test Page": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "พิมพ์หน้าทดสอบ"
+          }
+        }
+      }
+    },
+    "Print failed: %@": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "พิมพ์ล้มเหลว: %1$@"
+          }
+        }
+      }
+    },
+    "Print pending": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "รอพิมพ์"
+          }
+        }
+      }
+    },
+    "Print this strip again?": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "พิมพ์โฟโต้สตริปนี้อีกครั้งหรือไม่?"
+          }
+        }
+      }
+    },
+    "Printer": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "เครื่องพิมพ์"
+          }
+        }
+      }
+    },
+    "Printer Diagnostics": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "การวินิจฉัยเครื่องพิมพ์"
+          }
+        }
+      }
+    },
+    "Printer test: Not run this launch.": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "การทดสอบเครื่องพิมพ์: ยังไม่ได้ทดสอบในการเปิดแอปครั้งนี้"
+          }
+        }
+      }
+    },
+    "Processing…": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "กำลังประมวลผล…"
+          }
+        }
+      }
+    },
+    "Public URL (optional)": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "URL สาธารณะ (ไม่บังคับ)"
+          }
+        }
+      }
+    },
+    "Public base URL": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "URL สาธารณะหลัก"
+          }
+        }
+      }
+    },
+    "QR codes use this URL after cloud upload succeeds; otherwise they use the LAN server.\nExample: https://photos.yourdomain.com": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "คิวอาร์โค้ดจะใช้ URL นี้หลังอัปโหลดขึ้นคลาวด์สำเร็จ มิฉะนั้นจะใช้เซิร์ฟเวอร์ LAN\nตัวอย่าง: https://photos.yourdomain.com"
+          }
+        }
+      }
+    },
+    "Readiness": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ความพร้อม"
+          }
+        }
+      }
+    },
+    "Ready": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "พร้อม"
+          }
+        }
+      }
+    },
+    "Ready on port %@": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "พร้อมใช้งานที่พอร์ต %1$@"
+          }
+        }
+      }
+    },
+    "Ready with Warnings": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "พร้อมแต่มีคำเตือน"
+          }
+        }
+      }
+    },
+    "Ready?": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "พร้อมหรือยัง?"
+          }
+        }
+      }
+    },
+    "Refresh": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "รีเฟรช"
+          }
+        }
+      }
+    },
+    "Refresh Checks": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "รีเฟรชการตรวจสอบ"
+          }
+        }
+      }
+    },
+    "Regenerate": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "สร้างใหม่"
+          }
+        }
+      }
+    },
+    "Regenerate Token…": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "สร้างโทเค็นใหม่…"
+          }
+        }
+      }
+    },
+    "Regenerate gallery token?": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "สร้างโทเค็นแกลเลอรีใหม่หรือไม่?"
+          }
+        }
+      }
+    },
+    "Registered tokens: %@": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "โทเค็นที่ลงทะเบียน: %1$@"
+          }
+        }
+      }
+    },
+    "Remote Access": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "การเข้าถึงระยะไกล"
+          }
+        }
+      }
+    },
+    "Remote path": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "พาธปลายทาง"
+          }
+        }
+      }
+    },
+    "Remove": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "นำออก"
+          }
+        }
+      }
+    },
+    "Remove the admin PIN (you will be prompted to create a new one next time)": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "นำ PIN ผู้ดูแลออก (ครั้งถัดไปจะให้สร้างใหม่)"
+          }
+        }
+      }
+    },
+    "Rendering strip…": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "กำลังเรนเดอร์โฟโต้สตริป…"
+          }
+        }
+      }
+    },
+    "Reset Admin PIN?": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "รีเซ็ต PIN ผู้ดูแลหรือไม่?"
+          }
+        }
+      }
+    },
+    "Reset PIN": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "รีเซ็ต PIN"
+          }
+        }
+      }
+    },
+    "Reset to Idle": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "รีเซ็ตเป็นพัก"
+          }
+        }
+      }
+    },
+    "Resume": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ดำเนินการต่อ"
+          }
+        }
+      }
+    },
+    "Resume or discard the unfinished session in Operations.": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ดำเนินการต่อหรือละทิ้งเซสชันที่ยังไม่เสร็จในเมนูการปฏิบัติการ"
+          }
+        }
+      }
+    },
+    "Retry": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ลองใหม่"
+          }
+        }
+      }
+    },
+    "Retry All Failed": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ลองใหม่ทั้งหมดที่ล้มเหลว"
+          }
+        }
+      }
+    },
+    "Rotation": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "การหมุน"
+          }
+        }
+      }
+    },
+    "Run Full Preflight": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ตรวจสอบก่อนเริ่มแบบเต็ม"
+          }
+        }
+      }
+    },
+    "Run Safe Checks to inspect the booth.": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "เรียกใช้การตรวจสอบแบบปลอดภัยเพื่อตรวจดูบูธ"
+          }
+        }
+      }
+    },
+    "Run printer test?": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "เรียกใช้การทดสอบเครื่องพิมพ์หรือไม่?"
+          }
+        }
+      }
+    },
+    "Running": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "กำลังทำงาน"
+          }
+        }
+      }
+    },
+    "Runtime": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "รันไทม์"
+          }
+        }
+      }
+    },
+    "SSH alias": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ชื่อแทน SSH"
+          }
+        }
+      }
+    },
+    "Save": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "บันทึก"
+          }
+        }
+      }
+    },
+    "Saving…": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "กำลังบันทึก…"
+          }
+        }
+      }
+    },
+    "Scan to get your photos": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "สแกนเพื่อรับรูปภาพของคุณ"
+          }
+        }
+      }
+    },
+    "Select": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "เลือก"
+          }
+        }
+      }
+    },
+    "Select an active event first": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "เลือกงานที่ใช้งานอยู่ก่อน"
+          }
+        }
+      }
+    },
+    "Selected printer: %@": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "เครื่องพิมพ์ที่เลือก: %1$@"
+          }
+        }
+      }
+    },
+    "Selected printer: System Default": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "เครื่องพิมพ์ที่เลือก: ค่าเริ่มต้นของระบบ"
+          }
+        }
+      }
+    },
+    "Send the strip to your connected Selphy printer.": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ส่งโฟโต้สตริปไปยังเครื่องพิมพ์ Selphy ที่เชื่อมต่ออยู่"
+          }
+        }
+      }
+    },
+    "Server user": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ผู้ใช้เซิร์ฟเวอร์"
+          }
+        }
+      }
+    },
+    "Session Phase": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ระยะเซสชัน"
+          }
+        }
+      }
+    },
+    "Session Recovery": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "กู้คืนเซสชัน"
+          }
+        }
+      }
+    },
+    "Session cannot finish until every photograph is accepted.": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "เซสชันจะเสร็จสิ้นไม่ได้จนกว่าจะยอมรับรูปภาพทุกภาพ"
+          }
+        }
+      }
+    },
+    "Session controls always use Wi-Fi. 60 FPS uses more bandwidth; choose cable preview for the smoothest result. Sony USB live view may be limited by the camera.": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "คำสั่งควบคุมเซสชันใช้ Wi-Fi เสมอ 60 FPS ใช้แบนด์วิดท์มากขึ้น เลือกภาพตัวอย่างผ่านสายเพื่อความลื่นไหลสูงสุด ภาพสดผ่าน USB ของ Sony อาจถูกจำกัดโดยกล้อง"
+          }
+        }
+      }
+    },
+    "Session start failed: %@": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "เริ่มเซสชันล้มเหลว: %1$@"
+          }
+        }
+      }
+    },
+    "Sessions": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "เซสชัน"
+          }
+        }
+      }
+    },
+    "Sessions in this date range will appear here.": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "เซสชันในช่วงวันที่นี้จะแสดงที่นี่"
+          }
+        }
+      }
+    },
+    "Sessions per Day": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "เซสชันต่อวัน"
+          }
+        }
+      }
+    },
+    "Set Active": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ตั้งเป็นงานที่ใช้งาน"
+          }
+        }
+      }
+    },
+    "Set Default": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ตั้งเป็นค่าเริ่มต้น"
+          }
+        }
+      }
+    },
+    "Set Up & Test": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ตั้งค่าและทดสอบ"
+          }
+        }
+      }
+    },
+    "Set aperture on camera body when disabled — USB PTP support varies by camera.": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ตั้งค่ารูรับแสงที่ตัวกล้องเมื่อปิดใช้งาน — การรองรับ USB PTP แตกต่างกันไปในแต่ละกล้อง"
+          }
+        }
+      }
+    },
+    "Settings": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "การตั้งค่า"
+          }
+        }
+      }
+    },
+    "Show GIF links": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "แสดงลิงก์ GIF"
+          }
+        }
+      }
+    },
+    "Show Viewer": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "แสดงหน้าจอผู้ชม"
+          }
+        }
+      }
+    },
+    "Shows": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "แสดง"
+          }
+        }
+      }
+    },
+    "Shutter": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ความเร็วชัตเตอร์"
+          }
+        }
+      }
+    },
+    "Shutter Speed": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ความเร็วชัตเตอร์"
+          }
+        }
+      }
+    },
+    "Skip": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ข้าม"
+          }
+        }
+      }
+    },
+    "Skip for Now": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ข้ามไปก่อน"
+          }
+        }
+      }
+    },
+    "Skip system print dialog": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ข้ามกล่องโต้ตอบการพิมพ์ระบบ"
+          }
+        }
+      }
+    },
+    "Skipped because no event is active.": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ข้ามเพราะไม่มีงานที่ใช้งานอยู่"
+          }
+        }
+      }
+    },
+    "Skipped until an experience document is available.": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ข้ามจนกว่าเอกสารประสบการณ์จะพร้อมใช้งาน"
+          }
+        }
+      }
+    },
+    "Skipped until filter settings are available.": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ข้ามจนกว่าการตั้งค่าฟิลเตอร์จะพร้อมใช้งาน"
+          }
+        }
+      }
+    },
+    "Slot %@": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ช่อง %1$@"
+          }
+        }
+      }
+    },
+    "Slots": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ช่อง"
+          }
+        }
+      }
+    },
+    "Slots (%@)": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ช่อง (%1$@)"
+          }
+        }
+      }
+    },
+    "Soft": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "นุ่มนวล"
+          }
+        }
+      }
+    },
+    "Some DSLR controls are unavailable on this camera's USB profile.": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "การควบคุม DSLR บางรายการไม่พร้อมใช้งานในโปรไฟล์ USB ของกล้องนี้"
+          }
+        }
+      }
+    },
+    "Start": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "เริ่ม"
+          }
+        }
+      }
+    },
+    "Start Camera": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "เริ่มกล้อง"
+          }
+        }
+      }
+    },
+    "Start Session": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "เริ่มเซสชัน"
+          }
+        }
+      }
+    },
+    "Start the selected camera first": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "เริ่มกล้องที่เลือกก่อน"
+          }
+        }
+      }
+    },
+    "Started %@ at %@": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "เริ่มเมื่อ %1$@ เวลา %2$@"
+          }
+        }
+      }
+    },
+    "Starting…": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "กำลังเริ่ม…"
+          }
+        }
+      }
+    },
+    "Status": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "สถานะ"
+          }
+        }
+      }
+    },
+    "Stopped": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "หยุดแล้ว"
+          }
+        }
+      }
+    },
+    "Strip Preview": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ภาพตัวอย่างโฟโต้สตริป"
+          }
+        }
+      }
+    },
+    "Strip ready": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "โฟโต้สตริปพร้อมแล้ว"
+          }
+        }
+      }
+    },
+    "System": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ระบบ"
+          }
+        }
+      }
+    },
+    "System Default": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ค่าเริ่มต้นของระบบ"
+          }
+        }
+      }
+    },
+    "Template": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "เทมเพลต"
+          }
+        }
+      }
+    },
+    "Using the macOS System Default printer.": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ใช้เครื่องพิมพ์ค่าเริ่มต้นของ macOS"
+          }
+        }
+      }
+    },
+    "Templates": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "เทมเพลต"
+          }
+        }
+      }
+    },
+    "Test Capture": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ทดสอบถ่ายภาพ"
+          }
+        }
+      }
+    },
+    "Test Connection Again": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ทดสอบการเชื่อมต่ออีกครั้ง"
+          }
+        }
+      }
+    },
+    "Test Print": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ทดสอบพิมพ์"
+          }
+        }
+      }
+    },
+    "Test capture failed: %@": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "การทดสอบถ่ายภาพล้มเหลว: %1$@"
+          }
+        }
+      }
+    },
+    "Thai": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ไทย"
+          }
+        }
+      }
+    },
+    "Thai name": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ชื่อภาษาไทย"
+          }
+        }
+      }
+    },
+    "Thai prompt": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "พรอมต์ภาษาไทย"
+          }
+        }
+      }
+    },
+    "Thai subtitle": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "คำบรรยายภาษาไทย"
+          }
+        }
+      }
+    },
+    "The last unaccepted preview was not saved and will be retaken.": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ภาพตัวอย่างล่าสุดที่ยังไม่ยอมรับไม่ได้ถูกบันทึกและจะถ่ายใหม่"
+          }
+        }
+      }
+    },
+    "This Mac can't verify its owner right now. Try your PIN.": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ขณะนี้ Mac ไม่สามารถยืนยันเจ้าของได้ ลองใช้ PIN ของคุณ"
+          }
+        }
+      }
+    },
+    "This submits a new print request and does not create another persistent automatic-print job.": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "การดำเนินการนี้จะส่งคำขอพิมพ์ใหม่และไม่สร้างงานพิมพ์อัตโนมัติถาวรเพิ่ม"
+          }
+        }
+      }
+    },
+    "To": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ถึง"
+          }
+        }
+      }
+    },
+    "Token: %@": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "โทเค็น: %1$@"
+          }
+        }
+      }
+    },
+    "Torch": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ไฟช่วย"
+          }
+        }
+      }
+    },
+    "Tunnel hostname": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ชื่อโฮสต์ของทันเนล"
+          }
+        }
+      }
+    },
+    "Unavailable": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ไม่พร้อมใช้งาน"
+          }
+        }
+      }
+    },
+    "Unlock PRC PhotoBooth administrator settings with Touch ID or your Mac password.": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ปลดล็อกการตั้งค่าผู้ดูแล PRC PhotoBooth ด้วย Touch ID หรือรหัสผ่าน Mac"
+          }
+        }
+      }
+    },
+    "Untitled": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ไม่มีชื่อ"
+          }
+        }
+      }
+    },
+    "Upload photos to cloud after each session": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "อัปโหลดรูปภาพขึ้นคลาวด์หลังแต่ละเซสชัน"
+          }
+        }
+      }
+    },
+    "Use Touch ID or Mac Password": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ใช้ Touch ID หรือรหัสผ่าน Mac"
+          }
+        }
+      }
+    },
+    "Use ‘prc-%@’ Instead": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ใช้ ‘prc-%1$@’ แทน"
+          }
+        }
+      }
+    },
+    "Used in QR codes after cloud upload succeeds. Leave blank to use the LAN server.": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ใช้ในคิวอาร์โค้ดหลังอัปโหลดขึ้นคลาวด์สำเร็จ เว้นว่างไว้เพื่อใช้เซิร์ฟเวอร์ LAN"
+          }
+        }
+      }
+    },
+    "Uses the ZV-E10's AUTO or P exposure program. ISO, shutter speed, and aperture stay automatic.": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ใช้โหมดรับแสง AUTO หรือ P ของ ZV-E10 ค่า ISO ความเร็วชัตเตอร์ และรูรับแสงจะเป็นอัตโนมัติ"
+          }
+        }
+      }
+    },
+    "Version 1.2 options are stored separately from the legacy event layout.": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ตัวเลือก Version 1.2 จะจัดเก็บแยกจากรูปแบบงานเดิม"
+          }
+        }
+      }
+    },
+    "Vintage": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "วินเทจ"
+          }
+        }
+      }
+    },
+    "Waiting": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "กำลังรอ"
+          }
+        }
+      }
+    },
+    "Waiting for the camera's Sony PTP live-view stream…": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "กำลังรอสตรีมภาพสด Sony PTP จากกล้อง…"
+          }
+        }
+      }
+    },
+    "Warm": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "โทนอุ่น"
+          }
+        }
+      }
+    },
+    "Width": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ความกว้าง"
+          }
+        }
+      }
+    },
+    "Wireless (Wi-Fi)": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ไร้สาย (Wi-Fi)"
+          }
+        }
+      }
+    },
+    "You will be asked to create a new PIN now.": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ระบบจะให้คุณสร้าง PIN ใหม่ตอนนี้"
+          }
+        }
+      }
+    },
+    "already exists outside PRC PhotoBooth’s managed configuration": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "มีอยู่ภายนอกการตั้งค่าที่ PRC PhotoBooth จัดการ"
+          }
+        }
+      }
+    },
+    "cloudRemotePath": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "cloudRemotePath"
+          }
+        }
+      }
+    },
+    "cloudSSHHost": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "cloudSSHHost"
+          }
+        }
+      }
+    },
+    "cloudUploadEnabled": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "cloudUploadEnabled"
+          }
+        }
+      }
+    },
+    "eventFolderPath": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "eventFolderPath"
+          }
+        }
+      }
+    },
+    "iPad": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "iPad"
+          }
+        }
+      }
+    },
+    "iPad connected: %@": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "เชื่อมต่อ iPad: %1$@"
+          }
+        }
+      }
+    },
+    "iPad not connected": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ไม่ได้เชื่อมต่อ iPad"
+          }
+        }
+      }
+    },
+    "iPad: connected via cable": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "iPad: เชื่อมต่อผ่านสายแล้ว"
+          }
+        }
+      }
+    },
+    "iPad: not connected via cable — plug in, trust this Mac, and keep the iPad app open": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "iPad: ไม่ได้เชื่อมต่อผ่านสาย — เสียบสาย กดเชื่อถือ Mac เครื่องนี้ และเปิดแอป iPad ไว้"
+          }
+        }
+      }
+    },
+    "operatorLanguage": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "operatorLanguage"
+          }
+        }
+      }
+    },
+    "previewConnectionMode": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "previewConnectionMode"
+          }
+        }
+      }
+    },
+    "previewFrameRate": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "previewFrameRate"
+          }
+        }
+      }
+    },
+    "publicBaseURL": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "publicBaseURL"
+          }
+        }
+      }
+    },
+    "px": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "พิกเซล"
+          }
+        }
+      }
+    },
+    "selphyAutoPrintAfterSession": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "selphyAutoPrintAfterSession"
+          }
+        }
+      }
+    },
+    "selphyCopies": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "selphyCopies"
+          }
+        }
+      }
+    },
+    "selphyPaperSize": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "selphyPaperSize"
+          }
+        }
+      }
+    },
+    "selphyPrinterName": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "selphyPrinterName"
+          }
+        }
+      }
+    },
+    "selphySkipPrintDialog": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "selphySkipPrintDialog"
+          }
+        }
+      }
+    },
+    "· %@": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "· %1$@"
+          }
+        }
+      }
+    },
+    "×": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "×"
+          }
+        }
+      }
+    },
+    "×  Height": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "×  ความสูง"
+          }
+        }
+      }
+    },
+    "ไทย": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ไทย"
+          }
+        }
+      }
+    },
+    "Attempts: %@": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "จำนวนครั้ง: %1$@"
+          }
+        }
+      }
+    },
+    "Back": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ย้อนกลับ"
+          }
+        }
+      }
+    },
+    "Back to Options": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "กลับไปที่ตัวเลือก"
+          }
+        }
+      }
+    },
+    "Continue": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ดำเนินการต่อ"
+          }
+        }
+      }
+    },
+    "DSLR / Mirrorless": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "DSLR / มิเรอร์เลส"
+          }
+        }
+      }
+    },
+    "Hide selected gallery sessions?": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ซ่อนเซสชันแกลเลอรีที่เลือกหรือไม่?"
+          }
+        }
+      }
+    },
+    "Import / Replace Frame PNG…": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "นำเข้า / แทนที่ PNG ของเฟรม…"
+          }
+        }
+      }
+    },
+    "Next session": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "เซสชันถัดไป"
+          }
+        }
+      }
+    },
+    "Paper: %@": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "กระดาษ: %1$@"
+          }
+        }
+      }
+    },
+    "Quit %@": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ปิด %@"
+          }
+        }
+      }
+    },
+    "Retake": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ถ่ายใหม่"
+          }
+        }
+      }
+    },
+    "Run Safe Checks": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "เรียกใช้การตรวจสอบแบบปลอดภัย"
+          }
+        }
+      }
+    },
+    "Active event": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "งานที่ใช้งานอยู่"
+          }
+        }
+      }
+    },
+    "Attempts": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "จำนวนครั้ง"
+          }
+        }
+      }
+    },
+    "Approved": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "อนุมัติแล้ว"
+          }
+        }
+      }
+    },
+    "Camera connection": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "การเชื่อมต่อกล้อง"
+          }
+        }
+      }
+    },
+    "Camera permission": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "สิทธิ์กล้อง"
+          }
+        }
+      }
+    },
+    "Camera test capture": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ทดสอบถ่ายภาพด้วยกล้อง"
+          }
+        }
+      }
+    },
+    "Captured": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ถ่ายแล้ว"
+          }
+        }
+      }
+    },
+    "Cancelled": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ยกเลิกแล้ว"
+          }
+        }
+      }
+    },
+    "Cloud upload": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "อัปโหลดขึ้นคลาวด์"
+          }
+        }
+      }
+    },
+    "Copies": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "จำนวนสำเนา"
+          }
+        }
+      }
+    },
+    "Countdown": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "นับถอยหลัง"
+          }
+        }
+      }
+    },
+    "Customer display": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "หน้าจอลูกค้า"
+          }
+        }
+      }
+    },
+    "Disk space": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "พื้นที่ดิสก์"
+          }
+        }
+      }
+    },
+    "Event experience": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ประสบการณ์ของงาน"
+          }
+        }
+      }
+    },
+    "Event layout": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "เลย์เอาต์งาน"
+          }
+        }
+      }
+    },
+    "Filter pipeline": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ระบบฟิลเตอร์"
+          }
+        }
+      }
+    },
+    "Finished": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "เสร็จสิ้น"
+          }
+        }
+      }
+    },
+    "Gallery storage": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "พื้นที่จัดเก็บแกลเลอรี"
+          }
+        }
+      }
+    },
+    "Hidden": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ซ่อนอยู่"
+          }
+        }
+      }
+    },
+    "Idle": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "พร้อมรับงาน"
+          }
+        }
+      }
+    },
+    "Local IP address": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ที่อยู่ IP ภายในเครือข่าย"
+          }
+        }
+      }
+    },
+    "Local download server": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "เซิร์ฟเวอร์ดาวน์โหลดภายในเครื่อง"
+          }
+        }
+      }
+    },
+    "Not registered": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ยังไม่ได้ลงทะเบียน"
+          }
+        }
+      }
+    },
+    "Not run": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ยังไม่ได้เรียกใช้"
+          }
+        }
+      }
+    },
+    "Output folder": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "โฟลเดอร์ผลลัพธ์"
+          }
+        }
+      }
+    },
+    "Paper": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "กระดาษ"
+          }
+        }
+      }
+    },
+    "Passed": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ผ่าน"
+          }
+        }
+      }
+    },
+    "Preview transport": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ช่องทางส่งภาพตัวอย่าง"
+          }
+        }
+      }
+    },
+    "Printer configuration": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "การตั้งค่าเครื่องพิมพ์"
+          }
+        }
+      }
+    },
+    "Printer test": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ทดสอบเครื่องพิมพ์"
+          }
+        }
+      }
+    },
+    "Processing": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "กำลังประมวลผล"
+          }
+        }
+      }
+    },
+    "Register download": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ลงทะเบียนการดาวน์โหลด"
+          }
+        }
+      }
+    },
+    "Render GIF": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "สร้าง GIF"
+          }
+        }
+      }
+    },
+    "Render strip": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "สร้างโฟโต้สตริป"
+          }
+        }
+      }
+    },
+    "Review": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ตรวจสอบภาพ"
+          }
+        }
+      }
+    },
+    "Runtime persistence": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "การบันทึกข้อมูลรันไทม์"
+          }
+        }
+      }
+    },
+    "Selecting experience": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "กำลังเลือกประสบการณ์"
+          }
+        }
+      }
+    },
+    "Skipped": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ข้าม"
+          }
+        }
+      }
+    },
+    "Template assets": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ไฟล์ประกอบเทมเพลต"
+          }
+        }
+      }
+    },
+    "Unfinished session": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "เซสชันที่ยังไม่เสร็จ"
+          }
+        }
+      }
+    },
+    "Update gallery": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "อัปเดตแกลเลอรี"
+          }
+        }
+      }
+    },
+    "Warning": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "คำเตือน"
+          }
+        }
+      }
+    },
+    "Automatic print": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "พิมพ์อัตโนมัติ"
+          }
+        }
+      }
+    },
+    "Queue health": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "สุขภาพคิวงาน"
+          }
+        }
+      }
+    },
+    "Active event: %@.": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "งานที่ใช้งานอยู่: %1$@"
+          }
+        }
+      }
+    },
+    "A customer display is ready.": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "หน้าจอลูกค้าพร้อมใช้งาน"
+          }
+        }
+      }
+    },
+    "A required queue job has permanently failed.": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "งานคิวที่จำเป็นล้มเหลวถาวร"
+          }
+        }
+      }
+    },
+    "A slot has zero or negative dimensions.": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ช่องภาพมีขนาดเป็นศูนย์หรือติดลบ"
+          }
+        }
+      }
+    },
+    "A slot references a photo index outside the event.": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ช่องภาพอ้างอิงดัชนีภาพนอกขอบเขตของงาน"
+          }
+        }
+      }
+    },
+    "An enabled template has invalid capture slots.": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "เทมเพลตที่เปิดใช้งานมีช่องถ่ายภาพไม่ถูกต้อง"
+          }
+        }
+      }
+    },
+    "An unfinished capture session awaits Resume or Discard.": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "มีเซสชันถ่ายภาพที่ยังไม่เสร็จ รอให้ดำเนินการต่อหรือละทิ้ง"
+          }
+        }
+      }
+    },
+    "At least 10 GB is available.": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "มีพื้นที่ว่างอย่างน้อย 10 GB"
+          }
+        }
+      }
+    },
+    "Atomic runtime writes are available.": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "พร้อมใช้งานการเขียนข้อมูลรันไทม์แบบอะตอมิก"
+          }
+        }
+      }
+    },
+    "Between 2 GB and 10 GB is available.": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "มีพื้นที่ว่างระหว่าง 2 GB ถึง 10 GB"
+          }
+        }
+      }
+    },
+    "Cable mode requires a supported USB listener and connected client.": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "โหมดสายต้องมีตัวรับ USB ที่รองรับและไคลเอนต์ที่เชื่อมต่ออยู่"
+          }
+        }
+      }
+    },
+    "Camera permission is denied or restricted.": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "สิทธิ์กล้องถูกปฏิเสธหรือจำกัดการใช้งาน"
+          }
+        }
+      }
+    },
+    "Camera permission is granted.": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "อนุญาตให้ใช้กล้องแล้ว"
+          }
+        }
+      }
+    },
+    "Camera is unavailable.": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "กล้องไม่พร้อมใช้งาน"
+          }
+        }
+      }
+    },
+    "Camera is ready.": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "กล้องพร้อมใช้งาน"
+          }
+        }
+      }
+    },
+    "Configured filters passed synthetic-image validation.": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ฟิลเตอร์ที่ตั้งค่าผ่านการตรวจสอบด้วยภาพสังเคราะห์"
+          }
+        }
+      }
+    },
+    "Configured printer is available.": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "เครื่องพิมพ์ที่ตั้งค่าพร้อมใช้งาน"
+          }
+        }
+      }
+    },
+    "Configured printer is unavailable.": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "เครื่องพิมพ์ที่ตั้งค่าไม่พร้อมใช้งาน"
+          }
+        }
+      }
+    },
+    "A configured filter failed synthetic-image validation.": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ฟิลเตอร์ที่ตั้งค่าล้มเหลวในการตรวจสอบด้วยภาพสังเคราะห์"
+          }
+        }
+      }
+    },
+    "Connect an iPad or activate the external viewer.": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "เชื่อมต่อ iPad หรือเปิดใช้งานหน้าจอผู้ชมภายนอก"
+          }
+        }
+      }
+    },
+    "Diagnostic capture succeeded.": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "การถ่ายภาพวินิจฉัยสำเร็จ"
+          }
+        }
+      }
+    },
+    "Disabled in Settings.": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ปิดใช้งานอยู่ในการตั้งค่า"
+          }
+        }
+      }
+    },
+    "Experience document is loaded and validated.": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "โหลดและตรวจสอบเอกสารประสบการณ์แล้ว"
+          }
+        }
+      }
+    },
+    "Folder is writable.": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "โฟลเดอร์สามารถเขียนได้"
+          }
+        }
+      }
+    },
+    "Health check returned HTTP 200.": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "การตรวจสอบสถานะตอบกลับ HTTP 200"
+          }
+        }
+      }
+    },
+    "Less than 2 GB is available.": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "มีพื้นที่ว่างน้อยกว่า 2 GB"
+          }
+        }
+      }
+    },
+    "Multipeer preview connection is active.": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "การเชื่อมต่อภาพตัวอย่างผ่าน Multipeer ทำงานอยู่"
+          }
+        }
+      }
+    },
+    "No active event layout to validate.": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ไม่มีเลย์เอาต์งานที่ใช้งานอยู่ให้ตรวจสอบ"
+          }
+        }
+      }
+    },
+    "No event is active.": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ไม่มีงานที่ใช้งานอยู่"
+          }
+        }
+      }
+    },
+    "No iPad is connected.": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ไม่มี iPad เชื่อมต่ออยู่"
+          }
+        }
+      }
+    },
+    "No LAN address was found.": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ไม่พบที่อยู่ LAN"
+          }
+        }
+      }
+    },
+    "No output folder is configured.": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ยังไม่ได้ตั้งค่าโฟลเดอร์ผลลัพธ์"
+          }
+        }
+      }
+    },
+    "No unfinished capture session is waiting.": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ไม่มีเซสชันถ่ายภาพที่ยังไม่เสร็จรอดำเนินการ"
+          }
+        }
+      }
+    },
+    "One or more capture indexes have no corresponding slot.": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ดัชนีถ่ายภาพอย่างน้อยหนึ่งรายการไม่มีช่องภาพที่ตรงกัน"
+          }
+        }
+      }
+    },
+    "Optional cloud or print work is waiting or failed.": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "งานคลาวด์หรือการพิมพ์เสริมกำลังรออยู่หรือล้มเหลว"
+          }
+        }
+      }
+    },
+    "Photo count, canvas, and at least one slot are required.": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ต้องระบุจำนวนภาพ ขนาดแคนวาส และช่องภาพอย่างน้อยหนึ่งช่อง"
+          }
+        }
+      }
+    },
+    "Photo slots and canvas are valid.": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ช่องภาพและแคนวาสถูกต้อง"
+          }
+        }
+      }
+    },
+    "Printer is available.": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "เครื่องพิมพ์พร้อมใช้งาน"
+          }
+        }
+      }
+    },
+    "Printer test page submitted.": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ส่งหน้าทดสอบเครื่องพิมพ์แล้ว"
+          }
+        }
+      }
+    },
+    "Queue persistence and required jobs are healthy.": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "การบันทึกคิวและงานที่จำเป็นทำงานปกติ"
+          }
+        }
+      }
+    },
+    "Running diagnostic camera capture…": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "กำลังถ่ายภาพวินิจฉัยด้วยกล้อง…"
+          }
+        }
+      }
+    },
+    "Selected camera is unavailable.": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "กล้องที่เลือกไม่พร้อมใช้งาน"
+          }
+        }
+      }
+    },
+    "Selected camera is ready.": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "กล้องที่เลือกพร้อมใช้งาน"
+          }
+        }
+      }
+    },
+    "Skipped because no iPad is connected.": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ข้ามเพราะไม่มี iPad เชื่อมต่ออยู่"
+          }
+        }
+      }
+    },
+    "SSH connectivity failed.": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "การเชื่อมต่อ SSH ล้มเหลว"
+          }
+        }
+      }
+    },
+    "SSH connectivity is ready.": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "การเชื่อมต่อ SSH พร้อมใช้งาน"
+          }
+        }
+      }
+    },
+    "Submitting printer test page…": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "กำลังส่งหน้าทดสอบเครื่องพิมพ์…"
+          }
+        }
+      }
+    },
+    "Test page submitted.": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ส่งหน้าทดสอบแล้ว"
+          }
+        }
+      }
+    },
+    "The event experience document is unavailable.": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "เอกสารประสบการณ์ของงานไม่พร้อมใช้งาน"
+          }
+        }
+      }
+    },
+    "The local download server is not healthy.": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "เซิร์ฟเวอร์ดาวน์โหลดภายในเครื่องไม่พร้อมใช้งาน"
+          }
+        }
+      }
+    },
+    "The persistent job queue is unavailable.": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "คิวงานถาวรไม่พร้อมใช้งาน"
+          }
+        }
+      }
+    },
+    "USB preview client is connected.": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ไคลเอนต์ภาพตัวอย่าง USB เชื่อมต่ออยู่"
+          }
+        }
+      }
+    },
+    "Runtime persistence is unavailable.": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "การบันทึกข้อมูลรันไทม์ไม่พร้อมใช้งาน"
+          }
+        }
+      }
+    },
+    "Automatic printing is disabled; configure a printer when needed.": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ปิดการพิมพ์อัตโนมัติอยู่ หากต้องการให้ตั้งค่าเครื่องพิมพ์"
+          }
+        }
+      }
+    },
+    "Cloud SSH setup is incomplete.": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "การตั้งค่า Cloud SSH ยังไม่เสร็จสมบูรณ์"
+          }
+        }
+      }
+    },
+    "Not run during this application launch.": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ยังไม่ได้เรียกใช้ในการเปิดแอปครั้งนี้"
+          }
+        }
+      }
+    },
+    "Run Full Preflight to test the shutter.": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "เรียกใช้การตรวจสอบก่อนเริ่มแบบเต็มเพื่อทดสอบชัตเตอร์"
+          }
+        }
+      }
+    },
+    "Built-in / USB / Continuity": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ในตัว / USB / Continuity"
+          }
+        }
+      }
+    },
+    "DSLR / Mirrorless (USB Tethered)": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "DSLR / มิเรอร์เลส (เชื่อมต่อ USB)"
+          }
+        }
+      }
+    },
+    "Fill Flash": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "แฟลชเติมแสง"
+          }
+        }
+      }
+    },
+    "L-size (3.5×5\")": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ขนาด L (3.5×5 นิ้ว)"
+          }
+        }
+      }
+    },
+    "→": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "→"
+          }
+        }
+      }
+    }
   },
-  "version" : "1.0"
+  "version": "1.0"
 }

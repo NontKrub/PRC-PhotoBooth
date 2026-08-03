@@ -22,4 +22,16 @@ public enum PhotoFilterID: String, Codable, Sendable, CaseIterable, Identifiable
         case .vintage: return "filter.vintage"
         }
     }
+
+    public func displayName(for language: CustomerLanguage) -> String {
+        switch self {
+        case .original: return language == .thai ? "ต้นฉบับ" : "Original"
+        case .monochrome: return language == .thai ? "ขาวดำ" : "Monochrome"
+        case .warm: return language == .thai ? "โทนอุ่น" : "Warm"
+        case .cool: return language == .thai ? "โทนเย็น" : "Cool"
+        case .highContrast: return language == .thai ? "คอนทราสต์สูง" : "High Contrast"
+        case .soft: return language == .thai ? "นุ่มนวล" : "Soft"
+        case .vintage: return language == .thai ? "วินเทจ" : "Vintage"
+        }
+    }
 }

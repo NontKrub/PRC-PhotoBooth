@@ -26,9 +26,15 @@ struct PosePromptEditorView: View {
                         TextField("English subtitle", text: $template.posePrompts[promptIndex].subtitle.english)
                         TextField("Thai subtitle", text: $template.posePrompts[promptIndex].subtitle.thai)
                         HStack {
-                            Text(template.posePrompts[promptIndex].imageFileName ?? "No prompt image")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
+                            Group {
+                                if let imageFileName = template.posePrompts[promptIndex].imageFileName {
+                                    Text(imageFileName)
+                                } else {
+                                    Text("No prompt image")
+                                }
+                            }
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
                             Spacer()
                             Button("Import Image…") { importingPhotoIndex = index }
                             if template.posePrompts[promptIndex].imageFileName != nil {

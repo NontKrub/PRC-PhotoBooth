@@ -1,6 +1,7 @@
 import SwiftUI
 
 struct TemplateListView: View {
+    @Environment(\.locale) private var locale
     @Binding var templates: [EventTemplateDefinition]
     @Binding var defaultTemplateID: String
     let previews: [String: CGImage]
@@ -26,10 +27,14 @@ struct TemplateListView: View {
                             .foregroundStyle(.secondary)
                     }
                     VStack(alignment: .leading, spacing: 3) {
-                        Text(template.name.value(for: .english)).font(.headline)
-                        Text("\(template.photoCount) photos · \(template.isEnabled ? "Enabled" : "Disabled")")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
+                        Text(template.name.value(for: operatorLanguage)).font(.headline)
+                        HStack(spacing: 4) {
+                            Text("\(template.photoCount) photos")
+                            Text("·")
+                            Text(LocalizedStringKey(template.isEnabled ? "Enabled" : "Disabled"))
+                        }
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                     }
                     Spacer()
                     if template.id == defaultTemplateID {
@@ -38,12 +43,14 @@ struct TemplateListView: View {
                     Button("Edit") { onEdit(template.id) }
                     Menu {
                         Button("Set Default") { defaultTemplateID = template.id }
-                        Button(template.isEnabled ? "Disable" : "Enable") {
+                        Button {
                             guard let index = templates.firstIndex(where: { $0.id == template.id }) else { return }
                             templates[index].isEnabled.toggle()
                             if !templates[index].isEnabled, defaultTemplateID == template.id {
                                 defaultTemplateID = templates.first(where: { $0.id != template.id && $0.isEnabled })?.id ?? template.id
                             }
+                        } label: {
+                            Text(LocalizedStringKey(template.isEnabled ? "Disable" : "Enable"))
                         }
                         Button("Duplicate") { onDuplicate(template.id) }
                         Button("Move Up") { onMove(template.id, -1) }
@@ -66,5 +73,9 @@ struct TemplateListView: View {
                     .disabled(templates.count >= 8)
             }
         }
+    }
+
+    private var operatorLanguage: CustomerLanguage {
+        locale.identifier.lowercased().hasPrefix("th") ? .thai : .english
     }
 }

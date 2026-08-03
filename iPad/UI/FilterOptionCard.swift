@@ -14,7 +14,7 @@ struct FilterOptionCard: View {
                     RoundedRectangle(cornerRadius: 14)
                         .fill(Color.white.opacity(0.08))
                     if let sample {
-                        Image(sample, scale: 1, label: Text(filter.localizationKey))
+                        Image(sample, scale: 1, label: Text(filter.displayName(for: language)))
                             .resizable()
                             .scaledToFill()
                             .clipShape(RoundedRectangle(cornerRadius: 14))
@@ -27,7 +27,7 @@ struct FilterOptionCard: View {
                     }
                 }
                 .frame(width: 150, height: 105)
-                Text(filterDisplayName(filter, language: language))
+                Text(filter.displayName(for: language))
                     .font(.subheadline.weight(.semibold))
                     .foregroundStyle(.white)
                     .lineLimit(2)
@@ -40,7 +40,7 @@ struct FilterOptionCard: View {
             )
         }
         .buttonStyle(.plain)
-        .accessibilityLabel(filterDisplayName(filter, language: language))
+        .accessibilityLabel(filter.displayName(for: language))
         .accessibilityAddTraits(isSelected ? .isSelected : [])
         .task(id: filter) {
             guard let source = FilterSampleRenderer.makeSampleImage() else { return }
@@ -48,26 +48,4 @@ struct FilterOptionCard: View {
         }
     }
 
-    private func filterDisplayName(_ filter: PhotoFilterID, language: CustomerLanguage) -> String {
-        if language == .thai {
-            switch filter {
-            case .original: return "ต้นฉบับ"
-            case .monochrome: return "ขาวดำ"
-            case .warm: return "โทนอุ่น"
-            case .cool: return "โทนเย็น"
-            case .highContrast: return "คอนทราสต์สูง"
-            case .soft: return "นุ่มนวล"
-            case .vintage: return "วินเทจ"
-            }
-        }
-        switch filter {
-        case .original: return "Original"
-        case .monochrome: return "Monochrome"
-        case .warm: return "Warm"
-        case .cool: return "Cool"
-        case .highContrast: return "High Contrast"
-        case .soft: return "Soft"
-        case .vintage: return "Vintage"
-        }
-    }
 }

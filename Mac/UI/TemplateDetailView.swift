@@ -25,9 +25,15 @@ struct TemplateDetailView: View {
                 }
             }
             Section("Frame") {
-                Text(template.frameFileName ?? "No frame imported")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                if let frameFileName = template.frameFileName {
+                    Text(frameFileName)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                } else {
+                    Text("No frame imported")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
                 Button("Import / Replace Frame PNG…") { showingImporter = true }
             }
             Section("Slots") {

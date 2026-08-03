@@ -9,6 +9,13 @@ struct ExternalDisplayView: View {
     @Environment(SessionStateMachine.self) private var sm
     @State private var qrImage: CGImage?
 
+    private var displayLanguage: CustomerLanguage {
+        if sm.phase == .selectingExperience {
+            return coordinator.externalSelection.language
+        }
+        return sm.config.customerLanguage
+    }
+
     var body: some View {
         ZStack {
             Color.black.ignoresSafeArea()
@@ -29,6 +36,7 @@ struct ExternalDisplayView: View {
                 finishedContent(qrPayload: qr)
             }
         }
+        .environment(\.locale, Locale(identifier: displayLanguage.localeIdentifier))
     }
 
     // MARK: - Idle / ready
@@ -66,7 +74,10 @@ struct ExternalDisplayView: View {
     }
 
     private var startHintText: String {
-        coordinator.activeEvent == nil ? "No active event — set one up on the operator Mac" : "Click anywhere to begin"
+        LocalizedText(
+            english: coordinator.activeEvent == nil ? "No active event — set one up on the operator Mac" : "Click anywhere to begin",
+            thai: coordinator.activeEvent == nil ? "ยังไม่มีงานที่ใช้งานอยู่ — ตั้งค่างานบน Mac ของผู้ควบคุมก่อน" : "คลิกที่ใดก็ได้เพื่อเริ่ม"
+        ).value(for: displayLanguage)
     }
 
     private func attemptStart() {
@@ -86,7 +97,7 @@ struct ExternalDisplayView: View {
             Text(sm.config.templateName.value(for: sm.config.customerLanguage))
                 .font(.title2)
                 .foregroundStyle(.white.opacity(0.75))
-            Text("\(sm.config.photoCount) photos · \(filterName(sm.config.selectedFilterID))")
+            Text("\(sm.config.photoCount) photos · \(sm.config.selectedFilterID.displayName(for: displayLanguage))")
                 .foregroundStyle(.white.opacity(0.6))
             HStack(spacing: 16) {
                 Button("Back to Options") { coordinator.beginExternalExperienceSelection() }
@@ -96,18 +107,6 @@ struct ExternalDisplayView: View {
                 }
                 .buttonStyle(.borderedProminent)
             }
-        }
-    }
-
-    private func filterName(_ filter: PhotoFilterID) -> String {
-        switch filter {
-        case .original: return "Original"
-        case .monochrome: return "Monochrome"
-        case .warm: return "Warm"
-        case .cool: return "Cool"
-        case .highContrast: return "High Contrast"
-        case .soft: return "Soft"
-        case .vintage: return "Vintage"
         }
     }
 
@@ -216,7 +215,7 @@ struct ExternalDisplayView: View {
                 .tint(.white)
 
                 Button(action: { coordinator.handleReviewDecision(photoIndex: photoIndex, action: .keep) }) {
-                    Label(photoIndex + 1 < sm.config.photoCount ? "Keep & next" : "Keep & finish", systemImage: "checkmark")
+                    Label(LocalizedStringKey(photoIndex + 1 < sm.config.photoCount ? "Keep & next" : "Keep & finish"), systemImage: "checkmark")
                         .frame(width: 230, height: 56)
                 }
                 .buttonStyle(.borderedProminent)

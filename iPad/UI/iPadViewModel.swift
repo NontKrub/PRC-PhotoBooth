@@ -229,7 +229,10 @@ final class iPadViewModel {
             try? await Task.sleep(for: .seconds(8))
             guard let self, self.isSessionRequestPending else { return }
             self.isSessionRequestPending = false
-            self.sessionRequestError = "The operator did not respond. Please try again."
+            self.sessionRequestError = LocalizedText(
+                english: "The operator did not respond. Please try again.",
+                thai: "ผู้ควบคุมไม่ตอบสนอง กรุณาลองอีกครั้ง"
+            ).value(for: self.selectedLanguage)
         }
     }
 
