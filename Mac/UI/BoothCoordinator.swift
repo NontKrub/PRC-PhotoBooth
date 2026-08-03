@@ -48,12 +48,31 @@ enum SelphyPaperSize: String, CaseIterable {
 final class BoothCoordinator {
     static let eventFolderPathKey = "eventFolderPath"
 
+    nonisolated static func downloadURL(
+        publicBaseURL: String?,
+        localBaseURL: String,
+        token: String,
+        cloudUploadSucceeded: Bool
+    ) -> String {
+        let publicBase = publicBaseURL?.trimmingCharacters(in: CharacterSet(charactersIn: "/ ")) ?? ""
+        let localBase = localBaseURL.trimmingCharacters(in: CharacterSet(charactersIn: "/ "))
+        let base = cloudUploadSucceeded && !publicBase.isEmpty ? publicBase : localBase
+        return "\(base)/s/\(token)/"
+    }
+
     let multipeer: MultipeerService
     let capture: CaptureService
     let stateMachine: SessionStateMachine
     let server: LocalWebServer
     let store: DataStore
     let cloudSSHSetup: CloudSSHSetupService
+    let manifestStore: SessionManifestStore
+    let workspace: SessionWorkspace
+    let jobQueue: SessionJobQueue
+    let recoveryService: SessionRecoveryService
+    let preflight: BoothPreflightService
+    let printer: PrinterService
+    let cloudUpload: CloudUploadService
     let usbPreview = USBPreviewServer()
 
     var activeEvent: BoothEvent? {
@@ -82,6 +101,10 @@ final class BoothCoordinator {
     }
 
     private var currentSession: BoothSession?
+    private var currentManifest: SessionManifest?
+    private var currentManifestID: String?
+    private(set) var lastCompletedSessionID: String?
+    private var retakeCounts: [Int: Int] = [:]
     private var gifFrames: [Int: [CGImage]] = [:]
     private var countdownTask: Task<Void, Never>?
     var currentStripPreview: CGImage?
@@ -98,6 +121,39 @@ final class BoothCoordinator {
         server = LocalWebServer(port: 8585)
         store = DataStore.shared
         cloudSSHSetup = CloudSSHSetupService()
+        let runtimeDirectory = Self.runtimeDirectoryURL()
+        try? FileManager.default.createDirectory(at: runtimeDirectory, withIntermediateDirectories: true)
+        manifestStore = SessionManifestStore(baseDirectory: runtimeDirectory)
+        workspace = SessionWorkspace()
+        printer = PrinterService()
+        cloudUpload = CloudUploadService()
+        let jobStore = JobQueueStore(fileURL: runtimeDirectory.appendingPathComponent("jobs.json"))
+        let executor = SessionJobExecutor(
+            manifestStore: manifestStore,
+            workspace: workspace,
+            store: store,
+            server: server,
+            cloudUpload: cloudUpload,
+            printer: printer
+        )
+        jobQueue = SessionJobQueue(store: jobStore, executor: executor)
+        recoveryService = SessionRecoveryService(
+            manifestStore: manifestStore,
+            workspace: workspace,
+            jobQueue: jobQueue
+        )
+        preflight = BoothPreflightService()
+        jobQueue.onJobsChanged = { [weak self] in
+            self?.reconcileCurrentSessionJobs()
+            self?.reconcileRecoveredSessions()
+            self?.cleanupCompletedWorkingFiles()
+        }
+        recoveryService.onResume = { [weak self] manifest, images in
+            self?.resumeRecoveredSession(manifest: manifest, images: images)
+        }
+        recoveryService.onDiscard = { [weak self] manifest in
+            self?.finishDiscardingRecoveredSession(manifest)
+        }
         capture.dslr.onError = { [weak self] err in
             Task { @MainActor [weak self] in self?.errorMessage = "DSLR: \(err.localizedDescription)" }
         }
@@ -113,9 +169,13 @@ final class BoothCoordinator {
                 serverURL = "http://\(ip):8585"
             }
             try? await server.start()
-            if let dir = picturesOutputDir() { await server.setSessDir(dir) }
+            _ = await server.waitUntilReady()
+            jobQueue.start()
             activeEvent = store.fetchActiveEvent()
-            cleanupOldSessions(keepDays: 60)
+            await restoreDownloadTokens()
+            await recoveryService.scanNow()
+            await cleanupOldSessions(keepDays: 60)
+            await runSafePreflight()
         }
 
         setupMultipeerHandlers()
@@ -127,6 +187,12 @@ final class BoothCoordinator {
     }
 
     // MARK: - External display viewer
+
+    var isCustomerDisplayReady: Bool {
+        if isExternalViewerActive { return true }
+        if case .connected = multipeer.connectionState { return true }
+        return false
+    }
 
     func refreshExternalScreens() {
         externalScreens = NSScreen.screens.filter { $0 != NSScreen.main }
@@ -156,6 +222,14 @@ final class BoothCoordinator {
     func hideExternalViewer() {
         externalDisplayWindow?.close()
         externalDisplayWindow = nil
+    }
+
+    func shutdown() {
+        countdownTask?.cancel()
+        capture.stop()
+        usbPreview.stop()
+        jobQueue.stop()
+        Task { await server.stop() }
     }
 
     // MARK: - Camera permission (M10)
@@ -237,6 +311,96 @@ final class BoothCoordinator {
         }
     }
 
+    func runSafePreflight() async {
+        let context = await makePreflightContext()
+        await preflight.runSafeChecks(using: context)
+    }
+
+    func runFullPreflight(runPrinterTest: Bool) async {
+        let context = await makePreflightContext()
+        await preflight.runFullPreflight(
+            using: context,
+            runPrinterTest: runPrinterTest,
+            cameraTest: { [weak self] in
+                guard let self else { return }
+                _ = try await self.capture.captureDiagnosticStill()
+            },
+            printerTest: { [weak self] in
+                guard let self else { return }
+                try await self.printer.printTestPage()
+            }
+        )
+    }
+
+    private func makePreflightContext() async -> BoothPreflightContext {
+        let serverStatus = await server.statusSnapshot()
+        let serverHealthy = await localServerHealthCheck(status: serverStatus)
+        let ipadConnected: Bool = {
+            if case .connected = multipeer.connectionState { return true }
+            return false
+        }()
+        let output = picturesOutputDir()
+        let capacity = output.flatMap { try? $0.resourceValues(forKeys: [.volumeAvailableCapacityKey]).volumeAvailableCapacity }.map(Int64.init)
+        let jobs = jobQueue.jobs
+        let requiredFailed = jobs.contains {
+            !$0.kind.isOptional && $0.status == .failed
+        }
+        let optionalPendingOrFailed = jobs.contains {
+            $0.kind.isOptional && ($0.status == .waitingRetry || $0.status == .failed)
+        }
+        let cloudUploadEnabled = UserDefaults.standard.bool(forKey: "cloudUploadEnabled")
+        let cloudSetupComplete = cloudSSHSetup.state == .complete
+        let cloudConnectivityPassed = cloudUploadEnabled && cloudSetupComplete
+            ? await cloudSSHSetup.checkConnection()
+            : false
+        let printerConfigured: Bool = {
+            switch printer.configuredPrinterStatus() {
+            case .available: return true
+            case .unavailable: return false
+            case .systemDefault:
+                return NSPrinter.printerNames.contains(NSPrintInfo.shared.printer.name)
+            }
+        }()
+        return BoothPreflightContext(
+            event: activeEvent?.toEventConfig(),
+            cameraPermissionGranted: cameraPermissionGranted,
+            cameraConnected: capture.isRunning && (cameraSourceKind != .dslr || capture.dslr.isRunning),
+            customerDisplayReady: isCustomerDisplayReady,
+            ipadConnected: ipadConnected,
+            usesCablePreview: previewConnectionMode == .cable,
+            usbPreviewSupported: usbPreview.isSupported,
+            usbPreviewClientConnected: usbPreview.isClientConnected,
+            outputFolderURL: output,
+            availableDiskBytes: capacity,
+            localServerStatus: serverStatus,
+            localServerHealthPassed: serverHealthy,
+            localIPAddress: LocalWebServer.lanIPAddress(),
+            runtimeDirectoryURL: Self.runtimeDirectoryURL(),
+            runtimePersistenceAvailable: FileManager.default.fileExists(atPath: Self.runtimeDirectoryURL().path),
+            queuePersistenceAvailable: jobQueue.lastQueueError == nil,
+            unfinishedCaptureSession: recoveryService.recoverableCaptureSession != nil,
+            requiredJobFailed: requiredFailed || jobs.contains(where: { !$0.kind.isOptional && $0.status == .cancelled }),
+            optionalJobPendingOrFailed: optionalPendingOrFailed,
+            cloudUploadEnabled: cloudUploadEnabled,
+            cloudSetupComplete: cloudSetupComplete,
+            cloudConnectivityPassed: cloudConnectivityPassed,
+            automaticPrintingEnabled: UserDefaults.standard.bool(forKey: "selphyAutoPrintAfterSession"),
+            printerConfigured: printerConfigured,
+            printerTestResult: printer.lastTestResult
+        )
+    }
+
+    private func localServerHealthCheck(status: LocalWebServerStatus) async -> Bool {
+        guard case .ready(let port) = status.state else { return false }
+        guard let url = URL(string: "http://127.0.0.1:\(port)/health") else { return false }
+        do {
+            let (_, response) = try await URLSession.shared.data(from: url)
+            return (response as? HTTPURLResponse)?.statusCode == 200
+        } catch {
+            return false
+        }
+    }
+
     private func handleDSLRConnectionStateChanged() {
         if capture.dslr.isRunning {
             if cameraSourceKind == .dslr { capture.usesDSLR = true }
@@ -273,15 +437,93 @@ final class BoothCoordinator {
     // MARK: - Session control
 
     func startSession() {
-        guard let event = activeEvent else { return }
+        guard currentSession == nil, let event = activeEvent else { return }
+        guard recoveryService.recoverableCaptureSession == nil else {
+            errorMessage = "Resume or discard the unfinished session in Operations."
+            return
+        }
         let config = event.toEventConfig()
-        stateMachine.startSession(config: config)
-        currentSession = store.startSession(for: event)
-        gifFrames = [:]
-        capture.resetStills()
-        multipeer.sendControl(.sessionStart)
-        multipeer.sendControl(.eventConfig(config: config))
-        beginCountdown(photoIndex: 0)
+        guard isCustomerDisplayReady else {
+            errorMessage = "Connect an iPad or activate the external viewer before starting a session."
+            return
+        }
+        guard cameraPermissionGranted,
+              capture.isRunning,
+              (cameraSourceKind != .dslr || capture.dslr.isRunning) else {
+            errorMessage = "The selected camera is not ready."
+            return
+        }
+        guard config.photoCount > 0,
+              !config.slots.isEmpty,
+              config.slots.allSatisfy({ $0.photoIndex >= 0 && $0.photoIndex < config.photoCount }),
+              config.canvasWidth > 0,
+              config.canvasHeight > 0,
+              let outputRoot = picturesOutputDir() else {
+            errorMessage = "The active event layout is not valid."
+            return
+        }
+        let session = store.startSession(for: event)
+        let frameURL = event.framePNGPath.flatMap { appSupportDir()?.appendingPathComponent($0) }
+
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            var createdDirectory: URL?
+            do {
+                let descriptor = try workspace.createWorkspace(
+                    sessionID: session.id,
+                    eventName: config.eventName,
+                    outputRoot: outputRoot,
+                    startedAt: session.startedAt,
+                    frameSourceURL: frameURL
+                )
+                createdDirectory = URL(fileURLWithPath: descriptor.absoluteDirectoryPath, isDirectory: true)
+                let manifest = SessionManifest(
+                    schemaVersion: SessionManifest.currentSchemaVersion,
+                    id: session.id,
+                    eventID: config.eventID,
+                    eventName: config.eventName,
+                    eventConfig: config,
+                    startedAt: session.startedAt,
+                    completedAt: nil,
+                    cancelledAt: nil,
+                    status: .capturing,
+                    nextPhotoIndex: 0,
+                    outputRootPath: descriptor.outputRootPath,
+                    relativeDirectoryPath: descriptor.relativeDirectoryPath,
+                    absoluteDirectoryPath: descriptor.absoluteDirectoryPath,
+                    frameSnapshotFileName: descriptor.frameSnapshotFileName,
+                    stripFileName: nil,
+                    gifFileName: nil,
+                    downloadToken: session.downloadToken,
+                    shots: (0..<config.photoCount).map {
+                        RuntimeShotRecord(
+                            photoIndex: $0,
+                            imageFileName: nil,
+                            gifFrameFileNames: [],
+                            retakeCount: 0,
+                            acceptedAt: nil
+                        )
+                    },
+                    lastError: nil,
+                    updatedAt: Date()
+                )
+                try await manifestStore.create(manifest)
+                currentSession = session
+                currentManifest = manifest
+                currentManifestID = manifest.id
+                retakeCounts = [:]
+                gifFrames = [:]
+                capture.resetStills()
+                stateMachine.startSession(config: config, sessionID: session.id)
+                multipeer.sendControl(.sessionStart)
+                multipeer.sendControl(.eventConfig(config: config))
+                beginCountdown(photoIndex: 0)
+            } catch {
+                if let createdDirectory { try? FileManager.default.removeItem(at: createdDirectory) }
+                store.deleteSession(session)
+                errorMessage = "Session start failed: \(error.localizedDescription)"
+            }
+        }
     }
 
     func beginCountdown(photoIndex: Int) {
@@ -316,10 +558,11 @@ final class BoothCoordinator {
     }
 
     private func updateStripPreview() {
-        guard let event = activeEvent else { return }
-        let config = event.toEventConfig()
-        let frameURL = event.framePNGPath.flatMap { appSupportDir()?.appendingPathComponent($0) }
-        let framePNG = frameURL.flatMap { loadCGImage(from: $0) }
+        guard let manifest = currentManifest else { return }
+        let config = manifest.eventConfig
+        let framePNG = manifest.frameSnapshotFileName.flatMap {
+            loadCGImage(from: URL(fileURLWithPath: manifest.absoluteDirectoryPath).appendingPathComponent($0))
+        }
         let images = capture.capturedStills
         let compositor = Compositor(config: config, framePNG: framePNG)
         Task.detached(priority: .utility) { [compositor, images] in
@@ -332,152 +575,453 @@ final class BoothCoordinator {
         multipeer.sendControl(.reviewDecision(action: action))
         switch action {
         case .keep:
-            stateMachine.keepShot(photoIndex: photoIndex)
-            if case .processing = stateMachine.phase {
-                Task { await finalizeSession() }
-            } else if case .countdown(let next, _) = stateMachine.phase {
-                beginCountdown(photoIndex: next)
+            Task { @MainActor [weak self] in
+                await self?.acceptShot(photoIndex: photoIndex)
             }
         case .retake:
-            stateMachine.retakeShot(photoIndex: photoIndex)
-            beginCountdown(photoIndex: photoIndex)
+            Task { @MainActor [weak self] in
+                await self?.requestRetake(photoIndex: photoIndex, source: .guest)
+            }
         }
     }
 
     func operatorOverride(_ action: OperatorAction) {
-        let prevPhase = stateMachine.phase
-        stateMachine.operatorOverride(action)
         multipeer.sendControl(.operatorOverride(action: action))
         switch action {
         case .forceStart:
-            if prevPhase == .idle || prevPhase == .readyToStart { startSession() }
+            if stateMachine.phase == .idle || stateMachine.phase == .readyToStart { startSession() }
         case .forceRetake:
-            if case .review(let idx) = prevPhase { beginCountdown(photoIndex: idx) }
+            if case .review(let idx) = stateMachine.phase {
+                Task { @MainActor [weak self] in
+                    await self?.requestRetake(photoIndex: idx, source: .operatorSource)
+                }
+            }
         case .skip:
-            if case .review(let idx) = prevPhase { handleReviewDecision(photoIndex: idx, action: .keep) }
+            if case .review(let idx) = stateMachine.phase { handleReviewDecision(photoIndex: idx, action: .keep) }
         case .cancelSession:
-            countdownTask?.cancel()
+            Task { @MainActor [weak self] in
+                await self?.cancelCurrentSession()
+            }
+        }
+    }
+
+    private enum RetakeSource {
+        case guest
+        case operatorSource
+    }
+
+    private func acceptShot(photoIndex: Int) async {
+        guard case .review(let currentIndex) = stateMachine.phase,
+              currentIndex == photoIndex,
+              var manifest = currentManifest,
+              currentManifestID == manifest.id,
+              let image = capture.capturedStills[photoIndex] else {
+            errorMessage = "Cannot keep this photograph because its review state is unavailable."
+            return
+        }
+
+        do {
+            let saved = try workspace.saveAcceptedCapture(
+                image: image,
+                gifFrames: gifFrames[photoIndex] ?? [],
+                photoIndex: photoIndex,
+                workspace: workspaceDescriptor(from: manifest)
+            )
+            upsertManifestShot(
+                &manifest,
+                photoIndex: photoIndex,
+                imageFileName: saved.imageFileName,
+                gifFrameFileNames: saved.gifFrameFileNames,
+                retakeCount: retakeCounts[photoIndex] ?? 0,
+                acceptedAt: Date()
+            )
+            manifest.nextPhotoIndex = (0..<manifest.eventConfig.photoCount)
+                .first { index in
+                    manifest.shots.first(where: { $0.photoIndex == index })?.imageFileName == nil
+                } ?? manifest.eventConfig.photoCount
+            let isComplete = manifest.nextPhotoIndex == manifest.eventConfig.photoCount
+            manifest.status = isComplete ? .finalizing : .capturing
+            try await manifestStore.save(manifest)
+            currentManifest = manifest
+            let session = currentSession ?? store.restoreSessionRecord(from: manifest)
+            store.upsertShot(
+                session: session,
+                photoIndex: photoIndex,
+                imagePath: saved.imageFileName,
+                retakeCount: retakeCounts[photoIndex] ?? 0
+            )
+
+            stateMachine.keepShot(photoIndex: photoIndex)
+            if case .processing = stateMachine.phase {
+                await finalizeSession()
+            } else if case .countdown(let next, _) = stateMachine.phase {
+                beginCountdown(photoIndex: next)
+            }
+        } catch {
+            errorMessage = "Could not save photograph \(photoIndex + 1): \(error.localizedDescription)"
+        }
+    }
+
+    private func requestRetake(photoIndex: Int, source: RetakeSource) async {
+        _ = source
+        guard case .review(let currentIndex) = stateMachine.phase,
+              currentIndex == photoIndex,
+              var manifest = currentManifest else { return }
+
+        let count = incrementRetakeCount(in: &retakeCounts, photoIndex: photoIndex)
+        let previous = manifest.shots.first(where: { $0.photoIndex == photoIndex })
+        upsertManifestShot(
+            &manifest,
+            photoIndex: photoIndex,
+            imageFileName: previous?.imageFileName,
+            gifFrameFileNames: previous?.gifFrameFileNames ?? [],
+            retakeCount: count,
+            acceptedAt: previous?.acceptedAt
+        )
+        do {
+            try await manifestStore.save(manifest)
+            currentManifest = manifest
+            if let session = currentSession {
+                store.upsertShot(
+                    session: session,
+                    photoIndex: photoIndex,
+                    imagePath: previous?.imageFileName,
+                    retakeCount: count
+                )
+            }
+            stateMachine.retakeShot(photoIndex: photoIndex)
+            beginCountdown(photoIndex: photoIndex)
+        } catch {
+            retakeCounts[photoIndex] = max(0, count - 1)
+            errorMessage = "Could not save retake count: \(error.localizedDescription)"
+        }
+    }
+
+    private func cancelCurrentSession() async {
+        countdownTask?.cancel()
+        guard currentSession != nil, var manifest = currentManifest else {
+            stateMachine.reset()
+            return
+        }
+        manifest.status = .cancelled
+        manifest.cancelledAt = Date()
+        try? await manifestStore.save(manifest)
+        jobQueue.cancelJobs(sessionID: manifest.id)
+        try? workspace.removeEntireSession(manifest: manifest)
+        if let session = currentSession { store.deleteSession(session) }
+        currentManifest = nil
+        currentManifestID = nil
+        currentSession = nil
+        retakeCounts = [:]
+        gifFrames = [:]
+        capture.resetStills()
+        stateMachine.reset()
+    }
+
+    private func resumeRecoveredSession(manifest: SessionManifest, images: [Int: CGImage]) {
+        guard currentSession == nil else {
+            errorMessage = "Finish or cancel the current session before resuming recovery."
+            return
+        }
+        guard manifest.nextPhotoIndex >= 0,
+              manifest.nextPhotoIndex < manifest.eventConfig.photoCount else {
+            errorMessage = "Recovered session has no remaining photograph index."
+            return
+        }
+        currentManifest = manifest
+        currentManifestID = manifest.id
+        currentSession = store.restoreSessionRecord(from: manifest)
+        retakeCounts = manifest.shots.reduce(into: [:]) { result, shot in
+            result[shot.photoIndex] = shot.retakeCount
+        }
+        gifFrames = [:]
+        capture.restoreStills(images)
+        let thumbnails = images.reduce(into: [Int: Data]()) { result, item in
+            if let data = capture.thumbnail(for: item.value) { result[item.key] = data }
+        }
+        stateMachine.restoreSession(
+            sessionID: manifest.id,
+            config: manifest.eventConfig,
+            keptShots: thumbnails,
+            nextPhotoIndex: manifest.nextPhotoIndex
+        )
+        multipeer.sendControl(.sessionStart)
+        multipeer.sendControl(.eventConfig(config: manifest.eventConfig))
+        beginCountdown(photoIndex: manifest.nextPhotoIndex)
+    }
+
+    private func finishDiscardingRecoveredSession(_ manifest: SessionManifest) {
+        if let session = store.fetchSession(id: manifest.id) { store.deleteSession(session) }
+        if currentManifestID == manifest.id {
+            currentManifest = nil
+            currentManifestID = nil
             currentSession = nil
+            capture.resetStills()
+            retakeCounts = [:]
+            gifFrames = [:]
+            stateMachine.reset()
         }
     }
 
     // MARK: - Finalize session
 
     private func finalizeSession() async {
-        guard let event = activeEvent, let session = currentSession else { return }
-        let config = event.toEventConfig()
-        let fmt = DateFormatter()
-        fmt.dateFormat = "yyyyMMdd-HHmm"
-        let relPath = "\(safeFolderName(event.name))/\(fmt.string(from: session.startedAt))"
-        guard let sessDir = picturesOutputDir()?.appendingPathComponent(relPath) else { return }
-        try? FileManager.default.createDirectory(at: sessDir, withIntermediateDirectories: true)
-
-        // Composite strip
-        let frameURL = event.framePNGPath.flatMap { appSupportDir()?.appendingPathComponent($0) }
-        let framePNG = frameURL.flatMap { loadCGImage(from: $0) }
-        let compositor = Compositor(config: config, framePNG: framePNG)
-        let images = capture.capturedStills
-        var stripPath: String? = nil
-        var gifPath: String? = nil
-
-        if let img = try? compositor.render(images: images) {
-            let url = sessDir.appendingPathComponent("strip.png")
-            try? compositor.savePNG(img, to: url)
-            stripPath = "\(relPath)/strip.png"
-            currentStripPreview = img
+        guard var manifest = currentManifest else { return }
+        guard (0..<manifest.eventConfig.photoCount).allSatisfy({ index in
+            manifest.shots.first(where: { $0.photoIndex == index })?.imageFileName != nil
+        }) else {
+            errorMessage = "Session cannot finish until every photograph is accepted."
+            return
         }
 
-        // GIF
-        let allFrames = (0..<config.photoCount).flatMap { gifFrames[$0] ?? [] }
-        if !allFrames.isEmpty {
-            let url = sessDir.appendingPathComponent("booth.gif")
-            try? GIFEncoder().encode(frames: allFrames, to: url)
-            gifPath = "\(relPath)/booth.gif"
+        manifest.status = .finalizing
+        manifest.lastError = nil
+        do {
+            try await manifestStore.save(manifest)
+        } catch {
+            errorMessage = "Could not start session processing: \(error.localizedDescription)"
+            return
         }
-
-        // Persist stills
-        for (idx, image) in images {
-            let url = sessDir.appendingPathComponent("shot_\(idx).jpg")
-            if let data = jpegData(from: image, quality: 0.9) { try? data.write(to: url) }
-            _ = store.recordShot(session: session, photoIndex: idx,
-                                 imagePath: "shot_\(idx).jpg", retakeCount: 0)
-        }
-
-        let token = session.downloadToken
-        await server.registerToken(token, sessionID: relPath)
-        store.finishSession(session, stripPath: stripPath, gifPath: gifPath)
-
-        // Async backup to server — fire and forget
+        currentManifest = manifest
+        jobQueue.enqueueFinalizationJobs(for: manifest)
         if UserDefaults.standard.bool(forKey: "cloudUploadEnabled") {
-            let syncDir = sessDir; let syncRel = relPath; let syncToken = token
-            Task.detached(priority: .background) {
-                syncBoothSession(localDir: syncDir, relPath: syncRel, token: syncToken)
+            jobQueue.enqueueCloudUpload(for: manifest)
+        }
+        if UserDefaults.standard.bool(forKey: "selphyAutoPrintAfterSession") &&
+            UserDefaults.standard.bool(forKey: "selphySkipPrintDialog") {
+            jobQueue.enqueueAutoPrint(for: manifest)
+        }
+    }
+
+    private func reconcileCurrentSessionJobs() {
+        guard let manifest = currentManifest,
+              currentSession != nil,
+              stateMachine.phase == .processing else { return }
+        let jobs = jobQueue.jobs.filter { $0.sessionID == manifest.id }
+        if let failed = jobs.first(where: {
+            ($0.kind == .renderStrip || $0.kind == .registerDownload) && $0.status == .failed
+        }) {
+            Task { await markCurrentSessionFailed(message: failed.lastError ?? "Required job failed.") }
+            return
+        }
+        guard jobs.first(where: { $0.kind == .renderStrip })?.status == .succeeded,
+              jobs.first(where: { $0.kind == .registerDownload })?.status == .succeeded else {
+            return
+        }
+        Task { await completeCurrentSessionIfReady() }
+    }
+
+    private func cleanupCompletedWorkingFiles() {
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            for result in await manifestStore.loadAll() {
+                guard case .loaded(let manifest) = result, manifest.status == .completed else { continue }
+                let jobs = jobQueue.jobs.filter { $0.sessionID == manifest.id }
+                // Keep failed GIF inputs available for an operator retry; explicit cancellation permits cleanup.
+                guard jobs.first(where: { $0.kind == .renderStrip })?.status == .succeeded,
+                      jobs.filter({ $0.kind == .renderGIF }).allSatisfy({
+                          $0.status == .succeeded || $0.status == .cancelled
+                      }) else { continue }
+                try? workspace.removeWorkingFiles(manifest: manifest)
             }
         }
+    }
 
-        let ip = LocalWebServer.lanIPAddress() ?? "localhost"
-        let stored = (UserDefaults.standard.string(forKey: "publicBaseURL") ?? "")
-            .trimmingCharacters(in: CharacterSet(charactersIn: "/ "))
-        // The trailing slash prevents nginx from issuing an absolute redirect that
-        // exposes its internal tunnel port to guests scanning a public QR code.
-        let qr = stored.isEmpty ? "http://\(ip):8585/s/\(token)/" : "\(stored)/s/\(token)/"
-
-        let stripThumb: Data? = stripPath.flatMap { path in
-            picturesOutputDir().flatMap { loadCGImage(from: $0.appendingPathComponent(path)) }
-                               .flatMap { jpegData(from: $0, quality: 0.4) }
+    private func reconcileRecoveredSessions() {
+        guard currentSession == nil else { return }
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            let results = await manifestStore.loadAll()
+            for result in results {
+                guard case .loaded(let manifest) = result, manifest.status == .finalizing else { continue }
+                let jobs = jobQueue.jobs.filter { $0.sessionID == manifest.id }
+                if let failed = jobs.first(where: {
+                    ($0.kind == .renderStrip || $0.kind == .registerDownload) && $0.status == .failed
+                }) {
+                    var failedManifest = manifest
+                    failedManifest.status = .failed
+                    failedManifest.lastError = failed.lastError ?? "Required job failed."
+                    failedManifest.updatedAt = Date()
+                    try? await manifestStore.save(failedManifest)
+                    continue
+                }
+                guard jobs.first(where: { $0.kind == .renderStrip })?.status == .succeeded,
+                      jobs.first(where: { $0.kind == .registerDownload })?.status == .succeeded else {
+                    continue
+                }
+                var completed = manifest
+                completed.status = .completed
+                completed.completedAt = Date()
+                completed.lastError = nil
+                try? await manifestStore.save(completed)
+                _ = store.restoreSessionRecord(from: completed)
+                store.finishSession(
+                    sessionID: completed.id,
+                    stripPath: completed.stripFileName.map { "\(completed.relativeDirectoryPath)/\($0)" },
+                    gifPath: completed.gifFileName.map { "\(completed.relativeDirectoryPath)/\($0)" }
+                )
+                if jobs.filter({ $0.kind == .renderGIF }).allSatisfy({
+                    $0.status == .succeeded || $0.status == .cancelled
+                }) {
+                    try? workspace.removeWorkingFiles(manifest: completed)
+                }
+            }
         }
+    }
 
+    private func markCurrentSessionFailed(message: String) async {
+        guard let current = currentManifest, current.status != .failed else { return }
+        var manifest = (try? await manifestStore.load(sessionID: current.id)) ?? current
+        manifest.status = .failed
+        manifest.lastError = message
+        try? await manifestStore.save(manifest)
+        currentManifest = manifest
+    }
+
+    private func completeCurrentSessionIfReady() async {
+        guard let original = currentManifest,
+              currentSession != nil,
+              stateMachine.phase == .processing else { return }
+        let jobs = jobQueue.jobs.filter { $0.sessionID == original.id }
+        guard jobs.first(where: { $0.kind == .renderStrip })?.status == .succeeded,
+              jobs.first(where: { $0.kind == .registerDownload })?.status == .succeeded else {
+            return
+        }
+        let latest = (try? await manifestStore.load(sessionID: original.id)) ?? original
+        var manifest = latest
+        guard manifest.status != .completed else { return }
+        manifest.status = .completed
+        manifest.completedAt = Date()
+        manifest.lastError = nil
+        do {
+            try await manifestStore.save(manifest)
+        } catch {
+            return
+        }
+        currentManifest = manifest
+        lastCompletedSessionID = manifest.id
+        store.finishSession(
+            sessionID: manifest.id,
+            stripPath: manifest.stripFileName.map { "\(manifest.relativeDirectoryPath)/\($0)" },
+            gifPath: manifest.gifFileName.map { "\(manifest.relativeDirectoryPath)/\($0)" }
+        )
+
+        let directory = URL(fileURLWithPath: manifest.absoluteDirectoryPath, isDirectory: true)
+        let token = manifest.downloadToken
+        let publicBase = UserDefaults.standard.string(forKey: "publicBaseURL")?
+            .trimmingCharacters(in: CharacterSet(charactersIn: "/ "))
+        let ip = LocalWebServer.lanIPAddress() ?? "localhost"
+        let qr = Self.downloadURL(
+            publicBaseURL: publicBase,
+            localBaseURL: "http://\(ip):8585",
+            token: token,
+            cloudUploadSucceeded: jobs.first(where: { $0.kind == .cloudUpload })?.status == .succeeded
+        )
+        let stripThumb = loadCGImage(from: directory.appendingPathComponent("strip.png"))
+            .flatMap { jpegData(from: $0, quality: 0.4) }
+        currentStripPreview = loadCGImage(from: directory.appendingPathComponent("strip.png"))
         stateMachine.finishSession(qrPayload: qr)
         multipeer.sendControl(.sessionFinished(qrPayload: qr, stripThumbData: stripThumb, gifThumbData: nil))
+        if jobs.filter({ $0.kind == .renderGIF }).allSatisfy({
+            $0.status == .succeeded || $0.status == .cancelled
+        }) {
+            try? workspace.removeWorkingFiles(manifest: manifest)
+        }
         currentSession = nil
+    }
+
+    private func restoreDownloadTokens() async {
+        var mappings: [String: URL] = [:]
+        for result in await manifestStore.loadAll() {
+            guard case .loaded(let manifest) = result,
+                  manifest.status == .completed || manifest.status == .finalizing else { continue }
+            let directory = URL(fileURLWithPath: manifest.absoluteDirectoryPath, isDirectory: true)
+            let strip = directory.appendingPathComponent(manifest.stripFileName ?? "strip.png")
+            guard FileManager.default.fileExists(atPath: directory.path),
+                  FileManager.default.fileExists(atPath: strip.path) else {
+                recoveryService.recordError("Cannot restore download token for \(manifest.eventName): session output is missing.")
+                continue
+            }
+            mappings[manifest.downloadToken] = directory
+        }
+        await server.replaceTokenMap(mappings)
     }
 
     // MARK: - Session cleanup (M10)
 
-    private func cleanupOldSessions(keepDays: Int) {
-        guard let picsDir = picturesOutputDir() else { return }
+    private func cleanupOldSessions(keepDays: Int) async {
         let cutoff = Calendar.current.date(byAdding: .day, value: -keepDays, to: Date())!
-        let old = store.fetchSessions(finishedBefore: cutoff)
-        for session in old {
-            if let sp = session.stripPath {
-                let dir = picsDir.appendingPathComponent(sp).deletingLastPathComponent()
-                try? FileManager.default.removeItem(at: dir)
+        for result in await manifestStore.loadAll() {
+            guard case .loaded(let manifest) = result else { continue }
+            if manifest.status == .completed,
+               let completedAt = manifest.completedAt,
+               completedAt < cutoff {
+                try? workspace.removeEntireSession(manifest: manifest)
+                try? await manifestStore.delete(sessionID: manifest.id)
+                jobQueue.deleteJobs(sessionID: manifest.id)
+                await server.unregisterToken(manifest.downloadToken)
+                if let session = store.fetchSession(id: manifest.id) { store.deleteSession(session) }
+            } else if manifest.status == .cancelled,
+                      let cancelledAt = manifest.cancelledAt,
+                      cancelledAt < Calendar.current.date(byAdding: .day, value: -7, to: Date())! {
+                try? await manifestStore.delete(sessionID: manifest.id)
+                jobQueue.deleteJobs(sessionID: manifest.id)
             }
-            store.context.delete(session)
         }
-        try? store.context.save()
+        jobQueue.purgeOldSucceededJobs(olderThan: Calendar.current.date(byAdding: .day, value: -7, to: Date())!)
+
+        // Keep the pre-1.1 cleanup path for sessions that predate runtime manifests.
+        for session in store.fetchSessions(finishedBefore: cutoff) {
+            if let stripPath = session.stripPath {
+                let strip = picturesOutputDir()?.appendingPathComponent(stripPath)
+                try? strip.map { try FileManager.default.removeItem(at: $0.deletingLastPathComponent()) }
+            }
+            store.deleteSession(session)
+        }
     }
 
     // MARK: - Print
 
     func printCurrentStrip() {
-        guard let cg = currentStripPreview else { return }
-        let ud = UserDefaults.standard
-        let raw = ud.string(forKey: "selphyPaperSize") ?? SelphyPaperSize.postcard.rawValue
-        let paper = SelphyPaperSize(rawValue: raw) ?? .postcard
-        let ptSize = paper.pointSize
-
-        let nsImg = NSImage(cgImage: cg, size: .zero)
-        let iv = NSImageView(frame: NSRect(origin: .zero, size: ptSize))
-        iv.image = nsImg
-        iv.imageScaling = .scaleProportionallyUpOrDown
-
-        let pi = NSPrintInfo.shared.copy() as! NSPrintInfo
-        pi.paperSize = ptSize
-        pi.orientation = .portrait
-        pi.topMargin = 0; pi.bottomMargin = 0; pi.leftMargin = 0; pi.rightMargin = 0
-        pi.isHorizontallyCentered = true; pi.isVerticallyCentered = true
-
-        let skipDialog = ud.bool(forKey: "selphySkipPrintDialog")
-        if skipDialog {
-            let copies = max(1, ud.integer(forKey: "selphyCopies"))
-            pi.dictionary().setValue(copies, forKey: "NSCopies")
+        guard let sessionID = lastCompletedSessionID else { return }
+        Task { @MainActor [weak self] in
+            guard let self,
+                  let manifest = try? await manifestStore.load(sessionID: sessionID) else { return }
+            let skipDialog = UserDefaults.standard.bool(forKey: "selphySkipPrintDialog")
+            if skipDialog {
+                if let existing = jobQueue.jobs.first(where: { $0.sessionID == sessionID && $0.kind == .autoPrint }),
+                   existing.status == .failed || existing.status == .cancelled {
+                    jobQueue.retry(jobID: existing.id)
+                } else {
+                    jobQueue.enqueueAutoPrint(for: manifest)
+                }
+                return
+            }
+            let url = URL(fileURLWithPath: manifest.absoluteDirectoryPath).appendingPathComponent(manifest.stripFileName ?? "strip.png")
+            do {
+                try await printer.printStrip(at: url, showPrintDialog: true)
+            } catch {
+                errorMessage = "Print failed: \(error.localizedDescription)"
+            }
         }
+    }
 
-        let op = NSPrintOperation(view: iv, printInfo: pi)
-        op.showsPrintPanel = !skipDialog
-        op.showsProgressPanel = true
-        op.run()
+    func printAgainCurrentStrip() {
+        guard let sessionID = lastCompletedSessionID else { return }
+        Task { @MainActor [weak self] in
+            guard let self,
+                  let manifest = try? await manifestStore.load(sessionID: sessionID) else { return }
+            let url = URL(fileURLWithPath: manifest.absoluteDirectoryPath)
+                .appendingPathComponent(manifest.stripFileName ?? "strip.png")
+            do {
+                try await printer.printStrip(
+                    at: url,
+                    showPrintDialog: !UserDefaults.standard.bool(forKey: "selphySkipPrintDialog")
+                )
+            } catch {
+                errorMessage = "Print failed: \(error.localizedDescription)"
+            }
+        }
     }
 
     // MARK: - Multipeer handlers
@@ -535,6 +1079,12 @@ final class BoothCoordinator {
 
     // MARK: - Directories
 
+    static func runtimeDirectoryURL() -> URL {
+        let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
+            ?? FileManager.default.temporaryDirectory
+        return appSupport.appendingPathComponent("PRC-PhotoBooth/Runtime", isDirectory: true)
+    }
+
     nonisolated static func eventFolderURL(storedPath: String?, fallback: URL) -> URL {
         guard let storedPath, !storedPath.isEmpty else { return fallback }
         return URL(fileURLWithPath: storedPath, isDirectory: true)
@@ -550,7 +1100,6 @@ final class BoothCoordinator {
             return
         }
         UserDefaults.standard.set(url.path, forKey: Self.eventFolderPathKey)
-        Task { await server.setSessDir(url) }
     }
 
     func appSupportDir() -> URL? {
@@ -577,105 +1126,61 @@ final class BoothCoordinator {
     }
 
     private func safeFolderName(_ s: String) -> String {
-        let safe = s.components(separatedBy: CharacterSet(charactersIn: "/:\\*?\"<>|"))
-                    .joined(separator: "-")
-                    .trimmingCharacters(in: .whitespaces)
-        return safe.isEmpty ? "Event" : safe
+        SessionWorkspace.safeEventFolderName(s)
+    }
+
+    private func workspaceDescriptor(from manifest: SessionManifest) -> SessionWorkspaceDescriptor {
+        SessionWorkspaceDescriptor(
+            outputRootPath: manifest.outputRootPath,
+            relativeDirectoryPath: manifest.relativeDirectoryPath,
+            absoluteDirectoryPath: manifest.absoluteDirectoryPath,
+            frameSnapshotFileName: manifest.frameSnapshotFileName
+        )
+    }
+
+    private func upsertManifestShot(
+        _ manifest: inout SessionManifest,
+        photoIndex: Int,
+        imageFileName: String?,
+        gifFrameFileNames: [String],
+        retakeCount: Int,
+        acceptedAt: Date?
+    ) {
+        upsertRuntimeShot(
+            in: &manifest.shots,
+            photoIndex: photoIndex,
+            imageFileName: imageFileName,
+            gifFrameFileNames: gifFrameFileNames,
+            retakeCount: retakeCount,
+            acceptedAt: acceptedAt
+        )
     }
 }
 
-extension LocalWebServer {
-    func setSessDir(_ url: URL) { self.sessionsDirectory = url }
+func incrementRetakeCount(in counts: inout [Int: Int], photoIndex: Int) -> Int {
+    counts[photoIndex, default: 0] += 1
+    return counts[photoIndex] ?? 1
 }
 
-// MARK: - Server backup sync
-
-private func syncBoothSession(localDir: URL, relPath: String, token: String) {
-    let ud       = UserDefaults.standard
-    let host     = ud.string(forKey: "cloudSSHHost")     ?? "homelab"
-    let basePath = (ud.string(forKey: "cloudRemotePath") ?? "/bk1/prc/photobooth")
-                       .trimmingCharacters(in: CharacterSet(charactersIn: "/"))
-    let remote   = "/\(basePath)/\(relPath)"
-    let sDir     = "/\(basePath)/s"
-
-    let html = boothDownloadPageHTML(token: token)
-    try? html.data(using: .utf8)?.write(to: localDir.appendingPathComponent("index.html"))
-
-    @discardableResult
-    func run(_ label: String, _ exe: String, _ args: [String]) -> Bool {
-        let p = Process()
-        p.executableURL = URL(fileURLWithPath: exe)
-        p.arguments = args
-        // cloudflared lives in /opt/homebrew/bin; Process() doesn't inherit the user's PATH
-        var env = ProcessInfo.processInfo.environment
-        env["PATH"] = "/opt/homebrew/bin:/usr/local/bin:" + (env["PATH"] ?? "/usr/bin:/bin")
-        p.environment = env
-        let output = Pipe()
-        p.standardOutput = output
-        p.standardError = output
-        do {
-            try p.run()
-            p.waitUntilExit()
-        } catch {
-            NSLog("[Cloud Upload] \(label) could not start: \(error.localizedDescription)")
-            return false
-        }
-
-        guard p.terminationStatus == 0 else {
-            let data = output.fileHandleForReading.readDataToEndOfFile()
-            let details = String(data: data, encoding: .utf8) ?? ""
-            NSLog("[Cloud Upload] \(label) failed (exit \(p.terminationStatus)): \(details)")
-            return false
-        }
-        return true
+func upsertRuntimeShot(
+    in shots: inout [RuntimeShotRecord],
+    photoIndex: Int,
+    imageFileName: String?,
+    gifFrameFileNames: [String],
+    retakeCount: Int,
+    acceptedAt: Date?
+) {
+    let shot = RuntimeShotRecord(
+        photoIndex: photoIndex,
+        imageFileName: imageFileName,
+        gifFrameFileNames: gifFrameFileNames,
+        retakeCount: max(0, retakeCount),
+        acceptedAt: acceptedAt
+    )
+    if let index = shots.firstIndex(where: { $0.photoIndex == photoIndex }) {
+        shots[index] = shot
+    } else {
+        shots.append(shot)
     }
-
-    // ssh reads ~/.ssh/config → ProxyCommand cloudflared access ssh --hostname ssh.nakrub.me
-    guard run("create remote directories", "/usr/bin/ssh", [host, "mkdir -p \(shellQuoted(remote)) \(shellQuoted(sDir))"]) else { return }
-
-    // rsync passes the destination through the remote shell. Escape it here so
-    // event folder names such as "New Event" reach their intended directory.
-    let destination = "\(host):\(rsyncRemoteEscapedPath(remote))/"
-    guard run("upload session", "/usr/bin/rsync", ["-az", "-e", "ssh", localDir.path + "/", destination]) else { return }
-
-    _ = run("publish download link", "/usr/bin/ssh", [host, "ln -sfn \(shellQuoted(remote)) \(shellQuoted("\(sDir)/\(token)"))"])
-}
-
-private func shellQuoted(_ value: String) -> String {
-    "'\(value.replacingOccurrences(of: "'", with: "'\\''"))'"
-}
-
-private func rsyncRemoteEscapedPath(_ path: String) -> String {
-    let safe = CharacterSet(charactersIn: "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789/._-")
-    return path.unicodeScalars.map { scalar in
-        safe.contains(scalar) ? String(scalar) : "\\" + String(scalar)
-    }.joined()
-}
-
-private func boothDownloadPageHTML(token: String) -> String {
-    """
-    <!DOCTYPE html>
-    <html lang="en">
-    <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>PRC Photo Booth — Your Photos</title>
-    <style>
-    body{font-family:-apple-system,sans-serif;background:#111;color:#eee;text-align:center;padding:2rem;margin:0}
-    h1{font-size:1.5rem;margin-bottom:.25rem}p{color:#aaa;font-size:.9rem;margin-bottom:2rem}
-    img{max-width:90vw;max-height:70vh;border-radius:8px;display:block;margin:0 auto 1.5rem}
-    a.btn{display:inline-block;background:#fff;color:#111;padding:.75rem 2rem;border-radius:8px;text-decoration:none;font-weight:600;margin:.5rem}
-    a.btn.secondary{background:#333;color:#eee}
-    </style>
-    </head>
-    <body>
-    <h1>✨ Your Photo Strip</h1>
-    <p>Tap a button to save your memories!</p>
-    <img src="/s/\(token)/strip.png" alt="Photo Strip">
-    <br>
-    <a class="btn" href="/s/\(token)/strip.png" download="photobooth-strip.png">⬇ Save Strip</a>
-    <a class="btn secondary" href="/s/\(token)/booth.gif" download="photobooth.gif">⬇ Save GIF</a>
-    </body>
-    </html>
-    """
+    shots.sort { $0.photoIndex < $1.photoIndex }
 }

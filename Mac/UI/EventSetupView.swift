@@ -120,7 +120,7 @@ struct EventDetailView: View {
             Section("Remote Access") {
                 TextField("Public URL (optional)", text: $publicBaseURL)
                     .font(.caption.monospaced())
-                Text("QR codes use this URL instead of the LAN IP.\nExample: https://photos.yourdomain.com")
+                Text("QR codes use this URL after cloud upload succeeds; otherwise they use the LAN server.\nExample: https://photos.yourdomain.com")
                     .font(.caption).foregroundStyle(.secondary)
             }
 

@@ -12,21 +12,25 @@ struct MacContentView: View {
 
     var body: some View {
         TabView(selection: $selectedTab) {
-            OperatorConsoleView()
+            OperatorConsoleView(onOpenOperations: { selectedTab = 1 })
                 .tabItem { Label("Console", systemImage: "camera.viewfinder") }
                 .tag(0)
 
+            OperationsView()
+                .tabItem { Label("Operations", systemImage: "checklist") }
+                .tag(1)
+
             EventSetupView()
                 .tabItem { Label("Event Setup", systemImage: "slider.horizontal.3") }
-                .tag(1)
+                .tag(2)
 
             AdminDashboardView(onPINReset: beginPINReset)
                 .tabItem { Label("Analytics", systemImage: "chart.bar") }
-                .tag(2)
+                .tag(3)
         }
         .frame(minWidth: 940, minHeight: 640)
         .onChange(of: selectedTab) { old, new in
-            if new == 1 || new == 2 {
+            if new == 2 || new == 3 {
                 guard !isAdminUnlocked else { return }
                 selectedTab = old  // revert immediately
                 pendingTab = new
@@ -89,10 +93,12 @@ struct SettingsView: View {
     @AppStorage("selphyPaperSize")       private var paperSize      = SelphyPaperSize.postcard.rawValue
     @AppStorage("selphyCopies")          private var copies         = 1
     @AppStorage("selphySkipPrintDialog") private var skipDialog     = false
+    @AppStorage("selphyPrinterName")     private var printerName    = ""
+    @AppStorage("selphyAutoPrintAfterSession") private var autoPrint = false
 
     @AppStorage("cloudUploadEnabled")    private var cloudEnabled   = false
     @AppStorage("cloudSSHHost")          private var sshHost        = ""
-    @AppStorage("cloudRemotePath")       private var remotePath     = "/bk1/prc/photobooth"
+    @AppStorage("cloudRemotePath")       private var remotePath     = CloudUploadConfiguration.defaultRemoteBasePath
     @AppStorage("publicBaseURL")         private var publicBaseURL  = ""
     @AppStorage(BoothCoordinator.eventFolderPathKey) private var eventFolderPath = ""
     @State private var selectedScreenIndex = 0
@@ -113,6 +119,16 @@ struct SettingsView: View {
         .navigationTitle("Settings")
         .sheet(isPresented: $showCloudSSHSetup) {
             CloudSSHSetupView(setup: coordinator.cloudSSHSetup)
+        }
+        .onChange(of: skipDialog) { _, value in
+            if !value { autoPrint = false }
+            coordinator.printer.invalidateTestResult()
+        }
+        .onChange(of: printerName) { _, _ in coordinator.printer.invalidateTestResult() }
+        .onChange(of: paperSize) { _, _ in coordinator.printer.invalidateTestResult() }
+        .task {
+            coordinator.printer.refreshPrinters()
+            if !skipDialog { autoPrint = false }
         }
     }
 
@@ -352,7 +368,7 @@ struct SettingsView: View {
                             .textFieldStyle(.roundedBorder)
                             .frame(width: 280)
                     }
-                    Text("Used in QR codes. Leave blank to use LAN IP instead.")
+                    Text("Used in QR codes after cloud upload succeeds. Leave blank to use the LAN server.")
                         .font(.caption).foregroundStyle(.secondary)
                 }
             }
@@ -368,6 +384,18 @@ struct SettingsView: View {
     private var printerSection: some View {
         GroupBox {
             VStack(alignment: .leading, spacing: 12) {
+                Picker("Printer", selection: $printerName) {
+                    Text("System Default").tag("")
+                    ForEach(coordinator.printer.availablePrinterNames, id: \.self) { name in
+                        Text(name).tag(name)
+                    }
+                }
+                .frame(width: 360)
+
+                Text(printerStatusText)
+                    .font(.caption)
+                    .foregroundStyle(printerStatusColor)
+
                 Picker("Paper Size", selection: $paperSize) {
                     ForEach(SelphyPaperSize.allCases, id: \.rawValue) {
                         Text($0.rawValue).tag($0.rawValue)
@@ -377,8 +405,18 @@ struct SettingsView: View {
 
                 Stepper("Copies: \(copies)", value: $copies, in: 1...5)
 
-                Toggle("Skip system print dialog (auto-print)", isOn: $skipDialog)
-                    .help("Prints immediately after each session without showing the system print dialog.")
+                Toggle("Skip system print dialog", isOn: $skipDialog)
+                    .help("Suppresses the macOS print dialog. Enable Automatic Printing separately to print after each session.")
+
+                Toggle("Automatic Printing", isOn: $autoPrint)
+                    .disabled(!skipDialog || !printerIsConfigured)
+                    .help("Prints the strip after required download jobs succeed.")
+
+                Button("Test Print") {
+                    Task { try? await coordinator.printer.printTestPage() }
+                }
+                .buttonStyle(.bordered)
+                .disabled(coordinator.printer.isPrinting || !printerIsConfigured)
 
                 Divider()
 
@@ -390,8 +428,29 @@ struct SettingsView: View {
             }
             .padding(4)
         } label: {
-            Label("Printer (Canon Selphy CP1500)", systemImage: "printer")
+            Label("Printer", systemImage: "printer")
                 .font(.headline)
         }
+    }
+
+    private var printerIsConfigured: Bool {
+        switch coordinator.printer.configuredPrinterStatus() {
+        case .systemDefault: return NSPrinter.printerNames.contains(NSPrintInfo.shared.printer.name)
+        case .available: return true
+        case .unavailable: return false
+        }
+    }
+
+    private var printerStatusText: String {
+        switch coordinator.printer.configuredPrinterStatus() {
+        case .systemDefault: return "Using the macOS System Default printer."
+        case .available(let name): return "Configured printer: \(name)"
+        case .unavailable(let name): return "Configured printer unavailable: \(name)"
+        }
+    }
+
+    private var printerStatusColor: Color {
+        if case .unavailable = coordinator.printer.configuredPrinterStatus() { return .red }
+        return .secondary
     }
 }

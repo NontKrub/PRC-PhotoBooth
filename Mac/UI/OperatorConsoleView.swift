@@ -2,9 +2,11 @@ import SwiftUI
 import AVFoundation
 
 struct OperatorConsoleView: View {
+    var onOpenOperations: () -> Void
     @Environment(BoothCoordinator.self) private var coordinator
     @Environment(SessionStateMachine.self) private var sm
     @State private var showPrintPrompt = false
+    @State private var showPrintAgainConfirmation = false
     @State private var showGrid = false
 
     var body: some View {
@@ -13,6 +15,7 @@ struct OperatorConsoleView: View {
             Divider()
             VStack(alignment: .leading, spacing: 0) {
                 connectionBanner
+                readinessBanner
                 Divider()
                 ScrollView {
                     VStack(alignment: .leading, spacing: 16) {
@@ -43,6 +46,12 @@ struct OperatorConsoleView: View {
             Button("Skip", role: .cancel) {}
         } message: {
             Text("Send the strip to your connected Selphy printer.")
+        }
+        .confirmationDialog("Print this strip again?", isPresented: $showPrintAgainConfirmation, titleVisibility: .visible) {
+            Button("Print Again") { coordinator.printAgainCurrentStrip() }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("This submits a new print request and does not create another persistent automatic-print job.")
         }
     }
 
@@ -175,6 +184,39 @@ struct OperatorConsoleView: View {
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
         .background(connectionColor.opacity(0.08))
+    }
+
+    var readinessBanner: some View {
+        Button(action: onOpenOperations) {
+            HStack(spacing: 8) {
+                Circle().fill(readinessColor).frame(width: 8, height: 8)
+                Text(readinessLabel).font(.caption)
+                Spacer()
+                Image(systemName: "chevron.right").font(.caption2)
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 7)
+            .background(readinessColor.opacity(0.08))
+        }
+        .buttonStyle(.plain)
+    }
+
+    var readinessLabel: String {
+        switch coordinator.preflight.readiness {
+        case .ready: return "Booth Ready"
+        case .readyWithWarnings: return "Ready with Warnings"
+        case .notReady: return "Booth Not Ready"
+        case .checking: return "Checking Booth…"
+        }
+    }
+
+    var readinessColor: Color {
+        switch coordinator.preflight.readiness {
+        case .ready: return .green
+        case .readyWithWarnings: return .orange
+        case .notReady: return .red
+        case .checking: return .blue
+        }
     }
 
     var connectionColor: Color {
@@ -504,6 +546,36 @@ struct OperatorConsoleView: View {
                              total: Double(sm.config.countdownSeconds))
                     .tint(.orange)
             }
+            if case .finished = sm.phase {
+                Button("Print Again") { showPrintAgainConfirmation = true }
+                    .buttonStyle(.bordered)
+            }
+            if case .processing = sm.phase {
+                processingStatus
+            }
+        }
+    }
+
+    private var processingStatus: some View {
+        VStack(alignment: .leading, spacing: 3) {
+            let sessionJobs = coordinator.jobQueue.jobs.filter { $0.sessionID == sm.currentSessionID }
+            if let strip = sessionJobs.first(where: { $0.kind == .renderStrip }) {
+                Text(strip.status == .succeeded ? "Strip ready" : "Rendering strip…")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            if let download = sessionJobs.first(where: { $0.kind == .registerDownload }) {
+                Text(download.status == .succeeded ? "Download ready" : "Preparing download…")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            if sessionJobs.contains(where: { $0.kind == .cloudUpload && $0.status != .succeeded }) {
+                Text("Cloud upload pending").font(.caption).foregroundStyle(.secondary)
+            }
+            if sessionJobs.contains(where: { $0.kind == .renderGIF && $0.status != .succeeded }) {
+                Text("GIF processing").font(.caption).foregroundStyle(.secondary)
+            }
+            if sessionJobs.contains(where: { $0.kind == .autoPrint && $0.status != .succeeded }) {
+                Text("Print pending").font(.caption).foregroundStyle(.secondary)
+            }
         }
     }
 
@@ -530,12 +602,16 @@ struct OperatorConsoleView: View {
             .disabled(coordinator.activeEvent == nil
                       || (sm.phase != .idle && sm.phase != .readyToStart)
                       || !coordinator.cameraPermissionGranted
+                      || !coordinator.capture.isRunning
                       || (coordinator.cameraSourceKind == .dslr && !coordinator.capture.dslr.isRunning)
-                      || !iPadConnected)
+                      || !coordinator.isCustomerDisplayReady
+                      || coordinator.recoveryService.recoverableCaptureSession != nil)
             .help(coordinator.activeEvent == nil ? "Select an active event first" :
                   !coordinator.cameraPermissionGranted ? "Camera permission required" :
+                  !coordinator.capture.isRunning ? "Start the selected camera first" :
                   (coordinator.cameraSourceKind == .dslr && !coordinator.capture.dslr.isRunning) ? "Connect DSLR camera first" :
-                  !iPadConnected ? "iPad not connected" : "")
+                  !coordinator.isCustomerDisplayReady ? "Connect an iPad or activate the external viewer" :
+                  coordinator.recoveryService.recoverableCaptureSession != nil ? "Resume or discard the unfinished session in Operations." : "")
 
             Button(action: { coordinator.operatorOverride(.cancelSession) }) {
                 Label("Reset to Idle", systemImage: "arrow.counterclockwise")

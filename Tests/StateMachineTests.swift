@@ -46,6 +46,40 @@ struct StateMachineTests {
         #expect(sm.keptShots[0] == nil)
     }
 
+    @Test("session preparation waits for an explicit countdown")
+    func sessionPreparationWaitsForCountdown() async {
+        let sm = SessionStateMachine()
+        sm.startSession(config: EventConfig(photoCount: 1, countdownSeconds: 3))
+
+        #expect(sm.phase == .readyToStart)
+    }
+
+    @Test("restored session keeps ID and thumbnails until countdown begins")
+    func restoresSession() async {
+        let sm = SessionStateMachine()
+        let config = EventConfig(photoCount: 3, countdownSeconds: 3)
+        let thumbnail = Data([0x01, 0x02])
+
+        sm.restoreSession(
+            sessionID: "recovered-session",
+            config: config,
+            keptShots: [0: thumbnail, 1: Data([0x03])],
+            nextPhotoIndex: 2
+        )
+
+        #expect(sm.currentSessionID == "recovered-session")
+        #expect(sm.keptShots[0] == thumbnail)
+        #expect(sm.phase == .readyToStart)
+
+        sm.beginCountdown(photoIndex: 2)
+        if case .countdown(let index, let seconds) = sm.phase {
+            #expect(index == 2)
+            #expect(seconds == 3)
+        } else {
+            Issue.record("Expected restored session countdown")
+        }
+    }
+
     @Test("operator cancel returns to idle")
     func operatorCancel() async {
         let sm = SessionStateMachine()

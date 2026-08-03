@@ -11,6 +11,8 @@ PRC PhotoBooth is a SwiftUI photo-booth system for macOS and iPad. The Mac app r
 - Live preview over MultipeerConnectivity, with an optional USB-C preview transport for lower-latency wired preview.
 - Composited PNG strips, looping animated GIFs, QR-code download links, and optional printing to a connected Selphy printer.
 - Local guest download server on port `8585`.
+- Booth preflight checks, a non-PIN-gated Operations tab, and persistent processing/upload/print jobs.
+- Restart-safe capture recovery and persistent QR registration using absolute session folders.
 - SwiftData persistence, PIN-gated event setup and analytics, CSV export, and an external-display viewer.
 
 ## Architecture
@@ -98,7 +100,33 @@ xcodebuild \
 4. Launch the iPad app on the same local network. The apps discover each other automatically through MultipeerConnectivity.
 5. Choose Wireless or Cable for the preview transport if needed. Cable mode is for the live preview stream; it does not replace the control connection.
 6. Start a session from the iPad or operator console. After each capture, keep the photo or retake it.
-7. When the session finishes, the Mac renders the strip and GIF, shows a QR code for downloads, and offers printing when a printer is configured.
+7. Open Operations before an event and run Safe Checks. Run Full Preflight when a diagnostic camera capture or printer test is appropriate.
+8. When the session finishes, queued required jobs make the strip and QR available first; GIF, cloud upload, and automatic printing continue independently.
+
+### Version 1.1 operations
+
+- Accepted photographs are written immediately. A session interrupted during capture appears in Operations with Resume or Discard; no countdown starts automatically.
+- A photograph captured but not accepted before the application closed cannot be recovered and must be retaken.
+- Runtime manifests and `jobs.json` live under:
+
+  ```text
+  ~/Library/Application Support/PRC-PhotoBooth/Runtime/
+  ├── Sessions/<session-id>.json
+  └── jobs.json
+  ```
+
+- Each session creates its output directory at capture start. `.work/` contains frame snapshots and GIF source frames and is removed only after rendering reaches a terminal state.
+- QR mappings are restored from completed/finalizing manifests, so old QR links continue to work after restart or an output-folder change while the original absolute folder still exists.
+- Cloud uploads and automatic prints retry from the Operations queue. A cloud failure never blocks the local QR download. Automatic printing requires a configured printer and Skip system print dialog.
+- Printer diagnostics submit a test page only when the operator requests one. Version 1.1 does not report ink, ribbon, paper, jam, or power levels.
+
+### Manual booth-start checklist
+
+1. Confirm the active event has valid slots and the intended frame.
+2. Confirm the selected camera is connected and the customer iPad or external viewer is ready.
+3. Run Safe Checks; run Full Preflight when physical tests are needed.
+4. Confirm output storage, local server health, queue health, printer setup, and cloud status in Operations.
+5. Resolve any recoverable capture session before starting a new one.
 
 ## Output and storage
 
@@ -116,13 +144,14 @@ Finished session files are stored under:
 
 ```text
 ~/Pictures/PRC-PhotoBooth/
-└── <event-name>/<yyyyMMdd-HHmm>/
+└── <safe-event-name>/<yyyyMMdd-HHmmss>-<session-id-prefix>/
+    ├── .work/
     ├── strip.png
     ├── booth.gif
     └── shot_<index>.jpg
 ```
 
-The local web server exposes tokenized download pages at `/s/<token>/`. The QR code uses the Mac's LAN address by default, or an optional public base URL configured in Event Setup. Completed sessions older than 60 days are cleaned up when the Mac app starts.
+The local web server exposes tokenized download pages at `/s/<token>` and `/s/<token>/`, plus `/health`. Only `strip.png` and an existing `booth.gif` are served. The QR code uses the Mac's LAN address by default, or an optional public base URL configured in Event Setup. Completed sessions older than 60 days are cleaned up when the Mac app starts; cancelled manifests are retained for seven days.
 
 ## Project layout
 
