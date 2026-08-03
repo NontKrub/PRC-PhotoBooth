@@ -16,8 +16,6 @@ jobs:
   build-mac-app:
     name: Build macOS app
     runs-on: macos-15
-    env:
-      DERIVED_DATA_PATH: ${{ runner.temp }}/PRC-PhotoBooth-DerivedData
 
     steps:
       - name: Check out source
@@ -44,7 +42,7 @@ jobs:
             -scheme PRC-PhotoBooth-Mac \
             -configuration Debug \
             -destination "platform=macOS" \
-            -derivedDataPath "$DERIVED_DATA_PATH" \
+            -derivedDataPath "$RUNNER_TEMP/PRC-PhotoBooth-DerivedData" \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
             build
@@ -55,7 +53,7 @@ jobs:
             -project PRC-PhotoBooth.xcodeproj \
             -scheme PRC-PhotoBoothTests \
             -destination "platform=macOS" \
-            -derivedDataPath "$DERIVED_DATA_PATH" \
+            -derivedDataPath "$RUNNER_TEMP/PRC-PhotoBooth-DerivedData" \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
             test
@@ -63,7 +61,7 @@ jobs:
       - name: Package app
         id: package
         run: |
-          app_path="$DERIVED_DATA_PATH/Build/Products/Debug/PRC-PhotoBooth-Mac.app"
+          app_path="$RUNNER_TEMP/PRC-PhotoBooth-DerivedData/Build/Products/Debug/PRC-PhotoBooth-Mac.app"
           archive_path="$RUNNER_TEMP/PRC-PhotoBooth-Mac-${GITHUB_SHA:0:7}.zip"
 
           test -d "$app_path"
@@ -90,8 +88,6 @@ jobs:
   build-ipad-app:
     name: Build iPad Simulator app
     runs-on: macos-15
-    env:
-      DERIVED_DATA_PATH: ${{ runner.temp }}/PRC-PhotoBooth-iPad-DerivedData
 
     steps:
       - name: Check out source
@@ -119,7 +115,7 @@ jobs:
             -configuration Debug \
             -destination "generic/platform=iOS Simulator" \
             -sdk iphonesimulator \
-            -derivedDataPath "$DERIVED_DATA_PATH" \
+            -derivedDataPath "$RUNNER_TEMP/PRC-PhotoBooth-iPad-DerivedData" \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
             build
@@ -127,7 +123,7 @@ jobs:
       - name: Package app
         id: package
         run: |
-          app_path="$DERIVED_DATA_PATH/Build/Products/Debug-iphonesimulator/PRC-PhotoBooth-iPad.app"
+          app_path="$RUNNER_TEMP/PRC-PhotoBooth-iPad-DerivedData/Build/Products/Debug-iphonesimulator/PRC-PhotoBooth-iPad.app"
           archive_path="$RUNNER_TEMP/PRC-PhotoBooth-iPad-Simulator-${GITHUB_SHA:0:7}.zip"
 
           test -d "$app_path"
