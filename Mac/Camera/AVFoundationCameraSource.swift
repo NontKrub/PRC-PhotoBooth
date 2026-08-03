@@ -11,6 +11,10 @@ private enum PreviewStreamFormat {
     static let jpegQuality: CGFloat = 0.7
 }
 
+private final class ThreadSafeCIContext: @unchecked Sendable {
+    let value = CIContext(options: [.useSoftwareRenderer: false])
+}
+
 private final class PreviewFrameThrottle: @unchecked Sendable {
     private let lock = NSLock()
     private var minimumInterval: TimeInterval
@@ -65,7 +69,7 @@ final class AVFoundationCameraSource: NSObject, CameraSource {
     // rollingBuffer is NSLock-guarded internally — safe to share across threads
     let rollingBuffer = RollingVideoBuffer(windowSeconds: 8, maxFPS: 15)
     // CIContext is thread-safe; the nonisolated delegate uses this immutable instance for preview rendering.
-    nonisolated(unsafe) private let ciContext = CIContext(options: [.useSoftwareRenderer: false])
+    nonisolated private let ciContext = ThreadSafeCIContext()
     // Keep preview updates at the selected rate, independent of the camera's
     // native frame rate (which can be 30 or 60 FPS).
     nonisolated private let previewFrameThrottle = PreviewFrameThrottle(maxFPS: 30)
@@ -237,7 +241,7 @@ final class AVFoundationCameraSource: NSObject, CameraSource {
             filter.ev = exposureEV
             ci = filter.outputImage ?? ci
         }
-        return ciContext.createCGImage(ci, from: ci.extent) ?? raw
+        return ciContext.value.createCGImage(ci, from: ci.extent) ?? raw
     }
 }
 
@@ -254,7 +258,7 @@ extension AVFoundationCameraSource: AVCaptureVideoDataOutputSampleBufferDelegate
         let ciImage = CIImage(cvPixelBuffer: pixelBuffer)
         let scale = min(1.0, PreviewStreamFormat.maxDimension / max(ciImage.extent.width, ciImage.extent.height))
         let scaled = ciImage.transformed(by: CGAffineTransform(scaleX: scale, y: scale))
-        guard let cgImage = ciContext.createCGImage(scaled, from: scaled.extent),
+        guard let cgImage = ciContext.value.createCGImage(scaled, from: scaled.extent),
               let jpeg = jpegData(from: cgImage, quality: PreviewStreamFormat.jpegQuality)
         else { return }
 
@@ -290,7 +294,7 @@ extension AVFoundationCameraSource: AVCapturePhotoCaptureDelegate {
             let img: CGImage
             if exifRaw != 1, let orientation = CGImagePropertyOrientation(rawValue: exifRaw) {
                 let ci = CIImage(cgImage: raw).oriented(orientation)
-                img = ciContext.createCGImage(ci, from: ci.extent) ?? raw
+                img = ciContext.value.createCGImage(ci, from: ci.extent) ?? raw
             } else {
                 img = raw
             }
