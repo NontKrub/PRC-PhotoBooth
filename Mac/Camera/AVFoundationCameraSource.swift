@@ -64,7 +64,8 @@ final class AVFoundationCameraSource: NSObject, CameraSource {
 
     // rollingBuffer is NSLock-guarded internally — safe to share across threads
     let rollingBuffer = RollingVideoBuffer(windowSeconds: 8, maxFPS: 15)
-    private let ciContext = CIContext(options: [.useSoftwareRenderer: false])
+    // CIContext is thread-safe; the nonisolated delegate uses this immutable instance for preview rendering.
+    nonisolated(unsafe) private let ciContext = CIContext(options: [.useSoftwareRenderer: false])
     // Keep preview updates at the selected rate, independent of the camera's
     // native frame rate (which can be 30 or 60 FPS).
     nonisolated private let previewFrameThrottle = PreviewFrameThrottle(maxFPS: 30)
