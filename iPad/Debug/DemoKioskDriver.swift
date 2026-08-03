@@ -49,7 +49,7 @@ enum DemoKioskDriver {
             canvasWidth: 900,
             canvasHeight: 1600,
             slots: (0..<3).map { index in
-                SharedPhotoSlot(
+                return SharedPhotoSlot(
                     normalizedRect: CGRect(x: 0.1, y: 0.05 + Double(index) * 0.3, width: 0.8, height: 0.25),
                     zOrder: index,
                     photoIndex: index
@@ -66,21 +66,23 @@ enum DemoKioskDriver {
               let templateID = vm.selectedTemplateID,
               let filterID = vm.selectedFilterID,
               let template = catalog.templates.first(where: { $0.id == templateID }) else { return }
+        let isSquare = template.aspectRatio == 1
         let config = EventConfig(
             eventID: catalog.eventID,
             eventName: catalog.eventName,
             photoCount: template.photoCount,
             countdownSeconds: 2,
-            canvasWidth: template.aspectRatio == 1 ? 1200 : 900,
-            canvasHeight: template.aspectRatio == 1 ? 1200 : 1600,
+            canvasWidth: isSquare ? 1200 : 900,
+            canvasHeight: isSquare ? 1200 : 1600,
             slots: (0..<template.photoCount).map { index in
-                SharedPhotoSlot(
-                    normalizedRect: CGRect(
-                        x: template.aspectRatio == 1 ? (index % 2 == 0 ? 0.05 : 0.525) : 0.1,
-                        y: template.aspectRatio == 1 ? (index < 2 ? 0.05 : 0.525) : 0.05 + Double(index) * (0.9 / Double(template.photoCount)),
-                        width: template.aspectRatio == 1 ? 0.425 : 0.8,
-                        height: template.aspectRatio == 1 ? 0.425 : 0.2
-                    ),
+                let x: CGFloat = isSquare ? (index % 2 == 0 ? 0.05 : 0.525) : 0.1
+                let y: CGFloat = isSquare
+                    ? (index < 2 ? 0.05 : 0.525)
+                    : CGFloat(0.05 + Double(index) * (0.9 / Double(template.photoCount)))
+                let width: CGFloat = isSquare ? 0.425 : 0.8
+                let height: CGFloat = isSquare ? 0.425 : 0.2
+                return SharedPhotoSlot(
+                    normalizedRect: CGRect(x: x, y: y, width: width, height: height),
                     zOrder: index,
                     photoIndex: index
                 )
