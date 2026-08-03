@@ -13,8 +13,12 @@ struct ExternalDisplayView: View {
         ZStack {
             Color.black.ignoresSafeArea()
             switch sm.phase {
-            case .idle, .readyToStart:
+            case .idle:
                 idleContent
+            case .selectingExperience:
+                ExternalExperienceSelectionView()
+            case .readyToStart:
+                readyContent
             case .countdown(let idx, let secs):
                 countdownContent(photoIndex: idx, secondsRemaining: secs)
             case .captured, .processing:
@@ -67,7 +71,44 @@ struct ExternalDisplayView: View {
 
     private func attemptStart() {
         guard sm.phase == .idle, coordinator.activeEvent != nil else { return }
-        coordinator.startSession()
+        if coordinator.externalSelectionRequired {
+            coordinator.beginExternalExperienceSelection()
+        } else {
+            coordinator.startSession()
+        }
+    }
+
+    private var readyContent: some View {
+        VStack(spacing: 24) {
+            Text("Ready?")
+                .font(.system(size: 52, weight: .black, design: .rounded))
+                .foregroundStyle(.white)
+            Text(sm.config.templateName.value(for: sm.config.customerLanguage))
+                .font(.title2)
+                .foregroundStyle(.white.opacity(0.75))
+            Text("\(sm.config.photoCount) photos · \(filterName(sm.config.selectedFilterID))")
+                .foregroundStyle(.white.opacity(0.6))
+            HStack(spacing: 16) {
+                Button("Back to Options") { coordinator.beginExternalExperienceSelection() }
+                    .buttonStyle(.bordered)
+                Button("Start") {
+                    coordinator.startSession(selection: coordinator.externalSelection.selection)
+                }
+                .buttonStyle(.borderedProminent)
+            }
+        }
+    }
+
+    private func filterName(_ filter: PhotoFilterID) -> String {
+        switch filter {
+        case .original: return "Original"
+        case .monochrome: return "Monochrome"
+        case .warm: return "Warm"
+        case .cool: return "Cool"
+        case .highContrast: return "High Contrast"
+        case .soft: return "Soft"
+        case .vintage: return "Vintage"
+        }
     }
 
     // MARK: - Countdown
@@ -78,6 +119,35 @@ struct ExternalDisplayView: View {
             Color.black.opacity(0.2).ignoresSafeArea()
 
             VStack {
+                Spacer()
+                if let prompt = coordinator.currentSessionPresentation?.prompts.first(where: { $0.photoIndex == photoIndex }) {
+                    HStack(spacing: 14) {
+                        if let data = prompt.imageData,
+                           let source = CGImageSourceCreateWithData(data as CFData, nil),
+                           let image = CGImageSourceCreateImageAtIndex(source, 0, nil) {
+                            Image(nsImage: flipSafeImage(image))
+                                .resizable()
+                                .scaledToFit()
+                                .frame(maxWidth: 180, maxHeight: 180)
+                                .clipShape(RoundedRectangle(cornerRadius: 16))
+                        }
+                        VStack(alignment: .leading, spacing: 6) {
+                            Text(prompt.title)
+                                .font(.title2.bold())
+                                .lineLimit(3)
+                            if !prompt.subtitle.isEmpty {
+                                Text(prompt.subtitle)
+                                    .font(.body)
+                                    .lineLimit(3)
+                                    .foregroundStyle(.white.opacity(0.75))
+                            }
+                        }
+                        .foregroundStyle(.white)
+                    }
+                    .padding(.horizontal, 20)
+                    .padding(.vertical, 14)
+                    .background(.black.opacity(0.45), in: RoundedRectangle(cornerRadius: 18))
+                }
                 Spacer()
                 ZStack {
                     Circle().strokeBorder(.white.opacity(0.15), lineWidth: 10).frame(width: 320, height: 320)
@@ -126,7 +196,8 @@ struct ExternalDisplayView: View {
 
             ZStack {
                 RoundedRectangle(cornerRadius: 18).fill(Color(white: 0.1))
-                if let img = coordinator.capture.capturedStills[photoIndex] {
+                if let img = coordinator.currentFilteredReviewImages[photoIndex]
+                    ?? coordinator.capture.capturedStills[photoIndex] {
                     Image(nsImage: flipSafeImage(img))
                         .resizable()
                         .scaledToFill()
@@ -188,11 +259,23 @@ struct ExternalDisplayView: View {
 
     private var cameraPreview: some View {
         Group {
+#if DEBUG
+            if coordinator.capture.demoMode, let image = coordinator.capture.demoPreviewImage {
+                Image(nsImage: flipSafeImage(image))
+                    .resizable()
+                    .scaledToFill()
+            } else if coordinator.capture.isRunning, let session = coordinator.capture.camera.captureSession {
+                CameraPreviewView(captureSession: session, isMirrored: coordinator.capture.camera.isMirrored)
+            } else {
+                Color.black
+            }
+#else
             if coordinator.capture.isRunning, let session = coordinator.capture.camera.captureSession {
                 CameraPreviewView(captureSession: session, isMirrored: coordinator.capture.camera.isMirrored)
             } else {
                 Color.black
             }
+#endif
         }
         .ignoresSafeArea()
     }

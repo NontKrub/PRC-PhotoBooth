@@ -5,6 +5,8 @@ struct CountdownView: View {
     let secondsRemaining: Int
     @Environment(iPadViewModel.self) private var vm
 
+    private var isThai: Bool { vm.selectedLanguage == .thai }
+
     var body: some View {
         ZStack {
             PreviewMirrorView().ignoresSafeArea()
@@ -14,6 +16,35 @@ struct CountdownView: View {
                 // Photo strip progress at top
                 photoProgress
                     .padding(.top, 52)
+
+                if let prompt = vm.currentPrompt(for: photoIndex) {
+                    HStack(spacing: 14) {
+                        if let image = vm.promptImages[prompt.promptID] {
+                            Image(image, scale: 1, label: Text(prompt.title))
+                                .resizable()
+                                .scaledToFit()
+                                .frame(maxWidth: 180, maxHeight: 180)
+                                .clipShape(RoundedRectangle(cornerRadius: 16))
+                        }
+                        VStack(alignment: .leading, spacing: 6) {
+                            Text(prompt.title)
+                                .font(.title2.bold())
+                                .lineLimit(3)
+                            if !prompt.subtitle.isEmpty {
+                                Text(prompt.subtitle)
+                                    .font(.body)
+                                    .lineLimit(3)
+                                    .foregroundStyle(.white.opacity(0.75))
+                            }
+                        }
+                        .foregroundStyle(.white)
+                    }
+                    .padding(.horizontal, 20)
+                    .padding(.vertical, 14)
+                    .background(.black.opacity(0.45), in: RoundedRectangle(cornerRadius: 18))
+                    .padding(.horizontal, 32)
+                    .padding(.top, 18)
+                }
 
                 Spacer()
 
@@ -51,7 +82,9 @@ struct CountdownView: View {
                 Spacer()
 
                 // Caption
-                Text("Photo \(photoIndex + 1) of \(vm.eventConfig.photoCount)")
+                Text(isThai
+                     ? "ภาพที่ \(photoIndex + 1) จาก \(vm.eventConfig.photoCount)"
+                     : "Photo \(photoIndex + 1) of \(vm.eventConfig.photoCount)")
                     .font(.system(size: 15, weight: .semibold))
                     .foregroundStyle(.white.opacity(0.5))
                     .tracking(1)

@@ -16,7 +16,8 @@ struct LocalWebServerStatus: Sendable, Equatable {
 actor LocalWebServer {
     private var listener: NWListener?
     let port: UInt16
-    private var tokenMap: [String: URL] = [:]
+    private var sessionRoutes: [String: SessionRouteRegistration] = [:]
+    private var galleryRoutes: [String: EventGalleryRouteRegistration] = [:]
 
     private var state: LocalWebServerState = .stopped
 
@@ -26,22 +27,49 @@ actor LocalWebServer {
 
     func registerToken(_ token: String, sessionDirectory: URL) {
         guard !token.isEmpty else { return }
-        tokenMap[token] = sessionDirectory.standardizedFileURL
+        registerToken(token, registration: SessionRouteRegistration(
+            sessionDirectory: sessionDirectory.standardizedFileURL,
+            language: .english,
+            eventGalleryPath: nil
+        ))
+    }
+
+    func registerToken(_ token: String, registration: SessionRouteRegistration) {
+        guard !token.isEmpty else { return }
+        sessionRoutes[token] = registration
     }
 
     func unregisterToken(_ token: String) {
-        tokenMap.removeValue(forKey: token)
+        sessionRoutes.removeValue(forKey: token)
     }
 
     func replaceTokenMap(_ mappings: [String: URL]) {
-        tokenMap = mappings.reduce(into: [:]) { result, mapping in
+        sessionRoutes = mappings.reduce(into: [:]) { result, mapping in
             guard !mapping.key.isEmpty else { return }
-            result[mapping.key] = mapping.value.standardizedFileURL
+            result[mapping.key] = SessionRouteRegistration(
+                sessionDirectory: mapping.value.standardizedFileURL,
+                language: .english,
+                eventGalleryPath: nil
+            )
+        }
+    }
+
+    func replaceSessionRoutes(_ mappings: [String: SessionRouteRegistration]) {
+        sessionRoutes = mappings.reduce(into: [:]) { result, mapping in
+            guard !mapping.key.isEmpty else { return }
+            result[mapping.key] = mapping.value
+        }
+    }
+
+    func replaceGalleryRoutes(_ mappings: [String: EventGalleryRouteRegistration]) {
+        galleryRoutes = mappings.reduce(into: [:]) { result, mapping in
+            guard !mapping.key.isEmpty else { return }
+            result[mapping.key] = mapping.value
         }
     }
 
     func statusSnapshot() -> LocalWebServerStatus {
-        LocalWebServerStatus(state: state, registeredTokenCount: tokenMap.count)
+        LocalWebServerStatus(state: state, registeredTokenCount: sessionRoutes.count)
     }
 
     func waitUntilReady(timeout: TimeInterval = 5) async -> LocalWebServerStatus {
@@ -104,10 +132,10 @@ actor LocalWebServer {
         guard let data = await receive(from: connection),
               let request = parseRequest(data),
               request.method == "GET" else {
-            await send(connection, response: LocalDownloadRouter(tokenMap: [:]).response(for: "/missing").httpData)
+            await send(connection, response: LocalDownloadRouter(sessionRoutes: [:], galleryRoutes: [:]).response(for: "/missing").httpData)
             return
         }
-        let response = LocalDownloadRouter(tokenMap: tokenMap).response(for: request.path)
+        let response = LocalDownloadRouter(sessionRoutes: sessionRoutes, galleryRoutes: galleryRoutes).response(for: request.path)
         await send(connection, response: response.httpData)
     }
 

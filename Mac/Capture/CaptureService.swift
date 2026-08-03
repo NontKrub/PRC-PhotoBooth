@@ -11,8 +11,13 @@ import Observation
 final class CaptureService {
     let camera: AVFoundationCameraSource   // always used for preview
     let dslr: DSLRCameraSource             // used for still capture when usesDSLR == true
+#if DEBUG
+    let demoCamera = DemoCameraSource()
+#endif
+    private(set) var demoPreviewImage: CGImage?
 
     var usesDSLR = false
+    var demoMode = false
     var captureRotationDegrees: Int = 0
     var onPreviewJPEG: (@MainActor (Data) -> Void)?
     private(set) var capturedStills: [Int: CGImage] = [:]
@@ -37,11 +42,29 @@ final class CaptureService {
     }
 
     func start() throws {
+#if DEBUG
+        if demoMode {
+            demoCamera.onPreviewJPEG = { [weak self] jpeg in
+                if let source = CGImageSourceCreateWithData(jpeg as CFData, nil) {
+                    self?.demoPreviewImage = CGImageSourceCreateImageAtIndex(source, 0, nil)
+                }
+                self?.onPreviewJPEG?(jpeg)
+            }
+            try demoCamera.start()
+            isRunning = true
+            return
+        }
+#endif
         try camera.start()
         isRunning = true
     }
 
     func stop() {
+#if DEBUG
+        if demoMode {
+            demoCamera.stop()
+        }
+#endif
         camera.stop()
         if dslr.isRunning { dslr.stop() }
         isRunning = false
@@ -62,6 +85,20 @@ final class CaptureService {
 
     func captureStill(for photoIndex: Int) async throws -> CGImage {
         var image: CGImage
+#if DEBUG
+        if demoMode {
+            image = try await demoCamera.captureStill()
+        } else {
+            if usesDSLR {
+            guard dslr.isRunning else {
+                throw DSLRError.captureFailed("DSLR is selected but not connected yet.")
+            }
+            image = try await dslr.captureStill()
+            } else {
+                image = try await camera.captureStill()
+            }
+        }
+#else
         if usesDSLR {
             guard dslr.isRunning else {
                 throw DSLRError.captureFailed("DSLR is selected but not connected yet.")
@@ -70,6 +107,7 @@ final class CaptureService {
         } else {
             image = try await camera.captureStill()
         }
+#endif
         if captureRotationDegrees != 0 {
             image = rotated(image, by: captureRotationDegrees) ?? image
         }
@@ -79,11 +117,23 @@ final class CaptureService {
 
     func captureDiagnosticStill() async throws -> CGImage {
         var image: CGImage
+#if DEBUG
+        if demoMode {
+            image = try await demoCamera.captureStill()
+        } else {
+            if dslr.isRunning {
+                image = try await dslr.captureStill()
+            } else {
+                image = try await camera.captureStill()
+            }
+        }
+#else
         if dslr.isRunning {
             image = try await dslr.captureStill()
         } else {
             image = try await camera.captureStill()
         }
+#endif
         if captureRotationDegrees != 0 {
             image = rotated(image, by: captureRotationDegrees) ?? image
         }
@@ -99,6 +149,11 @@ final class CaptureService {
     }
 
     func drainBufferForGIF() -> [CGImage] {
+#if DEBUG
+        if demoMode {
+            return DemoImageFactory.gifFrames(for: demoCamera.availableDevices.count)
+        }
+#endif
         // Sony live view is delivered through ImageCaptureCore, not the
         // AVFoundation preview stream, so use the active source's buffer.
         if usesDSLR {

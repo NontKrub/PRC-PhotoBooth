@@ -14,6 +14,11 @@ PRC PhotoBooth is a SwiftUI photo-booth system for macOS and iPad. The Mac app r
 - Booth preflight checks, a non-PIN-gated Operations tab, and persistent processing/upload/print jobs.
 - Restart-safe capture recovery and persistent QR registration using absolute session folders.
 - SwiftData persistence, PIN-gated event setup and analytics, CSV export, and an external-display viewer.
+- Version 1.2 guest experience packages with up to eight templates, local Core Image filters, pose prompts, and Thai/English customer choices.
+- Privacy-controlled local event galleries with pending, approved, and hidden moderation states.
+- Debug-only hardware-free demo camera and standalone iPad kiosk flows.
+
+Version 1.2 has no audio countdown. Countdown and pose prompts are visual only.
 
 ## Architecture
 
@@ -119,6 +124,32 @@ xcodebuild \
 - QR mappings are restored from completed/finalizing manifests, so old QR links continue to work after restart or an output-folder change while the original absolute folder still exists.
 - Cloud uploads and automatic prints retry from the Operations queue. A cloud failure never blocks the local QR download. Automatic printing requires a configured printer and Skip system print dialog.
 - Printer diagnostics submit a test page only when the operator requests one. Version 1.1 does not report ink, ribbon, paper, jam, or power levels.
+
+### Version 1.2 guest experience
+
+Event Setup stores guest-facing configuration as atomic JSON packages, so existing SwiftData history remains compatible:
+
+```text
+~/Library/Application Support/PRC-PhotoBooth/
+├── EventExperiences/<event-id>/
+├── Gallery/Events/<event-id>.json
+└── Runtime/Sessions/<session-id>.json
+```
+
+Operators can create, duplicate, order, enable, disable, and choose a default template. Each template has its own canvas, slots, frame, photo count, preview, and optional Thai/English pose prompts. The kiosk can require template, filter, and language choices; the Mac validates the selection against the current experience revision before creating a session.
+
+Filters are applied to review-sized copies and final strip/GIF renders. Accepted `shot_<index>.jpg` files remain the original photographs and are the recovery source.
+
+The event gallery is local-network only. Disabled galleries publish nothing; approval-required galleries keep new sessions pending until an operator approves them; automatic galleries publish approved thumbnails immediately. Hidden sessions disappear from the gallery but keep their individual download URLs. Regenerating a gallery token invalidates only the old gallery URL, not individual session links.
+
+Debug builds support hardware-free checks:
+
+```text
+Mac:  --demo-mode --reset-demo-data
+iPad: --demo-kiosk
+```
+
+Use the computer-based GUI workflow after automated tests to inspect Event Setup, selection, prompts, review, moderation, Thai text, and restart persistence.
 
 ### Manual booth-start checklist
 

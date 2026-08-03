@@ -14,6 +14,7 @@ struct OperationsView: View {
                 preflightResults
                 recoverySection
                 queueSection
+                GalleryModerationView()
                 printerSection
                 serverSection
             }

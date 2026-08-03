@@ -18,10 +18,10 @@ struct SessionJobQueueTests {
 
         queue.start()
         queue.enqueueFinalizationJobs(for: makeManifest(withGIFFrames: true))
-        try await waitUntil { await executor.snapshot().kinds.count == 3 }
+        try await waitUntil { await executor.snapshot().kinds.count == 4 }
 
         let snapshot = await executor.snapshot()
-        #expect(snapshot.kinds == [.renderStrip, .registerDownload, .renderGIF])
+        #expect(snapshot.kinds == [.renderStrip, .registerDownload, .updateGallery, .renderGIF])
         #expect(snapshot.maximumConcurrentExecutions == 1)
     }
 
@@ -66,7 +66,7 @@ struct SessionJobQueueTests {
 
         queue.start()
         queue.enqueueFinalizationJobs(for: makeManifest(withGIFFrames: true))
-        try await waitUntil { await executor.snapshot().kinds.count == 3 }
+        try await waitUntil { await executor.snapshot().kinds.count == 4 }
         try await waitUntil {
             await queue.job(status: .failed, kind: .renderGIF) != nil
         }

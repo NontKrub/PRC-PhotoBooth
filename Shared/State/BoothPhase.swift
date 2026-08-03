@@ -2,6 +2,7 @@ import Foundation
 
 public enum BoothPhase: Equatable, Sendable {
     case idle
+    case selectingExperience
     case readyToStart
     case countdown(photoIndex: Int, secondsRemaining: Int)
     case captured(photoIndex: Int)
@@ -12,6 +13,7 @@ public enum BoothPhase: Equatable, Sendable {
     public var displayName: String {
         switch self {
         case .idle:             return "Idle"
+        case .selectingExperience: return "Selecting experience"
         case .readyToStart:     return "Ready"
         case .countdown(let i, let s): return "Countdown [\(i+1)] \(s)s"
         case .captured(let i):  return "Captured [\(i+1)]"

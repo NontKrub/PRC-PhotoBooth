@@ -30,12 +30,14 @@ targets:
     resources:
       - path: Mac/Assets.xcassets
         optional: true
+      - path: Mac/Localizable.xcstrings
+        optional: true
     info:
       path: Mac/Info.plist
       properties:
         CFBundleDisplayName: PRC PhotoBooth
-        CFBundleShortVersionString: "1.1"
-        CFBundleVersion: "2"
+        CFBundleShortVersionString: "1.2"
+        CFBundleVersion: "3"
         NSCameraUsageDescription: PRC PhotoBooth needs camera access to capture photos for the booth.
         NSMicrophoneUsageDescription: PRC PhotoBooth uses the microphone as part of the camera session.
         NSLocalNetworkUsageDescription: PRC PhotoBooth connects to the iPad over local network to stream the camera preview and sync session state.
@@ -104,12 +106,14 @@ targets:
     resources:
       - path: iPad/Assets.xcassets
         optional: true
+      - path: iPad/Localizable.xcstrings
+        optional: true
     info:
       path: iPad/Info.plist
       properties:
         CFBundleDisplayName: PRC PhotoBooth
-        CFBundleShortVersionString: "1.1"
-        CFBundleVersion: "2"
+        CFBundleShortVersionString: "1.2"
+        CFBundleVersion: "3"
         NSLocalNetworkUsageDescription: PRC PhotoBooth connects to the operator Mac over local network for camera preview and session control.
         NSBonjourServices:
           - _prc-photobooth._tcp

@@ -1,0 +1,23 @@
+{
+  "sourceLanguage" : "en",
+  "strings" : {
+    "Application Language" : { "localizations" : { "th" : { "stringUnit" : { "state" : "translated", "value" : "ภาษาของแอปพลิเคชัน" } } } },
+    "Event Setup" : { "localizations" : { "th" : { "stringUnit" : { "state" : "translated", "value" : "ตั้งค่างาน" } } } },
+    "Gallery Moderation" : { "localizations" : { "th" : { "stringUnit" : { "state" : "translated", "value" : "ตรวจสอบแกลเลอรี" } } } },
+    "Guest Experience" : { "localizations" : { "th" : { "stringUnit" : { "state" : "translated", "value" : "ประสบการณ์ผู้เข้าร่วมงาน" } } } },
+    "Templates" : { "localizations" : { "th" : { "stringUnit" : { "state" : "translated", "value" : "เทมเพลต" } } } },
+    "Filters" : { "localizations" : { "th" : { "stringUnit" : { "state" : "translated", "value" : "ฟิลเตอร์" } } } },
+    "Event Gallery" : { "localizations" : { "th" : { "stringUnit" : { "state" : "translated", "value" : "แกลเลอรีงาน" } } } },
+    "Approval required" : { "localizations" : { "th" : { "stringUnit" : { "state" : "translated", "value" : "ต้องอนุมัติ" } } } },
+    "Automatic" : { "localizations" : { "th" : { "stringUnit" : { "state" : "translated", "value" : "อัตโนมัติ" } } } },
+    "Disabled" : { "localizations" : { "th" : { "stringUnit" : { "state" : "translated", "value" : "ปิดใช้งาน" } } } },
+    "Original" : { "localizations" : { "th" : { "stringUnit" : { "state" : "translated", "value" : "ต้นฉบับ" } } } },
+    "Monochrome" : { "localizations" : { "th" : { "stringUnit" : { "state" : "translated", "value" : "ขาวดำ" } } } },
+    "Warm" : { "localizations" : { "th" : { "stringUnit" : { "state" : "translated", "value" : "โทนอุ่น" } } } },
+    "Cool" : { "localizations" : { "th" : { "stringUnit" : { "state" : "translated", "value" : "โทนเย็น" } } } },
+    "High Contrast" : { "localizations" : { "th" : { "stringUnit" : { "state" : "translated", "value" : "คอนทราสต์สูง" } } } },
+    "Soft" : { "localizations" : { "th" : { "stringUnit" : { "state" : "translated", "value" : "นุ่มนวล" } } } },
+    "Vintage" : { "localizations" : { "th" : { "stringUnit" : { "state" : "translated", "value" : "วินเทจ" } } } }
+  },
+  "version" : "1.0"
+}

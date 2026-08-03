@@ -17,6 +17,10 @@ enum PreflightRequirement: Sendable {
 enum PreflightCheckID: String, Sendable, CaseIterable, Identifiable {
     case activeEvent
     case eventLayout
+    case eventExperience
+    case templateAssets
+    case filterPipeline
+    case galleryStorage
     case cameraPermission
     case cameraConnection
     case cameraTestCapture
@@ -54,6 +58,14 @@ enum BoothReadinessStatus: Sendable, Equatable {
 
 struct BoothPreflightContext: Sendable {
     var event: EventConfig?
+    var eventExperienceStatus: PreflightCheckStatus
+    var eventExperienceDetail: String
+    var templateAssetsStatus: PreflightCheckStatus
+    var templateAssetsDetail: String
+    var filterPipelineStatus: PreflightCheckStatus
+    var filterPipelineDetail: String
+    var galleryStorageStatus: PreflightCheckStatus
+    var galleryStorageDetail: String
     var cameraPermissionGranted: Bool
     var cameraConnected: Bool
     var customerDisplayReady: Bool
@@ -81,6 +93,14 @@ struct BoothPreflightContext: Sendable {
 
     init(
         event: EventConfig? = nil,
+        eventExperienceStatus: PreflightCheckStatus = .skipped,
+        eventExperienceDetail: String = "Skipped for legacy events.",
+        templateAssetsStatus: PreflightCheckStatus = .skipped,
+        templateAssetsDetail: String = "Skipped until an experience document is available.",
+        filterPipelineStatus: PreflightCheckStatus = .skipped,
+        filterPipelineDetail: String = "Skipped until filter settings are available.",
+        galleryStorageStatus: PreflightCheckStatus = .skipped,
+        galleryStorageDetail: String = "Gallery is disabled.",
         cameraPermissionGranted: Bool = false,
         cameraConnected: Bool = false,
         customerDisplayReady: Bool = false,
@@ -107,6 +127,14 @@ struct BoothPreflightContext: Sendable {
         printerTestResult: PrinterTestResult? = nil
     ) {
         self.event = event
+        self.eventExperienceStatus = eventExperienceStatus
+        self.eventExperienceDetail = eventExperienceDetail
+        self.templateAssetsStatus = templateAssetsStatus
+        self.templateAssetsDetail = templateAssetsDetail
+        self.filterPipelineStatus = filterPipelineStatus
+        self.filterPipelineDetail = filterPipelineDetail
+        self.galleryStorageStatus = galleryStorageStatus
+        self.galleryStorageDetail = galleryStorageDetail
         self.cameraPermissionGranted = cameraPermissionGranted
         self.cameraConnected = cameraConnected
         self.customerDisplayReady = customerDisplayReady

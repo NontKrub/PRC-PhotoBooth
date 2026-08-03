@@ -4,6 +4,8 @@ struct ReviewView: View {
     let photoIndex: Int
     @Environment(iPadViewModel.self) private var vm
 
+    private var isThai: Bool { vm.selectedLanguage == .thai }
+
     var thumbnail: CGImage? {
         guard let data = vm.stateMachine.keptShots[photoIndex],
               let src = CGImageSourceCreateWithData(data as CFData, nil)
@@ -18,10 +20,12 @@ struct ReviewView: View {
             VStack(spacing: 0) {
                 // Header
                 VStack(spacing: 6) {
-                    Text("How did it look?")
+                    Text(isThai ? "เป็นอย่างไรบ้าง?" : "How did it look?")
                         .font(.system(size: 32, weight: .bold, design: .rounded))
                         .foregroundStyle(.white)
-                    Text("Photo \(photoIndex + 1) of \(vm.eventConfig.photoCount)")
+                    Text(isThai
+                         ? "ภาพที่ \(photoIndex + 1) จาก \(vm.eventConfig.photoCount)"
+                         : "Photo \(photoIndex + 1) of \(vm.eventConfig.photoCount)")
                         .font(.system(size: 14, weight: .medium))
                         .foregroundStyle(.white.opacity(0.4))
                         .tracking(0.5)
@@ -56,7 +60,7 @@ struct ReviewView: View {
                         HStack(spacing: 10) {
                             Image(systemName: "arrow.counterclockwise")
                                 .font(.system(size: 16, weight: .semibold))
-                            Text("Retake")
+                            Text(isThai ? "ถ่ายใหม่" : "Retake")
                                 .font(.system(size: 17, weight: .semibold))
                         }
                         .foregroundStyle(.white.opacity(0.8))
@@ -71,7 +75,9 @@ struct ReviewView: View {
                         HStack(spacing: 10) {
                             Image(systemName: "checkmark")
                                 .font(.system(size: 16, weight: .bold))
-                            Text(photoIndex + 1 < vm.eventConfig.photoCount ? "Keep & next" : "Keep & finish")
+                        Text(isThai
+                             ? (photoIndex + 1 < vm.eventConfig.photoCount ? "เก็บและถัดไป" : "เก็บและเสร็จสิ้น")
+                             : (photoIndex + 1 < vm.eventConfig.photoCount ? "Keep & next" : "Keep & finish"))
                                 .font(.system(size: 17, weight: .bold))
                         }
                         .foregroundStyle(.black)

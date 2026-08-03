@@ -10,6 +10,8 @@ struct iPadContentView: View {
             switch vm.stateMachine.phase {
             case .idle:
                 IdleView()
+            case .selectingExperience:
+                ExperienceSelectionView()
             case .readyToStart:
                 StartView()
             case .countdown(let idx, let secs):
@@ -35,6 +37,7 @@ struct iPadContentView: View {
         }
         .statusBarHidden(true)
         .persistentSystemOverlays(.hidden)
+        .environment(\.locale, Locale(identifier: vm.selectedLanguage.localeIdentifier))
     }
 
     var processingIndicator: some View {
@@ -42,7 +45,7 @@ struct iPadContentView: View {
             ProgressView()
                 .scaleEffect(2)
                 .tint(.white)
-            Text("Processing…")
+            Text(vm.selectedLanguage == .thai ? "กำลังประมวลผล…" : "Processing…")
                 .foregroundStyle(.white)
                 .font(.title2)
         }
@@ -50,23 +53,27 @@ struct iPadContentView: View {
 
     private var previewTransportMenu: some View {
         Menu {
-            Section("Preview connection") {
+            Section(vm.selectedLanguage == .thai ? "การเชื่อมต่อภาพตัวอย่าง" : "Preview connection") {
                 Button {
                     vm.selectPreviewTransport(.wireless)
                 } label: {
-                    Label("Wireless", systemImage: vm.previewTransport == .wireless ? "checkmark" : "wifi")
+                    Label(vm.selectedLanguage == .thai ? "ไร้สาย" : "Wireless", systemImage: vm.previewTransport == .wireless ? "checkmark" : "wifi")
                 }
 
                 Button {
                     vm.selectPreviewTransport(.usb)
                 } label: {
-                    Label(vm.usbPreviewConnected ? "USB cable" : "USB cable (not connected)",
+                    Label(vm.usbPreviewConnected
+                          ? (vm.selectedLanguage == .thai ? "สาย USB" : "USB cable")
+                          : (vm.selectedLanguage == .thai ? "สาย USB (ยังไม่เชื่อมต่อ)" : "USB cable (not connected)"),
                           systemImage: vm.previewTransport == .usb ? "checkmark" : "cable.connector")
                 }
             }
 
             Section {
-                Text("Controls remain connected over Wi-Fi. USB carries the live preview.")
+                Text(vm.selectedLanguage == .thai
+                     ? "การควบคุมยังเชื่อมต่อผ่าน Wi-Fi สาย USB ใช้สำหรับภาพตัวอย่างสด"
+                     : "Controls remain connected over Wi-Fi. USB carries the live preview.")
             }
         } label: {
             Image(systemName: vm.previewTransport == .usb ? "cable.connector" : "wifi")
@@ -76,6 +83,6 @@ struct iPadContentView: View {
                 .background(.black.opacity(0.4), in: Circle())
                 .overlay(Circle().strokeBorder(.white.opacity(0.2), lineWidth: 1))
         }
-        .accessibilityLabel("Preview connection")
+        .accessibilityLabel(vm.selectedLanguage == .thai ? "การเชื่อมต่อภาพตัวอย่าง" : "Preview connection")
     }
 }

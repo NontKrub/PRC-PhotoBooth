@@ -9,6 +9,7 @@ struct MacContentView: View {
     @State private var pendingTab: Int? = nil
     @State private var isAdminUnlocked = false
     @State private var showCloudSSHSetup = false
+    @AppStorage("operatorLanguage") private var operatorLanguage = OperatorLanguage.system.rawValue
 
     var body: some View {
         TabView(selection: $selectedTab) {
@@ -29,6 +30,7 @@ struct MacContentView: View {
                 .tag(3)
         }
         .frame(minWidth: 940, minHeight: 640)
+        .environment(\.locale, operatorLocale)
         .onChange(of: selectedTab) { old, new in
             if new == 2 || new == 3 {
                 guard !isAdminUnlocked else { return }
@@ -77,6 +79,14 @@ struct MacContentView: View {
         }
     }
 
+    private var operatorLocale: Locale {
+        switch OperatorLanguage(rawValue: operatorLanguage) ?? .system {
+        case .system: return .autoupdatingCurrent
+        case .english: return Locale(identifier: "en")
+        case .thai: return Locale(identifier: "th")
+        }
+    }
+
     private func beginPINReset() {
         clearPIN()
         isAdminUnlocked = false
@@ -100,6 +110,7 @@ struct SettingsView: View {
     @AppStorage("cloudSSHHost")          private var sshHost        = ""
     @AppStorage("cloudRemotePath")       private var remotePath     = CloudUploadConfiguration.defaultRemoteBasePath
     @AppStorage("publicBaseURL")         private var publicBaseURL  = ""
+    @AppStorage("operatorLanguage")      private var operatorLanguage = OperatorLanguage.system.rawValue
     @AppStorage(BoothCoordinator.eventFolderPathKey) private var eventFolderPath = ""
     @State private var selectedScreenIndex = 0
     @State private var showCloudSSHSetup = false
@@ -107,6 +118,7 @@ struct SettingsView: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 24) {
+                operatorLanguageSection
                 cameraFeatureStatusSection
                 ipadSection
                 externalDisplaySection
@@ -129,6 +141,17 @@ struct SettingsView: View {
         .task {
             coordinator.printer.refreshPrinters()
             if !skipDialog { autoPrint = false }
+        }
+    }
+
+    private var operatorLanguageSection: some View {
+        GroupBox("Application Language") {
+            Picker("Language", selection: $operatorLanguage) {
+                Text("System").tag(OperatorLanguage.system.rawValue)
+                Text("English").tag(OperatorLanguage.english.rawValue)
+                Text("ไทย").tag(OperatorLanguage.thai.rawValue)
+            }
+            .pickerStyle(.segmented)
         }
     }
 

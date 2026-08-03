@@ -43,7 +43,7 @@ struct IdleView: View {
                             .tracking(-2)
                             .minimumScaleFactor(0.4)
                             .lineLimit(3)
-                        Text("Created by nont")
+                        Text(vm.selectedLanguage == .thai ? "จัดทำโดย nont" : "Created by nont")
                             .font(.system(size: 18, weight: .medium))
                             .foregroundStyle(.white.opacity(0.55))
                             .tracking(0.5)
@@ -72,7 +72,7 @@ struct IdleView: View {
                             .font(.system(size: 20, weight: .medium))
                             .foregroundStyle(.white.opacity(0.75))
                     }
-                    Text("Tap anywhere to begin")
+                    Text(vm.selectedLanguage == .thai ? "แตะที่ใดก็ได้เพื่อเริ่ม" : "Tap anywhere to begin")
                         .font(.system(size: 15, weight: .medium))
                         .foregroundStyle(.white.opacity(0.45))
                         .tracking(0.5)
@@ -107,9 +107,9 @@ struct IdleView: View {
 
     var badgeLabel: String {
         switch vm.multipeer.connectionState {
-        case .connected(let name): return "Connected to \(name)"
-        case .connecting:          return "Connecting…"
-        case .disconnected:        return "Waiting for operator"
+        case .connected(let name): return vm.selectedLanguage == .thai ? "เชื่อมต่อกับ \(name)" : "Connected to \(name)"
+        case .connecting:          return vm.selectedLanguage == .thai ? "กำลังเชื่อมต่อ…" : "Connecting…"
+        case .disconnected:        return vm.selectedLanguage == .thai ? "กำลังรอผู้ควบคุม" : "Waiting for operator"
         }
     }
 }

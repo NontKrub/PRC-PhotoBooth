@@ -17,6 +17,10 @@ final class BoothPreflightService {
 
         checked.append(result(.activeEvent, "Active event", context.event == nil ? "No event is active." : "Active event: \(context.event!.eventName).", context.event == nil ? .failed : .passed, .required, now))
         checked.append(eventLayoutResult(context.event, now: now))
+        checked.append(result(.eventExperience, "Event experience", context.eventExperienceDetail, context.eventExperienceStatus, .required, now))
+        checked.append(result(.templateAssets, "Template assets", context.templateAssetsDetail, context.templateAssetsStatus, .recommended, now))
+        checked.append(result(.filterPipeline, "Filter pipeline", context.filterPipelineDetail, context.filterPipelineStatus, .required, now))
+        checked.append(result(.galleryStorage, "Gallery storage", context.galleryStorageDetail, context.galleryStorageStatus, .recommended, now))
         checked.append(result(.cameraPermission, "Camera permission", context.cameraPermissionGranted ? "Camera permission is granted." : "Camera permission is denied or restricted.", context.cameraPermissionGranted ? .passed : .failed, .required, now))
         checked.append(result(.cameraConnection, "Camera connection", context.cameraConnected ? "Selected camera is ready." : "Selected camera is unavailable.", context.cameraConnected ? .passed : .failed, .required, now))
         checked.append(result(.cameraTestCapture, "Camera test capture", "Run Full Preflight to test the shutter.", .notRun, .recommended, now))

@@ -2,14 +2,15 @@ import Foundation
 
 enum SessionJobKind: String, Codable, Sendable, CaseIterable {
     case renderStrip
-    case renderGIF
     case registerDownload
+    case updateGallery
+    case renderGIF
     case cloudUpload
     case autoPrint
 
     var isOptional: Bool {
         switch self {
-        case .renderGIF, .cloudUpload, .autoPrint: return true
+        case .updateGallery, .renderGIF, .cloudUpload, .autoPrint: return true
         case .renderStrip, .registerDownload: return false
         }
     }
@@ -54,7 +55,7 @@ struct SessionJobRetryPolicy {
     static func maximumAutomaticAttempts(for kind: SessionJobKind) -> Int {
         switch kind {
         case .renderStrip, .renderGIF: return 2
-        case .registerDownload, .autoPrint: return 3
+        case .registerDownload, .updateGallery, .autoPrint: return 3
         case .cloudUpload: return 10
         }
     }

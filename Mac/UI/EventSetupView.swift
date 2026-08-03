@@ -139,6 +139,15 @@ struct EventDetailView: View {
                     .disabled(event.slots.isEmpty && event.framePNGPath == nil)
             }
 
+            Section("Guest Experience") {
+                NavigationLink("Edit Templates, Filters & Gallery") {
+                    EventExperienceEditorView(event: event)
+                }
+                Text("Version 1.2 options are stored separately from the legacy event layout.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
             Section("Camera") {
                 Picker("Rotation", selection: $event.cameraRotationDegrees) {
                     Text("0° (default)").tag(0)

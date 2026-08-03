@@ -6,6 +6,8 @@ struct FinishAndQRView: View {
     @Environment(iPadViewModel.self) private var vm
     @State private var qrImage: CGImage?
 
+    private var isThai: Bool { vm.selectedLanguage == .thai }
+
     var body: some View {
         ZStack {
             Color.black.ignoresSafeArea()
@@ -22,11 +24,11 @@ struct FinishAndQRView: View {
 
                 // Headline
                 VStack(spacing: 6) {
-                    Text("All done!")
+                    Text(isThai ? "เสร็จเรียบร้อย!" : "All done!")
                         .font(.system(size: 52, weight: .black, design: .rounded))
                         .foregroundStyle(.white)
                         .tracking(-1)
-                    Text("Scan to get your photos")
+                    Text(isThai ? "สแกนเพื่อรับรูปภาพของคุณ" : "Scan to get your photos")
                         .font(.system(size: 16, weight: .medium))
                         .foregroundStyle(.white.opacity(0.4))
                         .tracking(0.3)
@@ -66,7 +68,7 @@ struct FinishAndQRView: View {
 
                 // Next Session button
                 Button(action: { vm.customerDone() }) {
-                    Text("Next session")
+                    Text(isThai ? "เซสชันถัดไป" : "Next session")
                         .font(.system(size: 17, weight: .bold))
                         .foregroundStyle(.black)
                         .frame(width: 220, height: 58)

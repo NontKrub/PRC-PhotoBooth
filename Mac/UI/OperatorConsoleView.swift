@@ -62,6 +62,12 @@ struct OperatorConsoleView: View {
             Color.black
             if !coordinator.cameraPermissionGranted {
                 permissionDeniedOverlay
+            } else if coordinator.capture.demoMode,
+                      let image = coordinator.capture.demoPreviewImage {
+                CapturedImagePreview(cgImage: image)
+                    .overlay {
+                        if showGrid { GridOverlayView() }
+                    }
             } else if coordinator.cameraSourceKind == .dslr {
                 if let image = coordinator.capture.dslr.latestPreviewImage {
                     CapturedImagePreview(cgImage: image)
@@ -581,7 +587,7 @@ struct OperatorConsoleView: View {
 
     var phaseColor: Color {
         switch sm.phase {
-        case .idle, .readyToStart:  return .primary
+        case .idle, .selectingExperience, .readyToStart:  return .primary
         case .countdown:            return .orange
         case .captured:             return .blue
         case .review:               return .purple
