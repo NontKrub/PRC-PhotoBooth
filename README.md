@@ -205,4 +205,6 @@ run.sh     local build-and-launch helper for Mac plus an iPad simulator
 
 ## License
 
-No license file is currently included. Add a license before distributing the project or accepting external contributions.
+This project is licensed under the Apache License, Version 2.0. See [LICENSE](LICENSE).
+
+Bundled logos, app icons, photographs, and third-party materials may be subject to separate rights.
