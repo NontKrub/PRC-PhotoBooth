@@ -205,6 +205,8 @@ run.sh     local build-and-launch helper for Mac plus an iPad simulator
 
 ## License
 
-This project is licensed under the Apache License, Version 2.0. See [LICENSE](LICENSE).
+PRC PhotoBooth is licensed under the [Apache License 2.0](LICENSE).
+
+Copyright 2026 Thanawat Suesuthikul.
 
 Bundled logos, app icons, photographs, and third-party materials may be subject to separate rights.
