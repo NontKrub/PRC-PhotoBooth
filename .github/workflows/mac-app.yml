@@ -19,12 +19,15 @@ jobs:
 
     steps:
       - name: Check out source
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Install XcodeGen
         run: |
+          if brew tap | grep -Fxq 'aws/tap'; then
+            brew untap aws/tap
+          fi
           if ! command -v xcodegen >/dev/null 2>&1; then
-            brew install xcodegen
+            brew install --formula xcodegen
           fi
 
       - name: Show toolchain
@@ -69,7 +72,7 @@ jobs:
           echo "archive_path=$archive_path" >> "$GITHUB_OUTPUT"
 
       - name: Upload macOS app artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: PRC-PhotoBooth-Mac-${{ github.event.pull_request.number || github.run_number }}
           path: ${{ steps.package.outputs.archive_path }}
@@ -91,12 +94,15 @@ jobs:
 
     steps:
       - name: Check out source
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Install XcodeGen
         run: |
+          if brew tap | grep -Fxq 'aws/tap'; then
+            brew untap aws/tap
+          fi
           if ! command -v xcodegen >/dev/null 2>&1; then
-            brew install xcodegen
+            brew install --formula xcodegen
           fi
 
       - name: Show toolchain
@@ -131,7 +137,7 @@ jobs:
           echo "archive_path=$archive_path" >> "$GITHUB_OUTPUT"
 
       - name: Upload iPad app artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: PRC-PhotoBooth-iPad-Simulator-${{ github.event.pull_request.number || github.run_number }}
           path: ${{ steps.package.outputs.archive_path }}
