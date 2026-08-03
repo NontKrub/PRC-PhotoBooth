@@ -69,7 +69,8 @@
             "value": "%1$@ รูป · นับถอยหลัง %2$@ วินาที"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "%@ sessions": {
       "localizations": {
@@ -169,7 +170,8 @@
             "value": "กำลังใช้งาน"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Active Event": {
       "localizations": {
@@ -179,7 +181,8 @@
             "value": "งานที่ใช้งานอยู่"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Active iPad": {
       "localizations": {
@@ -189,7 +192,8 @@
             "value": "iPad ที่ใช้งานอยู่"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Add Slot": {
       "localizations": {
@@ -199,7 +203,8 @@
             "value": "เพิ่มช่องภาพ"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Add Template": {
       "localizations": {
@@ -209,7 +214,8 @@
             "value": "เพิ่มเทมเพลต"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Add this public key to the server user’s ~/.ssh/authorized_keys, then run the connection test again.": {
       "localizations": {
@@ -229,7 +235,8 @@
             "value": "การเข้าถึงผู้ดูแล"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "All": {
       "localizations": {
@@ -269,7 +276,8 @@
             "value": "อนุญาตให้ผู้เข้าร่วมเลือกฟิลเตอร์"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Allow language selection": {
       "localizations": {
@@ -279,7 +287,8 @@
             "value": "อนุญาตให้ผู้เข้าร่วมเลือกภาษา"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Allow template selection": {
       "localizations": {
@@ -289,7 +298,8 @@
             "value": "อนุญาตให้ผู้เข้าร่วมเลือกเทมเพลต"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Analytics": {
       "localizations": {
@@ -299,7 +309,8 @@
             "value": "การวิเคราะห์"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Aperture": {
       "localizations": {
@@ -319,7 +330,8 @@
             "value": "ภาษาของแอปพลิเคชัน"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Apply to Camera": {
       "localizations": {
@@ -329,7 +341,8 @@
             "value": "นำไปใช้กับกล้อง"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Approval required": {
       "localizations": {
@@ -349,7 +362,8 @@
             "value": "อนุมัติ"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Approve All Pending": {
       "localizations": {
@@ -359,7 +373,8 @@
             "value": "อนุมัติรายการที่รอทั้งหมด"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Authorize this Mac on the server": {
       "localizations": {
@@ -369,7 +384,8 @@
             "value": "อนุญาต Mac เครื่องนี้บนเซิร์ฟเวอร์"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Auto": {
       "localizations": {
@@ -389,7 +405,8 @@
             "value": "โหมดถ่ายภาพอัตโนมัติ"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Automatic": {
       "localizations": {
@@ -409,7 +426,8 @@
             "value": "พิมพ์อัตโนมัติ"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Avg Duration": {
       "localizations": {
@@ -419,7 +437,8 @@
             "value": "ระยะเวลาเฉลี่ย"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Avg Retakes": {
       "localizations": {
@@ -429,7 +448,8 @@
             "value": "จำนวนถ่ายซ้ำเฉลี่ย"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Booth Not Ready": {
       "localizations": {
@@ -439,7 +459,8 @@
             "value": "บูธยังไม่พร้อม"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Booth Ready": {
       "localizations": {
@@ -449,7 +470,8 @@
             "value": "บูธพร้อมแล้ว"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Busiest Hours": {
       "localizations": {
@@ -479,7 +501,8 @@
             "value": "ตามฟิลเตอร์"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "By Language": {
       "localizations": {
@@ -489,7 +512,8 @@
             "value": "ตามภาษา"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "By Template": {
       "localizations": {
@@ -499,7 +523,8 @@
             "value": "ตามเทมเพลต"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Cable (USB)": {
       "localizations": {
@@ -509,7 +534,8 @@
             "value": "สาย (USB)"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Camera": {
       "localizations": {
@@ -519,7 +545,8 @@
             "value": "กล้อง"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Camera Access Required": {
       "localizations": {
@@ -539,7 +566,8 @@
             "value": "กล้องเท่านั้น"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Camera Settings": {
       "localizations": {
@@ -549,7 +577,8 @@
             "value": "การตั้งค่ากล้อง"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Camera Source": {
       "localizations": {
@@ -559,7 +588,8 @@
             "value": "แหล่งกล้อง"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Camera error: %@": {
       "localizations": {
@@ -569,7 +599,8 @@
             "value": "ข้อผิดพลาดของกล้อง: %1$@"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Camera not running": {
       "localizations": {
@@ -589,7 +620,8 @@
             "value": "ต้องอนุญาตกล้อง"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Cancel": {
       "localizations": {
@@ -599,7 +631,8 @@
             "value": "ยกเลิก"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Canvas": {
       "localizations": {
@@ -619,7 +652,8 @@
             "value": "ขนาดผืนงาน"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Capture": {
       "localizations": {
@@ -629,7 +663,8 @@
             "value": "ถ่ายภาพ"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Capturing...": {
       "localizations": {
@@ -639,7 +674,8 @@
             "value": "กำลังถ่ายภาพ…"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Checking Booth…": {
       "localizations": {
@@ -649,7 +685,8 @@
             "value": "กำลังตรวจสอบบูธ…"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Checking…": {
       "localizations": {
@@ -659,7 +696,8 @@
             "value": "กำลังตรวจสอบ…"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Choose Event Folder…": {
       "localizations": {
@@ -669,7 +707,8 @@
             "value": "เลือกโฟลเดอร์งาน…"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Choose Folder": {
       "localizations": {
@@ -679,7 +718,8 @@
             "value": "เลือกโฟลเดอร์"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Choose a 4-digit PIN to protect operator settings.": {
       "localizations": {
@@ -689,7 +729,8 @@
             "value": "เลือก PIN 4 หลักเพื่อปกป้องการตั้งค่าผู้ดูแล"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Choose your experience": {
       "localizations": {
@@ -709,7 +750,8 @@
             "value": "ล้างการเลือก"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Click anywhere to begin": {
       "localizations": {
@@ -719,7 +761,8 @@
             "value": "คลิกที่ใดก็ได้เพื่อเริ่ม"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Close": {
       "localizations": {
@@ -729,7 +772,8 @@
             "value": "ปิด"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Cloud SSH Setup…": {
       "localizations": {
@@ -739,7 +783,8 @@
             "value": "ตั้งค่า Cloud SSH…"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Cloud SSH setup": {
       "localizations": {
@@ -759,7 +804,8 @@
             "value": "อัปโหลดคลาวด์ (Cloudflare Tunnel)"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Cloud upload pending": {
       "localizations": {
@@ -779,7 +825,8 @@
             "value": "เสร็จแล้ว"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Configured printer unavailable: %@": {
       "localizations": {
@@ -789,7 +836,8 @@
             "value": "เครื่องพิมพ์ที่ตั้งค่าไม่พร้อมใช้งาน: %1$@"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Configured printer: %@": {
       "localizations": {
@@ -799,7 +847,8 @@
             "value": "เครื่องพิมพ์ที่ตั้งค่า: %1$@"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Confirm PIN": {
       "localizations": {
@@ -809,7 +858,8 @@
             "value": "ยืนยัน PIN"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Connect": {
       "localizations": {
@@ -819,7 +869,8 @@
             "value": "เชื่อมต่อ"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Connect Camera": {
       "localizations": {
@@ -829,7 +880,8 @@
             "value": "เชื่อมต่อกล้อง"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Connect DSLR camera first": {
       "localizations": {
@@ -839,7 +891,8 @@
             "value": "เชื่อมต่อกล้อง DSLR ก่อน"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Connect a second display to use it as a customer-facing viewer instead of an iPad.": {
       "localizations": {
@@ -859,7 +912,8 @@
             "value": "เชื่อมต่อ iPad หรือเปิดใช้งานหน้าจอภายนอก"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Connect an iPad or activate the external viewer before starting a session.": {
       "localizations": {
@@ -869,7 +923,8 @@
             "value": "เชื่อมต่อ iPad หรือเปิดหน้าจอภายนอกก่อนเริ่มเซสชัน"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Connect camera via USB and set USB mode to PC Remote.": {
       "localizations": {
@@ -889,7 +944,8 @@
             "value": "เชื่อมต่อกล้องเพื่อเริ่มภาพสด Sony PTP"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Connecting to iPad…": {
       "localizations": {
@@ -899,7 +955,8 @@
             "value": "กำลังเชื่อมต่อ iPad…"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Connecting…": {
       "localizations": {
@@ -919,7 +976,8 @@
             "value": "รายละเอียดการเชื่อมต่อ"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Console": {
       "localizations": {
@@ -929,7 +987,8 @@
             "value": "คอนโซล"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Cool": {
       "localizations": {
@@ -939,7 +998,8 @@
             "value": "โทนเย็น"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Copy": {
       "localizations": {
@@ -949,7 +1009,8 @@
             "value": "คัดลอก"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Copy Public Key": {
       "localizations": {
@@ -959,7 +1020,8 @@
             "value": "คัดลอกคีย์สาธารณะ"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Copy URL": {
       "localizations": {
@@ -969,7 +1031,8 @@
             "value": "คัดลอก URL"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Create": {
       "localizations": {
@@ -979,7 +1042,8 @@
             "value": "สร้าง"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Create Admin PIN": {
       "localizations": {
@@ -989,7 +1053,8 @@
             "value": "สร้าง PIN ผู้ดูแล"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Create an event with + or select one from the list.": {
       "localizations": {
@@ -1009,7 +1074,8 @@
             "value": "บัตรเครดิต"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "DSLR Control Active": {
       "localizations": {
@@ -1019,7 +1085,8 @@
             "value": "การควบคุม DSLR ทำงานอยู่"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "DSLR Live Preview": {
       "localizations": {
@@ -1029,7 +1096,8 @@
             "value": "ภาพตัวอย่างสด DSLR"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "DSLR Standby": {
       "localizations": {
@@ -1039,7 +1107,8 @@
             "value": "DSLR พร้อมใช้งาน"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Date": {
       "localizations": {
@@ -1049,7 +1118,8 @@
             "value": "วันที่"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Date,Time,Event,Photos,Duration (s),Strip,GIF,Template,Filter,Customer Language,Gallery Status": {
       "localizations": {
@@ -1059,7 +1129,8 @@
             "value": "Date,Time,Event,Photos,Duration (s),Strip,GIF,Template,Filter,Customer Language,Gallery Status"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Default": {
       "localizations": {
@@ -1079,7 +1150,8 @@
             "value": "ภาษาลูกค้าเริ่มต้น"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Default filter": {
       "localizations": {
@@ -1089,7 +1161,8 @@
             "value": "ฟิลเตอร์เริ่มต้น"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Delete": {
       "localizations": {
@@ -1099,7 +1172,8 @@
             "value": "ลบ"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Disable": {
       "localizations": {
@@ -1109,7 +1183,8 @@
             "value": "ปิดใช้งาน"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Disabled": {
       "localizations": {
@@ -1129,7 +1204,8 @@
             "value": "ละทิ้ง"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Discard Session": {
       "localizations": {
@@ -1139,7 +1215,8 @@
             "value": "ละทิ้งเซสชัน"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Discard unfinished session?": {
       "localizations": {
@@ -1149,7 +1226,8 @@
             "value": "ละทิ้งเซสชันที่ยังไม่เสร็จหรือไม่?"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Disconnect": {
       "localizations": {
@@ -1159,7 +1237,8 @@
             "value": "ตัดการเชื่อมต่อ"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Done": {
       "localizations": {
@@ -1169,7 +1248,8 @@
             "value": "เสร็จสิ้น"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Download Server": {
       "localizations": {
@@ -1179,7 +1259,8 @@
             "value": "เซิร์ฟเวอร์ดาวน์โหลด"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Download ready": {
       "localizations": {
@@ -1189,7 +1270,8 @@
             "value": "ดาวน์โหลดพร้อมแล้ว"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Duplicate": {
       "localizations": {
@@ -1199,7 +1281,8 @@
             "value": "ทำสำเนา"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "EV": {
       "localizations": {
@@ -1219,7 +1302,8 @@
             "value": "แก้ไข"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Edit Photo Slots…": {
       "localizations": {
@@ -1229,7 +1313,8 @@
             "value": "แก้ไขช่องภาพ…"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Edit Slots…": {
       "localizations": {
@@ -1239,7 +1324,8 @@
             "value": "แก้ไขช่อง…"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Edit Templates, Filters & Gallery": {
       "localizations": {
@@ -1249,7 +1335,8 @@
             "value": "แก้ไขเทมเพลต ฟิลเตอร์ และแกลเลอรี"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Enable": {
       "localizations": {
@@ -1259,7 +1346,8 @@
             "value": "เปิดใช้งาน"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Enabled": {
       "localizations": {
@@ -1269,7 +1357,8 @@
             "value": "เปิดใช้งานแล้ว"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Enabled template slots are valid.": {
       "localizations": {
@@ -1279,7 +1368,8 @@
             "value": "ช่องของเทมเพลตที่เปิดใช้งานถูกต้อง"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "English": {
       "localizations": {
@@ -1299,7 +1389,8 @@
             "value": "ชื่อภาษาอังกฤษ"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "English prompt": {
       "localizations": {
@@ -1309,7 +1400,8 @@
             "value": "พรอมต์ภาษาอังกฤษ"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "English subtitle": {
       "localizations": {
@@ -1319,7 +1411,8 @@
             "value": "คำบรรยายภาษาอังกฤษ"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Enter the same PIN again.": {
       "localizations": {
@@ -1329,7 +1422,8 @@
             "value": "กรอก PIN เดิมอีกครั้ง"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Enter your 4-digit PIN to continue.": {
       "localizations": {
@@ -1339,7 +1433,8 @@
             "value": "กรอก PIN 4 หลักเพื่อดำเนินการต่อ"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Error": {
       "localizations": {
@@ -1349,7 +1444,8 @@
             "value": "ข้อผิดพลาด"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Event": {
       "localizations": {
@@ -1359,7 +1455,8 @@
             "value": "งาน"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Event Gallery": {
       "localizations": {
@@ -1369,7 +1466,8 @@
             "value": "แกลเลอรีงาน"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Event Info": {
       "localizations": {
@@ -1379,7 +1477,8 @@
             "value": "ข้อมูลงาน"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Event Name": {
       "localizations": {
@@ -1389,7 +1488,8 @@
             "value": "ชื่องาน"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Event Output": {
       "localizations": {
@@ -1399,7 +1499,8 @@
             "value": "ผลลัพธ์งาน"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Event Setup": {
       "localizations": {
@@ -1409,7 +1510,8 @@
             "value": "ตั้งค่างาน"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Event experience could not load: %@": {
       "localizations": {
@@ -1419,7 +1521,8 @@
             "value": "ไม่สามารถโหลดประสบการณ์งาน: %1$@"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Event experience is still loading.": {
       "localizations": {
@@ -1429,7 +1532,8 @@
             "value": "ประสบการณ์งานยังโหลดไม่เสร็จ"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Event folder": {
       "localizations": {
@@ -1439,7 +1543,8 @@
             "value": "โฟลเดอร์งาน"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Events (%@)": {
       "localizations": {
@@ -1449,7 +1554,8 @@
             "value": "งาน (%1$@)"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Events Run": {
       "localizations": {
@@ -1459,7 +1565,8 @@
             "value": "จำนวนงานที่ทำ"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Experience breakdown": {
       "localizations": {
@@ -1479,7 +1586,8 @@
             "value": "ส่งออก CSV"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "External Monitor Viewer": {
       "localizations": {
@@ -1489,7 +1597,8 @@
             "value": "หน้าจอภายนอกสำหรับผู้เข้าร่วม"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Failed": {
       "localizations": {
@@ -1499,7 +1608,8 @@
             "value": "ล้มเหลว"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Failed: %@": {
       "localizations": {
@@ -1509,7 +1619,8 @@
             "value": "ล้มเหลว: %1$@"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Feature Status": {
       "localizations": {
@@ -1519,7 +1630,8 @@
             "value": "สถานะฟีเจอร์"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Filter": {
       "localizations": {
@@ -1539,7 +1651,8 @@
             "value": "ฟิลเตอร์"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Flash": {
       "localizations": {
@@ -1559,7 +1672,8 @@
             "value": "เฟรม"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Frame Template": {
       "localizations": {
@@ -1569,7 +1683,8 @@
             "value": "เทมเพลตเฟรม"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "From": {
       "localizations": {
@@ -1579,7 +1694,8 @@
             "value": "ตั้งแต่"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "GIF processing": {
       "localizations": {
@@ -1599,7 +1715,8 @@
             "value": "แกลเลอรี"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Gallery Moderation": {
       "localizations": {
@@ -1609,7 +1726,8 @@
             "value": "ตรวจสอบแกลเลอรี"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Gallery URL unavailable: no LAN address": {
       "localizations": {
@@ -1629,7 +1747,8 @@
             "value": "ปิดใช้งานแกลเลอรี"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Gallery language": {
       "localizations": {
@@ -1639,7 +1758,8 @@
             "value": "ภาษาแกลเลอรี"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Gallery storage is writable.": {
       "localizations": {
@@ -1649,7 +1769,8 @@
             "value": "พื้นที่จัดเก็บแกลเลอรีเขียนได้"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Gallery storage warning: %@": {
       "localizations": {
@@ -1659,7 +1780,8 @@
             "value": "คำเตือนพื้นที่จัดเก็บแกลเลอรี: %1$@"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Gallery title (English)": {
       "localizations": {
@@ -1669,7 +1791,8 @@
             "value": "ชื่อแกลเลอรี (ภาษาอังกฤษ)"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Gallery title (Thai)": {
       "localizations": {
@@ -1679,7 +1802,8 @@
             "value": "ชื่อแกลเลอรี (ภาษาไทย)"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Grant camera access in System Settings → Privacy & Security → Camera.": {
       "localizations": {
@@ -1699,7 +1823,8 @@
             "value": "แสดงเส้นตาราง"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Guest Experience": {
       "localizations": {
@@ -1709,7 +1834,8 @@
             "value": "ประสบการณ์ผู้เข้าร่วม"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Guest Selection": {
       "localizations": {
@@ -1719,7 +1845,8 @@
             "value": "การเลือกของผู้เข้าร่วม"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Height": {
       "localizations": {
@@ -1729,7 +1856,8 @@
             "value": "ความสูง"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Hide": {
       "localizations": {
@@ -1739,7 +1867,8 @@
             "value": "ซ่อน"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Hide Selected": {
       "localizations": {
@@ -1749,7 +1878,8 @@
             "value": "ซ่อนรายการที่เลือก"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Hide Viewer": {
       "localizations": {
@@ -1759,7 +1889,8 @@
             "value": "ซ่อนหน้าจอผู้ชม"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "High Contrast": {
       "localizations": {
@@ -1769,7 +1900,8 @@
             "value": "คอนทราสต์สูง"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Hour": {
       "localizations": {
@@ -1779,7 +1911,8 @@
             "value": "ชั่วโมง"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "How did it look?": {
       "localizations": {
@@ -1819,7 +1952,8 @@
             "value": "Image Capture"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Import Image…": {
       "localizations": {
@@ -1829,7 +1963,8 @@
             "value": "นำเข้ารูปภาพ…"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Import PNG…": {
       "localizations": {
@@ -1839,7 +1974,8 @@
             "value": "นำเข้า PNG…"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Inactive": {
       "localizations": {
@@ -1849,7 +1985,8 @@
             "value": "ไม่ได้ใช้งาน"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Incorrect PIN. Try again.": {
       "localizations": {
@@ -1859,7 +1996,8 @@
             "value": "PIN ไม่ถูกต้อง ลองอีกครั้ง"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Individual download pages will remain available.": {
       "localizations": {
@@ -1889,7 +2027,8 @@
             "value": "เก็บและเสร็จสิ้น"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Keep & next": {
       "localizations": {
@@ -1899,7 +2038,8 @@
             "value": "เก็บและถัดไป"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "LAN URL: %@": {
       "localizations": {
@@ -1919,7 +2059,8 @@
             "value": "ภาษา"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Last Capture Preview": {
       "localizations": {
@@ -1929,7 +2070,8 @@
             "value": "ภาพตัวอย่างการถ่ายล่าสุด"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Last Run": {
       "localizations": {
@@ -1939,7 +2081,8 @@
             "value": "ทำงานล่าสุด"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Last checked ": {
       "localizations": {
@@ -1959,7 +2102,8 @@
             "value": "เค้าโครง"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Legacy": {
       "localizations": {
@@ -1969,7 +2113,8 @@
             "value": "เดิม"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Live Preview": {
       "localizations": {
@@ -1979,7 +2124,8 @@
             "value": "ภาพตัวอย่างสด"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Live preview device: %@": {
       "localizations": {
@@ -2019,7 +2165,8 @@
             "value": "กำลังโหลด"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Loading experience…": {
       "localizations": {
@@ -2029,7 +2176,8 @@
             "value": "กำลังโหลดประสบการณ์…"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Loading gallery…": {
       "localizations": {
@@ -2039,7 +2187,8 @@
             "value": "กำลังโหลดแกลเลอรี…"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Local Download Server": {
       "localizations": {
@@ -2049,7 +2198,8 @@
             "value": "เซิร์ฟเวอร์ดาวน์โหลดภายในเครื่อง"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Local network only. Regenerating the token invalidates old gallery links.": {
       "localizations": {
@@ -2069,7 +2219,8 @@
             "value": "Mac: ภาพตัวอย่างผ่านสายพร้อมแล้ว"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Mac: cable preview service unavailable": {
       "localizations": {
@@ -2079,7 +2230,8 @@
             "value": "Mac: บริการภาพตัวอย่างผ่านสายไม่พร้อมใช้งาน"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Managed by Cloud SSH Setup in ~/.ssh/config, using Cloudflare Access.": {
       "localizations": {
@@ -2099,7 +2251,8 @@
             "value": "กลับด้านภาพกล้อง"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Mirrors the idle/countdown/review/finish screens the iPad shows, driven by this Mac directly.": {
       "localizations": {
@@ -2119,7 +2272,8 @@
             "value": "โหมด"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Monitor": {
       "localizations": {
@@ -2129,7 +2283,8 @@
             "value": "จอภาพ"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Monochrome": {
       "localizations": {
@@ -2139,7 +2294,8 @@
             "value": "ขาวดำ"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Move Down": {
       "localizations": {
@@ -2149,7 +2305,8 @@
             "value": "เลื่อนลง"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Move Up": {
       "localizations": {
@@ -2159,7 +2316,8 @@
             "value": "เลื่อนขึ้น"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Name": {
       "localizations": {
@@ -2169,7 +2327,8 @@
             "value": "ชื่อ"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Names": {
       "localizations": {
@@ -2179,7 +2338,8 @@
             "value": "ชื่อ"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "New Event": {
       "localizations": {
@@ -2199,7 +2359,8 @@
             "value": "เทมเพลตใหม่"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "New sessions save here. Existing files are not moved.": {
       "localizations": {
@@ -2229,7 +2390,8 @@
             "value": "ยังไม่ได้เลือกงาน"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "No Sessions": {
       "localizations": {
@@ -2239,7 +2401,8 @@
             "value": "ไม่มีเซสชัน"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "No active event": {
       "localizations": {
@@ -2249,7 +2412,8 @@
             "value": "ไม่มีงานที่ใช้งานอยู่"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "No active event — go to Event Setup": {
       "localizations": {
@@ -2259,7 +2423,8 @@
             "value": "ไม่มีงานที่ใช้งานอยู่ — ไปที่ตั้งค่างาน"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "No active event — set one up on the operator Mac": {
       "localizations": {
@@ -2269,7 +2434,8 @@
             "value": "ยังไม่มีงานที่ใช้งานอยู่ — ตั้งค่างานบน Mac ของผู้ควบคุมก่อน"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "No cameras found": {
       "localizations": {
@@ -2309,7 +2475,8 @@
             "value": "ไม่พบจอภาพภายนอก"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "No frame imported": {
       "localizations": {
@@ -2349,7 +2516,8 @@
             "value": "ไม่มี iPad เชื่อมต่อ"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "No photo slots defined": {
       "localizations": {
@@ -2359,7 +2527,8 @@
             "value": "ยังไม่ได้กำหนดช่องภาพ"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "No prompt image": {
       "localizations": {
@@ -2389,7 +2558,8 @@
             "value": "ไม่พบกล้องที่เชื่อมต่อสาย"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Not Ready": {
       "localizations": {
@@ -2399,7 +2569,8 @@
             "value": "ยังไม่พร้อม"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Not available (no LAN IP)": {
       "localizations": {
@@ -2429,7 +2600,8 @@
             "value": "ตกลง"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Off": {
       "localizations": {
@@ -2479,7 +2651,8 @@
             "value": "เปิดโฟลเดอร์"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Open Gallery": {
       "localizations": {
@@ -2489,7 +2662,8 @@
             "value": "เปิดแกลเลอรี"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Open Individual Page": {
       "localizations": {
@@ -2499,7 +2673,8 @@
             "value": "เปิดหน้ารูปภาพ"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Open Session Folder": {
       "localizations": {
@@ -2509,7 +2684,8 @@
             "value": "เปิดโฟลเดอร์เซสชัน"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Open System Print Settings…": {
       "localizations": {
@@ -2519,7 +2695,8 @@
             "value": "เปิดการตั้งค่าการพิมพ์ระบบ…"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Open System Settings": {
       "localizations": {
@@ -2529,7 +2706,8 @@
             "value": "เปิดการตั้งค่าระบบ"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Operations": {
       "localizations": {
@@ -2539,7 +2717,8 @@
             "value": "การปฏิบัติการ"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Operator Override": {
       "localizations": {
@@ -2549,7 +2728,8 @@
             "value": "การควบคุมแทนผู้ดำเนินการ"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Original": {
       "localizations": {
@@ -2559,7 +2739,8 @@
             "value": "ต้นฉบับ"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Output saved": {
       "localizations": {
@@ -2569,7 +2750,8 @@
             "value": "บันทึกผลลัพธ์แล้ว"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "P%@": {
       "localizations": {
@@ -2589,7 +2771,8 @@
             "value": "PIN ไม่ตรงกัน เริ่มใหม่อีกครั้ง"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "PRC PhotoBooth": {
       "localizations": {
@@ -2599,7 +2782,8 @@
             "value": "PRC PhotoBooth"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "PRC-PhotoBooth": {
       "localizations": {
@@ -2609,7 +2793,8 @@
             "value": "PRC-PhotoBooth"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Paper Size": {
       "localizations": {
@@ -2619,7 +2804,8 @@
             "value": "ขนาดกระดาษ"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Paper: %@ · Copies: %@": {
       "localizations": {
@@ -2629,7 +2815,8 @@
             "value": "กระดาษ: %1$@ · จำนวน: %2$@"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Pending": {
       "localizations": {
@@ -2639,7 +2826,8 @@
             "value": "รอดำเนินการ"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Persistent Queue": {
       "localizations": {
@@ -2649,7 +2837,8 @@
             "value": "คิวถาวร"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Photo %@": {
       "localizations": {
@@ -2679,7 +2868,8 @@
             "value": "ช่องภาพ"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Photos": {
       "localizations": {
@@ -2689,7 +2879,8 @@
             "value": "รูปภาพ"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Photos: %@": {
       "localizations": {
@@ -2699,7 +2890,8 @@
             "value": "รูปภาพ: %1$@"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Pose Prompts": {
       "localizations": {
@@ -2709,7 +2901,8 @@
             "value": "พรอมต์ท่าทาง"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Postcard (4×6\")": {
       "localizations": {
@@ -2719,7 +2912,8 @@
             "value": "โปสการ์ด (4×6 นิ้ว)"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Preflight Results": {
       "localizations": {
@@ -2729,7 +2923,8 @@
             "value": "ผลการตรวจสอบก่อนเริ่ม"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Prepare this Mac to back up completed photo sessions through Cloudflare Access.": {
       "localizations": {
@@ -2749,7 +2944,8 @@
             "value": "กำลังเตรียมดาวน์โหลด…"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Preview frame rate": {
       "localizations": {
@@ -2759,7 +2955,8 @@
             "value": "อัตราเฟรมภาพตัวอย่าง"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Preview via": {
       "localizations": {
@@ -2769,7 +2966,8 @@
             "value": "ภาพตัวอย่างผ่าน"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Print": {
       "localizations": {
@@ -2779,7 +2977,8 @@
             "value": "พิมพ์"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Print Again": {
       "localizations": {
@@ -2789,7 +2988,8 @@
             "value": "พิมพ์อีกครั้ง"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Print Photo Strip?": {
       "localizations": {
@@ -2799,7 +2999,8 @@
             "value": "พิมพ์โฟโต้สตริปหรือไม่?"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Print Test Page": {
       "localizations": {
@@ -2809,7 +3010,8 @@
             "value": "พิมพ์หน้าทดสอบ"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Print failed: %@": {
       "localizations": {
@@ -2819,7 +3021,8 @@
             "value": "พิมพ์ล้มเหลว: %1$@"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Print pending": {
       "localizations": {
@@ -2839,7 +3042,8 @@
             "value": "พิมพ์โฟโต้สตริปนี้อีกครั้งหรือไม่?"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Printer": {
       "localizations": {
@@ -2849,7 +3053,8 @@
             "value": "เครื่องพิมพ์"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Printer Diagnostics": {
       "localizations": {
@@ -2859,7 +3064,8 @@
             "value": "การวินิจฉัยเครื่องพิมพ์"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Printer test: Not run this launch.": {
       "localizations": {
@@ -2889,7 +3095,8 @@
             "value": "URL สาธารณะ (ไม่บังคับ)"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Public base URL": {
       "localizations": {
@@ -2899,7 +3106,8 @@
             "value": "URL สาธารณะหลัก"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "QR codes use this URL after cloud upload succeeds; otherwise they use the LAN server.\nExample: https://photos.yourdomain.com": {
       "localizations": {
@@ -2919,7 +3127,8 @@
             "value": "ความพร้อม"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Ready": {
       "localizations": {
@@ -2929,7 +3138,8 @@
             "value": "พร้อม"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Ready on port %@": {
       "localizations": {
@@ -2939,7 +3149,8 @@
             "value": "พร้อมใช้งานที่พอร์ต %1$@"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Ready with Warnings": {
       "localizations": {
@@ -2949,7 +3160,8 @@
             "value": "พร้อมแต่มีคำเตือน"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Ready?": {
       "localizations": {
@@ -2969,7 +3181,8 @@
             "value": "รีเฟรช"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Refresh Checks": {
       "localizations": {
@@ -2979,7 +3192,8 @@
             "value": "รีเฟรชการตรวจสอบ"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Regenerate": {
       "localizations": {
@@ -2989,7 +3203,8 @@
             "value": "สร้างใหม่"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Regenerate Token…": {
       "localizations": {
@@ -2999,7 +3214,8 @@
             "value": "สร้างโทเค็นใหม่…"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Regenerate gallery token?": {
       "localizations": {
@@ -3009,7 +3225,8 @@
             "value": "สร้างโทเค็นแกลเลอรีใหม่หรือไม่?"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Registered tokens: %@": {
       "localizations": {
@@ -3029,7 +3246,8 @@
             "value": "การเข้าถึงระยะไกล"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Remote path": {
       "localizations": {
@@ -3039,7 +3257,8 @@
             "value": "พาธปลายทาง"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Remove": {
       "localizations": {
@@ -3049,7 +3268,8 @@
             "value": "นำออก"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Remove the admin PIN (you will be prompted to create a new one next time)": {
       "localizations": {
@@ -3059,7 +3279,8 @@
             "value": "นำ PIN ผู้ดูแลออก (ครั้งถัดไปจะให้สร้างใหม่)"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Rendering strip…": {
       "localizations": {
@@ -3069,7 +3290,8 @@
             "value": "กำลังเรนเดอร์โฟโต้สตริป…"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Reset Admin PIN?": {
       "localizations": {
@@ -3079,7 +3301,8 @@
             "value": "รีเซ็ต PIN ผู้ดูแลหรือไม่?"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Reset PIN": {
       "localizations": {
@@ -3089,7 +3312,8 @@
             "value": "รีเซ็ต PIN"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Reset to Idle": {
       "localizations": {
@@ -3099,7 +3323,8 @@
             "value": "รีเซ็ตเป็นพัก"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Resume": {
       "localizations": {
@@ -3109,7 +3334,8 @@
             "value": "ดำเนินการต่อ"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Resume or discard the unfinished session in Operations.": {
       "localizations": {
@@ -3119,7 +3345,8 @@
             "value": "ดำเนินการต่อหรือละทิ้งเซสชันที่ยังไม่เสร็จในเมนูการปฏิบัติการ"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Retry": {
       "localizations": {
@@ -3129,7 +3356,8 @@
             "value": "ลองใหม่"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Retry All Failed": {
       "localizations": {
@@ -3139,7 +3367,8 @@
             "value": "ลองใหม่ทั้งหมดที่ล้มเหลว"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Rotation": {
       "localizations": {
@@ -3149,7 +3378,8 @@
             "value": "การหมุน"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Run Full Preflight": {
       "localizations": {
@@ -3159,7 +3389,8 @@
             "value": "ตรวจสอบก่อนเริ่มแบบเต็ม"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Run Safe Checks to inspect the booth.": {
       "localizations": {
@@ -3179,7 +3410,8 @@
             "value": "เรียกใช้การทดสอบเครื่องพิมพ์หรือไม่?"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Running": {
       "localizations": {
@@ -3189,7 +3421,8 @@
             "value": "กำลังทำงาน"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Runtime": {
       "localizations": {
@@ -3199,7 +3432,8 @@
             "value": "รันไทม์"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "SSH alias": {
       "localizations": {
@@ -3219,7 +3453,8 @@
             "value": "บันทึก"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Saving…": {
       "localizations": {
@@ -3229,7 +3464,8 @@
             "value": "กำลังบันทึก…"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Scan to get your photos": {
       "localizations": {
@@ -3249,7 +3485,8 @@
             "value": "เลือก"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Select an active event first": {
       "localizations": {
@@ -3259,7 +3496,8 @@
             "value": "เลือกงานที่ใช้งานอยู่ก่อน"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Selected printer: %@": {
       "localizations": {
@@ -3269,7 +3507,8 @@
             "value": "เครื่องพิมพ์ที่เลือก: %1$@"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Selected printer: System Default": {
       "localizations": {
@@ -3279,7 +3518,8 @@
             "value": "เครื่องพิมพ์ที่เลือก: ค่าเริ่มต้นของระบบ"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Send the strip to your connected Selphy printer.": {
       "localizations": {
@@ -3309,7 +3549,8 @@
             "value": "ระยะเซสชัน"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Session Recovery": {
       "localizations": {
@@ -3319,7 +3560,8 @@
             "value": "กู้คืนเซสชัน"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Session cannot finish until every photograph is accepted.": {
       "localizations": {
@@ -3329,7 +3571,8 @@
             "value": "เซสชันจะเสร็จสิ้นไม่ได้จนกว่าจะยอมรับรูปภาพทุกภาพ"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Session controls always use Wi-Fi. 60 FPS uses more bandwidth; choose cable preview for the smoothest result. Sony USB live view may be limited by the camera.": {
       "localizations": {
@@ -3349,7 +3592,8 @@
             "value": "เริ่มเซสชันล้มเหลว: %1$@"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Sessions": {
       "localizations": {
@@ -3359,7 +3603,8 @@
             "value": "เซสชัน"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Sessions in this date range will appear here.": {
       "localizations": {
@@ -3389,7 +3634,8 @@
             "value": "ตั้งเป็นงานที่ใช้งาน"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Set Default": {
       "localizations": {
@@ -3399,7 +3645,8 @@
             "value": "ตั้งเป็นค่าเริ่มต้น"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Set Up & Test": {
       "localizations": {
@@ -3409,7 +3656,8 @@
             "value": "ตั้งค่าและทดสอบ"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Set aperture on camera body when disabled — USB PTP support varies by camera.": {
       "localizations": {
@@ -3429,7 +3677,8 @@
             "value": "การตั้งค่า"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Show GIF links": {
       "localizations": {
@@ -3439,7 +3688,8 @@
             "value": "แสดงลิงก์ GIF"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Show Viewer": {
       "localizations": {
@@ -3449,7 +3699,8 @@
             "value": "แสดงหน้าจอผู้ชม"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Shows": {
       "localizations": {
@@ -3459,7 +3710,8 @@
             "value": "แสดง"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Shutter": {
       "localizations": {
@@ -3479,7 +3731,8 @@
             "value": "ความเร็วชัตเตอร์"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Skip": {
       "localizations": {
@@ -3489,7 +3742,8 @@
             "value": "ข้าม"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Skip for Now": {
       "localizations": {
@@ -3499,7 +3753,8 @@
             "value": "ข้ามไปก่อน"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Skip system print dialog": {
       "localizations": {
@@ -3509,7 +3764,8 @@
             "value": "ข้ามกล่องโต้ตอบการพิมพ์ระบบ"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Skipped because no event is active.": {
       "localizations": {
@@ -3519,7 +3775,8 @@
             "value": "ข้ามเพราะไม่มีงานที่ใช้งานอยู่"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Skipped until an experience document is available.": {
       "localizations": {
@@ -3529,7 +3786,8 @@
             "value": "ข้ามจนกว่าเอกสารประสบการณ์จะพร้อมใช้งาน"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Skipped until filter settings are available.": {
       "localizations": {
@@ -3539,7 +3797,8 @@
             "value": "ข้ามจนกว่าการตั้งค่าฟิลเตอร์จะพร้อมใช้งาน"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Slot %@": {
       "localizations": {
@@ -3559,7 +3818,8 @@
             "value": "ช่อง"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Slots (%@)": {
       "localizations": {
@@ -3579,7 +3839,8 @@
             "value": "นุ่มนวล"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Some DSLR controls are unavailable on this camera's USB profile.": {
       "localizations": {
@@ -3599,7 +3860,8 @@
             "value": "เริ่ม"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Start Camera": {
       "localizations": {
@@ -3609,7 +3871,8 @@
             "value": "เริ่มกล้อง"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Start Session": {
       "localizations": {
@@ -3619,7 +3882,8 @@
             "value": "เริ่มเซสชัน"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Start the selected camera first": {
       "localizations": {
@@ -3629,7 +3893,8 @@
             "value": "เริ่มกล้องที่เลือกก่อน"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Started %@ at %@": {
       "localizations": {
@@ -3649,7 +3914,8 @@
             "value": "กำลังเริ่ม…"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Status": {
       "localizations": {
@@ -3659,7 +3925,8 @@
             "value": "สถานะ"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Stopped": {
       "localizations": {
@@ -3669,7 +3936,8 @@
             "value": "หยุดแล้ว"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Strip Preview": {
       "localizations": {
@@ -3679,7 +3947,8 @@
             "value": "ภาพตัวอย่างโฟโต้สตริป"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Strip ready": {
       "localizations": {
@@ -3689,7 +3958,8 @@
             "value": "โฟโต้สตริปพร้อมแล้ว"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "System": {
       "localizations": {
@@ -3729,7 +3999,8 @@
             "value": "ใช้เครื่องพิมพ์ค่าเริ่มต้นของ macOS"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Templates": {
       "localizations": {
@@ -3749,7 +4020,8 @@
             "value": "ทดสอบถ่ายภาพ"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Test Connection Again": {
       "localizations": {
@@ -3759,7 +4031,8 @@
             "value": "ทดสอบการเชื่อมต่ออีกครั้ง"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Test Print": {
       "localizations": {
@@ -3769,7 +4042,8 @@
             "value": "ทดสอบพิมพ์"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Test capture failed: %@": {
       "localizations": {
@@ -3779,7 +4053,8 @@
             "value": "การทดสอบถ่ายภาพล้มเหลว: %1$@"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Thai": {
       "localizations": {
@@ -3789,7 +4064,8 @@
             "value": "ไทย"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Thai name": {
       "localizations": {
@@ -3799,7 +4075,8 @@
             "value": "ชื่อภาษาไทย"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Thai prompt": {
       "localizations": {
@@ -3809,7 +4086,8 @@
             "value": "พรอมต์ภาษาไทย"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Thai subtitle": {
       "localizations": {
@@ -3819,7 +4097,8 @@
             "value": "คำบรรยายภาษาไทย"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "The last unaccepted preview was not saved and will be retaken.": {
       "localizations": {
@@ -3839,7 +4118,8 @@
             "value": "ขณะนี้ Mac ไม่สามารถยืนยันเจ้าของได้ ลองใช้ PIN ของคุณ"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "This submits a new print request and does not create another persistent automatic-print job.": {
       "localizations": {
@@ -3859,7 +4139,8 @@
             "value": "ถึง"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Token: %@": {
       "localizations": {
@@ -3879,7 +4160,8 @@
             "value": "ไฟช่วย"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Tunnel hostname": {
       "localizations": {
@@ -3899,7 +4181,8 @@
             "value": "ไม่พร้อมใช้งาน"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Unlock PRC PhotoBooth administrator settings with Touch ID or your Mac password.": {
       "localizations": {
@@ -3909,7 +4192,8 @@
             "value": "ปลดล็อกการตั้งค่าผู้ดูแล PRC PhotoBooth ด้วย Touch ID หรือรหัสผ่าน Mac"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Untitled": {
       "localizations": {
@@ -3919,7 +4203,8 @@
             "value": "ไม่มีชื่อ"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Upload photos to cloud after each session": {
       "localizations": {
@@ -3929,7 +4214,8 @@
             "value": "อัปโหลดรูปภาพขึ้นคลาวด์หลังแต่ละเซสชัน"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Use Touch ID or Mac Password": {
       "localizations": {
@@ -3939,7 +4225,8 @@
             "value": "ใช้ Touch ID หรือรหัสผ่าน Mac"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Use ‘prc-%@’ Instead": {
       "localizations": {
@@ -3949,7 +4236,8 @@
             "value": "ใช้ ‘prc-%1$@’ แทน"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Used in QR codes after cloud upload succeeds. Leave blank to use the LAN server.": {
       "localizations": {
@@ -3989,7 +4277,8 @@
             "value": "วินเทจ"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Waiting": {
       "localizations": {
@@ -3999,7 +4288,8 @@
             "value": "กำลังรอ"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Waiting for the camera's Sony PTP live-view stream…": {
       "localizations": {
@@ -4009,7 +4299,8 @@
             "value": "กำลังรอสตรีมภาพสด Sony PTP จากกล้อง…"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Warm": {
       "localizations": {
@@ -4019,7 +4310,8 @@
             "value": "โทนอุ่น"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Width": {
       "localizations": {
@@ -4039,7 +4331,8 @@
             "value": "ไร้สาย (Wi-Fi)"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "You will be asked to create a new PIN now.": {
       "localizations": {
@@ -4059,7 +4352,8 @@
             "value": "มีอยู่ภายนอกการตั้งค่าที่ PRC PhotoBooth จัดการ"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "cloudRemotePath": {
       "localizations": {
@@ -4069,7 +4363,8 @@
             "value": "cloudRemotePath"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "cloudSSHHost": {
       "localizations": {
@@ -4079,7 +4374,8 @@
             "value": "cloudSSHHost"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "cloudUploadEnabled": {
       "localizations": {
@@ -4089,7 +4385,8 @@
             "value": "cloudUploadEnabled"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "eventFolderPath": {
       "localizations": {
@@ -4099,7 +4396,8 @@
             "value": "eventFolderPath"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "iPad": {
       "localizations": {
@@ -4109,7 +4407,8 @@
             "value": "iPad"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "iPad connected: %@": {
       "localizations": {
@@ -4119,7 +4418,8 @@
             "value": "เชื่อมต่อ iPad: %1$@"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "iPad not connected": {
       "localizations": {
@@ -4129,7 +4429,8 @@
             "value": "ไม่ได้เชื่อมต่อ iPad"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "iPad: connected via cable": {
       "localizations": {
@@ -4139,7 +4440,8 @@
             "value": "iPad: เชื่อมต่อผ่านสายแล้ว"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "iPad: not connected via cable — plug in, trust this Mac, and keep the iPad app open": {
       "localizations": {
@@ -4149,7 +4451,8 @@
             "value": "iPad: ไม่ได้เชื่อมต่อผ่านสาย — เสียบสาย กดเชื่อถือ Mac เครื่องนี้ และเปิดแอป iPad ไว้"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "operatorLanguage": {
       "localizations": {
@@ -4159,7 +4462,8 @@
             "value": "operatorLanguage"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "previewConnectionMode": {
       "localizations": {
@@ -4169,7 +4473,8 @@
             "value": "previewConnectionMode"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "previewFrameRate": {
       "localizations": {
@@ -4179,7 +4484,8 @@
             "value": "previewFrameRate"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "publicBaseURL": {
       "localizations": {
@@ -4189,7 +4495,8 @@
             "value": "publicBaseURL"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "px": {
       "localizations": {
@@ -4209,7 +4516,8 @@
             "value": "selphyAutoPrintAfterSession"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "selphyCopies": {
       "localizations": {
@@ -4219,7 +4527,8 @@
             "value": "selphyCopies"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "selphyPaperSize": {
       "localizations": {
@@ -4229,7 +4538,8 @@
             "value": "selphyPaperSize"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "selphyPrinterName": {
       "localizations": {
@@ -4239,7 +4549,8 @@
             "value": "selphyPrinterName"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "selphySkipPrintDialog": {
       "localizations": {
@@ -4249,7 +4560,8 @@
             "value": "selphySkipPrintDialog"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "· %@": {
       "localizations": {
@@ -4299,7 +4611,8 @@
             "value": "จำนวนครั้ง: %1$@"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Back": {
       "localizations": {
@@ -4309,7 +4622,8 @@
             "value": "ย้อนกลับ"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Back to Options": {
       "localizations": {
@@ -4319,7 +4633,8 @@
             "value": "กลับไปที่ตัวเลือก"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Continue": {
       "localizations": {
@@ -4329,7 +4644,8 @@
             "value": "ดำเนินการต่อ"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "DSLR / Mirrorless": {
       "localizations": {
@@ -4339,7 +4655,8 @@
             "value": "DSLR / มิเรอร์เลส"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Hide selected gallery sessions?": {
       "localizations": {
@@ -4349,7 +4666,8 @@
             "value": "ซ่อนเซสชันแกลเลอรีที่เลือกหรือไม่?"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Import / Replace Frame PNG…": {
       "localizations": {
@@ -4359,7 +4677,8 @@
             "value": "นำเข้า / แทนที่ PNG ของเฟรม…"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Next session": {
       "localizations": {
@@ -4369,7 +4688,8 @@
             "value": "เซสชันถัดไป"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Paper: %@": {
       "localizations": {
@@ -4379,7 +4699,8 @@
             "value": "กระดาษ: %1$@"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Quit %@": {
       "localizations": {
@@ -4389,7 +4710,8 @@
             "value": "ปิด %@"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Retake": {
       "localizations": {
@@ -4399,7 +4721,8 @@
             "value": "ถ่ายใหม่"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Run Safe Checks": {
       "localizations": {
@@ -4409,7 +4732,8 @@
             "value": "เรียกใช้การตรวจสอบแบบปลอดภัย"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Active event": {
       "localizations": {
@@ -4419,7 +4743,8 @@
             "value": "งานที่ใช้งานอยู่"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Attempts": {
       "localizations": {
@@ -4429,7 +4754,8 @@
             "value": "จำนวนครั้ง"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Approved": {
       "localizations": {
@@ -4439,7 +4765,8 @@
             "value": "อนุมัติแล้ว"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Camera connection": {
       "localizations": {
@@ -4449,7 +4776,8 @@
             "value": "การเชื่อมต่อกล้อง"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Camera permission": {
       "localizations": {
@@ -4459,7 +4787,8 @@
             "value": "สิทธิ์กล้อง"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Camera test capture": {
       "localizations": {
@@ -4469,7 +4798,8 @@
             "value": "ทดสอบถ่ายภาพด้วยกล้อง"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Captured": {
       "localizations": {
@@ -4479,7 +4809,8 @@
             "value": "ถ่ายแล้ว"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Cancelled": {
       "localizations": {
@@ -4489,7 +4820,8 @@
             "value": "ยกเลิกแล้ว"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Cloud upload": {
       "localizations": {
@@ -4499,7 +4831,8 @@
             "value": "อัปโหลดขึ้นคลาวด์"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Copies": {
       "localizations": {
@@ -4509,7 +4842,8 @@
             "value": "จำนวนสำเนา"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Countdown": {
       "localizations": {
@@ -4519,7 +4853,8 @@
             "value": "นับถอยหลัง"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Customer display": {
       "localizations": {
@@ -4529,7 +4864,8 @@
             "value": "หน้าจอลูกค้า"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Disk space": {
       "localizations": {
@@ -4539,7 +4875,8 @@
             "value": "พื้นที่ดิสก์"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Event experience": {
       "localizations": {
@@ -4549,7 +4886,8 @@
             "value": "ประสบการณ์ของงาน"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Event layout": {
       "localizations": {
@@ -4559,7 +4897,8 @@
             "value": "เลย์เอาต์งาน"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Filter pipeline": {
       "localizations": {
@@ -4569,7 +4908,8 @@
             "value": "ระบบฟิลเตอร์"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Finished": {
       "localizations": {
@@ -4579,7 +4919,8 @@
             "value": "เสร็จสิ้น"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Gallery storage": {
       "localizations": {
@@ -4589,7 +4930,8 @@
             "value": "พื้นที่จัดเก็บแกลเลอรี"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Hidden": {
       "localizations": {
@@ -4599,7 +4941,8 @@
             "value": "ซ่อนอยู่"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Idle": {
       "localizations": {
@@ -4609,7 +4952,8 @@
             "value": "พร้อมรับงาน"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Local IP address": {
       "localizations": {
@@ -4619,7 +4963,8 @@
             "value": "ที่อยู่ IP ภายในเครือข่าย"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Local download server": {
       "localizations": {
@@ -4629,7 +4974,8 @@
             "value": "เซิร์ฟเวอร์ดาวน์โหลดภายในเครื่อง"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Not registered": {
       "localizations": {
@@ -4639,7 +4985,8 @@
             "value": "ยังไม่ได้ลงทะเบียน"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Not run": {
       "localizations": {
@@ -4649,7 +4996,8 @@
             "value": "ยังไม่ได้เรียกใช้"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Output folder": {
       "localizations": {
@@ -4659,7 +5007,8 @@
             "value": "โฟลเดอร์ผลลัพธ์"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Paper": {
       "localizations": {
@@ -4669,7 +5018,8 @@
             "value": "กระดาษ"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Passed": {
       "localizations": {
@@ -4679,7 +5029,8 @@
             "value": "ผ่าน"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Preview transport": {
       "localizations": {
@@ -4689,7 +5040,8 @@
             "value": "ช่องทางส่งภาพตัวอย่าง"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Printer configuration": {
       "localizations": {
@@ -4699,7 +5051,8 @@
             "value": "การตั้งค่าเครื่องพิมพ์"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Printer test": {
       "localizations": {
@@ -4709,7 +5062,8 @@
             "value": "ทดสอบเครื่องพิมพ์"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Processing": {
       "localizations": {
@@ -4719,7 +5073,8 @@
             "value": "กำลังประมวลผล"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Register download": {
       "localizations": {
@@ -4729,7 +5084,8 @@
             "value": "ลงทะเบียนการดาวน์โหลด"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Render GIF": {
       "localizations": {
@@ -4739,7 +5095,8 @@
             "value": "สร้าง GIF"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Render strip": {
       "localizations": {
@@ -4749,7 +5106,8 @@
             "value": "สร้างโฟโต้สตริป"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Review": {
       "localizations": {
@@ -4759,7 +5117,8 @@
             "value": "ตรวจสอบภาพ"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Runtime persistence": {
       "localizations": {
@@ -4769,7 +5128,8 @@
             "value": "การบันทึกข้อมูลรันไทม์"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Selecting experience": {
       "localizations": {
@@ -4779,7 +5139,8 @@
             "value": "กำลังเลือกประสบการณ์"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Skipped": {
       "localizations": {
@@ -4789,7 +5150,8 @@
             "value": "ข้าม"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Template assets": {
       "localizations": {
@@ -4799,7 +5161,8 @@
             "value": "ไฟล์ประกอบเทมเพลต"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Unfinished session": {
       "localizations": {
@@ -4809,7 +5172,8 @@
             "value": "เซสชันที่ยังไม่เสร็จ"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Update gallery": {
       "localizations": {
@@ -4819,7 +5183,8 @@
             "value": "อัปเดตแกลเลอรี"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Warning": {
       "localizations": {
@@ -4829,7 +5194,8 @@
             "value": "คำเตือน"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Automatic print": {
       "localizations": {
@@ -4839,7 +5205,8 @@
             "value": "พิมพ์อัตโนมัติ"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Queue health": {
       "localizations": {
@@ -4849,7 +5216,8 @@
             "value": "สุขภาพคิวงาน"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Active event: %@.": {
       "localizations": {
@@ -4859,7 +5227,8 @@
             "value": "งานที่ใช้งานอยู่: %1$@"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "A customer display is ready.": {
       "localizations": {
@@ -4869,7 +5238,8 @@
             "value": "หน้าจอลูกค้าพร้อมใช้งาน"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "A required queue job has permanently failed.": {
       "localizations": {
@@ -4879,7 +5249,8 @@
             "value": "งานคิวที่จำเป็นล้มเหลวถาวร"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "A slot has zero or negative dimensions.": {
       "localizations": {
@@ -4889,7 +5260,8 @@
             "value": "ช่องภาพมีขนาดเป็นศูนย์หรือติดลบ"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "A slot references a photo index outside the event.": {
       "localizations": {
@@ -4899,7 +5271,8 @@
             "value": "ช่องภาพอ้างอิงดัชนีภาพนอกขอบเขตของงาน"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "An enabled template has invalid capture slots.": {
       "localizations": {
@@ -4909,7 +5282,8 @@
             "value": "เทมเพลตที่เปิดใช้งานมีช่องถ่ายภาพไม่ถูกต้อง"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "An unfinished capture session awaits Resume or Discard.": {
       "localizations": {
@@ -4919,7 +5293,8 @@
             "value": "มีเซสชันถ่ายภาพที่ยังไม่เสร็จ รอให้ดำเนินการต่อหรือละทิ้ง"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "At least 10 GB is available.": {
       "localizations": {
@@ -4929,7 +5304,8 @@
             "value": "มีพื้นที่ว่างอย่างน้อย 10 GB"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Atomic runtime writes are available.": {
       "localizations": {
@@ -4939,7 +5315,8 @@
             "value": "พร้อมใช้งานการเขียนข้อมูลรันไทม์แบบอะตอมิก"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Between 2 GB and 10 GB is available.": {
       "localizations": {
@@ -4949,7 +5326,8 @@
             "value": "มีพื้นที่ว่างระหว่าง 2 GB ถึง 10 GB"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Cable mode requires a supported USB listener and connected client.": {
       "localizations": {
@@ -4959,7 +5337,8 @@
             "value": "โหมดสายต้องมีตัวรับ USB ที่รองรับและไคลเอนต์ที่เชื่อมต่ออยู่"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Camera permission is denied or restricted.": {
       "localizations": {
@@ -4969,7 +5348,8 @@
             "value": "สิทธิ์กล้องถูกปฏิเสธหรือจำกัดการใช้งาน"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Camera permission is granted.": {
       "localizations": {
@@ -4979,7 +5359,8 @@
             "value": "อนุญาตให้ใช้กล้องแล้ว"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Camera is unavailable.": {
       "localizations": {
@@ -4989,7 +5370,8 @@
             "value": "กล้องไม่พร้อมใช้งาน"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Camera is ready.": {
       "localizations": {
@@ -4999,7 +5381,8 @@
             "value": "กล้องพร้อมใช้งาน"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Configured filters passed synthetic-image validation.": {
       "localizations": {
@@ -5009,7 +5392,8 @@
             "value": "ฟิลเตอร์ที่ตั้งค่าผ่านการตรวจสอบด้วยภาพสังเคราะห์"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Configured printer is available.": {
       "localizations": {
@@ -5019,7 +5403,8 @@
             "value": "เครื่องพิมพ์ที่ตั้งค่าพร้อมใช้งาน"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Configured printer is unavailable.": {
       "localizations": {
@@ -5029,7 +5414,8 @@
             "value": "เครื่องพิมพ์ที่ตั้งค่าไม่พร้อมใช้งาน"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "A configured filter failed synthetic-image validation.": {
       "localizations": {
@@ -5039,7 +5425,8 @@
             "value": "ฟิลเตอร์ที่ตั้งค่าล้มเหลวในการตรวจสอบด้วยภาพสังเคราะห์"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Connect an iPad or activate the external viewer.": {
       "localizations": {
@@ -5049,7 +5436,8 @@
             "value": "เชื่อมต่อ iPad หรือเปิดใช้งานหน้าจอผู้ชมภายนอก"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Diagnostic capture succeeded.": {
       "localizations": {
@@ -5059,7 +5447,8 @@
             "value": "การถ่ายภาพวินิจฉัยสำเร็จ"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Disabled in Settings.": {
       "localizations": {
@@ -5069,7 +5458,8 @@
             "value": "ปิดใช้งานอยู่ในการตั้งค่า"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Experience document is loaded and validated.": {
       "localizations": {
@@ -5079,7 +5469,8 @@
             "value": "โหลดและตรวจสอบเอกสารประสบการณ์แล้ว"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Folder is writable.": {
       "localizations": {
@@ -5089,7 +5480,8 @@
             "value": "โฟลเดอร์สามารถเขียนได้"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Health check returned HTTP 200.": {
       "localizations": {
@@ -5099,7 +5491,8 @@
             "value": "การตรวจสอบสถานะตอบกลับ HTTP 200"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Less than 2 GB is available.": {
       "localizations": {
@@ -5109,7 +5502,8 @@
             "value": "มีพื้นที่ว่างน้อยกว่า 2 GB"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Multipeer preview connection is active.": {
       "localizations": {
@@ -5119,7 +5513,8 @@
             "value": "การเชื่อมต่อภาพตัวอย่างผ่าน Multipeer ทำงานอยู่"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "No active event layout to validate.": {
       "localizations": {
@@ -5129,7 +5524,8 @@
             "value": "ไม่มีเลย์เอาต์งานที่ใช้งานอยู่ให้ตรวจสอบ"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "No event is active.": {
       "localizations": {
@@ -5139,7 +5535,8 @@
             "value": "ไม่มีงานที่ใช้งานอยู่"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "No iPad is connected.": {
       "localizations": {
@@ -5149,7 +5546,8 @@
             "value": "ไม่มี iPad เชื่อมต่ออยู่"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "No LAN address was found.": {
       "localizations": {
@@ -5159,7 +5557,8 @@
             "value": "ไม่พบที่อยู่ LAN"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "No output folder is configured.": {
       "localizations": {
@@ -5169,7 +5568,8 @@
             "value": "ยังไม่ได้ตั้งค่าโฟลเดอร์ผลลัพธ์"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "No unfinished capture session is waiting.": {
       "localizations": {
@@ -5179,7 +5579,8 @@
             "value": "ไม่มีเซสชันถ่ายภาพที่ยังไม่เสร็จรอดำเนินการ"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "One or more capture indexes have no corresponding slot.": {
       "localizations": {
@@ -5189,7 +5590,8 @@
             "value": "ดัชนีถ่ายภาพอย่างน้อยหนึ่งรายการไม่มีช่องภาพที่ตรงกัน"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Optional cloud or print work is waiting or failed.": {
       "localizations": {
@@ -5199,7 +5601,8 @@
             "value": "งานคลาวด์หรือการพิมพ์เสริมกำลังรออยู่หรือล้มเหลว"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Photo count, canvas, and at least one slot are required.": {
       "localizations": {
@@ -5209,7 +5612,8 @@
             "value": "ต้องระบุจำนวนภาพ ขนาดแคนวาส และช่องภาพอย่างน้อยหนึ่งช่อง"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Photo slots and canvas are valid.": {
       "localizations": {
@@ -5219,7 +5623,8 @@
             "value": "ช่องภาพและแคนวาสถูกต้อง"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Printer is available.": {
       "localizations": {
@@ -5229,7 +5634,8 @@
             "value": "เครื่องพิมพ์พร้อมใช้งาน"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Printer test page submitted.": {
       "localizations": {
@@ -5239,7 +5645,8 @@
             "value": "ส่งหน้าทดสอบเครื่องพิมพ์แล้ว"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Queue persistence and required jobs are healthy.": {
       "localizations": {
@@ -5249,7 +5656,8 @@
             "value": "การบันทึกคิวและงานที่จำเป็นทำงานปกติ"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Running diagnostic camera capture…": {
       "localizations": {
@@ -5259,7 +5667,8 @@
             "value": "กำลังถ่ายภาพวินิจฉัยด้วยกล้อง…"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Selected camera is unavailable.": {
       "localizations": {
@@ -5269,7 +5678,8 @@
             "value": "กล้องที่เลือกไม่พร้อมใช้งาน"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Selected camera is ready.": {
       "localizations": {
@@ -5279,7 +5689,8 @@
             "value": "กล้องที่เลือกพร้อมใช้งาน"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Skipped because no iPad is connected.": {
       "localizations": {
@@ -5289,7 +5700,8 @@
             "value": "ข้ามเพราะไม่มี iPad เชื่อมต่ออยู่"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "SSH connectivity failed.": {
       "localizations": {
@@ -5299,7 +5711,8 @@
             "value": "การเชื่อมต่อ SSH ล้มเหลว"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "SSH connectivity is ready.": {
       "localizations": {
@@ -5309,7 +5722,8 @@
             "value": "การเชื่อมต่อ SSH พร้อมใช้งาน"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Submitting printer test page…": {
       "localizations": {
@@ -5319,7 +5733,8 @@
             "value": "กำลังส่งหน้าทดสอบเครื่องพิมพ์…"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Test page submitted.": {
       "localizations": {
@@ -5329,7 +5744,8 @@
             "value": "ส่งหน้าทดสอบแล้ว"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "The event experience document is unavailable.": {
       "localizations": {
@@ -5339,7 +5755,8 @@
             "value": "เอกสารประสบการณ์ของงานไม่พร้อมใช้งาน"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "The local download server is not healthy.": {
       "localizations": {
@@ -5349,7 +5766,8 @@
             "value": "เซิร์ฟเวอร์ดาวน์โหลดภายในเครื่องไม่พร้อมใช้งาน"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "The persistent job queue is unavailable.": {
       "localizations": {
@@ -5359,7 +5777,8 @@
             "value": "คิวงานถาวรไม่พร้อมใช้งาน"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "USB preview client is connected.": {
       "localizations": {
@@ -5369,7 +5788,8 @@
             "value": "ไคลเอนต์ภาพตัวอย่าง USB เชื่อมต่ออยู่"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Runtime persistence is unavailable.": {
       "localizations": {
@@ -5379,7 +5799,8 @@
             "value": "การบันทึกข้อมูลรันไทม์ไม่พร้อมใช้งาน"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Automatic printing is disabled; configure a printer when needed.": {
       "localizations": {
@@ -5389,7 +5810,8 @@
             "value": "ปิดการพิมพ์อัตโนมัติอยู่ หากต้องการให้ตั้งค่าเครื่องพิมพ์"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Cloud SSH setup is incomplete.": {
       "localizations": {
@@ -5399,7 +5821,8 @@
             "value": "การตั้งค่า Cloud SSH ยังไม่เสร็จสมบูรณ์"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Not run during this application launch.": {
       "localizations": {
@@ -5409,7 +5832,8 @@
             "value": "ยังไม่ได้เรียกใช้ในการเปิดแอปครั้งนี้"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Run Full Preflight to test the shutter.": {
       "localizations": {
@@ -5419,7 +5843,8 @@
             "value": "เรียกใช้การตรวจสอบก่อนเริ่มแบบเต็มเพื่อทดสอบชัตเตอร์"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Built-in / USB / Continuity": {
       "localizations": {
@@ -5429,7 +5854,8 @@
             "value": "ในตัว / USB / Continuity"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "DSLR / Mirrorless (USB Tethered)": {
       "localizations": {
@@ -5439,7 +5865,8 @@
             "value": "DSLR / มิเรอร์เลส (เชื่อมต่อ USB)"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Fill Flash": {
       "localizations": {
@@ -5449,7 +5876,8 @@
             "value": "แฟลชเติมแสง"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "L-size (3.5×5\")": {
       "localizations": {
@@ -5459,7 +5887,8 @@
             "value": "ขนาด L (3.5×5 นิ้ว)"
           }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "→": {
       "localizations": {
