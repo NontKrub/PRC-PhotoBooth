@@ -13,6 +13,14 @@ struct SavedCaptureFiles: Sendable, Equatable {
     var gifFrameFileNames: [String]
 }
 
+struct SessionPresentationSnapshot: Codable, Sendable, Equatable {
+    var language: CustomerLanguage
+    var templateDisplayName: String
+    var filterID: PhotoFilterID
+    var prompts: [ResolvedPosePrompt]
+    var assetFileNames: [String: String]
+}
+
 enum SessionWorkspaceError: LocalizedError, Equatable {
     case invalidSessionID
     case missingSource(URL)
@@ -152,6 +160,83 @@ struct SessionWorkspace: Sendable {
             throw error
         }
         return SavedCaptureFiles(imageFileName: imageFileName, gifFrameFileNames: frameFileNames)
+    }
+
+    func savePresentationSnapshot(
+        presentation: SessionPresentation,
+        prompts: [ResolvedPosePrompt],
+        workspace: SessionWorkspaceDescriptor
+    ) throws {
+        let directory = try sessionDirectory(for: workspace)
+            .appendingPathComponent(".work/presentation", isDirectory: true)
+        try createDirectory(directory)
+        var snapshotPrompts = prompts
+        var assetFileNames: [String: String] = [:]
+        for presented in presentation.prompts {
+            guard let data = presented.imageData else { continue }
+            let fileName = "\(presented.promptID).jpg"
+            guard !fileName.contains("/") else { continue }
+            try data.write(to: directory.appendingPathComponent(fileName), options: [.atomic])
+            assetFileNames[presented.promptID] = fileName
+            if let index = snapshotPrompts.firstIndex(where: { $0.id == presented.promptID }) {
+                snapshotPrompts[index].assetID = fileName
+            }
+        }
+        let snapshot = SessionPresentationSnapshot(
+            language: presentation.language,
+            templateDisplayName: presentation.templateDisplayName,
+            filterID: presentation.filterID,
+            prompts: snapshotPrompts,
+            assetFileNames: assetFileNames
+        )
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        let data = try encoder.encode(snapshot)
+        let url = directory.appendingPathComponent("presentation.json")
+        let temporary = directory.appendingPathComponent(".presentation-\(UUID().uuidString).tmp")
+        defer { try? fileManager.removeItem(at: temporary) }
+        try data.write(to: temporary, options: [.atomic])
+        if fileManager.fileExists(atPath: url.path) {
+            _ = try fileManager.replaceItemAt(url, withItemAt: temporary)
+        } else {
+            try fileManager.moveItem(at: temporary, to: url)
+        }
+    }
+
+    func loadPresentationSnapshot(manifest: SessionManifest) throws -> SessionPresentation? {
+        let directory = URL(fileURLWithPath: manifest.absoluteDirectoryPath, isDirectory: true)
+        let presentationURL = try resolve(".work/presentation/presentation.json", in: directory)
+        guard fileManager.fileExists(atPath: presentationURL.path) else { return nil }
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        let snapshot = try decoder.decode(SessionPresentationSnapshot.self, from: Data(contentsOf: presentationURL))
+        let prompts = snapshot.prompts.map { prompt in
+            let fileName = snapshot.assetFileNames[prompt.id]
+            let data = fileName.flatMap {
+                try? Data(contentsOf: directory.appendingPathComponent(".work/presentation").appendingPathComponent($0))
+            }
+            return SessionPromptPresentation(
+                promptID: prompt.id,
+                photoIndex: prompt.photoIndex,
+                title: prompt.title.value(for: snapshot.language),
+                subtitle: {
+                    let requested = snapshot.language == .english ? prompt.subtitle.english : prompt.subtitle.thai
+                    let other = snapshot.language == .english ? prompt.subtitle.thai : prompt.subtitle.english
+                    return [requested, other]
+                        .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                        .first(where: { !$0.isEmpty }) ?? ""
+                }(),
+                imageData: data
+            )
+        }
+        return SessionPresentation(
+            sessionID: manifest.id,
+            language: snapshot.language,
+            templateDisplayName: snapshot.templateDisplayName,
+            filterID: snapshot.filterID,
+            prompts: prompts
+        )
     }
 
     func loadAcceptedImages(manifest: SessionManifest) throws -> [Int: CGImage] {

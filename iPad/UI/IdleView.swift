@@ -107,9 +107,9 @@ struct IdleView: View {
 
     var badgeLabel: String {
         switch vm.multipeer.connectionState {
-        case .connected(let name): return "Connected to \(name)"
-        case .connecting:          return "Connecting…"
-        case .disconnected:        return "Waiting for operator"
+        case .connected(let name): return vm.selectedLanguage == .thai ? "เชื่อมต่อกับ \(name)" : "Connected to \(name)"
+        case .connecting:          return vm.selectedLanguage == .thai ? "กำลังเชื่อมต่อ…" : "Connecting…"
+        case .disconnected:        return vm.selectedLanguage == .thai ? "กำลังรอผู้ควบคุม" : "Waiting for operator"
         }
     }
 }

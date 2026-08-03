@@ -4,6 +4,8 @@ struct ReviewView: View {
     let photoIndex: Int
     @Environment(iPadViewModel.self) private var vm
 
+    private var isThai: Bool { vm.selectedLanguage == .thai }
+
     var thumbnail: CGImage? {
         guard let data = vm.stateMachine.keptShots[photoIndex],
               let src = CGImageSourceCreateWithData(data as CFData, nil)
@@ -71,7 +73,7 @@ struct ReviewView: View {
                         HStack(spacing: 10) {
                             Image(systemName: "checkmark")
                                 .font(.system(size: 16, weight: .bold))
-                            Text(photoIndex + 1 < vm.eventConfig.photoCount ? "Keep & next" : "Keep & finish")
+                        Text(LocalizedStringKey(photoIndex + 1 < vm.eventConfig.photoCount ? "Keep & next" : "Keep & finish"))
                                 .font(.system(size: 17, weight: .bold))
                         }
                         .foregroundStyle(.black)

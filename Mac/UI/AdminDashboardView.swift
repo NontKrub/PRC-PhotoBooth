@@ -6,7 +6,9 @@ import UniformTypeIdentifiers
 struct AdminDashboardView: View {
     let onPINReset: () -> Void
 
+    @Environment(BoothCoordinator.self) private var coordinator
     @Environment(\.modelContext) private var modelContext
+    @Environment(\.locale) private var locale
     @Query(sort: \BoothSession.startedAt, order: .reverse) private var allSessions: [BoothSession]
     @Query(sort: \BoothEvent.createdAt, order: .reverse)   private var allEvents: [BoothEvent]
 
@@ -15,6 +17,8 @@ struct AdminDashboardView: View {
     @State private var selectedEventFilter: String? = nil   // nil = all events
     @State private var selectedSession: BoothSession? = nil
     @State private var showClearPIN = false
+    @State private var manifests: [String: SessionManifest] = [:]
+    @State private var galleryStatuses: [String: GalleryApprovalStatus] = [:]
 
 
     // MARK: - Derived data
@@ -58,6 +62,42 @@ struct AdminDashboardView: View {
         return durations.isEmpty ? 0 : durations.reduce(0, +) / Double(durations.count)
     }
 
+    private var enrichedSessions: [SessionManifest] {
+        filteredSessions.compactMap { manifests[$0.id] }
+    }
+
+    private var operatorLanguage: CustomerLanguage {
+        operatorCustomerLanguage(for: locale)
+    }
+
+    private var templateRows: [(label: String, count: Int)] {
+        groupedExperienceRows { analyticsTemplateName($0) }
+    }
+
+    private var filterRows: [(label: String, count: Int)] {
+        groupedExperienceRows { $0.eventConfig.selectedFilterID.displayName(for: operatorLanguage) }
+    }
+
+    private var languageRows: [(label: String, count: Int)] {
+        groupedExperienceRows {
+            operatorString(
+                $0.eventConfig.customerLanguage == .thai ? "Thai" : "English",
+                locale: locale
+            )
+        }
+    }
+
+    private var galleryRows: [(label: String, count: Int)] {
+        Dictionary(grouping: filteredSessions) { session in
+            if let status = galleryStatuses[session.id] {
+                return operatorGalleryStatusName(status, locale: locale)
+            }
+            return operatorString("Not registered", locale: locale)
+        }
+        .map { ($0.key, $0.value.count) }
+        .sorted { $0.label < $1.label }
+    }
+
     // MARK: - Body
 
     var body: some View {
@@ -74,6 +114,7 @@ struct AdminDashboardView: View {
                     if !dayStats.isEmpty { sessionsPerDayChart }
                     if !dayStats.isEmpty { busyHoursChart }
                     eventBreakdownTable
+                    experienceBreakdown
                 }
                 .padding()
             }
@@ -95,6 +136,9 @@ struct AdminDashboardView: View {
             Button("Cancel", role: .cancel) {}
         } message: {
             Text("You will be asked to create a new PIN now.")
+        }
+        .task(id: allSessions.count) {
+            await loadExperienceAnalytics()
         }
     }
 
@@ -225,6 +269,18 @@ struct AdminDashboardView: View {
         .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
     }
 
+    var experienceBreakdown: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Experience breakdown").font(.headline)
+            HStack(alignment: .top, spacing: 12) {
+                BreakdownCard(title: "By Template", rows: templateRows)
+                BreakdownCard(title: "By Filter", rows: filterRows)
+                BreakdownCard(title: "By Language", rows: languageRows)
+                BreakdownCard(title: "Gallery", rows: galleryRows)
+            }
+        }
+    }
+
     // MARK: - Helpers
 
     private struct EventRow: Identifiable {
@@ -249,6 +305,30 @@ struct AdminDashboardView: View {
         }.sorted { $0.sessions > $1.sessions }
     }
 
+    private func groupedExperienceRows(_ label: (SessionManifest) -> String) -> [(label: String, count: Int)] {
+        Dictionary(grouping: enrichedSessions, by: label)
+            .map { ($0.key, $0.value.count) }
+            .sorted { $0.label < $1.label }
+    }
+
+    private func loadExperienceAnalytics() async {
+        let loadedManifests = await coordinator.manifestStore.loadAll()
+        var byID: [String: SessionManifest] = [:]
+        for result in loadedManifests {
+            if case .loaded(let manifest) = result { byID[manifest.id] = manifest }
+        }
+
+        let loadedGalleries = await coordinator.galleryStore.loadAll()
+        var statuses: [String: GalleryApprovalStatus] = [:]
+        for result in loadedGalleries {
+            if case .loaded(let index) = result {
+                for session in index.sessions { statuses[session.sessionID] = session.approvalStatus }
+            }
+        }
+        manifests = byID
+        galleryStatuses = statuses
+    }
+
     private func sessionDuration(_ s: BoothSession) -> String? {
         guard let fin = s.finishedAt else { return nil }
         let secs = Int(fin.timeIntervalSince(s.startedAt))
@@ -264,13 +344,21 @@ struct AdminDashboardView: View {
     // MARK: - CSV export
 
     private func exportCSV() {
-        var lines = ["Date,Time,Event,Photos,Duration (s),Strip,GIF"]
+        var lines = ["Date,Time,Event,Photos,Duration (s),Strip,GIF,Template,Filter,Customer Language,Gallery Status"]
         for s in filteredSessions {
             let eventName = allEvents.first { $0.id == s.eventID }?.name ?? s.eventID
             let dur = s.finishedAt.map { Int($0.timeIntervalSince(s.startedAt)) } ?? 0
             let date = s.startedAt.formatted(.dateTime.year().month().day())
             let time = s.startedAt.formatted(.dateTime.hour().minute().second())
-            lines.append("\(date),\(time),\"\(eventName)\",\(s.photoCount),\(dur),\(s.stripPath ?? ""),\(s.gifPath ?? "")")
+            let manifest = manifests[s.id]
+            let template = manifest.map { csvTemplateName($0) } ?? "Legacy"
+            let filter = manifest?.eventConfig.selectedFilterID.rawValue ?? PhotoFilterID.original.rawValue
+            let language = manifest?.eventConfig.customerLanguage == .thai ? "Thai" : "English"
+            let gallery = galleryStatuses[s.id]?.rawValue ?? "not registered"
+            lines.append([
+                date, time, eventName, "\(s.photoCount)", "\(dur)", s.stripPath ?? "", s.gifPath ?? "",
+                template, filter, language, gallery
+            ].map(csvField).joined(separator: ","))
         }
         let csv = lines.joined(separator: "\n")
         let panel = NSSavePanel()
@@ -279,6 +367,22 @@ struct AdminDashboardView: View {
         if panel.runModal() == .OK, let url = panel.url {
             try? csv.write(to: url, atomically: true, encoding: .utf8)
         }
+    }
+
+    private func analyticsTemplateName(_ manifest: SessionManifest) -> String {
+        let name = manifest.eventConfig.templateName.value(for: operatorLanguage)
+        return manifest.eventConfig.templateID == "legacy-default" || name == "Untitled" || name == "ไม่มีชื่อ"
+            ? operatorString("Legacy", locale: locale)
+            : name
+    }
+
+    private func csvTemplateName(_ manifest: SessionManifest) -> String {
+        let name = manifest.eventConfig.templateName.value(for: .english)
+        return manifest.eventConfig.templateID == "legacy-default" || name == "Untitled" ? "Legacy" : name
+    }
+
+    private func csvField(_ value: String) -> String {
+        "\"\(value.replacingOccurrences(of: "\"", with: "\"\""))\""
     }
 }
 
@@ -295,6 +399,32 @@ struct StatCard: View {
             Label(title, systemImage: icon)
                 .font(.caption).foregroundStyle(.secondary)
             Text(value).font(.title2.bold()).foregroundStyle(color)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(12)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 10))
+    }
+}
+
+private struct BreakdownCard: View {
+    let title: String
+    let rows: [(label: String, count: Int)]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(title).font(.caption.bold())
+            if rows.isEmpty {
+                Text("No data").font(.caption).foregroundStyle(.secondary)
+            } else {
+                ForEach(Array(rows.prefix(5).enumerated()), id: \.offset) { _, row in
+                    HStack {
+                        Text(row.label).lineLimit(1)
+                        Spacer()
+                        Text("\(row.count)").foregroundStyle(.secondary)
+                    }
+                    .font(.caption)
+                }
+            }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(12)

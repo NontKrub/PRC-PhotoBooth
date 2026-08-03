@@ -9,12 +9,23 @@ struct ExternalDisplayView: View {
     @Environment(SessionStateMachine.self) private var sm
     @State private var qrImage: CGImage?
 
+    private var displayLanguage: CustomerLanguage {
+        if sm.phase == .selectingExperience {
+            return coordinator.externalSelection.language
+        }
+        return sm.config.customerLanguage
+    }
+
     var body: some View {
         ZStack {
             Color.black.ignoresSafeArea()
             switch sm.phase {
-            case .idle, .readyToStart:
+            case .idle:
                 idleContent
+            case .selectingExperience:
+                ExternalExperienceSelectionView()
+            case .readyToStart:
+                readyContent
             case .countdown(let idx, let secs):
                 countdownContent(photoIndex: idx, secondsRemaining: secs)
             case .captured, .processing:
@@ -25,6 +36,7 @@ struct ExternalDisplayView: View {
                 finishedContent(qrPayload: qr)
             }
         }
+        .environment(\.locale, Locale(identifier: displayLanguage.localeIdentifier))
     }
 
     // MARK: - Idle / ready
@@ -62,12 +74,40 @@ struct ExternalDisplayView: View {
     }
 
     private var startHintText: String {
-        coordinator.activeEvent == nil ? "No active event — set one up on the operator Mac" : "Click anywhere to begin"
+        LocalizedText(
+            english: coordinator.activeEvent == nil ? "No active event — set one up on the operator Mac" : "Click anywhere to begin",
+            thai: coordinator.activeEvent == nil ? "ยังไม่มีงานที่ใช้งานอยู่ — ตั้งค่างานบน Mac ของผู้ควบคุมก่อน" : "คลิกที่ใดก็ได้เพื่อเริ่ม"
+        ).value(for: displayLanguage)
     }
 
     private func attemptStart() {
         guard sm.phase == .idle, coordinator.activeEvent != nil else { return }
-        coordinator.startSession()
+        if coordinator.externalSelectionRequired {
+            coordinator.beginExternalExperienceSelection()
+        } else {
+            coordinator.startSession()
+        }
+    }
+
+    private var readyContent: some View {
+        VStack(spacing: 24) {
+            Text("Ready?")
+                .font(.system(size: 52, weight: .black, design: .rounded))
+                .foregroundStyle(.white)
+            Text(sm.config.templateName.value(for: sm.config.customerLanguage))
+                .font(.title2)
+                .foregroundStyle(.white.opacity(0.75))
+            Text("\(sm.config.photoCount) photos · \(sm.config.selectedFilterID.displayName(for: displayLanguage))")
+                .foregroundStyle(.white.opacity(0.6))
+            HStack(spacing: 16) {
+                Button("Back to Options") { coordinator.beginExternalExperienceSelection() }
+                    .buttonStyle(.bordered)
+                Button("Start") {
+                    coordinator.startSession(selection: coordinator.externalSelection.selection)
+                }
+                .buttonStyle(.borderedProminent)
+            }
+        }
     }
 
     // MARK: - Countdown
@@ -78,6 +118,35 @@ struct ExternalDisplayView: View {
             Color.black.opacity(0.2).ignoresSafeArea()
 
             VStack {
+                Spacer()
+                if let prompt = coordinator.currentSessionPresentation?.prompts.first(where: { $0.photoIndex == photoIndex }) {
+                    HStack(spacing: 14) {
+                        if let data = prompt.imageData,
+                           let source = CGImageSourceCreateWithData(data as CFData, nil),
+                           let image = CGImageSourceCreateImageAtIndex(source, 0, nil) {
+                            Image(nsImage: flipSafeImage(image))
+                                .resizable()
+                                .scaledToFit()
+                                .frame(maxWidth: 180, maxHeight: 180)
+                                .clipShape(RoundedRectangle(cornerRadius: 16))
+                        }
+                        VStack(alignment: .leading, spacing: 6) {
+                            Text(prompt.title)
+                                .font(.title2.bold())
+                                .lineLimit(3)
+                            if !prompt.subtitle.isEmpty {
+                                Text(prompt.subtitle)
+                                    .font(.body)
+                                    .lineLimit(3)
+                                    .foregroundStyle(.white.opacity(0.75))
+                            }
+                        }
+                        .foregroundStyle(.white)
+                    }
+                    .padding(.horizontal, 20)
+                    .padding(.vertical, 14)
+                    .background(.black.opacity(0.45), in: RoundedRectangle(cornerRadius: 18))
+                }
                 Spacer()
                 ZStack {
                     Circle().strokeBorder(.white.opacity(0.15), lineWidth: 10).frame(width: 320, height: 320)
@@ -126,7 +195,8 @@ struct ExternalDisplayView: View {
 
             ZStack {
                 RoundedRectangle(cornerRadius: 18).fill(Color(white: 0.1))
-                if let img = coordinator.capture.capturedStills[photoIndex] {
+                if let img = coordinator.currentFilteredReviewImages[photoIndex]
+                    ?? coordinator.capture.capturedStills[photoIndex] {
                     Image(nsImage: flipSafeImage(img))
                         .resizable()
                         .scaledToFill()
@@ -145,7 +215,7 @@ struct ExternalDisplayView: View {
                 .tint(.white)
 
                 Button(action: { coordinator.handleReviewDecision(photoIndex: photoIndex, action: .keep) }) {
-                    Label(photoIndex + 1 < sm.config.photoCount ? "Keep & next" : "Keep & finish", systemImage: "checkmark")
+                    Label(LocalizedStringKey(photoIndex + 1 < sm.config.photoCount ? "Keep & next" : "Keep & finish"), systemImage: "checkmark")
                         .frame(width: 230, height: 56)
                 }
                 .buttonStyle(.borderedProminent)
@@ -188,11 +258,23 @@ struct ExternalDisplayView: View {
 
     private var cameraPreview: some View {
         Group {
+#if DEBUG
+            if coordinator.capture.demoMode, let image = coordinator.capture.demoPreviewImage {
+                Image(nsImage: flipSafeImage(image))
+                    .resizable()
+                    .scaledToFill()
+            } else if coordinator.capture.isRunning, let session = coordinator.capture.camera.captureSession {
+                CameraPreviewView(captureSession: session, isMirrored: coordinator.capture.camera.isMirrored)
+            } else {
+                Color.black
+            }
+#else
             if coordinator.capture.isRunning, let session = coordinator.capture.camera.captureSession {
                 CameraPreviewView(captureSession: session, isMirrored: coordinator.capture.camera.isMirrored)
             } else {
                 Color.black
             }
+#endif
         }
         .ignoresSafeArea()
     }

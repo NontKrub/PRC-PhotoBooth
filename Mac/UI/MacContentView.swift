@@ -9,6 +9,7 @@ struct MacContentView: View {
     @State private var pendingTab: Int? = nil
     @State private var isAdminUnlocked = false
     @State private var showCloudSSHSetup = false
+    @AppStorage("operatorLanguage") private var operatorLanguage = OperatorLanguage.system.rawValue
 
     var body: some View {
         TabView(selection: $selectedTab) {
@@ -29,6 +30,7 @@ struct MacContentView: View {
                 .tag(3)
         }
         .frame(minWidth: 940, minHeight: 640)
+        .environment(\.locale, operatorLocale)
         .onChange(of: selectedTab) { old, new in
             if new == 2 || new == 3 {
                 guard !isAdminUnlocked else { return }
@@ -77,6 +79,14 @@ struct MacContentView: View {
         }
     }
 
+    private var operatorLocale: Locale {
+        switch OperatorLanguage(rawValue: operatorLanguage) ?? .system {
+        case .system: return .autoupdatingCurrent
+        case .english: return Locale(identifier: "en")
+        case .thai: return Locale(identifier: "th")
+        }
+    }
+
     private func beginPINReset() {
         clearPIN()
         isAdminUnlocked = false
@@ -89,6 +99,7 @@ struct MacContentView: View {
 
 struct SettingsView: View {
     @Environment(BoothCoordinator.self) private var coordinator
+    @Environment(\.locale) private var locale
 
     @AppStorage("selphyPaperSize")       private var paperSize      = SelphyPaperSize.postcard.rawValue
     @AppStorage("selphyCopies")          private var copies         = 1
@@ -100,6 +111,7 @@ struct SettingsView: View {
     @AppStorage("cloudSSHHost")          private var sshHost        = ""
     @AppStorage("cloudRemotePath")       private var remotePath     = CloudUploadConfiguration.defaultRemoteBasePath
     @AppStorage("publicBaseURL")         private var publicBaseURL  = ""
+    @AppStorage("operatorLanguage")      private var operatorLanguage = OperatorLanguage.system.rawValue
     @AppStorage(BoothCoordinator.eventFolderPathKey) private var eventFolderPath = ""
     @State private var selectedScreenIndex = 0
     @State private var showCloudSSHSetup = false
@@ -107,6 +119,7 @@ struct SettingsView: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 24) {
+                operatorLanguageSection
                 cameraFeatureStatusSection
                 ipadSection
                 externalDisplaySection
@@ -129,6 +142,17 @@ struct SettingsView: View {
         .task {
             coordinator.printer.refreshPrinters()
             if !skipDialog { autoPrint = false }
+        }
+    }
+
+    private var operatorLanguageSection: some View {
+        GroupBox("Application Language") {
+            Picker("Language", selection: $operatorLanguage) {
+                Text("System").tag(OperatorLanguage.system.rawValue)
+                Text("English").tag(OperatorLanguage.english.rawValue)
+                Text("ไทย").tag(OperatorLanguage.thai.rawValue)
+            }
+            .pickerStyle(.segmented)
         }
     }
 
@@ -160,13 +184,13 @@ struct SettingsView: View {
         }
     }
 
-    private func featureStatusRow(_ title: String, ready: Bool) -> some View {
+    private func featureStatusRow(_ title: LocalizedStringKey, ready: Bool) -> some View {
         HStack(spacing: 8) {
             Image(systemName: ready ? "checkmark.circle.fill" : "xmark.circle.fill")
                 .foregroundStyle(ready ? .green : .orange)
             Text(title)
             Spacer()
-            Text(ready ? "Ready" : "Unavailable")
+            Text(LocalizedStringKey(ready ? "Ready" : "Unavailable"))
                 .foregroundStyle(.secondary)
         }
         .font(.subheadline)
@@ -203,7 +227,7 @@ struct SettingsView: View {
                         set: { coordinator.previewConnectionMode = $0 }
                     )) {
                         ForEach(PreviewConnectionMode.allCases) { mode in
-                            Text(mode.rawValue).tag(mode)
+                            Text(operatorPreviewModeName(mode, locale: locale)).tag(mode)
                         }
                     }
                     .pickerStyle(.segmented)
@@ -351,8 +375,11 @@ struct SettingsView: View {
                     Divider()
 
                     LabeledContent("SSH Host") {
-                        Text(sshHost.isEmpty ? "Not configured" : sshHost)
-                            .textSelection(.enabled)
+                        if sshHost.isEmpty {
+                            Text("Not configured")
+                        } else {
+                            Text(sshHost)
+                        }
                     }
                     Text("Managed by Cloud SSH Setup in ~/.ssh/config, using Cloudflare Access.")
                         .font(.caption).foregroundStyle(.secondary)
@@ -398,7 +425,7 @@ struct SettingsView: View {
 
                 Picker("Paper Size", selection: $paperSize) {
                     ForEach(SelphyPaperSize.allCases, id: \.rawValue) {
-                        Text($0.rawValue).tag($0.rawValue)
+                        Text(operatorPaperSizeName($0, locale: locale)).tag($0.rawValue)
                     }
                 }
                 .frame(width: 280)
@@ -443,9 +470,9 @@ struct SettingsView: View {
 
     private var printerStatusText: String {
         switch coordinator.printer.configuredPrinterStatus() {
-        case .systemDefault: return "Using the macOS System Default printer."
-        case .available(let name): return "Configured printer: \(name)"
-        case .unavailable(let name): return "Configured printer unavailable: \(name)"
+        case .systemDefault: return operatorString("Using the macOS System Default printer.", locale: locale)
+        case .available(let name): return operatorFormat("Configured printer: %@", locale: locale, name)
+        case .unavailable(let name): return operatorFormat("Configured printer unavailable: %@", locale: locale, name)
         }
     }
 

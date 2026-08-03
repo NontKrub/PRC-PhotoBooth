@@ -12,7 +12,6 @@ final class SessionJobQueue {
     private let store: JobQueueStore
     private let executor: any SessionJobExecuting
     private var workerTask: Task<Void, Never>?
-    private var wakeContinuation: AsyncStream<Void>.Continuation?
     private var persistentQueueError: String?
 
     private(set) var jobs: [SessionJob] = []
@@ -28,17 +27,13 @@ final class SessionJobQueue {
     func start() {
         guard workerTask == nil else { return }
         isRunning = true
-        let (stream, continuation) = AsyncStream<Void>.makeStream()
-        wakeContinuation = continuation
         workerTask = Task { [weak self] in
-            await self?.runWorker(stream: stream)
+            await self?.runWorker()
         }
     }
 
     func stop() {
         isRunning = false
-        wakeContinuation?.finish()
-        wakeContinuation = nil
         workerTask?.cancel()
         workerTask = nil
     }
@@ -50,7 +45,7 @@ final class SessionJobQueue {
     }
 
     func enqueueFinalizationJobs(for manifest: SessionManifest) {
-        var kinds: [SessionJobKind] = [.renderStrip, .registerDownload]
+        var kinds: [SessionJobKind] = [.renderStrip, .registerDownload, .updateGallery]
         if manifest.shots.contains(where: { !$0.gifFrameFileNames.isEmpty }) {
             kinds.append(.renderGIF)
         }
@@ -71,7 +66,6 @@ final class SessionJobQueue {
             do {
                 try await store.retry(jobID: jobID)
                 await reload()
-                wakeContinuation?.yield(())
             } catch {
                 lastQueueError = error.localizedDescription
             }
@@ -109,7 +103,6 @@ final class SessionJobQueue {
             do {
                 for job in failed { try await store.retry(jobID: job.id) }
                 await reload()
-                wakeContinuation?.yield(())
             } catch {
                 lastQueueError = error.localizedDescription
             }
@@ -148,14 +141,13 @@ final class SessionJobQueue {
                     _ = try await store.enqueue(sessionID: sessionID, kind: kind)
                 }
                 await reload()
-                wakeContinuation?.yield(())
             } catch {
                 lastQueueError = error.localizedDescription
             }
         }
     }
 
-    private func runWorker(stream: AsyncStream<Void>) async {
+    private func runWorker() async {
         do {
             _ = try await store.load()
             try await store.resetInterruptedJobs()
@@ -171,21 +163,13 @@ final class SessionJobQueue {
                 continue
             }
             guard !Task.isCancelled else { break }
-            await waitForWakeOrPoll(stream)
+            await waitForWakeOrPoll()
         }
     }
 
-    private func waitForWakeOrPoll(_ stream: AsyncStream<Void>) async {
-        await withTaskGroup(of: Void.self) { group in
-            group.addTask {
-                try? await Task.sleep(for: .seconds(2))
-            }
-            group.addTask {
-                _ = await stream.first { _ in true }
-            }
-            _ = await group.next()
-            group.cancelAll()
-        }
+    private func waitForWakeOrPoll() async {
+        // ponytail: bounded 100ms poll; replace with a cancellable wake primitive if queue volume grows.
+        try? await Task.sleep(for: .milliseconds(100))
     }
 
     private func runNextJob() async -> Bool {
@@ -252,6 +236,7 @@ final class SessionJobQueue {
         for kind in [
             SessionJobKind.renderStrip,
             .registerDownload,
+            .updateGallery,
             .renderGIF,
             .autoPrint,
             .cloudUpload
@@ -291,6 +276,8 @@ final class SessionJobQueue {
             return true
         case .registerDownload, .autoPrint:
             return succeeded(.renderStrip)
+        case .updateGallery:
+            return succeeded(.renderStrip) && succeeded(.registerDownload)
         case .renderGIF:
             guard let download = job(for: .registerDownload) else { return true }
             return download.status == .succeeded || download.status == .failed || download.status == .cancelled

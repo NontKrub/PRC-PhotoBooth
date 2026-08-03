@@ -17,6 +17,7 @@ struct PINGateView: View {
     @State private var errorMsg: String? = nil
     @State private var deviceOwnerAuthenticationAvailable = false
     @FocusState private var focused: Bool
+    @Environment(\.locale) private var locale
 
     private enum Phase { case enter, confirm }
 
@@ -97,15 +98,15 @@ struct PINGateView: View {
 
     var title: String {
         switch mode {
-        case .setup:   return phase == .enter ? "Create Admin PIN" : "Confirm PIN"
-        case .verify:  return "Admin Access"
+        case .setup:   return operatorString(phase == .enter ? "Create Admin PIN" : "Confirm PIN", locale: locale)
+        case .verify:  return operatorString("Admin Access", locale: locale)
         }
     }
 
     var subtitle: String {
         switch mode {
-        case .setup:   return phase == .enter ? "Choose a 4-digit PIN to protect operator settings." : "Enter the same PIN again."
-        case .verify:  return "Enter your 4-digit PIN to continue."
+        case .setup:   return operatorString(phase == .enter ? "Choose a 4-digit PIN to protect operator settings." : "Enter the same PIN again.", locale: locale)
+        case .verify:  return operatorString("Enter your 4-digit PIN to continue.", locale: locale)
         }
     }
 
@@ -162,7 +163,7 @@ struct PINGateView: View {
             if verifyPIN(digits.joined()) {
                 onSuccess()
             } else {
-                triggerError("Incorrect PIN. Try again.")
+                triggerError(operatorString("Incorrect PIN. Try again.", locale: locale))
             }
         }
     }
@@ -172,7 +173,7 @@ struct PINGateView: View {
             setPIN(digits.joined())
             onSuccess()
         } else {
-            triggerError("PINs don't match. Start over.")
+            triggerError(operatorString("PINs don't match. Start over.", locale: locale))
             digits = []; confirmDigits = []; phase = .enter
         }
     }
@@ -194,13 +195,13 @@ struct PINGateView: View {
         let context = LAContext()
         guard context.canEvaluatePolicy(.deviceOwnerAuthentication, error: nil) else {
             deviceOwnerAuthenticationAvailable = false
-            triggerError("This Mac can't verify its owner right now. Try your PIN.")
+            triggerError(operatorString("This Mac can't verify its owner right now. Try your PIN.", locale: locale))
             return
         }
 
         context.evaluatePolicy(
             .deviceOwnerAuthentication,
-            localizedReason: "Unlock PRC PhotoBooth administrator settings with Touch ID or your Mac password."
+            localizedReason: operatorString("Unlock PRC PhotoBooth administrator settings with Touch ID or your Mac password.", locale: locale)
         ) { success, error in
             Task { @MainActor in
                 if success {

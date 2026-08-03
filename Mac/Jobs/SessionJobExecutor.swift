@@ -10,6 +10,10 @@ final class SessionJobExecutor: SessionJobExecuting {
     private let cloudUpload: CloudUploadService
     private let printer: PrinterService
     private let defaults: UserDefaults
+    private let filterPipeline: PhotoFilterPipeline
+    private let experienceStore: EventExperienceStore
+    private let galleryStore: EventGalleryStore
+    private let galleryThumbnailGenerator = GalleryThumbnailGenerator()
 
     init(
         manifestStore: SessionManifestStore,
@@ -18,7 +22,10 @@ final class SessionJobExecutor: SessionJobExecuting {
         server: LocalWebServer,
         cloudUpload: CloudUploadService,
         printer: PrinterService,
-        defaults: UserDefaults = .standard
+        defaults: UserDefaults = .standard,
+        filterPipeline: PhotoFilterPipeline = PhotoFilterPipeline(),
+        experienceStore: EventExperienceStore = EventExperienceStore(baseDirectory: BoothCoordinator.appSupportRootURL()),
+        galleryStore: EventGalleryStore = EventGalleryStore(baseDirectory: BoothCoordinator.appSupportRootURL())
     ) {
         self.manifestStore = manifestStore
         self.workspace = workspace
@@ -27,6 +34,9 @@ final class SessionJobExecutor: SessionJobExecuting {
         self.cloudUpload = cloudUpload
         self.printer = printer
         self.defaults = defaults
+        self.filterPipeline = filterPipeline
+        self.experienceStore = experienceStore
+        self.galleryStore = galleryStore
     }
 
     func execute(_ job: SessionJob) async throws {
@@ -42,6 +52,8 @@ final class SessionJobExecutor: SessionJobExecuting {
             try await renderStrip(manifest)
         case .registerDownload:
             try await registerDownload(manifest)
+        case .updateGallery:
+            try await updateGallery(manifest)
         case .renderGIF:
             try await renderGIF(manifest)
         case .cloudUpload:
@@ -64,12 +76,21 @@ final class SessionJobExecutor: SessionJobExecuting {
             }
         }
 
+        let filteredImages: [Int: CGImage]
+        do {
+            let source = (0..<manifest.eventConfig.photoCount).compactMap { images[$0] }
+            let filtered = try await filterPipeline.apply(manifest.eventConfig.selectedFilterID, to: source)
+            filteredImages = Dictionary(uniqueKeysWithValues: zip(0..<filtered.count, filtered))
+        } catch {
+            throw JobExecutionError.permanent("Could not apply \(manifest.eventConfig.selectedFilterID.rawValue) filter: \(error.localizedDescription)")
+        }
+
         let directory = sessionDirectory(for: manifest)
         let frame = try loadFrame(for: manifest, in: directory)
         let compositor = Compositor(config: manifest.eventConfig, framePNG: frame)
         let strip: CGImage
         do {
-            strip = try compositor.render(images: images)
+            strip = try compositor.render(images: filteredImages)
         } catch {
             throw JobExecutionError.permanent(error.localizedDescription)
         }
@@ -102,7 +123,21 @@ final class SessionJobExecutor: SessionJobExecuting {
         guard case .ready = status.state else {
             throw JobExecutionError.retryable("Local download server is not ready.")
         }
-        await server.registerToken(manifest.downloadToken, sessionDirectory: directory)
+        await server.registerToken(
+            manifest.downloadToken,
+            registration: SessionRouteRegistration(
+                sessionDirectory: directory,
+                language: manifest.eventConfig.customerLanguage,
+                eventGalleryPath: manifest.eventConfig.eventGalleryPath
+            )
+        )
+    }
+
+    private func updateGallery(_ manifest: SessionManifest) async throws {
+        guard let document = try? await experienceStore.load(eventID: manifest.eventID),
+              document.gallery.mode != .disabled else { return }
+        _ = try galleryThumbnailGenerator.generate(manifest: manifest)
+        try await galleryStore.upsertSession(manifest: manifest, configuration: document.gallery)
     }
 
     private func renderGIF(_ manifest: SessionManifest) async throws {
@@ -134,7 +169,8 @@ final class SessionJobExecutor: SessionJobExecuting {
         let temporary = directory.appendingPathComponent(".booth-\(UUID().uuidString).gif")
         defer { try? FileManager.default.removeItem(at: temporary) }
         do {
-            try GIFEncoder().encode(frames: frames, to: temporary)
+            let filteredFrames = try await filterPipeline.apply(manifest.eventConfig.selectedFilterID, to: frames)
+            try GIFEncoder().encode(frames: filteredFrames, to: temporary)
             try replaceFile(at: destination, with: temporary)
             var updated = (try? await manifestStore.load(sessionID: manifest.id)) ?? manifest
             updated.gifFileName = "booth.gif"

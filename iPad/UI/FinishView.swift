@@ -6,6 +6,8 @@ struct FinishAndQRView: View {
     @Environment(iPadViewModel.self) private var vm
     @State private var qrImage: CGImage?
 
+    private var isThai: Bool { vm.selectedLanguage == .thai }
+
     var body: some View {
         ZStack {
             Color.black.ignoresSafeArea()

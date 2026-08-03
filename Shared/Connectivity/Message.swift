@@ -8,12 +8,17 @@ public enum PreviewTransport: String, Codable, Sendable {
 }
 
 // All control messages exchanged over MultipeerConnectivity reliable channel.
-public enum Message: Codable, Sendable {
+public enum Message: Codable, Sendable, Equatable {
     case hello(role: DeviceRole)
     case eventConfig(config: EventConfig)
+    case eventExperienceCatalog(catalog: CustomerExperienceCatalog)
+    case eventExperienceAsset(packet: ExperienceAssetPacket)
     case setMirrored(isMirrored: Bool)
     case setPreviewTransport(transport: PreviewTransport)
     case sessionStart
+    case customerSessionRequest(selection: CustomerSessionSelection)
+    case sessionRequestRejected(reason: String)
+    case sessionPrepared(config: EventConfig, presentation: SessionPresentation)
     case beginCountdown(photoIndex: Int, seconds: Int)
     case shotCaptured(index: Int, thumbnailData: Data)
     case reviewDecision(action: ReviewAction)

@@ -10,6 +10,8 @@ struct iPadContentView: View {
             switch vm.stateMachine.phase {
             case .idle:
                 IdleView()
+            case .selectingExperience:
+                ExperienceSelectionView()
             case .readyToStart:
                 StartView()
             case .countdown(let idx, let secs):
@@ -35,6 +37,7 @@ struct iPadContentView: View {
         }
         .statusBarHidden(true)
         .persistentSystemOverlays(.hidden)
+        .environment(\.locale, Locale(identifier: vm.selectedLanguage.localeIdentifier))
     }
 
     var processingIndicator: some View {

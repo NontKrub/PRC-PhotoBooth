@@ -2,6 +2,7 @@ import Foundation
 import AppKit
 import SwiftUI
 import CoreGraphics
+import ImageIO
 import SwiftData
 import Observation
 import AVFoundation
@@ -74,10 +75,22 @@ final class BoothCoordinator {
     let printer: PrinterService
     let cloudUpload: CloudUploadService
     let usbPreview = USBPreviewServer()
+    let experienceStore: EventExperienceStore
+    let filterPipeline: PhotoFilterPipeline
+    let galleryStore: EventGalleryStore
 
     var activeEvent: BoothEvent? {
-        didSet { capture.captureRotationDegrees = activeEvent?.cameraRotationDegrees ?? 0 }
+        didSet {
+            capture.captureRotationDegrees = activeEvent?.cameraRotationDegrees ?? 0
+            let snapshot = activeEvent.map { makeEventSnapshot($0) }
+            Task { @MainActor [weak self] in
+                guard let self, let snapshot else { return }
+                await self.loadExperience(for: snapshot)
+            }
+        }
     }
+    private(set) var activeExperienceDocument: EventExperienceDocument?
+    private(set) var experienceCatalog: CustomerExperienceCatalog?
     var errorMessage: String?
     var serverURL: String = ""
     var cameraSourceKind: CameraSourceKind = .avFoundation {
@@ -108,6 +121,9 @@ final class BoothCoordinator {
     private var gifFrames: [Int: [CGImage]] = [:]
     private var countdownTask: Task<Void, Never>?
     var currentStripPreview: CGImage?
+    private(set) var currentFilteredReviewImages: [Int: CGImage] = [:]
+    private(set) var currentSessionPresentation: SessionPresentation?
+    var externalSelection = CustomerSessionSelectionDraft()
 
     // MARK: - External display viewer
     private(set) var externalScreens: [NSScreen] = []
@@ -123,6 +139,14 @@ final class BoothCoordinator {
         cloudSSHSetup = CloudSSHSetupService()
         let runtimeDirectory = Self.runtimeDirectoryURL()
         try? FileManager.default.createDirectory(at: runtimeDirectory, withIntermediateDirectories: true)
+        experienceStore = EventExperienceStore(baseDirectory: Self.appSupportRootURL())
+        filterPipeline = PhotoFilterPipeline()
+        galleryStore = EventGalleryStore(baseDirectory: Self.appSupportRootURL())
+#if DEBUG
+        let demoModeEnabled = ProcessInfo.processInfo.arguments.contains("--demo-mode")
+        capture.demoMode = demoModeEnabled
+        if demoModeEnabled { cameraPermissionGranted = true }
+#endif
         manifestStore = SessionManifestStore(baseDirectory: runtimeDirectory)
         workspace = SessionWorkspace()
         printer = PrinterService()
@@ -134,7 +158,8 @@ final class BoothCoordinator {
             store: store,
             server: server,
             cloudUpload: cloudUpload,
-            printer: printer
+            printer: printer,
+            galleryStore: galleryStore
         )
         jobQueue = SessionJobQueue(store: jobStore, executor: executor)
         recoveryService = SessionRecoveryService(
@@ -147,6 +172,7 @@ final class BoothCoordinator {
             self?.reconcileCurrentSessionJobs()
             self?.reconcileRecoveredSessions()
             self?.cleanupCompletedWorkingFiles()
+            Task { @MainActor [weak self] in await self?.refreshServerRoutes() }
         }
         recoveryService.onResume = { [weak self] manifest, images in
             self?.resumeRecoveredSession(manifest: manifest, images: images)
@@ -163,6 +189,20 @@ final class BoothCoordinator {
 
         Task { @MainActor [self] in
             usbPreview.start()
+#if DEBUG
+            if ProcessInfo.processInfo.arguments.contains("--demo-mode") {
+                do {
+                    let demoEvent = try await DemoDataSeeder().seed(
+                        store: store,
+                        experienceStore: experienceStore,
+                        reset: ProcessInfo.processInfo.arguments.contains("--reset-demo-data")
+                    )
+                    activeEvent = demoEvent
+                } catch {
+                    errorMessage = "Demo data could not load: \(error.localizedDescription)"
+                }
+            }
+#endif
             await checkCameraPermission()
             if cameraPermissionGranted { startCamera() }
             if let ip = LocalWebServer.lanIPAddress() {
@@ -184,6 +224,231 @@ final class BoothCoordinator {
         NotificationCenter.default.addObserver(forName: NSApplication.didChangeScreenParametersNotification, object: nil, queue: .main) { [weak self] _ in
             Task { @MainActor [weak self] in self?.refreshExternalScreens() }
         }
+    }
+
+    private func loadExperience(for snapshot: BoothEventSnapshot) async {
+        do {
+            let document = try await experienceStore.ensureDocument(for: snapshot)
+            activeExperienceDocument = document
+            experienceCatalog = CustomerExperienceCatalogBuilder().build(event: snapshot, document: document)
+            if let event = activeEvent, event.id == snapshot.id {
+                try LegacyEventMirrorService().updateLegacyEvent(event, using: document, modelContext: store.context)
+            }
+            sendExperienceCatalog()
+            await runSafePreflight()
+        } catch {
+            activeExperienceDocument = nil
+            experienceCatalog = nil
+            errorMessage = "Event experience could not load: \(error.localizedDescription)"
+        }
+    }
+
+    func refreshActiveExperience() {
+        guard let event = activeEvent else { return }
+        let snapshot = makeEventSnapshot(event)
+        Task { @MainActor [weak self] in
+            await self?.loadExperience(for: snapshot)
+        }
+    }
+
+    func loadExperienceDocument(for event: BoothEvent) async throws -> EventExperienceDocument {
+        let snapshot = makeEventSnapshot(event)
+        return try await experienceStore.ensureDocument(for: snapshot)
+    }
+
+    func saveExperienceDocument(
+        _ document: EventExperienceDocument,
+        for event: BoothEvent
+    ) async throws {
+        var normalized = document
+        normalized.templates.sort {
+            if $0.sortOrder == $1.sortOrder { return $0.id < $1.id }
+            return $0.sortOrder < $1.sortOrder
+        }
+        for index in normalized.templates.indices {
+            normalized.templates[index].sortOrder = index
+        }
+        normalized.revision = UUID().uuidString
+        normalized.updatedAt = Date()
+        try await experienceStore.save(normalized)
+        try LegacyEventMirrorService().updateLegacyEvent(event, using: normalized, modelContext: store.context)
+        if activeEvent?.id == event.id {
+            activeExperienceDocument = normalized
+            let snapshot = makeEventSnapshot(event)
+            experienceCatalog = CustomerExperienceCatalogBuilder().build(event: snapshot, document: normalized)
+            sendExperienceCatalog()
+            await refreshServerRoutes()
+        }
+    }
+
+    private func sendExperienceCatalog() {
+        guard let catalog = experienceCatalog, let document = activeExperienceDocument else { return }
+        multipeer.sendControl(.eventExperienceCatalog(catalog: catalog))
+        let templates = document.templates
+            .filter(\.isEnabled)
+            .sorted { $0.sortOrder < $1.sortOrder }
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            for template in templates {
+                guard let data = try? await self.experienceStore.readTemplatePreview(
+                    eventID: document.eventID,
+                    templateID: template.id
+                ) else {
+                    self.errorMessage = "Template preview unavailable: \(template.id)"
+                    continue
+                }
+                guard data.count <= 350_000 else {
+                    self.errorMessage = "Template preview is too large: \(template.id)"
+                    continue
+                }
+                self.multipeer.sendControl(.eventExperienceAsset(packet: ExperienceAssetPacket(
+                    eventID: document.eventID,
+                    revision: document.revision,
+                    assetID: template.id,
+                    kind: .templatePreview,
+                    jpegData: data
+                )))
+            }
+        }
+    }
+
+    private func makeEventSnapshot(_ event: BoothEvent) -> BoothEventSnapshot {
+        BoothEventSnapshot(
+            id: event.id,
+            name: event.name,
+            photoCount: event.photoCount,
+            countdownSeconds: event.countdownSeconds,
+            canvasWidth: event.canvasWidth,
+            canvasHeight: event.canvasHeight,
+            framePNGURL: event.framePNGPath.flatMap { appSupportDir()?.appendingPathComponent($0) },
+            slots: event.slots.sorted { $0.zOrder < $1.zOrder }.map {
+                SharedPhotoSlot(
+                    id: $0.id,
+                    normalizedRect: CGRect(x: $0.normX, y: $0.normY, width: $0.normW, height: $0.normH),
+                    rotation: $0.rotation,
+                    zOrder: $0.zOrder,
+                    photoIndex: $0.photoIndex
+                )
+            }
+        )
+    }
+
+    private func defaultSelection(for document: EventExperienceDocument) -> CustomerSessionSelection {
+        CustomerSessionSelection(
+            eventID: document.eventID,
+            experienceRevision: document.revision,
+            templateID: document.defaultTemplateID,
+            filterID: document.defaultFilterID,
+            language: document.defaultCustomerLanguage
+        )
+    }
+
+    var externalSelectionRequired: Bool {
+        guard let catalog = experienceCatalog else { return false }
+        return (catalog.templates.count > 1 && catalog.guestTemplateSelectionEnabled)
+            || (catalog.allowedFilterIDs.count > 1 && catalog.guestFilterSelectionEnabled)
+            || catalog.guestLanguageSelectionEnabled
+    }
+
+    func beginExternalExperienceSelection() {
+        guard let document = activeExperienceDocument else { return }
+        let selection = defaultSelection(for: document)
+        externalSelection = CustomerSessionSelectionDraft(
+            eventID: selection.eventID,
+            experienceRevision: selection.experienceRevision,
+            templateID: selection.templateID,
+            filterID: selection.filterID,
+            language: selection.language
+        )
+        stateMachine.transition(to: .selectingExperience)
+    }
+
+    func confirmExternalExperienceSelection() {
+        guard let catalog = experienceCatalog,
+              let template = catalog.templates.first(where: { $0.id == externalSelection.templateID }) else { return }
+        stateMachine.config = EventConfig(
+            eventID: catalog.eventID,
+            eventName: catalog.eventName,
+            photoCount: template.photoCount,
+            countdownSeconds: activeEvent?.countdownSeconds ?? 5,
+            templateID: template.id,
+            templateName: template.name,
+            selectedFilterID: externalSelection.filterID,
+            customerLanguage: externalSelection.language,
+            experienceRevision: catalog.revision
+        )
+        stateMachine.transition(to: .readyToStart)
+    }
+
+    private func selectedTemplateFrameURL(_ template: EventTemplateDefinition, eventID: String) -> URL? {
+        guard let fileName = template.frameFileName else { return nil }
+        return appSupportDir()?
+            .appendingPathComponent("EventExperiences", isDirectory: true)
+            .appendingPathComponent(eventID, isDirectory: true)
+            .appendingPathComponent("Templates", isDirectory: true)
+            .appendingPathComponent(template.id, isDirectory: true)
+            .appendingPathComponent(fileName)
+    }
+
+    private func makePresentation(
+        sessionID: String,
+        config: EventConfig,
+        document: EventExperienceDocument
+    ) async -> SessionPresentation {
+        var prompts: [SessionPromptPresentation] = []
+        for prompt in config.posePrompts {
+            let imageData: Data?
+            if let assetID = prompt.assetID,
+               let data = try? await experienceStore.readPromptImage(eventID: document.eventID, fileName: assetID) {
+                imageData = sessionPromptImageData(data)
+            } else {
+                imageData = nil
+            }
+            prompts.append(SessionPromptPresentation(
+                promptID: prompt.id,
+                photoIndex: prompt.photoIndex,
+                title: prompt.title.value(for: config.customerLanguage),
+                subtitle: localizedOptional(prompt.subtitle, language: config.customerLanguage),
+                imageData: imageData
+            ))
+        }
+        return SessionPresentation(
+            sessionID: sessionID,
+            language: config.customerLanguage,
+            templateDisplayName: config.templateName.value(for: config.customerLanguage),
+            filterID: config.selectedFilterID,
+            prompts: prompts
+        )
+    }
+
+    private func sessionPromptImageData(_ data: Data) -> Data? {
+        guard let source = CGImageSourceCreateWithData(data as CFData, nil),
+              let image = CGImageSourceCreateThumbnailAtIndex(source, 0, [
+                  kCGImageSourceCreateThumbnailFromImageAlways: true,
+                  kCGImageSourceThumbnailMaxPixelSize: 768,
+                  kCGImageSourceCreateThumbnailWithTransform: true
+              ] as CFDictionary),
+              let jpeg = jpegData(from: image, quality: 0.82),
+              jpeg.count <= 250_000 else { return nil }
+        return jpeg
+    }
+
+    private func presentation(for config: EventConfig, sessionID: String) -> SessionPresentation {
+        SessionPresentation(
+            sessionID: sessionID,
+            language: config.customerLanguage,
+            templateDisplayName: config.templateName.value(for: config.customerLanguage),
+            filterID: config.selectedFilterID,
+            prompts: config.posePrompts.map {
+                SessionPromptPresentation(
+                    promptID: $0.id,
+                    photoIndex: $0.photoIndex,
+                    title: $0.title.value(for: config.customerLanguage),
+                    subtitle: localizedOptional($0.subtitle, language: config.customerLanguage),
+                    imageData: nil
+                )
+            }
+        )
     }
 
     // MARK: - External display viewer
@@ -235,6 +500,13 @@ final class BoothCoordinator {
     // MARK: - Camera permission (M10)
 
     func checkCameraPermission() async {
+#if DEBUG
+        if capture.demoMode {
+            cameraPermissionGranted = true
+            if !capture.isRunning { startCamera() }
+            return
+        }
+#endif
         switch AVCaptureDevice.authorizationStatus(for: .video) {
         case .authorized:
             cameraPermissionGranted = true
@@ -353,6 +625,54 @@ final class BoothCoordinator {
         let cloudConnectivityPassed = cloudUploadEnabled && cloudSetupComplete
             ? await cloudSSHSetup.checkConnection()
             : false
+        let experienceStatus: PreflightCheckStatus = activeEvent == nil
+            ? .skipped
+            : activeExperienceDocument == nil ? .failed : .passed
+        let experienceDetail = activeEvent == nil
+            ? "Skipped because no event is active."
+            : activeExperienceDocument == nil ? "The event experience document is unavailable." : "Experience document is loaded and validated."
+        let templateStatus: (PreflightCheckStatus, String) = {
+            guard let document = activeExperienceDocument else {
+                return (.skipped, "Skipped until an experience document is available.")
+            }
+            let valid = document.templates.allSatisfy { template in
+                !template.slots.isEmpty
+                    && (0..<template.photoCount).allSatisfy { index in
+                        template.slots.contains(where: { $0.photoIndex == index })
+                    }
+            }
+            return valid
+                ? (.passed, "Enabled template slots are valid.")
+                : (.failed, "An enabled template has invalid capture slots.")
+        }()
+        let filterValid: Bool
+        if let document = activeExperienceDocument {
+            var valid = await filterPipeline.validate(document.defaultFilterID)
+            for filter in document.allowedFilterIDs {
+                let filterIsValid = await filterPipeline.validate(filter)
+                valid = valid && filterIsValid
+            }
+            filterValid = valid
+        } else {
+            filterValid = true
+        }
+        let filterStatus: (PreflightCheckStatus, String) = activeExperienceDocument == nil
+            ? (.skipped, "Skipped until filter settings are available.")
+            : filterValid
+                ? (.passed, "Configured filters passed synthetic-image validation.")
+                : (.failed, "A configured filter failed synthetic-image validation.")
+        let galleryStatus: (PreflightCheckStatus, String) = {
+            guard let document = activeExperienceDocument, document.gallery.mode != .disabled else {
+                return (.skipped, "Gallery is disabled.")
+            }
+            do {
+                let directory = Self.appSupportRootURL().appendingPathComponent("Gallery/Events", isDirectory: true)
+                try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+                return (.passed, "Gallery storage is writable.")
+            } catch {
+                return (.warning, "Gallery storage warning: \(error.localizedDescription)")
+            }
+        }()
         let printerConfigured: Bool = {
             switch printer.configuredPrinterStatus() {
             case .available: return true
@@ -363,6 +683,14 @@ final class BoothCoordinator {
         }()
         return BoothPreflightContext(
             event: activeEvent?.toEventConfig(),
+            eventExperienceStatus: experienceStatus,
+            eventExperienceDetail: experienceDetail,
+            templateAssetsStatus: templateStatus.0,
+            templateAssetsDetail: templateStatus.1,
+            filterPipelineStatus: filterStatus.0,
+            filterPipelineDetail: filterStatus.1,
+            galleryStorageStatus: galleryStatus.0,
+            galleryStorageDetail: galleryStatus.1,
             cameraPermissionGranted: cameraPermissionGranted,
             cameraConnected: capture.isRunning && (cameraSourceKind != .dslr || capture.dslr.isRunning),
             customerDisplayReady: isCustomerDisplayReady,
@@ -436,13 +764,43 @@ final class BoothCoordinator {
 
     // MARK: - Session control
 
-    func startSession() {
+    func startSession(selection requestedSelection: CustomerSessionSelection? = nil) {
         guard currentSession == nil, let event = activeEvent else { return }
         guard recoveryService.recoverableCaptureSession == nil else {
             errorMessage = "Resume or discard the unfinished session in Operations."
             return
         }
-        let config = event.toEventConfig()
+        guard let document = activeExperienceDocument else {
+            errorMessage = "Event experience is still loading."
+            if requestedSelection != nil { multipeer.sendControl(.sessionRequestRejected(reason: errorMessage!)) }
+            return
+        }
+        let snapshot = makeEventSnapshot(event)
+        let selection = requestedSelection ?? defaultSelection(for: document)
+        let validated: ValidatedCustomerSelection
+        let config: EventConfig
+        do {
+            validated = try CustomerSelectionValidator().validate(selection, against: document)
+            config = try EventConfigBuilder().build(
+                event: snapshot,
+                document: document,
+                selection: validated,
+                galleryPath: document.gallery.mode == .disabled
+                    ? nil
+                    : "/e/\(document.gallery.eventToken)/"
+            )
+        } catch {
+            if requestedSelection != nil {
+                let reason = (error as? CustomerSelectionError)?.message(for: selection.language) ?? error.localizedDescription
+                multipeer.sendControl(.sessionRequestRejected(reason: reason))
+                if let selectionError = error as? CustomerSelectionError,
+                   selectionError == .staleCatalog {
+                    sendExperienceCatalog()
+                }
+            }
+            errorMessage = (error as? CustomerSelectionError)?.message(for: .english) ?? error.localizedDescription
+            return
+        }
         guard isCustomerDisplayReady else {
             errorMessage = "Connect an iPad or activate the external viewer before starting a session."
             return
@@ -463,7 +821,9 @@ final class BoothCoordinator {
             return
         }
         let session = store.startSession(for: event)
-        let frameURL = event.framePNGPath.flatMap { appSupportDir()?.appendingPathComponent($0) }
+        session.photoCount = config.photoCount
+        try? store.context.save()
+        let frameURL = selectedTemplateFrameURL(validated.template, eventID: event.id)
 
         Task { @MainActor [weak self] in
             guard let self else { return }
@@ -513,10 +873,23 @@ final class BoothCoordinator {
                 currentManifestID = manifest.id
                 retakeCounts = [:]
                 gifFrames = [:]
+                currentFilteredReviewImages = [:]
                 capture.resetStills()
                 stateMachine.startSession(config: config, sessionID: session.id)
+                let presentation = await makePresentation(
+                    sessionID: session.id,
+                    config: config,
+                    document: document
+                )
+                try workspace.savePresentationSnapshot(
+                    presentation: presentation,
+                    prompts: config.posePrompts,
+                    workspace: descriptor
+                )
+                currentSessionPresentation = presentation
                 multipeer.sendControl(.sessionStart)
                 multipeer.sendControl(.eventConfig(config: config))
+                multipeer.sendControl(.sessionPrepared(config: config, presentation: presentation))
                 beginCountdown(photoIndex: 0)
             } catch {
                 if let createdDirectory { try? FileManager.default.removeItem(at: createdDirectory) }
@@ -548,7 +921,11 @@ final class BoothCoordinator {
         do {
             gifFrames[photoIndex] = capture.drainBufferForGIF()
             let image = try await capture.captureStill(for: photoIndex)
-            let thumbData = capture.thumbnail(for: image) ?? Data()
+            let filtered = try await filterPipeline.apply(stateMachine.config.selectedFilterID, to: image)
+            currentFilteredReviewImages[photoIndex] = filtered
+            guard let thumbData = capture.thumbnail(for: filtered) else {
+                throw PhotoFilterError.failedToCreateOutput(stateMachine.config.selectedFilterID)
+            }
             stateMachine.enterReview(photoIndex: photoIndex, thumbnailData: thumbData)
             multipeer.sendControl(.shotCaptured(index: photoIndex, thumbnailData: thumbData))
             updateStripPreview()
@@ -563,7 +940,7 @@ final class BoothCoordinator {
         let framePNG = manifest.frameSnapshotFileName.flatMap {
             loadCGImage(from: URL(fileURLWithPath: manifest.absoluteDirectoryPath).appendingPathComponent($0))
         }
-        let images = capture.capturedStills
+        let images = currentFilteredReviewImages
         let compositor = Compositor(config: config, framePNG: framePNG)
         Task.detached(priority: .utility) { [compositor, images] in
             let img = try? compositor.render(images: images)
@@ -712,8 +1089,10 @@ final class BoothCoordinator {
         currentManifest = nil
         currentManifestID = nil
         currentSession = nil
+        currentSessionPresentation = nil
         retakeCounts = [:]
         gifFrames = [:]
+        currentFilteredReviewImages = [:]
         capture.resetStills()
         stateMachine.reset()
     }
@@ -731,6 +1110,8 @@ final class BoothCoordinator {
         currentManifest = manifest
         currentManifestID = manifest.id
         currentSession = store.restoreSessionRecord(from: manifest)
+        currentSessionPresentation = (try? workspace.loadPresentationSnapshot(manifest: manifest))
+            ?? presentation(for: manifest.eventConfig, sessionID: manifest.id)
         retakeCounts = manifest.shots.reduce(into: [:]) { result, shot in
             result[shot.photoIndex] = shot.retakeCount
         }
@@ -747,6 +1128,10 @@ final class BoothCoordinator {
         )
         multipeer.sendControl(.sessionStart)
         multipeer.sendControl(.eventConfig(config: manifest.eventConfig))
+        multipeer.sendControl(.sessionPrepared(
+            config: manifest.eventConfig,
+            presentation: currentSessionPresentation!
+        ))
         beginCountdown(photoIndex: manifest.nextPhotoIndex)
     }
 
@@ -756,6 +1141,7 @@ final class BoothCoordinator {
             currentManifest = nil
             currentManifestID = nil
             currentSession = nil
+            currentSessionPresentation = nil
             capture.resetStills()
             retakeCounts = [:]
             gifFrames = [:]
@@ -928,10 +1314,46 @@ final class BoothCoordinator {
             try? workspace.removeWorkingFiles(manifest: manifest)
         }
         currentSession = nil
+        currentSessionPresentation = nil
     }
 
     private func restoreDownloadTokens() async {
-        var mappings: [String: URL] = [:]
+        await refreshServerRoutes()
+    }
+
+    func refreshServerRoutes() async {
+        var galleryMappings: [String: EventGalleryRouteRegistration] = [:]
+        for result in await galleryStore.loadAll() {
+            guard case .loaded(let index) = result else { continue }
+            if let document = try? await experienceStore.load(eventID: index.eventID),
+               document.gallery.mode == .disabled {
+                continue
+            }
+            let approved = index.sessions
+                .filter { $0.approvalStatus == .approved }
+                .map { entry in
+                    GalleryRouteSession(
+                        sessionID: entry.sessionID,
+                        downloadToken: entry.downloadToken,
+                        startedAt: entry.startedAt,
+                        thumbnailURL: URL(fileURLWithPath: entry.absoluteSessionDirectoryPath)
+                            .appendingPathComponent(entry.thumbnailFileName),
+                        gifAvailable: entry.gifFileName != nil,
+                        templateName: entry.templateName.value(for: index.language),
+                        filterID: entry.filterID
+                    )
+                }
+            galleryMappings[index.eventToken] = EventGalleryRouteRegistration(
+                eventID: index.eventID,
+                eventToken: index.eventToken,
+                title: index.title.value(for: index.language),
+                language: index.language,
+                showGIFLinks: index.showGIFLinks,
+                approvedSessions: approved
+            )
+        }
+
+        var sessionMappings: [String: SessionRouteRegistration] = [:]
         for result in await manifestStore.loadAll() {
             guard case .loaded(let manifest) = result,
                   manifest.status == .completed || manifest.status == .finalizing else { continue }
@@ -942,9 +1364,17 @@ final class BoothCoordinator {
                 recoveryService.recordError("Cannot restore download token for \(manifest.eventName): session output is missing.")
                 continue
             }
-            mappings[manifest.downloadToken] = directory
+            let galleryPath = manifest.eventConfig.eventGalleryPath.flatMap { path in
+                galleryMappings.values.contains(where: { "/e/\($0.eventToken)/" == path }) ? path : nil
+            }
+            sessionMappings[manifest.downloadToken] = SessionRouteRegistration(
+                sessionDirectory: directory,
+                language: manifest.eventConfig.customerLanguage,
+                eventGalleryPath: galleryPath
+            )
         }
-        await server.replaceTokenMap(mappings)
+        await server.replaceSessionRoutes(sessionMappings)
+        await server.replaceGalleryRoutes(galleryMappings)
     }
 
     // MARK: - Session cleanup (M10)
@@ -1038,6 +1468,7 @@ final class BoothCoordinator {
             if let event = activeEvent {
                 multipeer.sendControl(.eventConfig(config: event.toEventConfig()))
             }
+            sendExperienceCatalog()
             resynciPad()
         case .setPreviewTransport(let transport):
             previewConnectionMode = transport == .usb ? .cable : .wireless
@@ -1045,6 +1476,15 @@ final class BoothCoordinator {
             if stateMachine.phase == .idle, activeEvent != nil {
                 startSession()
             }
+        case .customerSessionRequest(let selection):
+            guard stateMachine.phase == .idle || stateMachine.phase == .selectingExperience || stateMachine.phase == .readyToStart else {
+                multipeer.sendControl(.sessionRequestRejected(reason: LocalizedText(
+                    english: "A session is already in progress.",
+                    thai: "มีเซสชันกำลังดำเนินการอยู่แล้ว"
+                ).value(for: selection.language)))
+                return
+            }
+            startSession(selection: selection)
         case .reviewDecision(let action):
             if case .review(let idx) = stateMachine.phase {
                 handleReviewDecision(photoIndex: idx, action: action)
@@ -1057,21 +1497,30 @@ final class BoothCoordinator {
     private func resynciPad() {
         multipeer.sendControl(.setMirrored(isMirrored: capture.camera.isMirrored))
         switch stateMachine.phase {
-        case .idle, .readyToStart:
+        case .idle, .selectingExperience, .readyToStart:
             break
         case .countdown(let idx, let secs):
             multipeer.sendControl(.sessionStart)
             multipeer.sendControl(.eventConfig(config: stateMachine.config))
+            if let presentation = currentSessionPresentation {
+                multipeer.sendControl(.sessionPrepared(config: stateMachine.config, presentation: presentation))
+            }
             multipeer.sendControl(.beginCountdown(photoIndex: idx, seconds: secs))
         case .captured(let idx), .review(let idx):
             if let thumb = stateMachine.keptShots[idx] {
                 multipeer.sendControl(.sessionStart)
                 multipeer.sendControl(.eventConfig(config: stateMachine.config))
+                if let presentation = currentSessionPresentation {
+                    multipeer.sendControl(.sessionPrepared(config: stateMachine.config, presentation: presentation))
+                }
                 multipeer.sendControl(.shotCaptured(index: idx, thumbnailData: thumb))
             }
         case .processing:
             multipeer.sendControl(.sessionStart)
             multipeer.sendControl(.eventConfig(config: stateMachine.config))
+            if let presentation = currentSessionPresentation {
+                multipeer.sendControl(.sessionPrepared(config: stateMachine.config, presentation: presentation))
+            }
         case .finished(let qr):
             multipeer.sendControl(.sessionFinished(qrPayload: qr, stripThumbData: nil, gifThumbData: nil))
         }
@@ -1079,10 +1528,14 @@ final class BoothCoordinator {
 
     // MARK: - Directories
 
-    static func runtimeDirectoryURL() -> URL {
+    static func appSupportRootURL() -> URL {
         let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
             ?? FileManager.default.temporaryDirectory
-        return appSupport.appendingPathComponent("PRC-PhotoBooth/Runtime", isDirectory: true)
+        return appSupport.appendingPathComponent("PRC-PhotoBooth", isDirectory: true)
+    }
+
+    static func runtimeDirectoryURL() -> URL {
+        Self.appSupportRootURL().appendingPathComponent("Runtime", isDirectory: true)
     }
 
     nonisolated static func eventFolderURL(storedPath: String?, fallback: URL) -> URL {
@@ -1155,6 +1608,14 @@ final class BoothCoordinator {
             acceptedAt: acceptedAt
         )
     }
+}
+
+private func localizedOptional(_ text: LocalizedText, language: CustomerLanguage) -> String {
+    let requested = language == .english ? text.english : text.thai
+    let other = language == .english ? text.thai : text.english
+    return [requested, other]
+        .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+        .first(where: { !$0.isEmpty }) ?? ""
 }
 
 func incrementRetakeCount(in counts: inout [Int: Int], photoIndex: Int) -> Int {

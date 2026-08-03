@@ -5,6 +5,7 @@ struct OperatorConsoleView: View {
     var onOpenOperations: () -> Void
     @Environment(BoothCoordinator.self) private var coordinator
     @Environment(SessionStateMachine.self) private var sm
+    @Environment(\.locale) private var locale
     @State private var showPrintPrompt = false
     @State private var showPrintAgainConfirmation = false
     @State private var showGrid = false
@@ -62,6 +63,12 @@ struct OperatorConsoleView: View {
             Color.black
             if !coordinator.cameraPermissionGranted {
                 permissionDeniedOverlay
+            } else if coordinator.capture.demoMode,
+                      let image = coordinator.capture.demoPreviewImage {
+                CapturedImagePreview(cgImage: image)
+                    .overlay {
+                        if showGrid { GridOverlayView() }
+                    }
             } else if coordinator.cameraSourceKind == .dslr {
                 if let image = coordinator.capture.dslr.latestPreviewImage {
                     CapturedImagePreview(cgImage: image)
@@ -118,12 +125,12 @@ struct OperatorConsoleView: View {
             Image(systemName: "camera.aperture")
                 .font(.system(size: 44))
                 .foregroundStyle(.white.opacity(0.65))
-            Text(coordinator.capture.dslr.isRunning ? "Sony PTP Control Active" : "Sony PTP Standby")
+            Text(LocalizedStringKey(coordinator.capture.dslr.isRunning ? "Sony PTP Control Active" : "Sony PTP Standby"))
                 .font(.headline)
                 .foregroundStyle(.white)
-            Text(coordinator.capture.dslr.isRunning
-                 ? "Waiting for the camera's Sony PTP live-view stream…"
-                 : "Connect the camera to start Sony PTP live view.")
+            Text(LocalizedStringKey(coordinator.capture.dslr.isRunning
+                                    ? "Waiting for the camera's Sony PTP live-view stream…"
+                                    : "Connect the camera to start Sony PTP live view."))
                 .font(.caption)
                 .foregroundStyle(.white.opacity(0.7))
                 .multilineTextAlignment(.center)
@@ -203,10 +210,10 @@ struct OperatorConsoleView: View {
 
     var readinessLabel: String {
         switch coordinator.preflight.readiness {
-        case .ready: return "Booth Ready"
-        case .readyWithWarnings: return "Ready with Warnings"
-        case .notReady: return "Booth Not Ready"
-        case .checking: return "Checking Booth…"
+        case .ready: return operatorString("Booth Ready", locale: locale)
+        case .readyWithWarnings: return operatorString("Ready with Warnings", locale: locale)
+        case .notReady: return operatorString("Booth Not Ready", locale: locale)
+        case .checking: return operatorString("Checking Booth…", locale: locale)
         }
     }
 
@@ -229,9 +236,9 @@ struct OperatorConsoleView: View {
 
     var connectionLabel: String {
         switch coordinator.multipeer.connectionState {
-        case .connected(let name): return "iPad connected: \(name)"
-        case .connecting:          return "Connecting to iPad…"
-        case .disconnected:        return "iPad not connected"
+        case .connected(let name): return operatorFormat("iPad connected: %@", locale: locale, name)
+        case .connecting:          return operatorString("Connecting to iPad…", locale: locale)
+        case .disconnected:        return operatorString("iPad not connected", locale: locale)
         }
     }
 
@@ -244,7 +251,7 @@ struct OperatorConsoleView: View {
             @Bindable var c = coordinator
             Picker("", selection: $c.cameraSourceKind) {
                 ForEach(CameraSourceKind.allCases) { kind in
-                    Text(kind.rawValue).tag(kind)
+                    Text(operatorCameraSourceName(kind, locale: locale)).tag(kind)
                 }
             }
             .labelsHidden()
@@ -388,7 +395,7 @@ struct OperatorConsoleView: View {
             if coordinator.capture.dslr.isRunning {
                 Divider()
                 Button(action: { coordinator.testCameraCapture() }) {
-                    Label(coordinator.capture.dslr.isCapturing ? "Capturing..." : "Test Capture",
+                    Label(LocalizedStringKey(coordinator.capture.dslr.isCapturing ? "Capturing..." : "Test Capture"),
                           systemImage: "camera.fill")
                         .frame(maxWidth: .infinity)
                 }
@@ -441,7 +448,7 @@ struct OperatorConsoleView: View {
             HStack {
                 Text("Flash").font(.caption2).foregroundStyle(.secondary).frame(width: 60, alignment: .leading)
                 Picker("", selection: $dslr.flashMode) {
-                    ForEach(DSLRFlashMode.allCases) { m in Text(m.rawValue).tag(m) }
+                    ForEach(DSLRFlashMode.allCases) { m in Text(operatorFlashModeName(m, locale: locale)).tag(m) }
                 }
                 .labelsHidden().font(.caption2)
                 .disabled(!support.flash)
@@ -520,7 +527,11 @@ struct OperatorConsoleView: View {
                 .font(.caption).foregroundStyle(.secondary)
             if let event = coordinator.activeEvent {
                 Text(event.name).font(.headline)
-                Text("\(event.photoCount) photos · \(event.countdownSeconds)s countdown")
+                Text(operatorPhotoSummary(
+                    photoCount: event.photoCount,
+                    countdownSeconds: event.countdownSeconds,
+                    locale: locale
+                ))
                     .font(.caption).foregroundStyle(.secondary)
                 if event.slots.isEmpty {
                     Label("No photo slots defined", systemImage: "exclamationmark.triangle")
@@ -539,7 +550,7 @@ struct OperatorConsoleView: View {
         VStack(alignment: .leading, spacing: 4) {
             Label("Session Phase", systemImage: "circle.dashed")
                 .font(.caption).foregroundStyle(.secondary)
-            Text(sm.phase.displayName)
+            Text(operatorPhaseName(sm.phase, locale: locale))
                 .font(.headline).foregroundStyle(phaseColor)
             if case .countdown(_, let secs) = sm.phase {
                 ProgressView(value: Double(secs),
@@ -560,11 +571,11 @@ struct OperatorConsoleView: View {
         VStack(alignment: .leading, spacing: 3) {
             let sessionJobs = coordinator.jobQueue.jobs.filter { $0.sessionID == sm.currentSessionID }
             if let strip = sessionJobs.first(where: { $0.kind == .renderStrip }) {
-                Text(strip.status == .succeeded ? "Strip ready" : "Rendering strip…")
+                Text(LocalizedStringKey(strip.status == .succeeded ? "Strip ready" : "Rendering strip…"))
                     .font(.caption).foregroundStyle(.secondary)
             }
             if let download = sessionJobs.first(where: { $0.kind == .registerDownload }) {
-                Text(download.status == .succeeded ? "Download ready" : "Preparing download…")
+                Text(LocalizedStringKey(download.status == .succeeded ? "Download ready" : "Preparing download…"))
                     .font(.caption).foregroundStyle(.secondary)
             }
             if sessionJobs.contains(where: { $0.kind == .cloudUpload && $0.status != .succeeded }) {
@@ -581,7 +592,7 @@ struct OperatorConsoleView: View {
 
     var phaseColor: Color {
         switch sm.phase {
-        case .idle, .readyToStart:  return .primary
+        case .idle, .selectingExperience, .readyToStart:  return .primary
         case .countdown:            return .orange
         case .captured:             return .blue
         case .review:               return .purple
@@ -639,7 +650,7 @@ struct OperatorConsoleView: View {
         }
     }
 
-    private func overrideBtn(_ label: String, icon: String, tint: Color = .primary, action: @escaping () -> Void) -> some View {
+    private func overrideBtn(_ label: LocalizedStringKey, icon: String, tint: Color = .primary, action: @escaping () -> Void) -> some View {
         Button(action: action) {
             Label(label, systemImage: icon).frame(maxWidth: .infinity)
         }

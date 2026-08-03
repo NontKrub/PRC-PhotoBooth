@@ -211,6 +211,62 @@ struct FrameSlotEditor: View {
     }
 }
 
+// Adapter used by the JSON-backed experience editor. The legacy editor keeps
+// its SwiftData API; edits are copied back only when this sheet is dismissed.
+struct TemplateFrameSlotEditor: View {
+    @Binding var slots: [SharedPhotoSlot]
+    let canvasWidth: Double
+    let canvasHeight: Double
+    let photoCount: Int
+    @State private var workingEvent: BoothEvent
+
+    init(
+        slots: Binding<[SharedPhotoSlot]>,
+        canvasWidth: Double,
+        canvasHeight: Double,
+        photoCount: Int
+    ) {
+        _slots = slots
+        self.canvasWidth = canvasWidth
+        self.canvasHeight = canvasHeight
+        self.photoCount = photoCount
+
+        let event = BoothEvent(name: "Template", photoCount: photoCount)
+        event.canvasWidth = canvasWidth
+        event.canvasHeight = canvasHeight
+        event.slots = slots.wrappedValue.map { shared in
+            let rect = shared.normalizedRect
+            let slot = BoothSlot(
+                normX: rect.origin.x,
+                normY: rect.origin.y,
+                normW: rect.size.width,
+                normH: rect.size.height,
+                rotation: shared.rotation,
+                zOrder: shared.zOrder,
+                photoIndex: min(max(shared.photoIndex, 0), max(0, photoCount - 1))
+            )
+            slot.id = shared.id
+            return slot
+        }
+        _workingEvent = State(initialValue: event)
+    }
+
+    var body: some View {
+        FrameSlotEditor(event: workingEvent)
+            .onDisappear {
+                slots = workingEvent.slots.map { slot in
+                    SharedPhotoSlot(
+                        id: slot.id,
+                        normalizedRect: CGRect(x: slot.normX, y: slot.normY, width: slot.normW, height: slot.normH),
+                        rotation: slot.rotation,
+                        zOrder: slot.zOrder,
+                        photoIndex: min(max(slot.photoIndex, 0), max(0, photoCount - 1))
+                    )
+                }
+            }
+    }
+}
+
 // MARK: - SlotView (drag + 8 resize handles)
 
 struct SlotView: View {

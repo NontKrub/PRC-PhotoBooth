@@ -22,10 +22,30 @@ struct LocalDownloadResponse: Sendable, Equatable {
 }
 
 struct LocalDownloadRouter: Sendable {
-    private let tokenMap: [String: URL]
+    private let sessionRoutes: [String: SessionRouteRegistration]
+    private let galleryRoutes: [String: EventGalleryRouteRegistration]
 
     init(tokenMap: [String: URL]) {
-        self.tokenMap = tokenMap.mapValues { $0.standardizedFileURL }
+        self.init(
+            sessionRoutes: tokenMap.mapValues {
+                SessionRouteRegistration(sessionDirectory: $0, language: .english, eventGalleryPath: nil)
+            },
+            galleryRoutes: [:]
+        )
+    }
+
+    init(
+        sessionRoutes: [String: SessionRouteRegistration],
+        galleryRoutes: [String: EventGalleryRouteRegistration]
+    ) {
+        self.sessionRoutes = sessionRoutes.mapValues {
+            SessionRouteRegistration(
+                sessionDirectory: $0.sessionDirectory.standardizedFileURL,
+                language: $0.language,
+                eventGalleryPath: $0.eventGalleryPath
+            )
+        }
+        self.galleryRoutes = galleryRoutes
     }
 
     func response(for requestPath: String) -> LocalDownloadResponse {
@@ -37,7 +57,7 @@ struct LocalDownloadRouter: Sendable {
         }
 
         if path == "/health" {
-            let body = Data(#"{"status":"ok","registeredTokens":\#(tokenMap.count)}"#.utf8)
+            let body = Data(#"{"status":"ok","registeredTokens":\#(sessionRoutes.count)}"#.utf8)
             return LocalDownloadResponse(
                 statusCode: 200,
                 reason: "OK",
@@ -47,27 +67,29 @@ struct LocalDownloadRouter: Sendable {
             )
         }
 
-        let components = path.dropFirst().split(separator: "/", omittingEmptySubsequences: false).map(String.init)
-        guard components.count == 2 || components.count == 3,
+        if let galleryResponse = galleryResponse(for: path) {
+            return galleryResponse
+        }
+        return sessionResponse(for: path)
+    }
+
+    private func sessionResponse(for path: String) -> LocalDownloadResponse {
+        let components = path.dropFirst().split(separator: "/", omittingEmptySubsequences: true).map(String.init)
+        guard (components.count == 2 || components.count == 3),
               components[0] == "s",
-              !components[1].isEmpty,
-              components.last != "" || components.count == 3,
-              let sessionDirectory = tokenMap[components[1]] else {
+              let registration = sessionRoutes[components[1]] else {
             return notFound()
         }
 
-        if components.count == 2 || components[2].isEmpty {
-            return page(token: components[1], sessionDirectory: sessionDirectory)
+        if components.count == 2 {
+            return page(token: components[1], registration: registration)
         }
-
-        guard components[2] == "strip.png" || components[2] == "booth.gif" else {
-            return notFound()
-        }
-        let registeredDirectory = sessionDirectory.resolvingSymlinksInPath().standardizedFileURL
-        let fileURL = sessionDirectory.appendingPathComponent(components[2])
+        guard components[2] == "strip.png" || components[2] == "booth.gif" else { return notFound() }
+        let directory = registration.sessionDirectory.resolvingSymlinksInPath().standardizedFileURL
+        let fileURL = registration.sessionDirectory.appendingPathComponent(components[2])
             .resolvingSymlinksInPath()
             .standardizedFileURL
-        guard fileURL.path.hasPrefix(registeredDirectory.path + "/"),
+        guard fileURL.path.hasPrefix(directory.path + "/"),
               let body = try? Data(contentsOf: fileURL) else {
             return notFound()
         }
@@ -75,24 +97,56 @@ struct LocalDownloadRouter: Sendable {
             statusCode: 200,
             reason: "OK",
             contentType: components[2] == "strip.png" ? "image/png" : "image/gif",
-            headers: [:],
+            headers: ["Cache-Control": "no-store"],
             body: body
         )
     }
 
-    private func page(token: String, sessionDirectory: URL) -> LocalDownloadResponse {
-        let gifURL = sessionDirectory.appendingPathComponent("booth.gif")
+    private func galleryResponse(for path: String) -> LocalDownloadResponse? {
+        let components = path.dropFirst().split(separator: "/", omittingEmptySubsequences: true).map(String.init)
+        guard components.first == "e", components.count >= 2,
+              let route = galleryRoutes[components[1]] else { return nil }
+        if components.count == 2 {
+            return galleryPage(route)
+        }
+        guard components.count == 4, components[2] == "thumb", components[3].hasSuffix(".jpg"),
+              let sessionID = String(components[3].dropLast(4)).removingPercentEncoding,
+              let session = route.approvedSessions.first(where: { $0.sessionID == sessionID }),
+              let data = try? Data(contentsOf: session.thumbnailURL) else {
+            return notFound()
+        }
+        return LocalDownloadResponse(
+            statusCode: 200,
+            reason: "OK",
+            contentType: "image/jpeg",
+            headers: ["Cache-Control": "no-store"],
+            body: data
+        )
+    }
+
+    private func page(token: String, registration: SessionRouteRegistration) -> LocalDownloadResponse {
+        let directory = registration.sessionDirectory
+        let gifURL = directory.appendingPathComponent("booth.gif")
+        let isThai = registration.language == .thai
+        let gifLabel = isThai ? "ดาวน์โหลด GIF" : "Download GIF"
         let gifButton = FileManager.default.fileExists(atPath: gifURL.path)
-            ? #"<a class="btn secondary" href="/s/\#(token)/booth.gif" download="photobooth.gif">⬇ Save GIF</a>"#
+            ? #"<a class="btn secondary" href="/s/\#(token)/booth.gif" download="photobooth.gif">⬇ \#(gifLabel)</a>"#
             : ""
+        let galleryButton: String = {
+            guard let path = registration.eventGalleryPath else { return "" }
+            let label = isThai ? "ดูแกลเลอรีของงาน" : "View event gallery"
+            return #"<a class="btn secondary" href="\#(path.htmlEscaped)">\#(label)</a>"#
+        }()
+        let title = isThai ? "รูปภาพของคุณ" : "Your photos"
+        let stripLabel = isThai ? "ดาวน์โหลดโฟโต้สตริป" : "Download photo strip"
         let escapedToken = token.htmlEscaped
         let html = """
         <!DOCTYPE html>
-        <html lang="en">
+        <html lang="\(isThai ? "th" : "en")">
         <head>
         <meta charset="UTF-8">
         <meta name="viewport" content="width=device-width, initial-scale=1">
-        <title>PRC Photo Booth — Your Photos</title>
+        <title>\(title.htmlEscaped)</title>
         <style>
         body{font-family:-apple-system,sans-serif;background:#111;color:#eee;text-align:center;padding:2rem;margin:0}
         h1{font-size:1.5rem;margin-bottom:.25rem}p{color:#aaa;font-size:.9rem;margin-bottom:2rem}
@@ -102,12 +156,13 @@ struct LocalDownloadRouter: Sendable {
         </style>
         </head>
         <body>
-        <h1>✨ Your Photo Strip</h1>
-        <p>Tap a button to save your memories!</p>
-        <img src="/s/\(escapedToken)/strip.png" alt="Photo Strip">
+        <h1>✨ \(title.htmlEscaped)</h1>
+        <p>\(isThai ? "ดาวน์โหลดความทรงจำของคุณ" : "Download your memories")</p>
+        <img src="/s/\(escapedToken)/strip.png" alt="\(title.htmlEscaped)">
         <br>
-        <a class="btn" href="/s/\(escapedToken)/strip.png" download="photobooth-strip.png">⬇ Save Strip</a>
+        <a class="btn" href="/s/\(escapedToken)/strip.png" download="photobooth-strip.png">⬇ \(stripLabel)</a>
         \(gifButton)
+        \(galleryButton)
         </body>
         </html>
         """
@@ -118,6 +173,92 @@ struct LocalDownloadRouter: Sendable {
             headers: ["Cache-Control": "no-store"],
             body: Data(html.utf8)
         )
+    }
+
+    private func galleryPage(_ route: EventGalleryRouteRegistration) -> LocalDownloadResponse {
+        let isThai = route.language == .thai
+        let countText = isThai ? "รูปภาพที่อนุมัติแล้ว" : "approved sessions"
+        let viewLabel = isThai ? "ดูรูปภาพ" : "View photos"
+        let cards = route.approvedSessions.map { session in
+            let date = formattedDate(session.startedAt, language: route.language)
+            let template = session.templateName.htmlEscaped
+            let filter = filterName(session.filterID, language: route.language).htmlEscaped
+            let gif = route.showGIFLinks && session.gifAvailable
+                ? (isThai ? " · GIF" : " · GIF")
+                : ""
+            return """
+            <article class="card">
+              <img src="/e/\(route.eventToken.htmlEscaped)/thumb/\(session.sessionID.htmlEscaped).jpg" alt="\(template)">
+              <div class="meta">\(date.htmlEscaped)<br>\(template) · \(filter)\(gif)</div>
+              <a class="btn" href="/s/\(session.downloadToken.htmlEscaped)/">\(viewLabel)</a>
+            </article>
+            """
+        }.joined(separator: "\n")
+        let title = route.title.htmlEscaped
+        let empty = isThai ? "ยังไม่มีรูปภาพที่อนุมัติ" : "No approved sessions yet"
+        let html = """
+        <!DOCTYPE html>
+        <html lang="\(isThai ? "th" : "en")">
+        <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <meta http-equiv="refresh" content="15">
+        <title>\(title)</title>
+        <style>
+        body{font-family:-apple-system,sans-serif;background:#111;color:#eee;padding:1.5rem;margin:0}
+        h1{text-align:center;margin:.5rem 0}.count{text-align:center;color:#aaa}
+        .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:1rem;max-width:1200px;margin:2rem auto}
+        .card{background:#1d1d1d;border-radius:14px;padding:12px;text-align:center}
+        .card img{width:100%;aspect-ratio:1/1;object-fit:contain;background:#080808;border-radius:10px}
+        .meta{color:#aaa;font-size:.85rem;line-height:1.45;margin:.75rem 0}
+        a.btn{display:inline-block;background:#fff;color:#111;padding:.65rem 1.2rem;border-radius:8px;text-decoration:none;font-weight:600}
+        </style>
+        </head>
+        <body>
+        <h1>\(title)</h1>
+        <div class="count">\(route.approvedSessions.count) \(countText)</div>
+        <main class="grid">\(cards.isEmpty ? "<p>\(empty.htmlEscaped)</p>" : cards)</main>
+        </body>
+        </html>
+        """
+        return LocalDownloadResponse(
+            statusCode: 200,
+            reason: "OK",
+            contentType: "text/html; charset=utf-8",
+            headers: ["Cache-Control": "no-store"],
+            body: Data(html.utf8)
+        )
+    }
+
+    private func formattedDate(_ date: Date, language: CustomerLanguage) -> String {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: language.localeIdentifier)
+        formatter.dateStyle = .medium
+        formatter.timeStyle = .short
+        return formatter.string(from: date)
+    }
+
+    private func filterName(_ filter: PhotoFilterID, language: CustomerLanguage) -> String {
+        if language == .thai {
+            switch filter {
+            case .original: return "ต้นฉบับ"
+            case .monochrome: return "ขาวดำ"
+            case .warm: return "โทนอุ่น"
+            case .cool: return "โทนเย็น"
+            case .highContrast: return "คอนทราสต์สูง"
+            case .soft: return "นุ่มนวล"
+            case .vintage: return "วินเทจ"
+            }
+        }
+        switch filter {
+        case .original: return "Original"
+        case .monochrome: return "Monochrome"
+        case .warm: return "Warm"
+        case .cool: return "Cool"
+        case .highContrast: return "High Contrast"
+        case .soft: return "Soft"
+        case .vintage: return "Vintage"
+        }
     }
 
     private func decodePath(_ requestPath: String) -> String {

@@ -6,6 +6,7 @@ import ImageIO
 struct EventSetupView: View {
     @Environment(BoothCoordinator.self) private var coordinator
     @Environment(\.modelContext) private var modelContext
+    @Environment(\.locale) private var locale
 
     // Live query — updates automatically when events are added/deleted
     @Query(sort: \BoothEvent.createdAt, order: .reverse) private var events: [BoothEvent]
@@ -31,7 +32,11 @@ struct EventSetupView: View {
                                     .font(.caption)
                             }
                         }
-                        Text("\(event.photoCount) photos · \(event.countdownSeconds)s countdown")
+                        Text(operatorPhotoSummary(
+                            photoCount: event.photoCount,
+                            countdownSeconds: event.countdownSeconds,
+                            locale: locale
+                        ))
                             .font(.caption).foregroundStyle(.secondary)
                     }
                     .tag(event.id)
@@ -139,6 +144,15 @@ struct EventDetailView: View {
                     .disabled(event.slots.isEmpty && event.framePNGPath == nil)
             }
 
+            Section("Guest Experience") {
+                NavigationLink("Edit Templates, Filters & Gallery") {
+                    EventExperienceEditorView(event: event)
+                }
+                Text("Version 1.2 options are stored separately from the legacy event layout.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
             Section("Camera") {
                 Picker("Rotation", selection: $event.cameraRotationDegrees) {
                     Text("0° (default)").tag(0)
@@ -185,7 +199,7 @@ struct EventDetailView: View {
         }
         .formStyle(.grouped)
         .navigationTitle(event.name)
-        .navigationSubtitle(event.isActive ? "Active" : "Inactive")
+        .navigationSubtitle(LocalizedStringKey(event.isActive ? "Active" : "Inactive"))
     }
 
     private func importFrame() {

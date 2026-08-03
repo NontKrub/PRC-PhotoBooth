@@ -4,6 +4,8 @@ struct StartView: View {
     @Environment(iPadViewModel.self) private var vm
     @State private var pressed = false
 
+    private var isThai: Bool { vm.selectedLanguage == .thai }
+
     var body: some View {
         ZStack {
             PreviewMirrorView().ignoresSafeArea()
@@ -35,6 +37,15 @@ struct StartView: View {
                     .padding(.vertical, 8)
                     .background(.white.opacity(0.1), in: Capsule())
                     .overlay(Capsule().strokeBorder(.white.opacity(0.15), lineWidth: 0.5))
+
+                    if !vm.eventConfig.templateName.value(for: vm.selectedLanguage).isEmpty {
+                        Text(vm.eventConfig.templateName.value(for: vm.selectedLanguage))
+                            .font(.headline)
+                            .foregroundStyle(.white.opacity(0.85))
+                        Text(vm.eventConfig.selectedFilterID.displayName(for: vm.selectedLanguage))
+                            .font(.subheadline)
+                            .foregroundStyle(.white.opacity(0.6))
+                    }
                 }
                 .padding(.bottom, 52)
 
@@ -59,8 +70,31 @@ struct StartView: View {
                         .onEnded { _ in pressed = false }
                 )
 
+                if vm.experienceCatalog != nil {
+                    Button("Back to Options") {
+                        vm.returnToExperienceSelection()
+                    }
+                    .foregroundStyle(.white.opacity(0.8))
+                    .padding(.top, 18)
+                    .disabled(vm.isSessionRequestPending)
+                }
+
+                if vm.isSessionRequestPending {
+                    ProgressView("Waiting for operator…")
+                        .tint(.white)
+                        .foregroundStyle(.white)
+                        .padding(.top, 18)
+                } else if let error = vm.sessionRequestError {
+                    Text(error)
+                        .font(.callout)
+                        .foregroundStyle(.orange)
+                        .multilineTextAlignment(.center)
+                        .padding(.top, 18)
+                }
+
                 Spacer()
             }
         }
     }
+
 }

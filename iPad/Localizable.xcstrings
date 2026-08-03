@@ -1,0 +1,436 @@
+{
+  "sourceLanguage": "en",
+  "strings": {
+    "%@ photos": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$@ รูปภาพ"
+          }
+        }
+      }
+    },
+    "%@s countdown": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$@ วินาที"
+          }
+        }
+      }
+    },
+    "All done!": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "เสร็จเรียบร้อย!"
+          }
+        }
+      }
+    },
+    "Back": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ย้อนกลับ"
+          }
+        }
+      }
+    },
+    "Back to Options": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "กลับไปที่ตัวเลือก"
+          }
+        }
+      }
+    },
+    "Choose your experience": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "เลือกรูปแบบของคุณ"
+          }
+        }
+      }
+    },
+    "Connected to %@": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "เชื่อมต่อกับ %1$@"
+          }
+        }
+      }
+    },
+    "Connecting…": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "กำลังเชื่อมต่อ…"
+          }
+        }
+      }
+    },
+    "Continue": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ดำเนินการต่อ"
+          }
+        }
+      }
+    },
+    "Controls remain connected over Wi-Fi. USB carries the live preview.": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "การควบคุมยังเชื่อมต่อผ่าน Wi-Fi สาย USB ใช้สำหรับภาพตัวอย่างสด"
+          }
+        }
+      }
+    },
+    "Cool": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "โทนเย็น"
+          }
+        }
+      }
+    },
+    "Created by nont": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "สร้างโดย nont"
+          }
+        }
+      }
+    },
+    "Filter": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ฟิลเตอร์"
+          }
+        }
+      }
+    },
+    "High Contrast": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "คอนทราสต์สูง"
+          }
+        }
+      }
+    },
+    "How did it look?": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ภาพเป็นอย่างไรบ้าง?"
+          }
+        }
+      }
+    },
+    "Keep & finish": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "เก็บและเสร็จสิ้น"
+          }
+        }
+      }
+    },
+    "Keep & next": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "เก็บและถัดไป"
+          }
+        }
+      }
+    },
+    "Language": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ภาษา"
+          }
+        }
+      }
+    },
+    "Monochrome": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ขาวดำ"
+          }
+        }
+      }
+    },
+    "Next session": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "เซสชันถัดไป"
+          }
+        }
+      }
+    },
+    "Original": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ต้นฉบับ"
+          }
+        }
+      }
+    },
+    "Photo %@ of %@": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ภาพที่ %1$@ จาก %2$@"
+          }
+        }
+      }
+    },
+    "Photo strip": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "โฟโต้สตริป"
+          }
+        }
+      }
+    },
+    "Preview connection": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "การเชื่อมต่อภาพตัวอย่าง"
+          }
+        }
+      }
+    },
+    "Processing…": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "กำลังประมวลผล…"
+          }
+        }
+      }
+    },
+    "QR code": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "คิวอาร์โค้ด"
+          }
+        }
+      }
+    },
+    "Retake": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ถ่ายใหม่"
+          }
+        }
+      }
+    },
+    "START": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "เริ่ม"
+          }
+        }
+      }
+    },
+    "Scan to get your photos": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "สแกนเพื่อรับรูปภาพของคุณ"
+          }
+        }
+      }
+    },
+    "Shot": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ภาพถ่าย"
+          }
+        }
+      }
+    },
+    "Soft": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "นุ่มนวล"
+          }
+        }
+      }
+    },
+    "Tap anywhere to begin": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "แตะที่ใดก็ได้เพื่อเริ่ม"
+          }
+        }
+      }
+    },
+    "Template": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "เทมเพลต"
+          }
+        }
+      }
+    },
+    "USB cable": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "สาย USB"
+          }
+        }
+      }
+    },
+    "USB cable (not connected)": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "สาย USB (ยังไม่เชื่อมต่อ)"
+          }
+        }
+      }
+    },
+    "Vintage": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "วินเทจ"
+          }
+        }
+      }
+    },
+    "Preview": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ภาพตัวอย่าง"
+          }
+        }
+      }
+    },
+    "Waiting for camera…": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "กำลังรอกล้อง…"
+          }
+        }
+      }
+    },
+    "Waiting for operator": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "กำลังรอผู้ควบคุม"
+          }
+        }
+      }
+    },
+    "Waiting for operator…": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "กำลังรอผู้ควบคุม…"
+          }
+        }
+      }
+    },
+    "Warm": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "โทนอุ่น"
+          }
+        }
+      }
+    },
+    "Wireless": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ไร้สาย"
+          }
+        }
+      }
+    },
+    "You're up!": {
+      "localizations": {
+        "th": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ถึงตาคุณแล้ว!"
+          }
+        }
+      }
+    }
+  },
+  "version": "1.0"
+}
