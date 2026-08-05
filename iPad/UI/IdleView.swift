@@ -91,9 +91,7 @@ struct IdleView: View {
     var connectionBadge: some View {
         HStack(spacing: 7) {
             Circle()
-                .fill(vm.multipeer.connectionState == .disconnected
-                      ? Color(red: 1, green: 0.35, blue: 0.35)
-                      : Color(red: 0.25, green: 0.88, blue: 0.5))
+                .fill(connectionColor)
                 .frame(width: 7, height: 7)
             Text(badgeLabel)
                 .font(.system(size: 13, weight: .medium))
@@ -105,11 +103,19 @@ struct IdleView: View {
         .overlay(Capsule().strokeBorder(.white.opacity(0.1), lineWidth: 0.5))
     }
 
+    var connectionColor: Color {
+        switch vm.multipeer.connectionState {
+        case .disconnected: return Color(red: 1, green: 0.35, blue: 0.35)
+        case .connecting:   return .orange
+        case .connected:    return Color(red: 0.25, green: 0.88, blue: 0.5)
+        }
+    }
+
     var badgeLabel: String {
         switch vm.multipeer.connectionState {
-        case .connected(let name): return vm.selectedLanguage == .thai ? "เชื่อมต่อกับ \(name)" : "Connected to \(name)"
-        case .connecting:          return vm.selectedLanguage == .thai ? "กำลังเชื่อมต่อ…" : "Connecting…"
-        case .disconnected:        return vm.selectedLanguage == .thai ? "กำลังรอผู้ควบคุม" : "Waiting for operator"
+        case .connected:    return vm.selectedLanguage == .thai ? "เชื่อมต่อกับผู้ควบคุมแล้ว" : "Connected to operator"
+        case .connecting:   return vm.selectedLanguage == .thai ? "กำลังเชื่อมต่อกับผู้ควบคุม…" : "Connecting to operator…"
+        case .disconnected: return vm.selectedLanguage == .thai ? "กำลังรอผู้ควบคุม" : "Waiting for operator"
         }
     }
 }

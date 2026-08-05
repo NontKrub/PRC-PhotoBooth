@@ -9,6 +9,7 @@ public let kMCServiceType = "prc-photobooth"
 private let kHeartbeatInterval: TimeInterval = 5
 private let kHeartbeatTimeout:  TimeInterval = 18
 private let kConnectionTimeout: TimeInterval = 35
+private let kHandshakeTimeout: TimeInterval = 10
 
 private final class SessionReference: @unchecked Sendable {
     private let lock = NSLock()
@@ -47,7 +48,16 @@ public final class MultipeerService: NSObject {
     public private(set) var connectionState: ConnectionState = .disconnected
     public private(set) var peerName: String = ""
     public private(set) var connectedPeerNames: [String] = []
-    public var activePeerName: String? = nil
+    public var activePeerName: String? {
+        get { peerTracker.activePeer }
+        set {
+            guard let newValue,
+                  peerTracker.verifiedPeers[newValue] != nil else { return }
+            peerTracker.activate(newValue)
+            refreshVerifiedPeerState()
+            startHeartbeat()
+        }
+    }
 
     // Control packets are decoded before hopping to the main actor. Preview
     // packets are disposable and coalesced so they cannot starve controls.
@@ -65,15 +75,19 @@ public final class MultipeerService: NSObject {
 
     private var heartbeatTimer: Timer?
     private var connectionTimeoutTask: Task<Void, Never>?
+    private var handshakeTimeoutTasks: [String: Task<Void, Never>] = [:]
+    private var reconnectTask: Task<Void, Never>?
     private var connectionAttemptID = 0
     private var lastHeartbeatReceived: Date = .distantPast
     private var reconnectAttempt = 0
     private let maxReconnectDelay: TimeInterval = 30
-    private var latestPreviewFrame: Data?
+    private var peerTracker: PeerConnectionTracker<String>
+    private var latestPreviewFrame: (peer: String, data: Data)?
     private var previewDeliveryTask: Task<Void, Never>?
 
     public init(role: DeviceRole) {
         self.role = role
+        self.peerTracker = PeerConnectionTracker(localRole: role)
         #if os(macOS)
         let name = Host.current().localizedName ?? "PRC-Mac"
         #else
@@ -87,15 +101,34 @@ public final class MultipeerService: NSObject {
     // MARK: - Session lifecycle
 
     private func resetPeer() {
-        stopHeartbeat()
-        connectionTimeoutTask?.cancel()
-        connectionTimeoutTask = nil
+        stopDiscovery()
+        clearConnectionState()
+
         connectionAttemptID &+= 1
-        _session?.disconnect()
-        let s = MCSession(peer: myPeerID, securityIdentity: nil, encryptionPreference: .required)
-        s.delegate = self
-        _session = s
-        sessionReference.set(s, attemptID: connectionAttemptID)
+        let oldSession = _session
+        _session = nil
+        sessionReference.set(nil, attemptID: connectionAttemptID)
+        oldSession?.disconnect()
+
+        let session = MCSession(peer: myPeerID, securityIdentity: nil, encryptionPreference: .required)
+        session.delegate = self
+        _session = session
+        sessionReference.set(session, attemptID: connectionAttemptID)
+
+        switch role {
+        case .mac:  startAdvertising()
+        case .iPad: startBrowsing()
+        }
+    }
+
+    private func stopDiscovery() {
+        advertiser?.stopAdvertisingPeer()
+        browser?.stopBrowsingForPeers()
+        advertiser = nil
+        browser = nil
+    }
+
+    private func startDiscovery() {
         switch role {
         case .mac:  startAdvertising()
         case .iPad: startBrowsing()
@@ -119,23 +152,70 @@ public final class MultipeerService: NSObject {
     }
 
     public func disconnect() {
+        stopDiscovery()
+        clearConnectionState()
+        connectionAttemptID &+= 1
+        let oldSession = _session
+        _session = nil
+        sessionReference.set(nil, attemptID: connectionAttemptID)
+        oldSession?.disconnect()
+    }
+
+    private func clearConnectionState(cancelReconnect: Bool = true) {
         stopHeartbeat()
+
         connectionTimeoutTask?.cancel()
         connectionTimeoutTask = nil
-        _session?.disconnect()
-        advertiser?.stopAdvertisingPeer()
-        browser?.stopBrowsingForPeers()
+
+        handshakeTimeoutTasks.values.forEach { $0.cancel() }
+        handshakeTimeoutTasks.removeAll()
+
+        if cancelReconnect {
+            reconnectTask?.cancel()
+            reconnectTask = nil
+        }
+
+        previewDeliveryTask?.cancel()
+        previewDeliveryTask = nil
+        latestPreviewFrame = nil
+
+        peerTracker.reset()
+        connectedPeerNames = []
+        peerName = ""
+        connectionState = .disconnected
+        lastHeartbeatReceived = .distantPast
+    }
+
+    private func invalidateCurrentSession() {
+        connectionAttemptID &+= 1
+        let oldSession = _session
+        _session = nil
+        sessionReference.set(nil, attemptID: connectionAttemptID)
+        oldSession?.disconnect()
     }
 
     // MARK: - Reconnect with backoff
 
     private func scheduleReconnect() {
+        guard reconnectTask == nil else { return }
+
         let delay = min(pow(2.0, Double(reconnectAttempt)), maxReconnectDelay)
         reconnectAttempt += 1
-        Task { @MainActor [weak self] in
+
+        print("[MPC] scheduling reconnect in \(delay)s")
+        reconnectTask = Task { @MainActor [weak self] in
             guard let self else { return }
-            try? await Task.sleep(for: .seconds(delay))
-            guard case .disconnected = connectionState else { return }
+            do {
+                try await Task.sleep(for: .seconds(delay))
+            } catch {
+                self.reconnectTask = nil
+                return
+            }
+            guard !Task.isCancelled, case .disconnected = self.connectionState else {
+                self.reconnectTask = nil
+                return
+            }
+            self.reconnectTask = nil
             resetPeer()
         }
     }
@@ -143,18 +223,31 @@ public final class MultipeerService: NSObject {
     // MARK: - Heartbeat
 
     private func startHeartbeat() {
+        guard peerTracker.activePeer != nil else {
+            stopHeartbeat()
+            return
+        }
+
         lastHeartbeatReceived = Date()
         heartbeatTimer?.invalidate()
         heartbeatTimer = Timer.scheduledTimer(withTimeInterval: kHeartbeatInterval, repeats: true) { [weak self] _ in
             Task { @MainActor [weak self] in
                 guard let self else { return }
-                self.sendControl(.heartbeat)
-                if Date().timeIntervalSince(self.lastHeartbeatReceived) > kHeartbeatTimeout {
-                    print("[MPC] heartbeat timeout — forcing reconnect")
-                    self._session?.disconnect()
-                    self.connectionState = .disconnected
-                    self.scheduleReconnect()
+                guard let activePeer = self.peerTracker.activePeer else {
+                    self.stopHeartbeat()
+                    return
                 }
+
+                if Date().timeIntervalSince(self.lastHeartbeatReceived) > kHeartbeatTimeout {
+                    print("[MPC] heartbeat timeout: \(activePeer)")
+                    self.stopDiscovery()
+                    self.clearConnectionState()
+                    self.invalidateCurrentSession()
+                    self.scheduleReconnect()
+                    return
+                }
+
+                self.sendControl(.heartbeat)
             }
         }
     }
@@ -176,11 +269,10 @@ public final class MultipeerService: NSObject {
             else { return }
 
             print("[MPC] connection timed out — retrying discovery")
-            self._session?.disconnect()
-            self.connectionState = .disconnected
-            self.activePeerName = nil
+            self.stopDiscovery()
+            self.clearConnectionState()
+            self.invalidateCurrentSession()
             self.scheduleReconnect()
-            if self.role == .iPad { self.startBrowsing() }
         }
     }
 
@@ -204,13 +296,105 @@ public final class MultipeerService: NSObject {
     }
 
     private func targetPeers(from session: MCSession) -> [MCPeerID] {
-        guard let active = activePeerName else { return session.connectedPeers }
-        return session.connectedPeers.filter { $0.displayName == active }
+        guard let activePeer = peerTracker.activePeer,
+              peerTracker.verifiedPeers[activePeer] != nil else { return [] }
+        return session.connectedPeers.filter { $0.displayName == activePeer }
     }
 
     // MARK: - Receive
 
-    private func handleControlMessage(_ message: Message) {
+    private func refreshVerifiedPeerState() {
+        connectedPeerNames = peerTracker.verifiedPeers.keys.sorted()
+
+        guard let activePeerName = peerTracker.activePeer else {
+            peerName = ""
+            connectionState = .disconnected
+            return
+        }
+
+        peerName = activePeerName
+        connectionState = .connected(peerName: activePeerName)
+    }
+
+    private func cancelHandshakeTimeout(for peerName: String) {
+        handshakeTimeoutTasks[peerName]?.cancel()
+        handshakeTimeoutTasks[peerName] = nil
+    }
+
+    private func startHandshakeTimeout(for peerName: String, attemptID: Int) {
+        cancelHandshakeTimeout(for: peerName)
+        handshakeTimeoutTasks[peerName] = Task { @MainActor [weak self] in
+            do {
+                try await Task.sleep(for: .seconds(kHandshakeTimeout))
+            } catch {
+                return
+            }
+
+            guard !Task.isCancelled,
+                  let self,
+                  self.connectionAttemptID == attemptID,
+                  let session = self._session,
+                  self.sessionReference.attemptID(for: session) == attemptID,
+                  self.peerTracker.transportPeers.contains(peerName),
+                  self.peerTracker.verifiedPeers[peerName] == nil else { return }
+
+            self.handshakeTimeoutTasks[peerName] = nil
+            print("[MPC] handshake timeout: \(peerName)")
+            self.removePeer(peerName, from: session)
+        }
+    }
+
+    private func removePeer(_ peerName: String, from session: MCSession? = nil) {
+        let wasActive = peerTracker.activePeer == peerName
+        cancelHandshakeTimeout(for: peerName)
+        if let peerID = session?.connectedPeers.first(where: { $0.displayName == peerName }) {
+            session?.cancelConnectPeer(peerID)
+        }
+        peerTracker.transportDisconnected(peerName)
+
+        guard peerTracker.hasVerifiedPeer else {
+            if wasActive { print("[MPC] active peer disconnected: \(peerName)") }
+            clearConnectionState(cancelReconnect: false)
+            startDiscovery()
+            scheduleReconnect()
+            return
+        }
+
+        refreshVerifiedPeerState()
+        if wasActive {
+            previewDeliveryTask?.cancel()
+            previewDeliveryTask = nil
+            latestPreviewFrame = nil
+            startHeartbeat()
+        }
+    }
+
+    private func handleControlMessage(_ message: Message, from peerName: String) {
+        if case .hello(let remoteRole) = message {
+            switch peerTracker.verifyHello(from: peerName, role: remoteRole) {
+            case .accepted:
+                cancelHandshakeTimeout(for: peerName)
+                refreshVerifiedPeerState()
+                connectionTimeoutTask?.cancel()
+                connectionTimeoutTask = nil
+                reconnectAttempt = 0
+                reconnectTask?.cancel()
+                reconnectTask = nil
+                startHeartbeat()
+                print("[MPC] verified peer: \(peerName), role: \(remoteRole)")
+                if peerTracker.activePeer == peerName {
+                    onControlMessage?(message)
+                }
+            case .wrongRole:
+                print("[MPC] rejected hello from \(peerName): wrong role")
+                removePeer(peerName, from: _session)
+            case .unknownTransportPeer:
+                print("[MPC] ignored hello from unknown transport peer: \(peerName)")
+            }
+            return
+        }
+
+        guard peerTracker.activePeer == peerName else { return }
         if case .heartbeat = message {
             lastHeartbeatReceived = Date()
             return
@@ -218,20 +402,24 @@ public final class MultipeerService: NSObject {
         onControlMessage?(message)
     }
 
-    private func enqueuePreviewFrame(_ jpegData: Data) {
+    private func enqueuePreviewFrame(_ jpegData: Data, from peerName: String) {
+        guard peerTracker.activePeer == peerName else { return }
+
         // Preview is disposable. Never let old frames build a queue ahead of
         // control messages; the next delivery uses only the newest frame.
-        latestPreviewFrame = jpegData
+        latestPreviewFrame = (peerName, jpegData)
         guard previewDeliveryTask == nil else { return }
 
         previewDeliveryTask = Task { @MainActor [weak self] in
             guard let self else { return }
             self.previewDeliveryTask = nil
-            guard let frame = self.latestPreviewFrame else { return }
+            guard !Task.isCancelled,
+                  let frame = self.latestPreviewFrame else { return }
             self.latestPreviewFrame = nil
-            self.onPreviewFrame?(frame)
+            guard self.peerTracker.activePeer == frame.peer else { return }
+            self.onPreviewFrame?(frame.data)
             if let pending = self.latestPreviewFrame {
-                self.enqueuePreviewFrame(pending)
+                self.enqueuePreviewFrame(pending.data, from: pending.peer)
             }
         }
     }
@@ -250,46 +438,59 @@ extension MultipeerService: MCSessionDelegate {
             guard self.connectionAttemptID == attemptID else { return }
             switch state {
             case .connected:
-                if !connectedPeerNames.contains(name) { connectedPeerNames.append(name) }
-                if activePeerName == nil { activePeerName = name }
-                connectionState = .connected(peerName: activePeerName ?? name)
-                peerName = activePeerName ?? name
-                reconnectAttempt = 0
-                connectionTimeoutTask?.cancel()
-                connectionTimeoutTask = nil
-                startHeartbeat()
-                sendControl(.hello(role: role))
+                peerTracker.transportConnected(name)
+                print("[MPC] transport connected: \(name)")
+                if !peerTracker.hasVerifiedPeer {
+                    connectionState = .connecting
+                    startConnectionTimeout()
+                }
+                startHandshakeTimeout(for: name, attemptID: attemptID)
+                sendHello(to: name)
             case .connecting:
                 // Do not downgrade a healthy connection while another peer is
                 // negotiating in the background.
-                if connectedPeerNames.isEmpty {
+                if !peerTracker.hasVerifiedPeer {
                     connectionState = .connecting
                     startConnectionTimeout()
                 }
             case .notConnected:
-                connectedPeerNames.removeAll { $0 == name }
-                if activePeerName == name { activePeerName = connectedPeerNames.first }
-                if connectedPeerNames.isEmpty {
-                    connectionState = .disconnected
-                    stopHeartbeat()
-                    connectionTimeoutTask?.cancel()
-                    connectionTimeoutTask = nil
-                    scheduleReconnect()
-                    if role == .iPad { startBrowsing() }
-                }
+                removePeer(name)
             @unknown default: break
             }
         }
     }
 
+    private func sendHello(to peerName: String) {
+        guard let session = _session,
+              let peerID = session.connectedPeers.first(where: { $0.displayName == peerName }) else { return }
+
+        do {
+            let payload = try Message.hello(role: role).encoded().packedAsControl()
+            try session.send(payload, toPeers: [peerID], with: .reliable)
+            print("[MPC] sent hello to: \(peerName)")
+        } catch {
+            print("[MPC] hello send failed: \(error)")
+        }
+    }
+
     nonisolated public func session(_ session: MCSession, didReceive data: Data, fromPeer peerID: MCPeerID) {
+        guard let attemptID = sessionReference.attemptID(for: session) else { return }
+        let peerName = peerID.displayName
         guard let (channel, payload) = data.unpackedPacket() else { return }
         switch channel {
         case .control:
             guard let message = try? Message.decoded(from: payload) else { return }
-            Task { @MainActor [weak self] in self?.handleControlMessage(message) }
+            Task { @MainActor [weak self] in
+                guard let self,
+                      self.connectionAttemptID == attemptID else { return }
+                self.handleControlMessage(message, from: peerName)
+            }
         case .preview:
-            Task { @MainActor [weak self] in self?.enqueuePreviewFrame(payload) }
+            Task { @MainActor [weak self] in
+                guard let self,
+                      self.connectionAttemptID == attemptID else { return }
+                self.enqueuePreviewFrame(payload, from: peerName)
+            }
         }
     }
 
