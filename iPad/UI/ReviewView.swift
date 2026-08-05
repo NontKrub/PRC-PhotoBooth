@@ -67,6 +67,7 @@ struct ReviewView: View {
                         .overlay(RoundedRectangle(cornerRadius: 16).strokeBorder(.white.opacity(0.15), lineWidth: 1))
                     }
                     .buttonStyle(.plain)
+                    .disabled(vm.reviewDecisionPending)
 
                     // Keep — primary
                     Button(action: { vm.customerKeep(photoIndex: photoIndex) }) {
@@ -81,6 +82,7 @@ struct ReviewView: View {
                         .background(Color.white, in: RoundedRectangle(cornerRadius: 16))
                     }
                     .buttonStyle(.plain)
+                    .disabled(vm.reviewDecisionPending)
                 }
                 .padding(.bottom, 56)
             }

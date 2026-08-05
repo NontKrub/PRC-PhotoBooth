@@ -70,14 +70,14 @@
 
 ## Shared customer workflow
 
-- [ ] Add platform-neutral customer state/actions
-- [ ] Add iPad adapter
-- [ ] Add Mac external adapter
-- [ ] Consolidate phase routing
-- [ ] Prevent duplicate button submissions
-- [ ] Preserve Thai/English
-- [ ] Add workflow tests
-- [ ] Run iPad/external parity matrix
+- [x] Add platform-neutral customer state/actions
+- [x] Add iPad adapter
+- [x] Add Mac external adapter
+- [x] Consolidate phase routing
+- [x] Prevent duplicate button submissions
+- [x] Preserve Thai/English
+- [x] Add workflow tests
+- [ ] Run iPad/external parity matrix — manual UI check pending
 
 ## External review
 

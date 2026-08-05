@@ -7,7 +7,7 @@ struct iPadContentView: View {
         ZStack {
             Color.black.ignoresSafeArea()
 
-            switch vm.stateMachine.phase {
+            switch CustomerDisplayWorkflow.screen(for: vm.stateMachine.phase) {
             case .idle:
                 IdleView()
             case .selectingExperience:
@@ -16,14 +16,14 @@ struct iPadContentView: View {
                 StartView()
             case .countdown(let idx, let secs):
                 CountdownView(photoIndex: idx, secondsRemaining: secs)
-            case .captured:
-                processingIndicator
             case .review(let idx):
                 ReviewView(photoIndex: idx)
             case .processing:
                 processingIndicator
-            case .finished(let qr):
-                FinishAndQRView(qrPayload: qr)
+            case .finished:
+                if case .finished(let qr) = vm.stateMachine.phase {
+                    FinishAndQRView(qrPayload: qr)
+                }
             }
 
             VStack {

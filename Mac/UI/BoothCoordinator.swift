@@ -94,6 +94,7 @@ final class BoothCoordinator {
     private(set) var activeExperienceDocument: EventExperienceDocument?
     private(set) var experienceCatalog: CustomerExperienceCatalog?
     var errorMessage: String?
+    private(set) var reviewDecisionPending = false
     var serverURL: String = ""
     var cameraSourceKind: CameraSourceKind = .avFoundation {
         didSet {
@@ -354,6 +355,8 @@ final class BoothCoordinator {
     }
 
     func beginExternalExperienceSelection() {
+        guard CustomerDisplayWorkflow.canApply(.begin, in: stateMachine.phase)
+                || CustomerDisplayWorkflow.canApply(.back, in: stateMachine.phase) else { return }
         guard let document = activeExperienceDocument else { return }
         let selection = defaultSelection(for: document)
         externalSelection = CustomerSessionSelectionDraft(
@@ -367,6 +370,7 @@ final class BoothCoordinator {
     }
 
     func confirmExternalExperienceSelection() {
+        guard CustomerDisplayWorkflow.canApply(.confirmSelection, in: stateMachine.phase) else { return }
         guard let catalog = experienceCatalog,
               let template = catalog.templates.first(where: { $0.id == externalSelection.templateID }) else { return }
         stateMachine.config = EventConfig(
@@ -770,6 +774,7 @@ final class BoothCoordinator {
 
     func startSession(selection requestedSelection: CustomerSessionSelection? = nil) {
         guard currentSession == nil, let event = activeEvent else { return }
+        reviewDecisionPending = false
         guard recoveryService.recoverableCaptureSession == nil else {
             errorMessage = "Resume or discard the unfinished session in Operations."
             return
@@ -931,6 +936,7 @@ final class BoothCoordinator {
                 throw PhotoFilterError.failedToCreateOutput(stateMachine.config.selectedFilterID)
             }
             stateMachine.enterReview(photoIndex: photoIndex, thumbnailData: thumbData)
+            reviewDecisionPending = false
             multipeer.sendControl(.shotCaptured(index: photoIndex, thumbnailData: thumbData))
             updateStripPreview()
         } catch {
@@ -959,15 +965,25 @@ final class BoothCoordinator {
     }
 
     func handleReviewDecision(photoIndex: Int, action: ReviewAction) {
+        let customerAction: CustomerDisplayAction = action == .keep
+            ? .keep(photoIndex: photoIndex)
+            : .retake(photoIndex: photoIndex)
+        guard !reviewDecisionPending,
+              CustomerDisplayWorkflow.canApply(customerAction, in: stateMachine.phase) else { return }
+        reviewDecisionPending = true
         multipeer.sendControl(.reviewDecision(action: action))
         switch action {
         case .keep:
             Task { @MainActor [weak self] in
-                await self?.acceptShot(photoIndex: photoIndex)
+                guard let self else { return }
+                defer { self.reviewDecisionPending = false }
+                await self.acceptShot(photoIndex: photoIndex)
             }
         case .retake:
             Task { @MainActor [weak self] in
-                await self?.requestRetake(photoIndex: photoIndex, source: .guest)
+                guard let self else { return }
+                defer { self.reviewDecisionPending = false }
+                await self.requestRetake(photoIndex: photoIndex, source: .guest)
             }
         }
     }
@@ -978,9 +994,14 @@ final class BoothCoordinator {
         case .forceStart:
             if stateMachine.phase == .idle || stateMachine.phase == .readyToStart { startSession() }
         case .forceRetake:
-            if case .review(let idx) = stateMachine.phase {
+            if case .review(let idx) = stateMachine.phase,
+               !reviewDecisionPending,
+               CustomerDisplayWorkflow.canApply(.retake(photoIndex: idx), in: stateMachine.phase) {
+                reviewDecisionPending = true
                 Task { @MainActor [weak self] in
-                    await self?.requestRetake(photoIndex: idx, source: .operatorSource)
+                    guard let self else { return }
+                    defer { self.reviewDecisionPending = false }
+                    await self.requestRetake(photoIndex: idx, source: .operatorSource)
                 }
             }
         case .skip:
@@ -1087,6 +1108,7 @@ final class BoothCoordinator {
     private func cancelCurrentSession() async {
         countdownTask?.cancel()
         guard currentSession != nil, var manifest = currentManifest else {
+            reviewDecisionPending = false
             stateMachine.reset()
             return
         }
@@ -1104,6 +1126,7 @@ final class BoothCoordinator {
         gifFrames = [:]
         currentFilteredReviewImages = [:]
         capture.resetStills()
+        reviewDecisionPending = false
         stateMachine.reset()
     }
 

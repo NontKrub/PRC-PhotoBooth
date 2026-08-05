@@ -14,12 +14,14 @@
 		03BAFB8414CD1C16426DE86C /* PrinterServiceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 33C6B38ACA5CF567BD8505C3 /* PrinterServiceTests.swift */; };
 		055644771C8A767C3286ECA7 /* DownloadURLTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB9D0FEC4E5F79C093F1BEC7 /* DownloadURLTests.swift */; };
 		061B8A6BAAC97D0554975F74 /* CloudSSHSetupTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 68AD6CCBF1B3CB849C8CA5A9 /* CloudSSHSetupTests.swift */; };
+		08F067E865F2304FD9220261 /* CustomerDisplayWorkflow.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3522E76630F6C3BC4146E719 /* CustomerDisplayWorkflow.swift */; };
 		092052CCFE9CA2D3C3858867 /* EventGalleryModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = 70A4C7673B4A3E62150215E0 /* EventGalleryModels.swift */; };
 		0980BF9D451D1A70DFE9E86F /* CaptureService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 29E6360321A719FBEC169D31 /* CaptureService.swift */; };
 		14E5F69CA34432D8DDB6337C /* EventGallerySettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AEB3524ED59CED1F96D4B9FA /* EventGallerySettingsView.swift */; };
 		160AE9511911551DC764B0FB /* SessionRecoveryService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 84D92FE313AF4B522174C85B /* SessionRecoveryService.swift */; };
 		184CF8230CB2FC21F436CB29 /* SessionManifestStoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 70E2D58E1F5981D3BE3AE72D /* SessionManifestStoreTests.swift */; };
 		19E14CC16590B7CC5A0A4ED6 /* AVFoundation.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = C2CA83F7AD79B9E79F7505F5 /* AVFoundation.framework */; };
+		1B155DBDD3068DF45597D0F2 /* CustomerDisplayWorkflow.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3522E76630F6C3BC4146E719 /* CustomerDisplayWorkflow.swift */; };
 		1B3527CA7D8FBF85B868E2A3 /* MultipeerService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 74CCEE6D0B13FC072FBD0CF7 /* MultipeerService.swift */; };
 		1B9774A2DB37298968ACE621 /* CountdownView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C019EF4C1161A49ADFD551E3 /* CountdownView.swift */; };
 		1C6896134FE40EACEB7C1425 /* ExperienceTypes.swift in Sources */ = {isa = PBXBuildFile; fileRef = 57645A87342654910C1246F9 /* ExperienceTypes.swift */; };
@@ -63,6 +65,7 @@
 		56B18371CBDE24DC5C349F36 /* CustomerSelectionValidator.swift in Sources */ = {isa = PBXBuildFile; fileRef = B200F03D55F203981DC5F233 /* CustomerSelectionValidator.swift */; };
 		57B1E22E23EC8495A2B93C4C /* ActiveCameraPreviewTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8EE3B99F5C1FD036A5A483B7 /* ActiveCameraPreviewTests.swift */; };
 		58E1BA7F017689C532543C3E /* FilterOptionCard.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3925EEC9B4ACE8F77838E1C0 /* FilterOptionCard.swift */; };
+		5A1231AD76852E72C5D3A711 /* CustomerDisplayWorkflowTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4CBAA07693E04A4F4981AF0A /* CustomerDisplayWorkflowTests.swift */; };
 		5A24B10E0AE5923B933019C3 /* CloudSSHSetupService.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB886D7A88555FB8EDE49CC3 /* CloudSSHSetupService.swift */; };
 		5AA60BA4612C6066E1DB9C80 /* FilterSampleRenderer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 76C0A7EF425EA6BDF05F506C /* FilterSampleRenderer.swift */; };
 		5C87D7C75337DF1D1F32D0BA /* CameraSource.swift in Sources */ = {isa = PBXBuildFile; fileRef = EFCA2984EED1538D9FBA8EC9 /* CameraSource.swift */; };
@@ -196,6 +199,7 @@
 		3081A491B946FDBE4ABCB65F /* GalleryRouterTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GalleryRouterTests.swift; sourceTree = "<group>"; };
 		3164566896D5C1F57370D357 /* GalleryThumbnailGenerator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GalleryThumbnailGenerator.swift; sourceTree = "<group>"; };
 		33C6B38ACA5CF567BD8505C3 /* PrinterServiceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PrinterServiceTests.swift; sourceTree = "<group>"; };
+		3522E76630F6C3BC4146E719 /* CustomerDisplayWorkflow.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CustomerDisplayWorkflow.swift; sourceTree = "<group>"; };
 		3541A8DDD5DC749D1B31FDB8 /* iPadApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = iPadApp.swift; sourceTree = "<group>"; };
 		36681FB9EF9476DA0F18BA13 /* BoothPreflightService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BoothPreflightService.swift; sourceTree = "<group>"; };
 		36A95B631A02627520EF46D5 /* DemoImageFactory.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DemoImageFactory.swift; sourceTree = "<group>"; };
@@ -208,6 +212,7 @@
 		4459E84FAD9578C1DDA3C158 /* PhotoFilterPipelineTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhotoFilterPipelineTests.swift; sourceTree = "<group>"; };
 		44A6C078264EEF6170132278 /* TemplatePreviewRenderer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TemplatePreviewRenderer.swift; sourceTree = "<group>"; };
 		4AA33DBA424BED93245726E5 /* ReviewView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReviewView.swift; sourceTree = "<group>"; };
+		4CBAA07693E04A4F4981AF0A /* CustomerDisplayWorkflowTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CustomerDisplayWorkflowTests.swift; sourceTree = "<group>"; };
 		5383E866A38FD3F694ABCF5E /* SessionRecoveryTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionRecoveryTests.swift; sourceTree = "<group>"; };
 		553249FDB48038050181108D /* SwiftData.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = SwiftData.framework; path = System/Library/Frameworks/SwiftData.framework; sourceTree = SDKROOT; };
 		57645A87342654910C1246F9 /* ExperienceTypes.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ExperienceTypes.swift; sourceTree = "<group>"; };
@@ -593,6 +598,7 @@
 			isa = PBXGroup;
 			children = (
 				C7A0F0599F8265D1CA4DEB93 /* BoothPhase.swift */,
+				3522E76630F6C3BC4146E719 /* CustomerDisplayWorkflow.swift */,
 				B67A978B744309AE93ED8128 /* SessionStateMachine.swift */,
 			);
 			path = State;
@@ -642,6 +648,7 @@
 				68AD6CCBF1B3CB849C8CA5A9 /* CloudSSHSetupTests.swift */,
 				F83BAA2070C1E452B6270E1A /* CloudUploadServiceTests.swift */,
 				035DF22C80686690C8B74B53 /* CompositorTests.swift */,
+				4CBAA07693E04A4F4981AF0A /* CustomerDisplayWorkflowTests.swift */,
 				BB9D0FEC4E5F79C093F1BEC7 /* DownloadURLTests.swift */,
 				81C75149E40C584806CE6AAC /* DSLRProtocolTests.swift */,
 				8EBCF7F6FB457E56B24820BA /* EventExperienceStoreTests.swift */,
@@ -871,6 +878,7 @@
 				78AAC9EB4106775E3B155C78 /* CloudSSHSetupView.swift in Sources */,
 				BECDF0F399AF61132DAC1393 /* CloudUploadService.swift in Sources */,
 				6934478B1C3B103AB1F4BD59 /* Compositor.swift in Sources */,
+				08F067E865F2304FD9220261 /* CustomerDisplayWorkflow.swift in Sources */,
 				ECC689CDFF77127F98ACEC45 /* CustomerExperienceCatalogBuilder.swift in Sources */,
 				56B18371CBDE24DC5C349F36 /* CustomerSelectionValidator.swift in Sources */,
 				B3A574E3ADEB92EB690F877B /* DSLRCameraSource.swift in Sources */,
@@ -943,6 +951,7 @@
 				061B8A6BAAC97D0554975F74 /* CloudSSHSetupTests.swift in Sources */,
 				3366CE79827720DC01942C08 /* CloudUploadServiceTests.swift in Sources */,
 				5080A23EC41AF2ECB29607A9 /* CompositorTests.swift in Sources */,
+				5A1231AD76852E72C5D3A711 /* CustomerDisplayWorkflowTests.swift in Sources */,
 				B1C4D9F03E7D2AF13C28B1C9 /* DSLRProtocolTests.swift in Sources */,
 				055644771C8A767C3286ECA7 /* DownloadURLTests.swift in Sources */,
 				22AEBADDA86C74E46145634F /* EventExperienceStoreTests.swift in Sources */,
@@ -977,6 +986,7 @@
 			files = (
 				3FBE9251DCDFF1A9A507AB66 /* BoothPhase.swift in Sources */,
 				1B9774A2DB37298968ACE621 /* CountdownView.swift in Sources */,
+				1B155DBDD3068DF45597D0F2 /* CustomerDisplayWorkflow.swift in Sources */,
 				C3DFC742BECE0C63AA5CBD64 /* CustomerLanguagePicker.swift in Sources */,
 				6DC7EF0067368AE2761F3F05 /* DemoKioskDriver.swift in Sources */,
 				AAE8622312F343DB10797A14 /* ExperienceSelectionView.swift in Sources */,

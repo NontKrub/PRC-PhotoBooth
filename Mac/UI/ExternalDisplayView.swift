@@ -81,7 +81,8 @@ struct ExternalDisplayView: View {
     }
 
     private func attemptStart() {
-        guard sm.phase == .idle, coordinator.activeEvent != nil else { return }
+        guard coordinator.activeEvent != nil,
+              CustomerDisplayWorkflow.canApply(.begin, in: sm.phase) else { return }
         if coordinator.externalSelectionRequired {
             coordinator.beginExternalExperienceSelection()
         } else {
@@ -100,9 +101,13 @@ struct ExternalDisplayView: View {
             Text("\(sm.config.photoCount) photos · \(sm.config.selectedFilterID.displayName(for: displayLanguage))")
                 .foregroundStyle(.white.opacity(0.6))
             HStack(spacing: 16) {
-                Button("Back to Options") { coordinator.beginExternalExperienceSelection() }
+                Button("Back to Options") {
+                    guard CustomerDisplayWorkflow.canApply(.back, in: sm.phase) else { return }
+                    coordinator.beginExternalExperienceSelection()
+                }
                     .buttonStyle(.bordered)
                 Button("Start") {
+                    guard CustomerDisplayWorkflow.canApply(.start, in: sm.phase) else { return }
                     coordinator.startSession(selection: coordinator.externalSelection.selection)
                 }
                 .buttonStyle(.borderedProminent)
@@ -213,6 +218,7 @@ struct ExternalDisplayView: View {
                 .buttonStyle(.bordered)
                 .controlSize(.large)
                 .tint(.white)
+                .disabled(coordinator.reviewDecisionPending)
 
                 Button(action: { coordinator.handleReviewDecision(photoIndex: photoIndex, action: .keep) }) {
                     Label(LocalizedStringKey(photoIndex + 1 < sm.config.photoCount ? "Keep & next" : "Keep & finish"), systemImage: "checkmark")
@@ -220,6 +226,7 @@ struct ExternalDisplayView: View {
                 }
                 .buttonStyle(.borderedProminent)
                 .controlSize(.large)
+                .disabled(coordinator.reviewDecisionPending)
             }
         }
     }
@@ -246,7 +253,10 @@ struct ExternalDisplayView: View {
                 }
             }
 
-            Button("Next session") { coordinator.operatorOverride(.cancelSession) }
+            Button("Next session") {
+                guard CustomerDisplayWorkflow.canApply(.back, in: sm.phase) else { return }
+                coordinator.operatorOverride(.cancelSession)
+            }
                 .buttonStyle(.borderedProminent)
                 .controlSize(.large)
                 .padding(.top, 12)
