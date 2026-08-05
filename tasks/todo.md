@@ -117,7 +117,7 @@
 - [x] Summarize automated tests
 - [x] Summarize manual tests; ZV-E10/display checks remain pending
 - [x] Commit logical changes
-- [ ] Push `feature/printable-qr-elements`
-- [ ] Update PR #7
-- [ ] Confirm CI green
+- [x] Push `feature/printable-qr-elements` — implementation head `6a282dd`
+- [x] Update PR #7
+- [ ] Confirm CI green for the final ledger commit
 - [x] Do not merge before real ZV-E10 and 3-shot GIF tests pass
