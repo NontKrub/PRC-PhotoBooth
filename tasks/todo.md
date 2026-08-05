@@ -39,12 +39,12 @@
 
 ## Single layout source
 
-- [ ] Remove legacy layout write controls from Event Settings
-- [ ] Add read-only default-template summary
-- [ ] Add `Edit Guest Experience…` navigation
-- [ ] Keep legacy fields for compatibility
-- [ ] Document one-way legacy mirror
-- [ ] Test legacy migration/mirroring
+- [x] Remove legacy layout write controls from Event Settings
+- [x] Add read-only default-template summary
+- [x] Add `Edit Guest Experience…` navigation
+- [x] Keep legacy fields for compatibility
+- [x] Document one-way legacy mirror
+- [x] Test legacy migration/mirroring
 
 ## Loading performance
 

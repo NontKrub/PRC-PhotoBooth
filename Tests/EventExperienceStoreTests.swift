@@ -1,6 +1,7 @@
 import Foundation
 import CoreGraphics
 import ImageIO
+import SwiftData
 import Testing
 import UniformTypeIdentifiers
 
@@ -258,4 +259,45 @@ private func temporaryDirectory() throws -> URL {
     let url = FileManager.default.temporaryDirectory.appendingPathComponent("PRC-Experience-\(UUID().uuidString)")
     try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
     return url
+}
+
+@Suite("LegacyEventMirrorService")
+struct LegacyEventMirrorServiceTests {
+    @Test("mirrors the default template into legacy event fields")
+    @MainActor
+    func mirrorsDefaultTemplate() throws {
+        let schema = Schema([BoothEvent.self, BoothSlot.self, BoothSession.self, CapturedShot.self])
+        let container = try ModelContainer(
+            for: schema,
+            configurations: ModelConfiguration(schema: schema, isStoredInMemoryOnly: true)
+        )
+        let context = ModelContext(container)
+        let event = BoothEvent(name: "Legacy", photoCount: 1)
+        context.insert(event)
+        let template = EventTemplateDefinition(
+            id: "template-1",
+            name: LocalizedText(english: "Default"),
+            photoCount: 3,
+            canvasWidth: 1200,
+            canvasHeight: 1800,
+            frameFileName: "frame.png",
+            slots: [SharedPhotoSlot(normalizedRect: CGRect(x: 0.1, y: 0.2, width: 0.8, height: 0.2), photoIndex: 2)]
+        )
+        let document = EventExperienceDocument(
+            id: "event-1",
+            eventID: "event-1",
+            defaultTemplateID: template.id,
+            templates: [template],
+            gallery: EventGalleryConfiguration()
+        )
+
+        try LegacyEventMirrorService().updateLegacyEvent(event, using: document, modelContext: context)
+
+        #expect(event.photoCount == 3)
+        #expect(event.canvasWidth == 1200)
+        #expect(event.canvasHeight == 1800)
+        #expect(event.framePNGPath == "EventExperiences/event-1/Templates/template-1/frame.png")
+        #expect(event.slots.count == 1)
+        #expect(event.slots.first?.photoIndex == 2)
+    }
 }
