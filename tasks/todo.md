@@ -119,5 +119,5 @@
 - [x] Commit logical changes
 - [x] Push `feature/printable-qr-elements` — implementation head `6a282dd`
 - [x] Update PR #7
-- [ ] Confirm CI green for the final ledger commit
+- [x] Confirm CI green for final ledger commit `f5daeb1` — PR App Builds run 15 passed
 - [x] Do not merge before real ZV-E10 and 3-shot GIF tests pass
