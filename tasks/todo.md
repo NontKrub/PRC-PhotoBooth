@@ -81,15 +81,15 @@
 
 ## External review
 
-- [ ] Use full-resolution filtered local image
-- [ ] Replace fixed 460×360 sizing
-- [ ] Use responsive geometry
-- [ ] Use `scaledToFit`
-- [ ] Add large Keep/Retake controls
-- [ ] Add `Photo N of M`
-- [ ] Disable controls after decision
-- [ ] Test portrait/landscape/square/rotated
-- [ ] Test 1080p and 4K/Retina scaling
+- [x] Use full-resolution filtered local image
+- [x] Replace fixed 460×360 sizing
+- [x] Use responsive geometry
+- [x] Use `scaledToFit`
+- [x] Add large Keep/Retake controls
+- [x] Add `Photo N of M`
+- [x] Disable controls after decision
+- [x] Test portrait/landscape/square/rotated (geometry coverage)
+- [ ] Test 1080p and 4K/Retina scaling — manual display check pending
 
 ## Regression
 

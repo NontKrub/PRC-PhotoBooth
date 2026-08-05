@@ -1,6 +1,22 @@
 import SwiftUI
 import AppKit
 
+struct ExternalReviewLayout {
+    static func imageSize(for displaySize: CGSize, image: CGSize) -> CGSize {
+        guard displaySize.width.isFinite, displaySize.height.isFinite,
+              image.width.isFinite, image.height.isFinite,
+              displaySize.width > 0, displaySize.height > 0,
+              image.width > 0, image.height > 0 else { return .zero }
+        let scale = min(displaySize.width * 0.92 / image.width, displaySize.height * 0.68 / image.height)
+        guard scale.isFinite, scale > 0 else { return .zero }
+        return CGSize(width: image.width * scale, height: image.height * scale)
+    }
+
+    static func buttonHeight(for displaySize: CGSize) -> CGFloat {
+        min(88, max(64, displaySize.height * 0.08))
+    }
+}
+
 // Customer-facing viewer shown on an external monitor — a Mac-native stand-in for the iPad
 // screen when no iPad is used. Driven directly by BoothCoordinator + SessionStateMachine
 // (same process as the operator console, so no MultipeerConnectivity round-trip is needed).
@@ -193,41 +209,60 @@ struct ExternalDisplayView: View {
     // MARK: - Review
 
     private func reviewContent(photoIndex: Int) -> some View {
-        VStack(spacing: 36) {
-            Text("How did it look?")
-                .font(.system(size: 40, weight: .bold, design: .rounded))
-                .foregroundStyle(.white)
+        GeometryReader { geometry in
+            let image = coordinator.currentFilteredReviewImages[photoIndex]
+                ?? coordinator.capture.capturedStills[photoIndex]
+            let sourceSize = image.map { CGSize(width: $0.width, height: $0.height) }
+                ?? CGSize(width: 4, height: 3)
+            let imageSize = ExternalReviewLayout.imageSize(for: geometry.size, image: sourceSize)
+            let buttonHeight = ExternalReviewLayout.buttonHeight(for: geometry.size)
+            let buttonWidth = min(280, max(180, geometry.size.width * 0.18))
 
-            ZStack {
-                RoundedRectangle(cornerRadius: 18).fill(Color(white: 0.1))
-                if let img = coordinator.currentFilteredReviewImages[photoIndex]
-                    ?? coordinator.capture.capturedStills[photoIndex] {
-                    Image(nsImage: flipSafeImage(img))
-                        .resizable()
-                        .scaledToFill()
-                        .clipShape(RoundedRectangle(cornerRadius: 18))
+            VStack(spacing: max(18, geometry.size.height * 0.025)) {
+                Text("How did it look?")
+                    .font(.system(size: 40, weight: .bold, design: .rounded))
+                    .foregroundStyle(.white)
+                Text("Photo \(photoIndex + 1) of \(sm.config.photoCount)")
+                    .font(.title3.weight(.semibold))
+                    .foregroundStyle(.white.opacity(0.65))
+
+                ZStack {
+                    RoundedRectangle(cornerRadius: 18).fill(Color(white: 0.1))
+                    if let image {
+                        Image(nsImage: flipSafeImage(image))
+                            .resizable()
+                            .interpolation(.high)
+                            .scaledToFit()
+                            .clipShape(RoundedRectangle(cornerRadius: 18))
+                    }
+                }
+                .frame(width: imageSize.width, height: imageSize.height)
+                .shadow(color: .black.opacity(0.5), radius: 24, y: 8)
+
+                Spacer(minLength: 0)
+
+                HStack(spacing: 24) {
+                    Button(action: { coordinator.handleReviewDecision(photoIndex: photoIndex, action: .retake) }) {
+                        Label("Retake", systemImage: "arrow.counterclockwise")
+                            .frame(width: buttonWidth, height: buttonHeight)
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.large)
+                    .tint(.white)
+                    .disabled(coordinator.reviewDecisionPending)
+
+                    Button(action: { coordinator.handleReviewDecision(photoIndex: photoIndex, action: .keep) }) {
+                        Label(LocalizedStringKey(photoIndex + 1 < sm.config.photoCount ? "Keep & next" : "Keep & finish"), systemImage: "checkmark")
+                            .frame(width: buttonWidth, height: buttonHeight)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.large)
+                    .disabled(coordinator.reviewDecisionPending)
                 }
             }
-            .frame(width: 460, height: 360)
-            .shadow(color: .black.opacity(0.5), radius: 24, y: 8)
-
-            HStack(spacing: 24) {
-                Button(action: { coordinator.handleReviewDecision(photoIndex: photoIndex, action: .retake) }) {
-                    Label("Retake", systemImage: "arrow.counterclockwise").frame(width: 170, height: 56)
-                }
-                .buttonStyle(.bordered)
-                .controlSize(.large)
-                .tint(.white)
-                .disabled(coordinator.reviewDecisionPending)
-
-                Button(action: { coordinator.handleReviewDecision(photoIndex: photoIndex, action: .keep) }) {
-                    Label(LocalizedStringKey(photoIndex + 1 < sm.config.photoCount ? "Keep & next" : "Keep & finish"), systemImage: "checkmark")
-                        .frame(width: 230, height: 56)
-                }
-                .buttonStyle(.borderedProminent)
-                .controlSize(.large)
-                .disabled(coordinator.reviewDecisionPending)
-            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .padding(.horizontal, max(24, geometry.size.width * 0.04))
+            .padding(.vertical, max(20, geometry.size.height * 0.04))
         }
     }
 
