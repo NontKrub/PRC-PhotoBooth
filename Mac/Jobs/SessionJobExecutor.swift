@@ -90,7 +90,18 @@ final class SessionJobExecutor: SessionJobExecuting {
         let compositor = Compositor(config: manifest.eventConfig, framePNG: frame)
         let strip: CGImage
         do {
-            strip = try compositor.render(images: filteredImages)
+            let qrPayload: String?
+            if manifest.eventConfig.qrCodeElements.isEmpty {
+                qrPayload = nil
+            } else {
+                qrPayload = try SessionQRCodePayloadResolver.resolve(
+                    token: manifest.downloadToken,
+                    localBaseURL: "http://\(LocalWebServer.lanIPAddress() ?? "localhost"):\(server.port)",
+                    publicBaseURL: defaults.string(forKey: "publicBaseURL"),
+                    cloudUploadEnabled: defaults.bool(forKey: "cloudUploadEnabled")
+                )
+            }
+            strip = try compositor.render(images: filteredImages, qrPayload: qrPayload)
         } catch {
             throw JobExecutionError.permanent(error.localizedDescription)
         }

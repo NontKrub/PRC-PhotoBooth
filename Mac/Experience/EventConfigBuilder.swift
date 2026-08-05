@@ -37,7 +37,8 @@ struct EventConfigBuilder {
             customerLanguage: selection.language,
             posePrompts: prompts,
             experienceRevision: document.revision,
-            eventGalleryPath: galleryPath
+            eventGalleryPath: galleryPath,
+            qrCodeElements: template.qrCodeElements
         )
     }
 }

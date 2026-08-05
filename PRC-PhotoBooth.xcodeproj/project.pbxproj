@@ -23,6 +23,7 @@
 		1B3527CA7D8FBF85B868E2A3 /* MultipeerService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 74CCEE6D0B13FC072FBD0CF7 /* MultipeerService.swift */; };
 		1B9774A2DB37298968ACE621 /* CountdownView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C019EF4C1161A49ADFD551E3 /* CountdownView.swift */; };
 		1C6896134FE40EACEB7C1425 /* ExperienceTypes.swift in Sources */ = {isa = PBXBuildFile; fileRef = 57645A87342654910C1246F9 /* ExperienceTypes.swift */; };
+		1E2FF091EEBDD2051BCE7D8B /* Vision.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 2EC3A2D1C576CA8A8419FF97 /* Vision.framework */; };
 		1E9B5F2CD017E9DCF82273B8 /* BoothPhase.swift in Sources */ = {isa = PBXBuildFile; fileRef = C7A0F0599F8265D1CA4DEB93 /* BoothPhase.swift */; };
 		1EBA26872AE4D1262F56EA9E /* GalleryRouterTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3081A491B946FDBE4ABCB65F /* GalleryRouterTests.swift */; };
 		1F2C36D954F030ADE624872F /* SessionManifestStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 860318C816C6AF142AAA03D0 /* SessionManifestStore.swift */; };
@@ -144,6 +145,7 @@
 		E7F1277532E131CF5071E3B7 /* USBPreviewServer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 24B980C65250404308C88BB0 /* USBPreviewServer.swift */; };
 		ECC4A6D04D406ADD63544BFD /* MultipeerConnectivity.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = DAF3E4AAFB2FE72146AD824D /* MultipeerConnectivity.framework */; };
 		ECC689CDFF77127F98ACEC45 /* CustomerExperienceCatalogBuilder.swift in Sources */ = {isa = PBXBuildFile; fileRef = B514D8A1659956BF413A3CB0 /* CustomerExperienceCatalogBuilder.swift */; };
+		EE48115A824CCA5ED57949F3 /* QRCodeScanTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9EB63FA4676F2D969C1E6414 /* QRCodeScanTests.swift */; };
 		EE9F38CA10C6E29E153C9588 /* SessionJobQueue.swift in Sources */ = {isa = PBXBuildFile; fileRef = B9A44DB7ECC7BD43608BC8A4 /* SessionJobQueue.swift */; };
 		F0E085E01771DA27CAC3BEC8 /* EventExperienceEditorView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7161E527181D437AFC97BF42 /* EventExperienceEditorView.swift */; };
 		F8D781D84527D63B940E0B66 /* QRCodeGenerator.swift in Sources */ = {isa = PBXBuildFile; fileRef = FC4655DC257D70C9ABB30347 /* QRCodeGenerator.swift */; };
@@ -186,6 +188,7 @@
 		29E6360321A719FBEC169D31 /* CaptureService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CaptureService.swift; sourceTree = "<group>"; };
 		2B555DBC71B145823AD802CE /* .gitkeep */ = {isa = PBXFileReference; path = .gitkeep; sourceTree = "<group>"; };
 		2D4131E679BC6023EF6ECD63 /* OperationsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OperationsView.swift; sourceTree = "<group>"; };
+		2EC3A2D1C576CA8A8419FF97 /* Vision.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Vision.framework; path = System/Library/Frameworks/Vision.framework; sourceTree = SDKROOT; };
 		3081A491B946FDBE4ABCB65F /* GalleryRouterTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GalleryRouterTests.swift; sourceTree = "<group>"; };
 		3164566896D5C1F57370D357 /* GalleryThumbnailGenerator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GalleryThumbnailGenerator.swift; sourceTree = "<group>"; };
 		33C6B38ACA5CF567BD8505C3 /* PrinterServiceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PrinterServiceTests.swift; sourceTree = "<group>"; };
@@ -231,6 +234,7 @@
 		9B6C6748F16DAED3CEF42F42 /* LocalDownloadRouter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LocalDownloadRouter.swift; sourceTree = "<group>"; };
 		9BE361332EDFD431A0529E97 /* BoothModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BoothModels.swift; sourceTree = "<group>"; };
 		9CCFC64966ED635FAC4A06C6 /* ExperienceSelectionView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ExperienceSelectionView.swift; sourceTree = "<group>"; };
+		9EB63FA4676F2D969C1E6414 /* QRCodeScanTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QRCodeScanTests.swift; sourceTree = "<group>"; };
 		9EC5B75CB04026ADBE94DD2E /* DemoKioskDriver.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DemoKioskDriver.swift; sourceTree = "<group>"; };
 		A5B62D650073182D6B778A65 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
 		A61D4E79BC09D0F47BDFD110 /* PrinterService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PrinterService.swift; sourceTree = "<group>"; };
@@ -326,6 +330,14 @@
 				C7DA80E3C424D8747F452D79 /* CoreImage.framework in Frameworks */,
 				8609458C84DBA54ADF253D89 /* CoreGraphics.framework in Frameworks */,
 				A2470F016CB2FDACB1213353 /* ImageIO.framework in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		FE16B0A42CA4DFE2A1C02D34 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				1E2FF091EEBDD2051BCE7D8B /* Vision.framework in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -457,6 +469,7 @@
 				636F46208E1900AED0290A66 /* Network.framework */,
 				553249FDB48038050181108D /* SwiftData.framework */,
 				AB93FA7E9EA0E1740863D0E3 /* UniformTypeIdentifiers.framework */,
+				2EC3A2D1C576CA8A8419FF97 /* Vision.framework */,
 			);
 			name = Frameworks;
 			sourceTree = "<group>";
@@ -633,6 +646,7 @@
 				D92CE292B7E0BEB9A95355F1 /* PreflightServiceTests.swift */,
 				33C6B38ACA5CF567BD8505C3 /* PrinterServiceTests.swift */,
 				FA2B87E5380B64A05E78F54E /* QRCodeGeneratorTests.swift */,
+				9EB63FA4676F2D969C1E6414 /* QRCodeScanTests.swift */,
 				68B898FEB0773DF2B43B117C /* RetakeTrackingTests.swift */,
 				D28FE311CF2E0A52B4AE5299 /* RollingVideoBufferTests.swift */,
 				FE457410A7E75626E17DF143 /* SessionJobQueueTests.swift */,
@@ -713,6 +727,7 @@
 			buildConfigurationList = E5B7A45415C8CAF804A06FBA /* Build configuration list for PBXNativeTarget "PRC-PhotoBoothTests" */;
 			buildPhases = (
 				B6F9651C834D05B1D8B170D7 /* Sources */,
+				FE16B0A42CA4DFE2A1C02D34 /* Frameworks */,
 			);
 			buildRules = (
 			);
@@ -928,6 +943,7 @@
 				63D0750D7B26CEF5F13E637C /* PreflightServiceTests.swift in Sources */,
 				03BAFB8414CD1C16426DE86C /* PrinterServiceTests.swift in Sources */,
 				39114D2E80A94ED86EFD11A5 /* QRCodeGeneratorTests.swift in Sources */,
+				EE48115A824CCA5ED57949F3 /* QRCodeScanTests.swift in Sources */,
 				68250C96244AB7C6879A910E /* RetakeTrackingTests.swift in Sources */,
 				4DBD05E3C9868500F567C5F7 /* RollingVideoBufferTests.swift in Sources */,
 				D7CAD76BE6D0BB28285F16D4 /* SessionJobQueueTests.swift in Sources */,

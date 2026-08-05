@@ -96,6 +96,70 @@ struct EventExperienceStoreTests {
         #expect(imported.url.pathExtension == "jpg")
     }
 
+    @Test("accepts templates with zero or multiple QR elements")
+    func validatesQRCodeCounts() async throws {
+        let store = EventExperienceStore(baseDirectory: try temporaryDirectory())
+        try await store.validate(document(for: validTemplate()))
+
+        var template = validTemplate()
+        template.qrCodeElements = [
+            SharedQRCodeElement(id: "qr-1", normalizedRect: CGRect(x: 0.1, y: 0.1, width: 0.2, height: 0.2)),
+            SharedQRCodeElement(id: "qr-2", normalizedRect: CGRect(x: 0.6, y: 0.6, width: 0.2, height: 0.2))
+        ]
+        try await store.validate(document(for: template))
+    }
+
+    @Test("rejects zero-size QR elements")
+    func rejectsZeroSizeQRCode() async throws {
+        var template = validTemplate()
+        template.qrCodeElements = [SharedQRCodeElement(id: "qr-1", normalizedRect: CGRect(x: 0, y: 0, width: 0, height: 0.2))]
+        try await expectInvalid(store: EventExperienceStore(baseDirectory: try temporaryDirectory()), document: document(for: template), containing: "QR")
+    }
+
+    @Test("rejects non-finite QR coordinates")
+    func rejectsNonFiniteQRCode() async throws {
+        var template = validTemplate()
+        template.qrCodeElements = [SharedQRCodeElement(id: "qr-1", normalizedRect: CGRect(x: .nan, y: 0, width: 0.2, height: 0.2))]
+        try await expectInvalid(store: EventExperienceStore(baseDirectory: try temporaryDirectory()), document: document(for: template), containing: "QR")
+    }
+
+    @Test("rejects duplicate QR IDs")
+    func rejectsDuplicateQRCodeIDs() async throws {
+        var template = validTemplate()
+        template.qrCodeElements = [
+            SharedQRCodeElement(id: "qr-1", normalizedRect: CGRect(x: 0, y: 0, width: 0.2, height: 0.2)),
+            SharedQRCodeElement(id: "qr-1", normalizedRect: CGRect(x: 0.3, y: 0.3, width: 0.2, height: 0.2))
+        ]
+        try await expectInvalid(store: EventExperienceStore(baseDirectory: try temporaryDirectory()), document: document(for: template), containing: "QR")
+    }
+
+    @Test("rejects photo and QR ID collisions")
+    func rejectsPhotoQRCodeIDCollision() async throws {
+        var template = validTemplate()
+        template.slots[0].id = "shared-id"
+        template.qrCodeElements = [SharedQRCodeElement(id: "shared-id", normalizedRect: CGRect(x: 0, y: 0, width: 0.2, height: 0.2))]
+        try await expectInvalid(store: EventExperienceStore(baseDirectory: try temporaryDirectory()), document: document(for: template), containing: "ID")
+    }
+
+    @Test("loads an old experience document without QR fields")
+    func loadsLegacyExperienceDocument() async throws {
+        let root = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let document = document(for: validTemplate())
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        var object = try #require(JSONSerialization.jsonObject(with: encoder.encode(document)) as? [String: Any])
+        var templates = try #require(object["templates"] as? [[String: Any]])
+        templates[0]["qrCodeElements"] = nil
+        object["templates"] = templates
+        let directory = root.appendingPathComponent("EventExperiences/event-1")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        try JSONSerialization.data(withJSONObject: object).write(to: directory.appendingPathComponent("experience.json"))
+
+        let loaded = try await EventExperienceStore(baseDirectory: root).load(eventID: "event-1")
+        #expect(loaded.templates[0].qrCodeElements.isEmpty)
+    }
+
     private func validTemplate(id: String = "template-1") -> EventTemplateDefinition {
         EventTemplateDefinition(
             id: id,
@@ -105,6 +169,33 @@ struct EventExperienceStoreTests {
             canvasHeight: 600,
             slots: [SharedPhotoSlot(normalizedRect: CGRect(x: 0, y: 0, width: 1, height: 1), photoIndex: 0)]
         )
+    }
+
+    private func document(for template: EventTemplateDefinition) -> EventExperienceDocument {
+        EventExperienceDocument(
+            id: "event-1",
+            eventID: "event-1",
+            defaultTemplateID: template.id,
+            templates: [template],
+            gallery: EventGalleryConfiguration()
+        )
+    }
+
+    private func expectInvalid(
+        store: EventExperienceStore,
+        document: EventExperienceDocument,
+        containing text: String
+    ) async throws {
+        do {
+            try await store.validate(document)
+            Issue.record("Expected validation to fail")
+        } catch let error as EventExperienceError {
+            guard case .invalid(let message) = error else {
+                Issue.record("Expected invalid error, got \(error)")
+                return
+            }
+            #expect(message.localizedCaseInsensitiveContains(text))
+        }
     }
 }
 

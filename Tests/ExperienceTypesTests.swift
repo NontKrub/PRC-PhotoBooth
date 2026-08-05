@@ -168,6 +168,56 @@ struct ExperienceTypesTests {
         }
     }
 
+    @Test("selected template QR elements are copied into EventConfig")
+    func eventConfigBuilderCopiesQRCodeElements() throws {
+        let qrElements = [
+            SharedQRCodeElement(id: "qr-1", normalizedRect: CGRect(x: 0.1, y: 0.1, width: 0.2, height: 0.2), zOrder: 4),
+            SharedQRCodeElement(id: "qr-2", normalizedRect: CGRect(x: 0.6, y: 0.6, width: 0.2, height: 0.2), zOrder: 5)
+        ]
+        let template = EventTemplateDefinition(
+            id: "template-selected",
+            name: LocalizedText(english: "Selected"),
+            photoCount: 1,
+            canvasWidth: 900,
+            canvasHeight: 1200,
+            slots: [SharedPhotoSlot(normalizedRect: CGRect(x: 0, y: 0, width: 1, height: 1), photoIndex: 0)],
+            qrCodeElements: qrElements
+        )
+        let document = EventExperienceDocument(
+            id: "event-1",
+            eventID: "event-1",
+            revision: "revision-1",
+            defaultTemplateID: template.id,
+            templates: [template],
+            gallery: EventGalleryConfiguration()
+        )
+        let selection = ValidatedCustomerSelection(
+            eventID: "event-1",
+            experienceRevision: "revision-1",
+            template: template,
+            filterID: .original,
+            language: .english
+        )
+
+        let config = try EventConfigBuilder().build(
+            event: BoothEventSnapshot(
+                id: "event-1",
+                name: "Event",
+                photoCount: 1,
+                countdownSeconds: 5,
+                canvasWidth: 900,
+                canvasHeight: 1200,
+                framePNGURL: nil,
+                slots: template.slots
+            ),
+            document: document,
+            selection: selection,
+            galleryPath: nil
+        )
+
+        #expect(config.qrCodeElements == qrElements)
+    }
+
     private func makeExperienceDocument() -> EventExperienceDocument {
         let slots = [
             SharedPhotoSlot(normalizedRect: CGRect(x: 0, y: 0, width: 1, height: 0.5), photoIndex: 0),

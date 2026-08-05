@@ -55,10 +55,12 @@ final class BoothCoordinator {
         token: String,
         cloudUploadSucceeded: Bool
     ) -> String {
-        let publicBase = publicBaseURL?.trimmingCharacters(in: CharacterSet(charactersIn: "/ ")) ?? ""
-        let localBase = localBaseURL.trimmingCharacters(in: CharacterSet(charactersIn: "/ "))
-        let base = cloudUploadSucceeded && !publicBase.isEmpty ? publicBase : localBase
-        return "\(base)/s/\(token)/"
+        (try? SessionQRCodePayloadResolver.resolve(
+            token: token,
+            localBaseURL: localBaseURL,
+            publicBaseURL: publicBaseURL,
+            cloudUploadEnabled: cloudUploadSucceeded
+        )) ?? "\(localBaseURL.trimmingCharacters(in: .whitespacesAndNewlines))/s/\(token)/"
     }
 
     let multipeer: MultipeerService
@@ -943,8 +945,14 @@ final class BoothCoordinator {
         }
         let images = currentFilteredReviewImages
         let compositor = Compositor(config: config, framePNG: framePNG)
-        Task.detached(priority: .utility) { [compositor, images] in
-            let img = try? compositor.render(images: images)
+        let qrPayload = config.qrCodeElements.isEmpty ? nil : try? SessionQRCodePayloadResolver.resolve(
+            token: manifest.downloadToken,
+            localBaseURL: "http://\(LocalWebServer.lanIPAddress() ?? "localhost"):8585",
+            publicBaseURL: UserDefaults.standard.string(forKey: "publicBaseURL"),
+            cloudUploadEnabled: UserDefaults.standard.bool(forKey: "cloudUploadEnabled")
+        )
+        Task.detached(priority: .utility) { [compositor, images, qrPayload] in
+            let img = try? compositor.render(images: images, qrPayload: qrPayload)
             await MainActor.run { [weak self] in self?.currentStripPreview = img }
         }
     }
@@ -1302,7 +1310,7 @@ final class BoothCoordinator {
             publicBaseURL: publicBase,
             localBaseURL: "http://\(ip):8585",
             token: token,
-            cloudUploadSucceeded: jobs.first(where: { $0.kind == .cloudUpload })?.status == .succeeded
+            cloudUploadSucceeded: UserDefaults.standard.bool(forKey: "cloudUploadEnabled")
         )
         let stripThumb = loadCGImage(from: directory.appendingPathComponent("strip.png"))
             .flatMap { jpegData(from: $0, quality: 0.4) }

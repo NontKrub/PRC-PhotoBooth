@@ -212,6 +212,27 @@ actor EventExperienceStore {
             guard template.slots.allSatisfy({ $0.normalizedRect.width > 0 && $0.normalizedRect.height > 0 && (0..<template.photoCount).contains($0.photoIndex) }) else { throw EventExperienceError.invalid("Template has an invalid slot.") }
             let slotIndexes = Set(template.slots.map(\.photoIndex))
             guard (0..<template.photoCount).allSatisfy(slotIndexes.contains) else { throw EventExperienceError.invalid("Every capture index needs a slot.") }
+            guard template.qrCodeElements.count <= 16 else { throw EventExperienceError.invalid("A template may contain at most 16 QR elements.") }
+            let slotIDs = Set(template.slots.map(\.id))
+            var qrIDs = Set<String>()
+            for qrCode in template.qrCodeElements {
+                let rect = qrCode.normalizedRect
+                guard !qrCode.id.isEmpty,
+                      qrIDs.insert(qrCode.id).inserted,
+                      !slotIDs.contains(qrCode.id),
+                      rect.origin.x.isFinite,
+                      rect.origin.y.isFinite,
+                      rect.width.isFinite,
+                      rect.height.isFinite,
+                      rect.width > 0,
+                      rect.height > 0,
+                      rect.intersects(CGRect(x: 0, y: 0, width: 1, height: 1)),
+                      rect.width * template.canvasWidth >= 4,
+                      rect.height * template.canvasHeight >= 4,
+                      qrCode.rotation.isFinite else {
+                    throw EventExperienceError.invalid("Template has an invalid QR element.")
+                }
+            }
             var promptIndexes = Set<Int>()
             for prompt in template.posePrompts {
                 guard (0..<template.photoCount).contains(prompt.photoIndex) else { throw EventExperienceError.invalid("Pose prompt index is outside template photo count.") }

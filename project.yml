@@ -169,6 +169,7 @@ targets:
         GENERATE_INFOPLIST_FILE: YES
     dependencies:
       - target: PRC-PhotoBooth-Mac
+      - sdk: Vision.framework
 
 schemes:
   PRC-PhotoBooth-Mac:
