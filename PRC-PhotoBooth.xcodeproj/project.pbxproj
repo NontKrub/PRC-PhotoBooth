@@ -61,6 +61,7 @@
 		53CD7F82FB571EDFB0A54AE9 /* Network.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 636F46208E1900AED0290A66 /* Network.framework */; };
 		55BF5169E771DDC51D07A03D /* CoreGraphics.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = BEB333AA893BB0250EB77EB2 /* CoreGraphics.framework */; };
 		56B18371CBDE24DC5C349F36 /* CustomerSelectionValidator.swift in Sources */ = {isa = PBXBuildFile; fileRef = B200F03D55F203981DC5F233 /* CustomerSelectionValidator.swift */; };
+		57B1E22E23EC8495A2B93C4C /* ActiveCameraPreviewTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8EE3B99F5C1FD036A5A483B7 /* ActiveCameraPreviewTests.swift */; };
 		58E1BA7F017689C532543C3E /* FilterOptionCard.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3925EEC9B4ACE8F77838E1C0 /* FilterOptionCard.swift */; };
 		5A24B10E0AE5923B933019C3 /* CloudSSHSetupService.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB886D7A88555FB8EDE49CC3 /* CloudSSHSetupService.swift */; };
 		5AA60BA4612C6066E1DB9C80 /* FilterSampleRenderer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 76C0A7EF425EA6BDF05F506C /* FilterSampleRenderer.swift */; };
@@ -234,6 +235,7 @@
 		8D1CDA95743E9BDD01DF6771 /* OperatorConsoleView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OperatorConsoleView.swift; sourceTree = "<group>"; };
 		8E37BBEEAC6F2E4DAC87F53F /* EventExperienceStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EventExperienceStore.swift; sourceTree = "<group>"; };
 		8EBCF7F6FB457E56B24820BA /* EventExperienceStoreTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EventExperienceStoreTests.swift; sourceTree = "<group>"; };
+		8EE3B99F5C1FD036A5A483B7 /* ActiveCameraPreviewTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ActiveCameraPreviewTests.swift; sourceTree = "<group>"; };
 		98B3AC61404AB756ABB081C9 /* EventGalleryStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EventGalleryStore.swift; sourceTree = "<group>"; };
 		9B6C6748F16DAED3CEF42F42 /* LocalDownloadRouter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LocalDownloadRouter.swift; sourceTree = "<group>"; };
 		9BE361332EDFD431A0529E97 /* BoothModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BoothModels.swift; sourceTree = "<group>"; };
@@ -635,6 +637,7 @@
 			isa = PBXGroup;
 			children = (
 				2B555DBC71B145823AD802CE /* .gitkeep */,
+				8EE3B99F5C1FD036A5A483B7 /* ActiveCameraPreviewTests.swift */,
 				4346C88E68A8DD1C20ECE9EC /* CanvasElementGeometryTests.swift */,
 				68AD6CCBF1B3CB849C8CA5A9 /* CloudSSHSetupTests.swift */,
 				F83BAA2070C1E452B6270E1A /* CloudUploadServiceTests.swift */,
@@ -935,6 +938,7 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				57B1E22E23EC8495A2B93C4C /* ActiveCameraPreviewTests.swift in Sources */,
 				F98E430CB67E8376857BBF40 /* CanvasElementGeometryTests.swift in Sources */,
 				061B8A6BAAC97D0554975F74 /* CloudSSHSetupTests.swift in Sources */,
 				3366CE79827720DC01942C08 /* CloudUploadServiceTests.swift in Sources */,

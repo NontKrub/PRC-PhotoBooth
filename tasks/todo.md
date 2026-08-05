@@ -59,14 +59,14 @@
 
 ## Active camera preview
 
-- [ ] Add shared preview resolver
-- [ ] Prefer ZV-E10 PTP image
-- [ ] Allow only non-built-in DSLR fallback session
-- [ ] Never silently show Mac camera in DSLR mode
-- [ ] Use resolver in console
-- [ ] Use resolver in external idle/countdown
-- [ ] Add resolver tests
-- [ ] Test Sony disconnect/reconnect
+- [x] Add shared preview resolver
+- [x] Prefer ZV-E10 PTP image
+- [x] Allow only non-built-in DSLR fallback session
+- [x] Never silently show Mac camera in DSLR mode
+- [x] Use resolver in console
+- [x] Use resolver in external idle/countdown
+- [x] Add resolver tests
+- [ ] Test Sony disconnect/reconnect — ZV-E10 hardware not connected here
 
 ## Shared customer workflow
 

@@ -63,80 +63,23 @@ struct OperatorConsoleView: View {
             Color.black
             if !coordinator.cameraPermissionGranted {
                 permissionDeniedOverlay
-            } else if coordinator.capture.demoMode,
-                      let image = coordinator.capture.demoPreviewImage {
-                CapturedImagePreview(cgImage: image)
-                    .overlay {
-                        if showGrid { GridOverlayView() }
-                    }
-            } else if coordinator.cameraSourceKind == .dslr {
-                if let image = coordinator.capture.dslr.latestPreviewImage {
-                    CapturedImagePreview(cgImage: image)
-                        .overlay {
-                            if showGrid { GridOverlayView() }
-                        }
-                } else if coordinator.capture.isRunning,
-                   let session = coordinator.capture.camera.captureSession,
-                   dslrPreviewDevice != nil {
-                    CameraPreviewView(captureSession: session,
-                                     isMirrored: coordinator.capture.camera.isMirrored)
-                        .aspectRatio(4/3, contentMode: .fit)
-                        .overlay {
-                            if showGrid { GridOverlayView() }
-                        }
-                } else if let image = coordinator.capture.dslr.lastCapturedImage {
-                    CapturedImagePreview(cgImage: image)
-                        .overlay {
-                            if showGrid { GridOverlayView() }
-                        }
-                } else {
-                    dslrPTPPreviewOverlay
-                }
-                dslrPreviewBadge
-            } else if coordinator.capture.isRunning, let session = coordinator.capture.camera.captureSession {
-                CameraPreviewView(captureSession: session,
-                                 isMirrored: coordinator.capture.camera.isMirrored)
-                    .aspectRatio(4/3, contentMode: .fit)
-                    .overlay {
-                        if showGrid { GridOverlayView() }
-                    }
             } else {
-                VStack(spacing: 12) {
-                    Image(systemName: "camera.slash.fill")
-                        .font(.system(size: 44)).foregroundStyle(.tertiary)
-                    Text("Camera not running")
-                        .foregroundStyle(.secondary)
-                    Button("Start Camera") { Task { await coordinator.checkCameraPermission() } }
-                        .buttonStyle(.bordered)
+                ActiveCameraPreviewView(
+                    preview: ActiveCameraPreviewResolver.resolve(
+                        capture: coordinator.capture,
+                        source: coordinator.cameraSourceKind
+                    ),
+                    showGrid: showGrid,
+                    onStart: coordinator.cameraSourceKind == .avFoundation
+                        ? { Task { await coordinator.checkCameraPermission() } }
+                        : nil
+                )
+                if coordinator.cameraSourceKind == .dslr {
+                    dslrPreviewBadge
                 }
             }
         }
         .frame(minWidth: 480)
-    }
-
-    var dslrPreviewDevice: CameraDeviceInfo? {
-        coordinator.capture.camera.availableDevices.first {
-            $0.id == coordinator.capture.camera.selectedDeviceID && $0.kind != .builtIn
-        }
-    }
-
-    var dslrPTPPreviewOverlay: some View {
-        VStack(spacing: 12) {
-            Image(systemName: "camera.aperture")
-                .font(.system(size: 44))
-                .foregroundStyle(.white.opacity(0.65))
-            Text(LocalizedStringKey(coordinator.capture.dslr.isRunning ? "Sony PTP Control Active" : "Sony PTP Standby"))
-                .font(.headline)
-                .foregroundStyle(.white)
-            Text(LocalizedStringKey(coordinator.capture.dslr.isRunning
-                                    ? "Waiting for the camera's Sony PTP live-view stream…"
-                                    : "Connect the camera to start Sony PTP live view."))
-                .font(.caption)
-                .foregroundStyle(.white.opacity(0.7))
-                .multilineTextAlignment(.center)
-                .frame(maxWidth: 360)
-        }
-        .padding(32)
     }
 
     var dslrPreviewBadge: some View {
@@ -676,6 +619,99 @@ struct OperatorConsoleView: View {
             }
         }
         .padding(.bottom, 8)
+    }
+}
+
+enum ActiveCameraPreview {
+    case image(CGImage)
+    case session(AVCaptureSession, mirrored: Bool)
+    case unavailable(title: String, detail: String)
+}
+
+@MainActor
+enum ActiveCameraPreviewResolver {
+    static func resolve(capture: CaptureService, source: CameraSourceKind) -> ActiveCameraPreview {
+        let selectedDeviceKind = capture.camera.availableDevices
+            .first { $0.id == capture.camera.selectedDeviceID }?.kind
+        return resolve(
+            source: source,
+            demoImage: capture.demoMode ? capture.demoPreviewImage : nil,
+            dslrPreview: capture.dslr.latestPreviewImage,
+            dslrLastCapture: capture.dslr.lastCapturedImage,
+            fallbackSession: capture.camera.captureSession,
+            fallbackDeviceKind: selectedDeviceKind,
+            cameraRunning: capture.isRunning,
+            mirrored: capture.camera.isMirrored
+        )
+    }
+
+    static func resolve(
+        source: CameraSourceKind,
+        demoImage: CGImage?,
+        dslrPreview: CGImage?,
+        dslrLastCapture: CGImage?,
+        fallbackSession: AVCaptureSession?,
+        fallbackDeviceKind: CameraDeviceInfo.Kind?,
+        cameraRunning: Bool,
+        mirrored: Bool
+    ) -> ActiveCameraPreview {
+        if let demoImage { return .image(demoImage) }
+
+        if source == .dslr {
+            if let dslrPreview { return .image(dslrPreview) }
+            if cameraRunning,
+               let fallbackSession,
+               let fallbackDeviceKind,
+               fallbackDeviceKind != .builtIn {
+                return .session(fallbackSession, mirrored: mirrored)
+            }
+            if let dslrLastCapture { return .image(dslrLastCapture) }
+            return .unavailable(
+                title: "Sony PTP Standby",
+                detail: "Connect the camera to start Sony PTP live view."
+            )
+        }
+
+        if cameraRunning, let fallbackSession {
+            return .session(fallbackSession, mirrored: mirrored)
+        }
+        return .unavailable(title: "Camera not running", detail: "Start the camera to show a live preview.")
+    }
+}
+
+struct ActiveCameraPreviewView: View {
+    let preview: ActiveCameraPreview
+    var showGrid = false
+    var onStart: (() -> Void)?
+
+    var body: some View {
+        Group {
+            switch preview {
+            case .image(let image):
+                CapturedImagePreview(cgImage: image)
+            case .session(let session, let mirrored):
+                CameraPreviewView(captureSession: session, isMirrored: mirrored)
+                    .aspectRatio(4 / 3, contentMode: .fit)
+            case .unavailable(let title, let detail):
+                VStack(spacing: 12) {
+                    Image(systemName: "camera.slash.fill")
+                        .font(.system(size: 44)).foregroundStyle(.tertiary)
+                    Text(title).foregroundStyle(.secondary)
+                    Text(detail)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center)
+                        .frame(maxWidth: 300)
+                    if let onStart {
+                        Button("Start Camera", action: onStart)
+                            .buttonStyle(.bordered)
+                    }
+                }
+        }
+        }
+        .overlay {
+            if showGrid { GridOverlayView() }
+        }
     }
 }
 

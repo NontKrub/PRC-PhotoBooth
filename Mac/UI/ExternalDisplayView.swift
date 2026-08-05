@@ -257,25 +257,12 @@ struct ExternalDisplayView: View {
     // MARK: - Shared
 
     private var cameraPreview: some View {
-        Group {
-#if DEBUG
-            if coordinator.capture.demoMode, let image = coordinator.capture.demoPreviewImage {
-                Image(nsImage: flipSafeImage(image))
-                    .resizable()
-                    .scaledToFill()
-            } else if coordinator.capture.isRunning, let session = coordinator.capture.camera.captureSession {
-                CameraPreviewView(captureSession: session, isMirrored: coordinator.capture.camera.isMirrored)
-            } else {
-                Color.black
-            }
-#else
-            if coordinator.capture.isRunning, let session = coordinator.capture.camera.captureSession {
-                CameraPreviewView(captureSession: session, isMirrored: coordinator.capture.camera.isMirrored)
-            } else {
-                Color.black
-            }
-#endif
-        }
+        ActiveCameraPreviewView(
+            preview: ActiveCameraPreviewResolver.resolve(
+                capture: coordinator.capture,
+                source: coordinator.cameraSourceKind
+            )
+        )
         .ignoresSafeArea()
     }
 
