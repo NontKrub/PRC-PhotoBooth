@@ -76,6 +76,7 @@ public struct EventTemplateDefinition: Codable, Sendable, Equatable, Identifiabl
     public var frameFileName: String?
     public var previewFileName: String?
     public var slots: [SharedPhotoSlot]
+    public var qrCodeElements: [SharedQRCodeElement]
     public var posePrompts: [PosePromptDefinition]
     public var createdAt: Date
     public var updatedAt: Date
@@ -91,6 +92,7 @@ public struct EventTemplateDefinition: Codable, Sendable, Equatable, Identifiabl
         frameFileName: String? = nil,
         previewFileName: String? = nil,
         slots: [SharedPhotoSlot],
+        qrCodeElements: [SharedQRCodeElement] = [],
         posePrompts: [PosePromptDefinition] = [],
         createdAt: Date = Date(),
         updatedAt: Date = Date()
@@ -105,9 +107,51 @@ public struct EventTemplateDefinition: Codable, Sendable, Equatable, Identifiabl
         self.frameFileName = frameFileName
         self.previewFileName = previewFileName
         self.slots = slots
+        self.qrCodeElements = qrCodeElements
         self.posePrompts = posePrompts
         self.createdAt = createdAt
         self.updatedAt = updatedAt
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id, name, isEnabled, sortOrder, photoCount, canvasWidth, canvasHeight
+        case frameFileName, previewFileName, slots, qrCodeElements, posePrompts, createdAt, updatedAt
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(String.self, forKey: .id)
+        name = try container.decode(LocalizedText.self, forKey: .name)
+        isEnabled = try container.decode(Bool.self, forKey: .isEnabled)
+        sortOrder = try container.decode(Int.self, forKey: .sortOrder)
+        photoCount = try container.decode(Int.self, forKey: .photoCount)
+        canvasWidth = try container.decode(Double.self, forKey: .canvasWidth)
+        canvasHeight = try container.decode(Double.self, forKey: .canvasHeight)
+        frameFileName = try container.decodeIfPresent(String.self, forKey: .frameFileName)
+        previewFileName = try container.decodeIfPresent(String.self, forKey: .previewFileName)
+        slots = try container.decode([SharedPhotoSlot].self, forKey: .slots)
+        qrCodeElements = try container.decodeIfPresent([SharedQRCodeElement].self, forKey: .qrCodeElements) ?? []
+        posePrompts = try container.decodeIfPresent([PosePromptDefinition].self, forKey: .posePrompts) ?? []
+        createdAt = try container.decode(Date.self, forKey: .createdAt)
+        updatedAt = try container.decode(Date.self, forKey: .updatedAt)
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(id, forKey: .id)
+        try container.encode(name, forKey: .name)
+        try container.encode(isEnabled, forKey: .isEnabled)
+        try container.encode(sortOrder, forKey: .sortOrder)
+        try container.encode(photoCount, forKey: .photoCount)
+        try container.encode(canvasWidth, forKey: .canvasWidth)
+        try container.encode(canvasHeight, forKey: .canvasHeight)
+        try container.encodeIfPresent(frameFileName, forKey: .frameFileName)
+        try container.encodeIfPresent(previewFileName, forKey: .previewFileName)
+        try container.encode(slots, forKey: .slots)
+        try container.encode(qrCodeElements, forKey: .qrCodeElements)
+        try container.encode(posePrompts, forKey: .posePrompts)
+        try container.encode(createdAt, forKey: .createdAt)
+        try container.encode(updatedAt, forKey: .updatedAt)
     }
 }
 

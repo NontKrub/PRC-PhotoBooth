@@ -1,17 +1,29 @@
 import Foundation
 import CoreGraphics
-import CoreImage
 
 // MARK: - QR code generation (shared between Mac external viewer + iPad finish screen)
 
 public func generateQRCode(from string: String) -> CGImage? {
-    guard let data = string.data(using: .utf8) else { return nil }
-    let filter = CIFilter(name: "CIQRCodeGenerator")
-    filter?.setValue(data, forKey: "inputMessage")
-    filter?.setValue("M", forKey: "inputCorrectionLevel")
-    guard let output = filter?.outputImage else { return nil }
-    let scaled = output.transformed(by: CGAffineTransform(scaleX: 8, y: 8))
-    return CIContext().createCGImage(scaled, from: scaled.extent)
+    QRCodeGenerator.makeImage(payload: string, correctionLevel: "M", scale: 8, quietZoneModules: 0)
+}
+
+public struct SharedQRCodeElement: Codable, Sendable, Equatable, Identifiable {
+    public var id: String
+    public var normalizedRect: CGRect
+    public var rotation: Double
+    public var zOrder: Int
+
+    public init(
+        id: String = UUID().uuidString,
+        normalizedRect: CGRect,
+        rotation: Double = 0,
+        zOrder: Int = 0
+    ) {
+        self.id = id
+        self.normalizedRect = normalizedRect
+        self.rotation = rotation
+        self.zOrder = zOrder
+    }
 }
 
 // MARK: - Event config (shared between Mac + iPad)
@@ -31,6 +43,7 @@ public struct EventConfig: Codable, Sendable, Equatable {
     public var posePrompts: [ResolvedPosePrompt]
     public var experienceRevision: String
     public var eventGalleryPath: String?
+    public var qrCodeElements: [SharedQRCodeElement]
 
     public init(
         eventID: String = UUID().uuidString,
@@ -46,7 +59,8 @@ public struct EventConfig: Codable, Sendable, Equatable {
         customerLanguage: CustomerLanguage = .english,
         posePrompts: [ResolvedPosePrompt] = [],
         experienceRevision: String = "",
-        eventGalleryPath: String? = nil
+        eventGalleryPath: String? = nil,
+        qrCodeElements: [SharedQRCodeElement] = []
     ) {
         self.eventID = eventID
         self.eventName = eventName
@@ -62,11 +76,12 @@ public struct EventConfig: Codable, Sendable, Equatable {
         self.posePrompts = posePrompts
         self.experienceRevision = experienceRevision
         self.eventGalleryPath = eventGalleryPath
+        self.qrCodeElements = qrCodeElements
     }
 
     private enum CodingKeys: String, CodingKey {
         case eventID, eventName, photoCount, countdownSeconds, canvasWidth, canvasHeight, slots
-        case templateID, templateName, selectedFilterID, customerLanguage, posePrompts, experienceRevision, eventGalleryPath
+        case templateID, templateName, selectedFilterID, customerLanguage, posePrompts, experienceRevision, eventGalleryPath, qrCodeElements
     }
 
     public init(from decoder: Decoder) throws {
@@ -85,6 +100,7 @@ public struct EventConfig: Codable, Sendable, Equatable {
         posePrompts = try container.decodeIfPresent([ResolvedPosePrompt].self, forKey: .posePrompts) ?? []
         experienceRevision = try container.decodeIfPresent(String.self, forKey: .experienceRevision) ?? ""
         eventGalleryPath = try container.decodeIfPresent(String.self, forKey: .eventGalleryPath)
+        qrCodeElements = try container.decodeIfPresent([SharedQRCodeElement].self, forKey: .qrCodeElements) ?? []
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -103,6 +119,7 @@ public struct EventConfig: Codable, Sendable, Equatable {
         try container.encode(posePrompts, forKey: .posePrompts)
         try container.encode(experienceRevision, forKey: .experienceRevision)
         try container.encodeIfPresent(eventGalleryPath, forKey: .eventGalleryPath)
+        try container.encode(qrCodeElements, forKey: .qrCodeElements)
     }
 }
 
