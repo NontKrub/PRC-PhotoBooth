@@ -229,6 +229,7 @@ struct TemplateFrameSlotEditor: View {
     let canvasWidth: Double
     let canvasHeight: Double
     let photoCount: Int
+    let frame: CGImage?
     @Environment(\.dismiss) private var dismiss
     @State private var selection: TemplateCanvasSelection?
 
@@ -285,7 +286,16 @@ struct TemplateFrameSlotEditor: View {
             ZStack {
                 Color(white: 0.2)
                 ZStack {
-                    Color.white
+                    if let frame {
+                        Image(frame, scale: 1, orientation: .up, label: Text("Template frame"))
+                            .resizable()
+                            .scaledToFill()
+                            .frame(width: displaySize.width, height: displaySize.height)
+                            .clipped()
+                    } else {
+                        Color.white
+                    }
+                    Color.clear
                         .contentShape(Rectangle())
                         .onTapGesture { selection = nil }
                     canvasGrid(w: displaySize.width, h: displaySize.height)

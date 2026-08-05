@@ -96,6 +96,46 @@ struct EventExperienceStoreTests {
         #expect(imported.url.pathExtension == "jpg")
     }
 
+    @Test("reads a template frame from its package")
+    func readsTemplateFrame() async throws {
+        let root = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        var template = validTemplate()
+        template.frameFileName = "frame.png"
+        let store = EventExperienceStore(baseDirectory: root)
+        try await store.save(document(for: template))
+        let directory = root
+            .appendingPathComponent("EventExperiences", isDirectory: true)
+            .appendingPathComponent("event-1", isDirectory: true)
+            .appendingPathComponent("Templates", isDirectory: true)
+            .appendingPathComponent(template.id, isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        try makeImage().writePNG(to: directory.appendingPathComponent("frame.png"))
+        #expect(FileManager.default.fileExists(atPath: directory.appendingPathComponent("frame.png").path))
+        #expect((try await store.load(eventID: "event-1")).templates[0].frameFileName == "frame.png")
+
+        let data = try await store.readTemplateFrame(eventID: "event-1", templateID: template.id)
+        #expect(data != nil)
+        #expect(data.flatMap { CGImageSourceCreateWithData($0 as CFData, nil) } != nil)
+    }
+
+    @Test("rejects traversal in a template frame filename")
+    func rejectsUnsafeTemplateFrameFilename() async throws {
+        let root = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        var template = validTemplate()
+        template.frameFileName = "../outside.png"
+        let store = EventExperienceStore(baseDirectory: root)
+        try await store.save(document(for: template))
+
+        do {
+            _ = try await store.readTemplateFrame(eventID: "event-1", templateID: template.id)
+            Issue.record("Expected unsafe frame filename to be rejected")
+        } catch let error as EventExperienceError {
+            guard case .invalid = error else { Issue.record("Wrong error: \(error)"); return }
+        }
+    }
+
     @Test("accepts templates with zero or multiple QR elements")
     func validatesQRCodeCounts() async throws {
         let store = EventExperienceStore(baseDirectory: try temporaryDirectory())

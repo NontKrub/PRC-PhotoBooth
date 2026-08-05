@@ -158,8 +158,18 @@ actor EventExperienceStore {
         let document = try load(eventID: eventID)
         guard let template = document.templates.first(where: { $0.id == templateID }),
               let fileName = template.previewFileName else { return nil }
-        let url = try templateURL(eventID: eventID, templateID: templateID)
-            .appendingPathComponent(fileName)
+        let directory = try templateURL(eventID: eventID, templateID: templateID)
+        let url = try templateAssetURL(fileName, in: directory)
+        return try Data(contentsOf: url)
+    }
+
+    func readTemplateFrame(eventID: String, templateID: String) throws -> Data? {
+        let document = try load(eventID: eventID)
+        guard let template = document.templates.first(where: { $0.id == templateID }),
+              let fileName = template.frameFileName else { return nil }
+        let directory = try templateURL(eventID: eventID, templateID: templateID)
+        let url = try templateAssetURL(fileName, in: directory)
+        guard fileManager.fileExists(atPath: url.path) else { return nil }
         return try Data(contentsOf: url)
     }
 
@@ -177,7 +187,9 @@ actor EventExperienceStore {
         }
         let template = document.templates[index]
         let directory = try templateURL(eventID: eventID, templateID: templateID)
-        let frame = template.frameFileName.flatMap { loadCGImage(from: directory.appendingPathComponent($0)) }
+        let frame = try template.frameFileName
+            .flatMap { try? templateAssetURL($0, in: directory) }
+            .flatMap { loadCGImage(from: $0) }
         let previewURL = directory.appendingPathComponent("preview.jpg")
         let image = try TemplatePreviewRenderer().render(template: template, frame: frame)
         try TemplatePreviewRenderer().saveJPEG(image, to: previewURL)
@@ -256,6 +268,19 @@ actor EventExperienceStore {
     private func templateURL(eventID: String, templateID: String) throws -> URL {
         guard !templateID.isEmpty, !templateID.contains("/"), !templateID.contains("\\"), !templateID.contains("\0") else { throw EventExperienceError.invalid("Invalid template ID.") }
         return try eventURL(eventID: eventID).appendingPathComponent("Templates", isDirectory: true).appendingPathComponent(templateID, isDirectory: true)
+    }
+
+    private func templateAssetURL(_ fileName: String, in directory: URL) throws -> URL {
+        guard !fileName.isEmpty,
+              !fileName.contains(where: { $0 == "/" || $0 == "\\" || $0 == "\0" }),
+              fileName == URL(fileURLWithPath: fileName).lastPathComponent else {
+            throw EventExperienceError.invalid("Invalid template asset name.")
+        }
+        let url = directory.appendingPathComponent(fileName)
+        guard url.deletingLastPathComponent().standardizedFileURL == directory.standardizedFileURL else {
+            throw EventExperienceError.invalid("Invalid template asset name.")
+        }
+        return url
     }
 
     private func atomicCopy(_ source: URL, to destination: URL) throws {

@@ -29,13 +29,13 @@
 
 ## Guest Experience editor
 
-- [ ] Add safe frame-read API
-- [ ] Load frame into template editor
-- [ ] Render frame behind canvas elements
-- [ ] Refresh frame after replacement
-- [ ] Handle missing/corrupt frame
-- [ ] Add frame-store tests
-- [ ] Verify compositor/editor alignment
+- [x] Add safe frame-read API
+- [x] Load frame into template editor
+- [x] Render frame behind canvas elements
+- [x] Refresh frame after replacement
+- [x] Handle missing/corrupt frame
+- [x] Add frame-store tests
+- [ ] Verify compositor/editor alignment — manual UI check pending
 
 ## Single layout source
 

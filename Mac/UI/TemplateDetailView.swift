@@ -3,6 +3,7 @@ import UniformTypeIdentifiers
 
 struct TemplateDetailView: View {
     @Binding var template: EventTemplateDefinition
+    let frame: CGImage?
     let onImportFrame: (URL) -> Void
     let onImportPromptImage: (Int, URL) -> Void
     @State private var showingImporter = false
@@ -59,7 +60,8 @@ struct TemplateDetailView: View {
                 qrCodeElements: $template.qrCodeElements,
                 canvasWidth: template.canvasWidth,
                 canvasHeight: template.canvasHeight,
-                photoCount: template.photoCount
+                photoCount: template.photoCount,
+                frame: frame
             )
         }
     }

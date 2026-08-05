@@ -23,6 +23,7 @@ struct EventExperienceEditorView: View {
     )
     @State private var selectedTemplateID: String?
     @State private var previews: [String: CGImage] = [:]
+    @State private var frames: [String: CGImage] = [:]
     @State private var isLoading = true
     @State private var isSaving = false
     @State private var errorMessage: String?
@@ -108,7 +109,7 @@ struct EventExperienceEditorView: View {
         )) { template in
             if let index = document.templates.firstIndex(where: { $0.id == template.id }) {
                 NavigationStack {
-                    TemplateDetailView(template: $document.templates[index]) { url in
+                    TemplateDetailView(template: $document.templates[index], frame: frames[template.id]) { url in
                         importFrame(url, templateID: template.id)
                     } onImportPromptImage: { photoIndex, url in
                         importPromptImage(url, templateID: template.id, photoIndex: photoIndex)
@@ -116,6 +117,7 @@ struct EventExperienceEditorView: View {
                     .navigationTitle(template.name.value(for: operatorLanguage))
                 }
                 .frame(minWidth: 560, minHeight: 620)
+                .task { await loadFrame(templateID: template.id) }
             }
         }
     }
@@ -215,10 +217,29 @@ struct EventExperienceEditorView: View {
                 guard let index = document.templates.firstIndex(where: { $0.id == templateID }) else { return }
                 document.templates[index].frameFileName = imported.fileName
                 document.templates[index].updatedAt = Date()
+                await loadFrame(templateID: templateID)
                 await loadPreviews()
             } catch {
                 errorMessage = error.localizedDescription
             }
+        }
+    }
+
+    private func loadFrame(templateID: String) async {
+        do {
+            guard let data = try await coordinator.experienceStore.readTemplateFrame(
+                eventID: event.id,
+                templateID: templateID
+            ),
+            let source = CGImageSourceCreateWithData(data as CFData, nil),
+            let image = CGImageSourceCreateImageAtIndex(source, 0, nil) else {
+                frames[templateID] = nil
+                return
+            }
+            frames[templateID] = image
+        } catch {
+            frames[templateID] = nil
+            errorMessage = "Template frame is missing or corrupt."
         }
     }
 
