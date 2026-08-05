@@ -93,31 +93,31 @@
 
 ## Regression
 
-- [ ] QR editor positioning
-- [ ] QR final-strip positioning/z-order
-- [ ] Local QR scan
-- [ ] Cloud QR behavior
+- [x] QR editor positioning
+- [x] QR final-strip positioning/z-order
+- [x] Local QR scan
+- [x] Cloud QR behavior
 - [ ] Physical print scan or mark not run
-- [ ] Recovery test
-- [ ] Existing download test
-- [ ] Mac Debug build
-- [ ] Mac Release build
-- [ ] iPad Debug build
-- [ ] iPad Release build
-- [ ] Full test suite
-- [ ] Static analysis
-- [ ] Address Sanitizer if configured
-- [ ] Thread Sanitizer if configured
-- [ ] `git diff --check`
-- [ ] Review final diff for unrelated files
+- [x] Recovery test
+- [x] Existing download test
+- [x] Mac Debug build
+- [x] Mac Release build
+- [x] iPad Debug build
+- [x] iPad Release build
+- [x] Full test suite — 139 tests in 33 suites
+- [x] Static analysis — Mac/iPad Debug and Release
+- [x] Address Sanitizer if configured — 139 tests passed
+- [x] Thread Sanitizer if configured — 139 tests passed
+- [x] `git diff --check`
+- [x] Review final diff for unrelated files; unrelated worktree changes left untouched
 
 ## GitHub
 
-- [ ] Collect screenshots/recording
-- [ ] Summarize automated tests
-- [ ] Summarize manual tests
-- [ ] Commit logical changes
+- [ ] Collect screenshots/recording — app window unavailable to Computer Use
+- [x] Summarize automated tests
+- [x] Summarize manual tests; ZV-E10/display checks remain pending
+- [x] Commit logical changes
 - [ ] Push `feature/printable-qr-elements`
 - [ ] Update PR #7
 - [ ] Confirm CI green
-- [ ] Do not merge before real ZV-E10 and 3-shot GIF tests pass
+- [x] Do not merge before real ZV-E10 and 3-shot GIF tests pass
