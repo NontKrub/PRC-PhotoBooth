@@ -144,6 +144,7 @@
 		E23A0EC7DD4066FF10BFA0A8 /* LocalizedText.swift in Sources */ = {isa = PBXBuildFile; fileRef = 11154D021EC68E28E4E445E8 /* LocalizedText.swift */; };
 		E7844ED89C59CFA0E17C68C4 /* PosePromptEditorView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1EFBA7CF460CA59D772AB1E9 /* PosePromptEditorView.swift */; };
 		E7F1277532E131CF5071E3B7 /* USBPreviewServer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 24B980C65250404308C88BB0 /* USBPreviewServer.swift */; };
+		E8F396F836BFEB40E41AE51A /* GIFEncoderTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A14B450ECDDDD6F417C43FA1 /* GIFEncoderTests.swift */; };
 		ECC4A6D04D406ADD63544BFD /* MultipeerConnectivity.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = DAF3E4AAFB2FE72146AD824D /* MultipeerConnectivity.framework */; };
 		ECC689CDFF77127F98ACEC45 /* CustomerExperienceCatalogBuilder.swift in Sources */ = {isa = PBXBuildFile; fileRef = B514D8A1659956BF413A3CB0 /* CustomerExperienceCatalogBuilder.swift */; };
 		EE48115A824CCA5ED57949F3 /* QRCodeScanTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9EB63FA4676F2D969C1E6414 /* QRCodeScanTests.swift */; };
@@ -239,6 +240,7 @@
 		9CCFC64966ED635FAC4A06C6 /* ExperienceSelectionView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ExperienceSelectionView.swift; sourceTree = "<group>"; };
 		9EB63FA4676F2D969C1E6414 /* QRCodeScanTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QRCodeScanTests.swift; sourceTree = "<group>"; };
 		9EC5B75CB04026ADBE94DD2E /* DemoKioskDriver.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DemoKioskDriver.swift; sourceTree = "<group>"; };
+		A14B450ECDDDD6F417C43FA1 /* GIFEncoderTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GIFEncoderTests.swift; sourceTree = "<group>"; };
 		A5B62D650073182D6B778A65 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
 		A61D4E79BC09D0F47BDFD110 /* PrinterService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PrinterService.swift; sourceTree = "<group>"; };
 		A724CDC05C18724EEBFC4F74 /* LocalDownloadRouterTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LocalDownloadRouterTests.swift; sourceTree = "<group>"; };
@@ -643,6 +645,7 @@
 				66783D018E2EC79A98E7BF6B /* EventGalleryStoreTests.swift */,
 				C3C050D8DC9A7D85295EA861 /* ExperienceTypesTests.swift */,
 				3081A491B946FDBE4ABCB65F /* GalleryRouterTests.swift */,
+				A14B450ECDDDD6F417C43FA1 /* GIFEncoderTests.swift */,
 				0D04DF82E7932C18CF3411DA /* JobQueueStoreTests.swift */,
 				A724CDC05C18724EEBFC4F74 /* LocalDownloadRouterTests.swift */,
 				DDC5B302B60C00003C61489D /* LocalizationTests.swift */,
@@ -941,6 +944,7 @@
 				22AEBADDA86C74E46145634F /* EventExperienceStoreTests.swift in Sources */,
 				4ED8BB93CAD4073DEAB8F6E4 /* EventGalleryStoreTests.swift in Sources */,
 				218A5273DBA0A7EE22B62B60 /* ExperienceTypesTests.swift in Sources */,
+				E8F396F836BFEB40E41AE51A /* GIFEncoderTests.swift in Sources */,
 				1EBA26872AE4D1262F56EA9E /* GalleryRouterTests.swift in Sources */,
 				30DF2D4C5D037B57C7A874C4 /* JobQueueStoreTests.swift in Sources */,
 				94A7E3F397975266D1868B60 /* LocalDownloadRouterTests.swift in Sources */,
