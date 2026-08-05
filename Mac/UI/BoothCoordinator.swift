@@ -491,6 +491,7 @@ final class BoothCoordinator {
 
     func shutdown() {
         countdownTask?.cancel()
+        multipeer.disconnect()
         capture.stop()
         usbPreview.stop()
         jobQueue.stop()
