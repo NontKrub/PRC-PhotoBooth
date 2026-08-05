@@ -30,6 +30,7 @@
 		200216BFC285C1435F494FE6 /* OperationsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2D4131E679BC6023EF6ECD63 /* OperationsView.swift */; };
 		218A5273DBA0A7EE22B62B60 /* ExperienceTypesTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C3C050D8DC9A7D85295EA861 /* ExperienceTypesTests.swift */; };
 		21BC288DECD3C609104AA4D6 /* RollingVideoBuffer.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0211854C0C9B012A71C374A /* RollingVideoBuffer.swift */; };
+		21C16D0F3C00DE1B9B4B6628 /* CanvasElementGeometry.swift in Sources */ = {isa = PBXBuildFile; fileRef = FBBADB864326B05210DF0F40 /* CanvasElementGeometry.swift */; };
 		21CDBF30DE58852B56064A2D /* PhotoFilterPipeline.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0718A8C72332866A8E4BC30 /* PhotoFilterPipeline.swift */; };
 		22AEBADDA86C74E46145634F /* EventExperienceStoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8EBCF7F6FB457E56B24820BA /* EventExperienceStoreTests.swift */; };
 		2A732086C34391D40E371E06 /* EventSetupView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2239A5B42C13F0EE56D456C8 /* EventSetupView.swift */; };
@@ -149,6 +150,7 @@
 		EE9F38CA10C6E29E153C9588 /* SessionJobQueue.swift in Sources */ = {isa = PBXBuildFile; fileRef = B9A44DB7ECC7BD43608BC8A4 /* SessionJobQueue.swift */; };
 		F0E085E01771DA27CAC3BEC8 /* EventExperienceEditorView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7161E527181D437AFC97BF42 /* EventExperienceEditorView.swift */; };
 		F8D781D84527D63B940E0B66 /* QRCodeGenerator.swift in Sources */ = {isa = PBXBuildFile; fileRef = FC4655DC257D70C9ABB30347 /* QRCodeGenerator.swift */; };
+		F98E430CB67E8376857BBF40 /* CanvasElementGeometryTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4346C88E68A8DD1C20ECE9EC /* CanvasElementGeometryTests.swift */; };
 		F9D6E32BF49556326B9C5515 /* PreflightStatusRow.swift in Sources */ = {isa = PBXBuildFile; fileRef = FD4D041EE3E81E34CEAAF993 /* PreflightStatusRow.swift */; };
 		FBF1D4A725065B19C6493A5A /* PINGateView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 82D1ACB7B1239F03487E9DB6 /* PINGateView.swift */; };
 		FEC9349B98E65A0693973747 /* SessionQRCodePayloadResolverTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0CCEE0EBC1DDE9E8D89D4D20 /* SessionQRCodePayloadResolverTests.swift */; };
@@ -200,6 +202,7 @@
 		3D386D0651659CC54BF76459 /* TemplateOptionCard.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TemplateOptionCard.swift; sourceTree = "<group>"; };
 		3D3F44538004352A0C8C55A4 /* Localizable.xcstrings */ = {isa = PBXFileReference; lastKnownFileType = text.json.xcstrings; path = Localizable.xcstrings; sourceTree = "<group>"; };
 		40BA7EBB119A8F258B0CA52B /* CustomerLanguagePicker.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CustomerLanguagePicker.swift; sourceTree = "<group>"; };
+		4346C88E68A8DD1C20ECE9EC /* CanvasElementGeometryTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CanvasElementGeometryTests.swift; sourceTree = "<group>"; };
 		4459E84FAD9578C1DDA3C158 /* PhotoFilterPipelineTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhotoFilterPipelineTests.swift; sourceTree = "<group>"; };
 		44A6C078264EEF6170132278 /* TemplatePreviewRenderer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TemplatePreviewRenderer.swift; sourceTree = "<group>"; };
 		4AA33DBA424BED93245726E5 /* ReviewView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReviewView.swift; sourceTree = "<group>"; };
@@ -296,6 +299,7 @@
 		F9A7C06C221109D35478F517 /* CloudSSHSetupView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CloudSSHSetupView.swift; sourceTree = "<group>"; };
 		FA071381067EC2A9AB33A262 /* MessageTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MessageTests.swift; sourceTree = "<group>"; };
 		FA2B87E5380B64A05E78F54E /* QRCodeGeneratorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QRCodeGeneratorTests.swift; sourceTree = "<group>"; };
+		FBBADB864326B05210DF0F40 /* CanvasElementGeometry.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CanvasElementGeometry.swift; sourceTree = "<group>"; };
 		FC3CD37481B2CD0F5D881D5B /* PRC-PhotoBooth-iPad.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = "PRC-PhotoBooth-iPad.entitlements"; sourceTree = "<group>"; };
 		FC4655DC257D70C9ABB30347 /* QRCodeGenerator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QRCodeGenerator.swift; sourceTree = "<group>"; };
 		FD4D041EE3E81E34CEAAF993 /* PreflightStatusRow.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PreflightStatusRow.swift; sourceTree = "<group>"; };
@@ -604,6 +608,7 @@
 			children = (
 				E596BF2721604EA8661A2334 /* AdminDashboardView.swift */,
 				BAC8DA4D4460820944539DA5 /* BoothCoordinator.swift */,
+				FBBADB864326B05210DF0F40 /* CanvasElementGeometry.swift */,
 				F9A7C06C221109D35478F517 /* CloudSSHSetupView.swift */,
 				7161E527181D437AFC97BF42 /* EventExperienceEditorView.swift */,
 				AEB3524ED59CED1F96D4B9FA /* EventGallerySettingsView.swift */,
@@ -628,6 +633,7 @@
 			isa = PBXGroup;
 			children = (
 				2B555DBC71B145823AD802CE /* .gitkeep */,
+				4346C88E68A8DD1C20ECE9EC /* CanvasElementGeometryTests.swift */,
 				68AD6CCBF1B3CB849C8CA5A9 /* CloudSSHSetupTests.swift */,
 				F83BAA2070C1E452B6270E1A /* CloudUploadServiceTests.swift */,
 				035DF22C80686690C8B74B53 /* CompositorTests.swift */,
@@ -853,6 +859,7 @@
 				1E9B5F2CD017E9DCF82273B8 /* BoothPhase.swift in Sources */,
 				42CBE3C345C82259241FC348 /* BoothPreflightService.swift in Sources */,
 				5C87D7C75337DF1D1F32D0BA /* CameraSource.swift in Sources */,
+				21C16D0F3C00DE1B9B4B6628 /* CanvasElementGeometry.swift in Sources */,
 				0980BF9D451D1A70DFE9E86F /* CaptureService.swift in Sources */,
 				5A24B10E0AE5923B933019C3 /* CloudSSHSetupService.swift in Sources */,
 				78AAC9EB4106775E3B155C78 /* CloudSSHSetupView.swift in Sources */,
@@ -925,6 +932,7 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				F98E430CB67E8376857BBF40 /* CanvasElementGeometryTests.swift in Sources */,
 				061B8A6BAAC97D0554975F74 /* CloudSSHSetupTests.swift in Sources */,
 				3366CE79827720DC01942C08 /* CloudUploadServiceTests.swift in Sources */,
 				5080A23EC41AF2ECB29607A9 /* CompositorTests.swift in Sources */,

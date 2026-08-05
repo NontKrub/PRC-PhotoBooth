@@ -53,13 +53,13 @@ final class BoothCoordinator {
         publicBaseURL: String?,
         localBaseURL: String,
         token: String,
-        cloudUploadSucceeded: Bool
+        cloudUploadEnabled: Bool
     ) -> String {
         (try? SessionQRCodePayloadResolver.resolve(
             token: token,
             localBaseURL: localBaseURL,
             publicBaseURL: publicBaseURL,
-            cloudUploadEnabled: cloudUploadSucceeded
+            cloudUploadEnabled: cloudUploadEnabled
         )) ?? "\(localBaseURL.trimmingCharacters(in: .whitespacesAndNewlines))/s/\(token)/"
     }
 
@@ -1310,7 +1310,7 @@ final class BoothCoordinator {
             publicBaseURL: publicBase,
             localBaseURL: "http://\(ip):8585",
             token: token,
-            cloudUploadSucceeded: UserDefaults.standard.bool(forKey: "cloudUploadEnabled")
+            cloudUploadEnabled: UserDefaults.standard.bool(forKey: "cloudUploadEnabled")
         )
         let stripThumb = loadCGImage(from: directory.appendingPathComponent("strip.png"))
             .flatMap { jpegData(from: $0, quality: 0.4) }
