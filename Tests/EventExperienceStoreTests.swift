@@ -137,6 +137,56 @@ struct EventExperienceStoreTests {
         }
     }
 
+    @Test("bulk preview reads skip missing assets")
+    func readsAvailableTemplatePreviews() async throws {
+        let root = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        var available = validTemplate(id: "template-1")
+        available.previewFileName = "preview.jpg"
+        var missing = validTemplate(id: "template-2")
+        missing.previewFileName = "preview.jpg"
+        let document = EventExperienceDocument(
+            id: "event-1",
+            eventID: "event-1",
+            defaultTemplateID: available.id,
+            templates: [available, missing],
+            gallery: EventGalleryConfiguration()
+        )
+        let store = EventExperienceStore(baseDirectory: root)
+        try await store.save(document)
+        let directory = root
+            .appendingPathComponent("EventExperiences", isDirectory: true)
+            .appendingPathComponent("event-1", isDirectory: true)
+            .appendingPathComponent("Templates", isDirectory: true)
+            .appendingPathComponent(available.id, isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let expected = Data([1, 2, 3] as [UInt8])
+        try expected.write(to: directory.appendingPathComponent("preview.jpg"))
+
+        let previews = try await store.readTemplatePreviews(
+            eventID: "event-1",
+            templates: [available, missing]
+        )
+        #expect(previews[available.id] == expected)
+        #expect(previews[missing.id] == nil)
+    }
+
+    @Test("bulk preview reads honor cancellation")
+    func cancelsPreviewReads() async throws {
+        let store = EventExperienceStore(baseDirectory: try temporaryDirectory())
+        let task = Task {
+            try await store.readTemplatePreviews(eventID: "event-1", templates: [])
+        }
+        task.cancel()
+
+        do {
+            _ = try await task.value
+            Issue.record("Expected preview read cancellation")
+        } catch is CancellationError {
+            // Expected.
+        }
+    }
+
     @Test("accepts templates with zero or multiple QR elements")
     func validatesQRCodeCounts() async throws {
         let store = EventExperienceStore(baseDirectory: try temporaryDirectory())

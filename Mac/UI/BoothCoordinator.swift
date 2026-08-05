@@ -291,11 +291,12 @@ final class BoothCoordinator {
             .sorted { $0.sortOrder < $1.sortOrder }
         Task { @MainActor [weak self] in
             guard let self else { return }
+            let previewData = try? await self.experienceStore.readTemplatePreviews(
+                eventID: document.eventID,
+                templates: templates
+            )
             for template in templates {
-                guard let data = try? await self.experienceStore.readTemplatePreview(
-                    eventID: document.eventID,
-                    templateID: template.id
-                ) else {
+                guard let data = previewData?[template.id] else {
                     self.errorMessage = "Template preview unavailable: \(template.id)"
                     continue
                 }

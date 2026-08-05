@@ -48,14 +48,14 @@
 
 ## Loading performance
 
-- [ ] Remove repeated document decode per preview
-- [ ] Add bulk/direct preview reads
-- [ ] Add cancellation checks
-- [ ] Propagate `CancellationError`
-- [ ] Cancel stale loads
-- [ ] Cache previews
-- [ ] Add dirty-state/Back behavior
-- [ ] Rapid open/close test
+- [x] Remove repeated document decode per preview
+- [x] Add bulk/direct preview reads
+- [x] Add cancellation checks
+- [x] Propagate `CancellationError`
+- [x] Cancel stale loads
+- [x] Cache previews
+- [x] Add dirty-state/Back behavior (`Back` explicitly discards unsaved edits)
+- [ ] Rapid open/close test — manual UI check pending
 
 ## Active camera preview
 

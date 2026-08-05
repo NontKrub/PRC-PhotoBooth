@@ -155,12 +155,34 @@ actor EventExperienceStore {
     }
 
     func readTemplatePreview(eventID: String, templateID: String) throws -> Data? {
+        try Task.checkCancellation()
         let document = try load(eventID: eventID)
         guard let template = document.templates.first(where: { $0.id == templateID }),
               let fileName = template.previewFileName else { return nil }
         let directory = try templateURL(eventID: eventID, templateID: templateID)
         let url = try templateAssetURL(fileName, in: directory)
+        guard fileManager.fileExists(atPath: url.path) else { return nil }
+        try Task.checkCancellation()
         return try Data(contentsOf: url)
+    }
+
+    func readTemplatePreviews(
+        eventID: String,
+        templates: [EventTemplateDefinition]
+    ) throws -> [String: Data] {
+        try Task.checkCancellation()
+        var previews: [String: Data] = [:]
+        for template in templates {
+            try Task.checkCancellation()
+            guard let fileName = template.previewFileName else { continue }
+            let directory = try templateURL(eventID: eventID, templateID: template.id)
+            let url = try templateAssetURL(fileName, in: directory)
+            guard fileManager.fileExists(atPath: url.path) else { continue }
+            let data = try Data(contentsOf: url)
+            try Task.checkCancellation()
+            previews[template.id] = data
+        }
+        return previews
     }
 
     func readTemplateFrame(eventID: String, templateID: String) throws -> Data? {
@@ -170,6 +192,7 @@ actor EventExperienceStore {
         let directory = try templateURL(eventID: eventID, templateID: templateID)
         let url = try templateAssetURL(fileName, in: directory)
         guard fileManager.fileExists(atPath: url.path) else { return nil }
+        try Task.checkCancellation()
         return try Data(contentsOf: url)
     }
 
