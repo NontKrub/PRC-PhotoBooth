@@ -64,6 +64,7 @@ struct StartView: View {
                         .animation(.spring(duration: 0.2), value: pressed)
                 }
                 .buttonStyle(.plain)
+                .disabled(vm.isSessionRequestPending)
                 .simultaneousGesture(
                     DragGesture(minimumDistance: 0)
                         .onChanged { _ in pressed = true }

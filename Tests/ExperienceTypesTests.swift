@@ -33,6 +33,7 @@ struct ExperienceTypesTests {
         #expect(config.posePrompts.isEmpty)
         #expect(config.experienceRevision.isEmpty)
         #expect(config.eventGalleryPath == nil)
+        #expect(config.qrCodeElements.isEmpty)
     }
 
     @Test("V1.2 EventConfig fields round trip")
@@ -45,11 +46,50 @@ struct ExperienceTypesTests {
             customerLanguage: .thai,
             posePrompts: [ResolvedPosePrompt(id: "prompt-1", photoIndex: 0, title: LocalizedText(english: "Smile", thai: "ยิ้ม"), subtitle: LocalizedText(), assetID: nil)],
             experienceRevision: "rev-1",
-            eventGalleryPath: "/e/token"
+            eventGalleryPath: "/e/token",
+            qrCodeElements: [
+                SharedQRCodeElement(id: "qr-1", normalizedRect: CGRect(x: 0.1, y: 0.2, width: 0.2, height: 0.2), rotation: 5, zOrder: 3),
+                SharedQRCodeElement(id: "qr-2", normalizedRect: CGRect(x: 0.6, y: 0.7, width: 0.15, height: 0.15), zOrder: 4)
+            ]
         )
         let data = try JSONEncoder().encode(config)
         let decoded = try JSONDecoder().decode(EventConfig.self, from: data)
         #expect(decoded == config)
+    }
+
+    @Test("legacy EventTemplateDefinition decodes without QR elements")
+    func decodesLegacyTemplate() throws {
+        let template = EventTemplateDefinition(
+            id: "template-legacy",
+            name: LocalizedText(english: "Legacy"),
+            photoCount: 1,
+            canvasWidth: 400,
+            canvasHeight: 600,
+            slots: [SharedPhotoSlot(normalizedRect: CGRect(x: 0, y: 0, width: 1, height: 1))]
+        )
+        var object = try #require(JSONSerialization.jsonObject(with: JSONEncoder().encode(template)) as? [String: Any])
+        object["qrCodeElements"] = nil
+        let legacyData = try JSONSerialization.data(withJSONObject: object)
+
+        let decoded = try JSONDecoder().decode(EventTemplateDefinition.self, from: legacyData)
+        #expect(decoded.qrCodeElements.isEmpty)
+        #expect(decoded.slots == template.slots)
+    }
+
+    @Test("EventTemplateDefinition QR elements round trip")
+    func templateQRCodeRoundTrip() throws {
+        let template = EventTemplateDefinition(
+            id: "template-qr",
+            name: LocalizedText(english: "QR"),
+            photoCount: 1,
+            canvasWidth: 400,
+            canvasHeight: 600,
+            slots: [SharedPhotoSlot(normalizedRect: CGRect(x: 0, y: 0, width: 1, height: 1))],
+            qrCodeElements: [SharedQRCodeElement(id: "qr-1", normalizedRect: CGRect(x: 0.1, y: 0.2, width: 0.2, height: 0.2))]
+        )
+
+        let decoded = try JSONDecoder().decode(EventTemplateDefinition.self, from: JSONEncoder().encode(template))
+        #expect(decoded == template)
     }
 
     @Test("Experience messages round trip with Thai strings")
@@ -72,7 +112,13 @@ struct ExperienceTypesTests {
             .eventExperienceAsset(packet: ExperienceAssetPacket(eventID: "event-1", revision: "rev-1", assetID: "template-1", kind: .templatePreview, jpegData: Data([1, 2, 3]))),
             .customerSessionRequest(selection: CustomerSessionSelection(eventID: "event-1", experienceRevision: "rev-1", templateID: "template-1", filterID: .warm, language: .thai)),
             .sessionRequestRejected(reason: "เลือกใหม่"),
-            .sessionPrepared(config: EventConfig(customerLanguage: .thai), presentation: SessionPresentation(sessionID: "session-1", language: .thai, templateDisplayName: "คลาสสิก", filterID: .warm, prompts: []))
+            .sessionPrepared(
+                config: EventConfig(
+                    customerLanguage: .thai,
+                    qrCodeElements: [SharedQRCodeElement(id: "qr-1", normalizedRect: CGRect(x: 0.1, y: 0.1, width: 0.2, height: 0.2))]
+                ),
+                presentation: SessionPresentation(sessionID: "session-1", language: .thai, templateDisplayName: "คลาสสิก", filterID: .warm, prompts: [])
+            )
         ]
 
         for message in messages {
@@ -120,6 +166,56 @@ struct ExperienceTypesTests {
         #expect(throws: CustomerSelectionError.disabledTemplate) {
             try validator.validate(disabledTemplate, against: document)
         }
+    }
+
+    @Test("selected template QR elements are copied into EventConfig")
+    func eventConfigBuilderCopiesQRCodeElements() throws {
+        let qrElements = [
+            SharedQRCodeElement(id: "qr-1", normalizedRect: CGRect(x: 0.1, y: 0.1, width: 0.2, height: 0.2), zOrder: 4),
+            SharedQRCodeElement(id: "qr-2", normalizedRect: CGRect(x: 0.6, y: 0.6, width: 0.2, height: 0.2), zOrder: 5)
+        ]
+        let template = EventTemplateDefinition(
+            id: "template-selected",
+            name: LocalizedText(english: "Selected"),
+            photoCount: 1,
+            canvasWidth: 900,
+            canvasHeight: 1200,
+            slots: [SharedPhotoSlot(normalizedRect: CGRect(x: 0, y: 0, width: 1, height: 1), photoIndex: 0)],
+            qrCodeElements: qrElements
+        )
+        let document = EventExperienceDocument(
+            id: "event-1",
+            eventID: "event-1",
+            revision: "revision-1",
+            defaultTemplateID: template.id,
+            templates: [template],
+            gallery: EventGalleryConfiguration()
+        )
+        let selection = ValidatedCustomerSelection(
+            eventID: "event-1",
+            experienceRevision: "revision-1",
+            template: template,
+            filterID: .original,
+            language: .english
+        )
+
+        let config = try EventConfigBuilder().build(
+            event: BoothEventSnapshot(
+                id: "event-1",
+                name: "Event",
+                photoCount: 1,
+                countdownSeconds: 5,
+                canvasWidth: 900,
+                canvasHeight: 1200,
+                framePNGURL: nil,
+                slots: template.slots
+            ),
+            document: document,
+            selection: selection,
+            galleryPath: nil
+        )
+
+        #expect(config.qrCodeElements == qrElements)
     }
 
     private func makeExperienceDocument() -> EventExperienceDocument {

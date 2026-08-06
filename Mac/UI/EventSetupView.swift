@@ -1,7 +1,5 @@
 import SwiftUI
 import SwiftData
-import UniformTypeIdentifiers
-import ImageIO
 
 struct EventSetupView: View {
     @Environment(BoothCoordinator.self) private var coordinator
@@ -13,7 +11,6 @@ struct EventSetupView: View {
 
     @State private var selectedEventID: String?
     @State private var showNewEventSheet = false
-    @State private var showSlotEditor = false
 
     private var selectedEvent: BoothEvent? {
         events.first { $0.id == selectedEventID }
@@ -57,7 +54,7 @@ struct EventSetupView: View {
             }
         } detail: {
             if let event = selectedEvent {
-                EventDetailView(event: event, onFrameEdit: { showSlotEditor = true })
+                EventDetailView(event: event)
             } else {
                 ContentUnavailableView {
                     Label("No Event Selected", systemImage: "calendar")
@@ -72,11 +69,6 @@ struct EventSetupView: View {
                 modelContext.insert(event)
                 try? modelContext.save()
                 selectedEventID = event.id
-            }
-        }
-        .sheet(isPresented: $showSlotEditor) {
-            if let event = selectedEvent {
-                FrameSlotEditor(event: event)
             }
         }
     }
@@ -100,17 +92,17 @@ struct EventSetupView: View {
 
 struct EventDetailView: View {
     @Bindable var event: BoothEvent
+    @Environment(BoothCoordinator.self) private var coordinator
     @Environment(\.modelContext) private var modelContext
     @AppStorage("publicBaseURL") private var publicBaseURL: String = ""
-    var onFrameEdit: () -> Void
+    @State private var experienceDocument: EventExperienceDocument?
+    @State private var experienceError: String?
 
     var body: some View {
         Form {
             Section("Event Info") {
                 TextField("Name", text: $event.name)
                     .onSubmit { try? modelContext.save() }
-                Stepper("Photos: \(event.photoCount)", value: $event.photoCount, in: 1...8)
-                    .onChange(of: event.photoCount) { _, _ in try? modelContext.save() }
                 Stepper("Countdown: \(event.countdownSeconds)s", value: $event.countdownSeconds, in: 3...15)
                     .onChange(of: event.countdownSeconds) { _, _ in try? modelContext.save() }
             }
@@ -129,26 +121,21 @@ struct EventDetailView: View {
                     .font(.caption).foregroundStyle(.secondary)
             }
 
-            Section("Frame Template") {
-                HStack {
-                    if let path = event.framePNGPath {
-                        Text(path).font(.caption.monospaced()).foregroundStyle(.secondary)
-                    } else {
-                        Text("No frame imported").foregroundStyle(.secondary)
-                    }
-                    Spacer()
-                    Button("Import PNG…") { importFrame() }
+            Section("Default Template") {
+                if let template = defaultTemplate {
+                    LabeledContent("Name", value: template.name.english)
+                    LabeledContent("Photos", value: "\(template.photoCount)")
+                    LabeledContent("Canvas", value: "\(Int(template.canvasWidth)) × \(Int(template.canvasHeight)) px")
+                    LabeledContent("Frame", value: template.frameFileName == nil ? "None" : "Imported")
+                } else if let experienceError {
+                    Text(experienceError).foregroundStyle(.red)
+                } else {
+                    ProgressView("Loading template…")
                 }
-                Button("Edit Photo Slots…", action: onFrameEdit)
-                    .buttonStyle(.bordered)
-                    .disabled(event.slots.isEmpty && event.framePNGPath == nil)
-            }
-
-            Section("Guest Experience") {
-                NavigationLink("Edit Templates, Filters & Gallery") {
+                NavigationLink("Edit Guest Experience…") {
                     EventExperienceEditorView(event: event)
                 }
-                Text("Version 1.2 options are stored separately from the legacy event layout.")
+                Text("Guest Experience is the source of truth. Legacy event layout fields remain as a compatibility mirror.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -163,67 +150,22 @@ struct EventDetailView: View {
                 .onChange(of: event.cameraRotationDegrees) { _, _ in try? modelContext.save() }
             }
 
-            Section("Canvas Size") {
-                HStack(spacing: 12) {
-                    Text("Width")
-                    TextField("Width", value: $event.canvasWidth, format: .number)
-                        .frame(width: 80)
-                        .onSubmit { try? modelContext.save() }
-                    Text("×  Height")
-                    TextField("Height", value: $event.canvasHeight, format: .number)
-                        .frame(width: 80)
-                        .onSubmit { try? modelContext.save() }
-                    Text("px")
-                }
-            }
-
-            Section("Photo Slots") {
-                if event.slots.isEmpty {
-                    Text("No slots defined — import a frame and use Edit Photo Slots.")
-                        .foregroundStyle(.secondary)
-                        .font(.caption)
-                } else {
-                    ForEach(event.slots.sorted { $0.zOrder < $1.zOrder }) { slot in
-                        HStack {
-                            Text("Slot \(slot.zOrder + 1)")
-                            Spacer()
-                            Text(String(format: "x%.2f y%.2f  %.0f%%×%.0f%%",
-                                        slot.normX, slot.normY,
-                                        slot.normW * 100, slot.normH * 100))
-                                .font(.caption.monospaced())
-                                .foregroundStyle(.secondary)
-                        }
-                    }
-                }
-            }
         }
         .formStyle(.grouped)
         .navigationTitle(event.name)
         .navigationSubtitle(LocalizedStringKey(event.isActive ? "Active" : "Inactive"))
+        .task(id: event.id) {
+            do {
+                experienceDocument = try await coordinator.loadExperienceDocument(for: event)
+            } catch {
+                experienceError = error.localizedDescription
+            }
+        }
     }
 
-    private func importFrame() {
-        let panel = NSOpenPanel()
-        panel.allowedContentTypes = [.png]
-        panel.allowsMultipleSelection = false
-        panel.canChooseDirectories = false
-        guard panel.runModal() == .OK, let url = panel.url else { return }
-
-        let destDir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)
-            .first!.appendingPathComponent("PRC-PhotoBooth/Frames")
-        try? FileManager.default.createDirectory(at: destDir, withIntermediateDirectories: true)
-        let dest = destDir.appendingPathComponent(url.lastPathComponent)
-        try? FileManager.default.copyItem(at: url, to: dest)
-        event.framePNGPath = "Frames/\(url.lastPathComponent)"
-        // Sync canvas dimensions to the PNG's actual pixel size
-        if let src = CGImageSourceCreateWithURL(url as CFURL, nil),
-           let props = CGImageSourceCopyPropertiesAtIndex(src, 0, nil) as? [String: Any],
-           let w = props[kCGImagePropertyPixelWidth as String] as? Double,
-           let h = props[kCGImagePropertyPixelHeight as String] as? Double {
-            event.canvasWidth = w
-            event.canvasHeight = h
-        }
-        try? modelContext.save()
+    private var defaultTemplate: EventTemplateDefinition? {
+        guard let experienceDocument else { return nil }
+        return experienceDocument.templates.first { $0.id == experienceDocument.defaultTemplateID }
     }
 }
 

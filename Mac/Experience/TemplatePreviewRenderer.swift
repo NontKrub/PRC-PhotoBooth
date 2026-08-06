@@ -12,12 +12,16 @@ struct TemplatePreviewRenderer {
             photoCount: template.photoCount,
             canvasWidth: template.canvasWidth,
             canvasHeight: template.canvasHeight,
-            slots: template.slots
+            slots: template.slots,
+            qrCodeElements: template.qrCodeElements
         )
         let placeholders = Dictionary(uniqueKeysWithValues: (0..<template.photoCount).map { index in
             (index, placeholder(index: index))
         })
-        let image = try Compositor(config: config, framePNG: frame).render(images: placeholders)
+        let image = try Compositor(config: config, framePNG: frame).render(
+            images: placeholders,
+            qrPayload: "https://example.invalid/s/preview/"
+        )
         return try scaled(image)
     }
 

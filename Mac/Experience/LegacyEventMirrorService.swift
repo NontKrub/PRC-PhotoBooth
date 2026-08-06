@@ -3,6 +3,7 @@ import SwiftData
 
 @MainActor
 struct LegacyEventMirrorService {
+    // The experience document is authoritative. This is a one-way compatibility mirror for legacy consumers.
     func updateLegacyEvent(
         _ event: BoothEvent,
         using document: EventExperienceDocument,

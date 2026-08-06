@@ -21,6 +21,7 @@ final class iPadViewModel {
     var sessionPresentation: SessionPresentation?
     var promptImages: [String: CGImage] = [:]
     private(set) var isSessionRequestPending = false
+    private(set) var reviewDecisionPending = false
     var sessionRequestError: String?
     var stripThumbImage: CGImage?
     var isMirrored = false
@@ -105,17 +106,20 @@ final class iPadViewModel {
 
         case .sessionStart:
             isSessionRequestPending = false
+            reviewDecisionPending = false
             sessionRequestTimeoutTask?.cancel()
             stateMachine.startSession(config: eventConfig)
 
         case .sessionRequestRejected(let reason):
             isSessionRequestPending = false
+            reviewDecisionPending = false
             sessionRequestTimeoutTask?.cancel()
             sessionRequestError = reason
             stateMachine.transition(to: .selectingExperience)
 
         case .sessionPrepared(let config, let presentation):
             isSessionRequestPending = false
+            reviewDecisionPending = false
             sessionRequestTimeoutTask?.cancel()
             eventConfig = config
             stateMachine.startSession(config: config, sessionID: presentation.sessionID)
@@ -128,21 +132,28 @@ final class iPadViewModel {
             }
 
         case .beginCountdown(let index, let seconds):
+            reviewDecisionPending = false
             stateMachine.transition(to: .countdown(photoIndex: index, secondsRemaining: seconds))
             runCountdown(photoIndex: index, totalSeconds: seconds)
 
         case .shotCaptured(let index, let thumbData):
+            reviewDecisionPending = false
             stateMachine.enterReview(photoIndex: index, thumbnailData: thumbData)
 
         case .reviewDecision(let action):
-            if case .review(let idx) = stateMachine.phase {
-                switch action {
-                case .keep: stateMachine.keepShot(photoIndex: idx)
-                case .retake: stateMachine.retakeShot(photoIndex: idx)
-                }
+            guard case .review(let idx) = stateMachine.phase else { break }
+            let customerAction: CustomerDisplayAction = action == .keep
+                ? .keep(photoIndex: idx)
+                : .retake(photoIndex: idx)
+            guard CustomerDisplayWorkflow.canApply(customerAction, in: stateMachine.phase) else { break }
+            reviewDecisionPending = false
+            switch action {
+            case .keep: stateMachine.keepShot(photoIndex: idx)
+            case .retake: stateMachine.retakeShot(photoIndex: idx)
             }
 
         case .sessionFinished(let qr, let stripData, _):
+            reviewDecisionPending = false
             if let data = stripData { stripThumbImage = Self.cgImage(from: data) }
             stateMachine.finishSession(qrPayload: qr)
 
@@ -188,6 +199,7 @@ final class iPadViewModel {
     // MARK: - Customer decisions
 
     func customerTappedToBegin() {
+        guard CustomerDisplayWorkflow.canApply(.begin, in: stateMachine.phase) else { return }
         sessionRequestError = nil
         if requiresExperienceSelection {
             beginExperienceSelection()
@@ -198,7 +210,8 @@ final class iPadViewModel {
     }
 
     func customerTappedStart() {
-        guard stateMachine.phase == .readyToStart else { return }
+        guard !isSessionRequestPending,
+              CustomerDisplayWorkflow.canApply(.start, in: stateMachine.phase) else { return }
 #if DEBUG
         if demoKioskMode {
             DemoKioskDriver.startSession(on: self)
@@ -206,6 +219,7 @@ final class iPadViewModel {
         }
 #endif
         guard let catalog = experienceCatalog else {
+            isSessionRequestPending = true
             multipeer.sendControl(.sessionStart)
             return
         }
@@ -265,7 +279,8 @@ final class iPadViewModel {
     }
 
     func confirmExperienceSelection() {
-        guard let catalog = experienceCatalog,
+        guard CustomerDisplayWorkflow.canApply(.confirmSelection, in: stateMachine.phase),
+              let catalog = experienceCatalog,
               let templateID = selectedTemplateID,
               let filterID = selectedFilterID,
               catalog.templates.contains(where: { $0.id == templateID }),
@@ -288,6 +303,7 @@ final class iPadViewModel {
     }
 
     func returnToExperienceSelection() {
+        guard CustomerDisplayWorkflow.canApply(.back, in: stateMachine.phase) else { return }
         beginExperienceSelection()
     }
 
@@ -311,17 +327,22 @@ final class iPadViewModel {
     }
 
     func customerKeep(photoIndex: Int) {
+        guard !reviewDecisionPending,
+              CustomerDisplayWorkflow.canApply(.keep(photoIndex: photoIndex), in: stateMachine.phase) else { return }
 #if DEBUG
         if demoKioskMode {
             demoAdvance(afterKeeping: photoIndex)
             return
         }
 #endif
+        reviewDecisionPending = true
         multipeer.sendControl(.reviewDecision(action: .keep))
         stateMachine.keepShot(photoIndex: photoIndex)
     }
 
     func customerRetake(photoIndex: Int) {
+        guard !reviewDecisionPending,
+              CustomerDisplayWorkflow.canApply(.retake(photoIndex: photoIndex), in: stateMachine.phase) else { return }
 #if DEBUG
         if demoKioskMode {
             stateMachine.retakeShot(photoIndex: photoIndex)
@@ -329,11 +350,14 @@ final class iPadViewModel {
             return
         }
 #endif
+        reviewDecisionPending = true
         multipeer.sendControl(.reviewDecision(action: .retake))
         stateMachine.retakeShot(photoIndex: photoIndex)
     }
 
     func customerDone() {
+        guard CustomerDisplayWorkflow.canApply(.back, in: stateMachine.phase) else { return }
+        reviewDecisionPending = false
         stateMachine.reset()
     }
 
@@ -361,6 +385,7 @@ final class iPadViewModel {
             guard let sample = FilterSampleRenderer.makeSampleImage(),
                   let filtered = try? await PhotoFilterPipeline().apply(self.eventConfig.selectedFilterID, to: sample),
                   let data = jpegDataForDemo(filtered) else { return }
+            self.reviewDecisionPending = false
             self.stateMachine.enterReview(photoIndex: photoIndex, thumbnailData: data)
         }
         stateMachine.beginCountdown(photoIndex: photoIndex)

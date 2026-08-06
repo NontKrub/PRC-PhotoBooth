@@ -90,7 +90,18 @@ final class SessionJobExecutor: SessionJobExecuting {
         let compositor = Compositor(config: manifest.eventConfig, framePNG: frame)
         let strip: CGImage
         do {
-            strip = try compositor.render(images: filteredImages)
+            let qrPayload: String?
+            if manifest.eventConfig.qrCodeElements.isEmpty {
+                qrPayload = nil
+            } else {
+                qrPayload = try SessionQRCodePayloadResolver.resolve(
+                    token: manifest.downloadToken,
+                    localBaseURL: "http://\(LocalWebServer.lanIPAddress() ?? "localhost"):\(server.port)",
+                    publicBaseURL: defaults.string(forKey: "publicBaseURL"),
+                    cloudUploadEnabled: defaults.bool(forKey: "cloudUploadEnabled")
+                )
+            }
+            strip = try compositor.render(images: filteredImages, qrPayload: qrPayload)
         } catch {
             throw JobExecutionError.permanent(error.localizedDescription)
         }
@@ -142,28 +153,34 @@ final class SessionJobExecutor: SessionJobExecuting {
 
     private func renderGIF(_ manifest: SessionManifest) async throws {
         let directory = sessionDirectory(for: manifest)
-        let framePaths = manifest.shots
+        let sampler = GIFFrameSampler()
+        let sampledShots = try manifest.shots
             .sorted { $0.photoIndex < $1.photoIndex }
-            .flatMap { shot in
-                shot.gifFrameFileNames.sorted {
-                    $0.localizedStandardCompare($1) == .orderedAscending
+            .map { shot -> [CGImage] in
+                guard !shot.gifFrameFileNames.isEmpty else {
+                    NSLog("[GIF] No frames for shot %d; omitting animation contribution", shot.photoIndex)
+                    return []
                 }
-            }
 
-        guard !framePaths.isEmpty else {
+                let frames = try shot.gifFrameFileNames.sorted {
+                    $0.localizedStandardCompare($1) == .orderedAscending
+                }.map { path -> CGImage in
+                    let url = directory.appendingPathComponent(path).standardizedFileURL
+                    guard url.path.hasPrefix(directory.path + "/"),
+                          let image = loadCGImage(from: url) else {
+                        throw JobExecutionError.permanent("GIF frame is missing or corrupt: \(path)")
+                    }
+                    return image
+                }
+                return sampler.sample(frames)
+            }
+        let frames = sampledShots.flatMap { $0 }
+
+        guard !frames.isEmpty else {
             var updated = (try? await manifestStore.load(sessionID: manifest.id)) ?? manifest
             updated.gifFileName = nil
             try await manifestStore.save(updated)
             return
-        }
-
-        let frames = try framePaths.map { path -> CGImage in
-            let url = directory.appendingPathComponent(path).standardizedFileURL
-            guard url.path.hasPrefix(directory.path + "/"),
-                  let image = loadCGImage(from: url) else {
-                throw JobExecutionError.permanent("GIF frame is missing or corrupt: \(path)")
-            }
-            return image
         }
         let destination = directory.appendingPathComponent("booth.gif")
         let temporary = directory.appendingPathComponent(".booth-\(UUID().uuidString).gif")

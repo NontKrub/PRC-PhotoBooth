@@ -3,21 +3,41 @@ import CoreGraphics
 import ImageIO
 import UniformTypeIdentifiers
 
+struct GIFFrameSampler {
+    let targetFramesPerShot: Int
+
+    init(targetFramesPerShot: Int = 60) {
+        self.targetFramesPerShot = targetFramesPerShot
+    }
+
+    func sample(_ frames: [CGImage]) -> [CGImage] {
+        guard targetFramesPerShot > 0, !frames.isEmpty else { return [] }
+        guard targetFramesPerShot > 1 else { return [frames[0]] }
+        guard frames.count > 1 else { return Array(repeating: frames[0], count: targetFramesPerShot) }
+
+        let sourceRange = Double(frames.count - 1)
+        let targetRange = Double(targetFramesPerShot - 1)
+        return (0..<targetFramesPerShot).map { index in
+            let sourceIndex = Int((Double(index) * sourceRange / targetRange).rounded())
+            return frames[sourceIndex]
+        }
+    }
+}
+
 // Encodes a sequence of CGImages into a looping animated GIF.
 struct GIFEncoder {
     let frameDelay: Double      // seconds per frame
     let maxDimension: Int       // downscale to this before encoding
-    let maxFrames: Int          // cap total frames for file size
 
-    init(frameDelay: Double = 1.0 / 12.0, maxDimension: Int = 480, maxFrames: Int = 120) {
+    init(frameDelay: Double = 1.0 / 12.0, maxDimension: Int = 480) {
         self.frameDelay = frameDelay
         self.maxDimension = maxDimension
-        self.maxFrames = maxFrames
     }
 
     // frames: ordered array across all shots — [shot0frames..., shot1frames..., ...]
     func encode(frames: [CGImage], to url: URL) throws {
         guard !frames.isEmpty else { throw GIFError.noFrames }
+        guard frameDelay > 0 else { throw GIFError.invalidFrameDelay }
         guard let dest = CGImageDestinationCreateWithURL(
             url as CFURL, UTType.gif.identifier as CFString, frames.count, nil
         ) else { throw GIFError.destinationFailed }
@@ -36,15 +56,9 @@ struct GIFEncoder {
             ]
         ]
 
-        // Subsample if over maxFrames
-        let step = frames.count > maxFrames ? frames.count / maxFrames : 1
-        var added = 0
-        for i in stride(from: 0, to: frames.count, by: step) {
-            guard added < maxFrames else { break }
-            let frame = frames[i]
+        for frame in frames {
             let scaled = scaledDown(frame) ?? frame
             CGImageDestinationAddImage(dest, scaled, frameProps as CFDictionary)
-            added += 1
         }
 
         guard CGImageDestinationFinalize(dest) else { throw GIFError.finalizeFailed }
@@ -69,10 +83,11 @@ struct GIFEncoder {
 }
 
 enum GIFError: LocalizedError {
-    case noFrames, destinationFailed, finalizeFailed
+    case noFrames, invalidFrameDelay, destinationFailed, finalizeFailed
     var errorDescription: String? {
         switch self {
         case .noFrames:          return "No frames to encode"
+        case .invalidFrameDelay: return "GIF frame delay must be positive"
         case .destinationFailed: return "Failed to create GIF destination"
         case .finalizeFailed:    return "Failed to finalize GIF"
         }

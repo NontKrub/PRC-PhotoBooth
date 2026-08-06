@@ -3,6 +3,7 @@ import UniformTypeIdentifiers
 
 struct TemplateDetailView: View {
     @Binding var template: EventTemplateDefinition
+    let frame: CGImage?
     let onImportFrame: (URL) -> Void
     let onImportPromptImage: (Int, URL) -> Void
     @State private var showingImporter = false
@@ -36,10 +37,10 @@ struct TemplateDetailView: View {
                 }
                 Button("Import / Replace Frame PNG…") { showingImporter = true }
             }
-            Section("Slots") {
-                Text("\(template.slots.count) slots · \(Set(template.slots.map(\.photoIndex)).count) capture indexes")
+            Section("Canvas Elements") {
+                Text("\(template.slots.count) photo slots · \(template.qrCodeElements.count) QR codes")
                     .foregroundStyle(.secondary)
-                Button("Edit Slots…") { showingSlotEditor = true }
+                Button("Edit Layout…") { showingSlotEditor = true }
             }
             Section("Pose Prompts") {
                 PosePromptEditorView(template: $template, onImportImage: onImportPromptImage)
@@ -56,9 +57,11 @@ struct TemplateDetailView: View {
         .sheet(isPresented: $showingSlotEditor) {
             TemplateFrameSlotEditor(
                 slots: $template.slots,
+                qrCodeElements: $template.qrCodeElements,
                 canvasWidth: template.canvasWidth,
                 canvasHeight: template.canvasHeight,
-                photoCount: template.photoCount
+                photoCount: template.photoCount,
+                frame: frame
             )
         }
     }

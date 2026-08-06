@@ -155,11 +155,44 @@ actor EventExperienceStore {
     }
 
     func readTemplatePreview(eventID: String, templateID: String) throws -> Data? {
+        try Task.checkCancellation()
         let document = try load(eventID: eventID)
         guard let template = document.templates.first(where: { $0.id == templateID }),
               let fileName = template.previewFileName else { return nil }
-        let url = try templateURL(eventID: eventID, templateID: templateID)
-            .appendingPathComponent(fileName)
+        let directory = try templateURL(eventID: eventID, templateID: templateID)
+        let url = try templateAssetURL(fileName, in: directory)
+        guard fileManager.fileExists(atPath: url.path) else { return nil }
+        try Task.checkCancellation()
+        return try Data(contentsOf: url)
+    }
+
+    func readTemplatePreviews(
+        eventID: String,
+        templates: [EventTemplateDefinition]
+    ) throws -> [String: Data] {
+        try Task.checkCancellation()
+        var previews: [String: Data] = [:]
+        for template in templates {
+            try Task.checkCancellation()
+            guard let fileName = template.previewFileName else { continue }
+            let directory = try templateURL(eventID: eventID, templateID: template.id)
+            let url = try templateAssetURL(fileName, in: directory)
+            guard fileManager.fileExists(atPath: url.path) else { continue }
+            let data = try Data(contentsOf: url)
+            try Task.checkCancellation()
+            previews[template.id] = data
+        }
+        return previews
+    }
+
+    func readTemplateFrame(eventID: String, templateID: String) throws -> Data? {
+        let document = try load(eventID: eventID)
+        guard let template = document.templates.first(where: { $0.id == templateID }),
+              let fileName = template.frameFileName else { return nil }
+        let directory = try templateURL(eventID: eventID, templateID: templateID)
+        let url = try templateAssetURL(fileName, in: directory)
+        guard fileManager.fileExists(atPath: url.path) else { return nil }
+        try Task.checkCancellation()
         return try Data(contentsOf: url)
     }
 
@@ -177,7 +210,9 @@ actor EventExperienceStore {
         }
         let template = document.templates[index]
         let directory = try templateURL(eventID: eventID, templateID: templateID)
-        let frame = template.frameFileName.flatMap { loadCGImage(from: directory.appendingPathComponent($0)) }
+        let frame = try template.frameFileName
+            .flatMap { try? templateAssetURL($0, in: directory) }
+            .flatMap { loadCGImage(from: $0) }
         let previewURL = directory.appendingPathComponent("preview.jpg")
         let image = try TemplatePreviewRenderer().render(template: template, frame: frame)
         try TemplatePreviewRenderer().saveJPEG(image, to: previewURL)
@@ -212,6 +247,27 @@ actor EventExperienceStore {
             guard template.slots.allSatisfy({ $0.normalizedRect.width > 0 && $0.normalizedRect.height > 0 && (0..<template.photoCount).contains($0.photoIndex) }) else { throw EventExperienceError.invalid("Template has an invalid slot.") }
             let slotIndexes = Set(template.slots.map(\.photoIndex))
             guard (0..<template.photoCount).allSatisfy(slotIndexes.contains) else { throw EventExperienceError.invalid("Every capture index needs a slot.") }
+            guard template.qrCodeElements.count <= 16 else { throw EventExperienceError.invalid("A template may contain at most 16 QR elements.") }
+            let slotIDs = Set(template.slots.map(\.id))
+            var qrIDs = Set<String>()
+            for qrCode in template.qrCodeElements {
+                let rect = qrCode.normalizedRect
+                guard !qrCode.id.isEmpty,
+                      qrIDs.insert(qrCode.id).inserted,
+                      !slotIDs.contains(qrCode.id),
+                      rect.origin.x.isFinite,
+                      rect.origin.y.isFinite,
+                      rect.width.isFinite,
+                      rect.height.isFinite,
+                      rect.width > 0,
+                      rect.height > 0,
+                      rect.intersects(CGRect(x: 0, y: 0, width: 1, height: 1)),
+                      rect.width * template.canvasWidth >= 4,
+                      rect.height * template.canvasHeight >= 4,
+                      qrCode.rotation.isFinite else {
+                    throw EventExperienceError.invalid("Template has an invalid QR element.")
+                }
+            }
             var promptIndexes = Set<Int>()
             for prompt in template.posePrompts {
                 guard (0..<template.photoCount).contains(prompt.photoIndex) else { throw EventExperienceError.invalid("Pose prompt index is outside template photo count.") }
@@ -235,6 +291,19 @@ actor EventExperienceStore {
     private func templateURL(eventID: String, templateID: String) throws -> URL {
         guard !templateID.isEmpty, !templateID.contains("/"), !templateID.contains("\\"), !templateID.contains("\0") else { throw EventExperienceError.invalid("Invalid template ID.") }
         return try eventURL(eventID: eventID).appendingPathComponent("Templates", isDirectory: true).appendingPathComponent(templateID, isDirectory: true)
+    }
+
+    private func templateAssetURL(_ fileName: String, in directory: URL) throws -> URL {
+        guard !fileName.isEmpty,
+              !fileName.contains(where: { $0 == "/" || $0 == "\\" || $0 == "\0" }),
+              fileName == URL(fileURLWithPath: fileName).lastPathComponent else {
+            throw EventExperienceError.invalid("Invalid template asset name.")
+        }
+        let url = directory.appendingPathComponent(fileName)
+        guard url.deletingLastPathComponent().standardizedFileURL == directory.standardizedFileURL else {
+            throw EventExperienceError.invalid("Invalid template asset name.")
+        }
+        return url
     }
 
     private func atomicCopy(_ source: URL, to destination: URL) throws {

@@ -83,9 +83,15 @@ struct ExternalExperienceSelectionView: View {
                         }
                     }
                     HStack {
-                        Button("Back") { stateMachine.reset() }
+                        Button("Back") {
+                            guard CustomerDisplayWorkflow.canApply(.back, in: stateMachine.phase) else { return }
+                            stateMachine.reset()
+                        }
                             .buttonStyle(.bordered)
-                        Button("Continue") { coordinator.confirmExternalExperienceSelection() }
+                        Button("Continue") {
+                            guard CustomerDisplayWorkflow.canApply(.confirmSelection, in: stateMachine.phase) else { return }
+                            coordinator.confirmExternalExperienceSelection()
+                        }
                             .buttonStyle(.borderedProminent)
                     }
                 }

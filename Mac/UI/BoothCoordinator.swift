@@ -53,12 +53,14 @@ final class BoothCoordinator {
         publicBaseURL: String?,
         localBaseURL: String,
         token: String,
-        cloudUploadSucceeded: Bool
+        cloudUploadEnabled: Bool
     ) -> String {
-        let publicBase = publicBaseURL?.trimmingCharacters(in: CharacterSet(charactersIn: "/ ")) ?? ""
-        let localBase = localBaseURL.trimmingCharacters(in: CharacterSet(charactersIn: "/ "))
-        let base = cloudUploadSucceeded && !publicBase.isEmpty ? publicBase : localBase
-        return "\(base)/s/\(token)/"
+        (try? SessionQRCodePayloadResolver.resolve(
+            token: token,
+            localBaseURL: localBaseURL,
+            publicBaseURL: publicBaseURL,
+            cloudUploadEnabled: cloudUploadEnabled
+        )) ?? "\(localBaseURL.trimmingCharacters(in: .whitespacesAndNewlines))/s/\(token)/"
     }
 
     let multipeer: MultipeerService
@@ -92,6 +94,7 @@ final class BoothCoordinator {
     private(set) var activeExperienceDocument: EventExperienceDocument?
     private(set) var experienceCatalog: CustomerExperienceCatalog?
     var errorMessage: String?
+    private(set) var reviewDecisionPending = false
     var serverURL: String = ""
     var cameraSourceKind: CameraSourceKind = .avFoundation {
         didSet {
@@ -289,11 +292,12 @@ final class BoothCoordinator {
             .sorted { $0.sortOrder < $1.sortOrder }
         Task { @MainActor [weak self] in
             guard let self else { return }
+            let previewData = try? await self.experienceStore.readTemplatePreviews(
+                eventID: document.eventID,
+                templates: templates
+            )
             for template in templates {
-                guard let data = try? await self.experienceStore.readTemplatePreview(
-                    eventID: document.eventID,
-                    templateID: template.id
-                ) else {
+                guard let data = previewData?[template.id] else {
                     self.errorMessage = "Template preview unavailable: \(template.id)"
                     continue
                 }
@@ -351,6 +355,8 @@ final class BoothCoordinator {
     }
 
     func beginExternalExperienceSelection() {
+        guard CustomerDisplayWorkflow.canApply(.begin, in: stateMachine.phase)
+                || CustomerDisplayWorkflow.canApply(.back, in: stateMachine.phase) else { return }
         guard let document = activeExperienceDocument else { return }
         let selection = defaultSelection(for: document)
         externalSelection = CustomerSessionSelectionDraft(
@@ -364,6 +370,7 @@ final class BoothCoordinator {
     }
 
     func confirmExternalExperienceSelection() {
+        guard CustomerDisplayWorkflow.canApply(.confirmSelection, in: stateMachine.phase) else { return }
         guard let catalog = experienceCatalog,
               let template = catalog.templates.first(where: { $0.id == externalSelection.templateID }) else { return }
         stateMachine.config = EventConfig(
@@ -767,6 +774,7 @@ final class BoothCoordinator {
 
     func startSession(selection requestedSelection: CustomerSessionSelection? = nil) {
         guard currentSession == nil, let event = activeEvent else { return }
+        reviewDecisionPending = false
         guard recoveryService.recoverableCaptureSession == nil else {
             errorMessage = "Resume or discard the unfinished session in Operations."
             return
@@ -928,6 +936,7 @@ final class BoothCoordinator {
                 throw PhotoFilterError.failedToCreateOutput(stateMachine.config.selectedFilterID)
             }
             stateMachine.enterReview(photoIndex: photoIndex, thumbnailData: thumbData)
+            reviewDecisionPending = false
             multipeer.sendControl(.shotCaptured(index: photoIndex, thumbnailData: thumbData))
             updateStripPreview()
         } catch {
@@ -943,22 +952,38 @@ final class BoothCoordinator {
         }
         let images = currentFilteredReviewImages
         let compositor = Compositor(config: config, framePNG: framePNG)
-        Task.detached(priority: .utility) { [compositor, images] in
-            let img = try? compositor.render(images: images)
+        let qrPayload = config.qrCodeElements.isEmpty ? nil : try? SessionQRCodePayloadResolver.resolve(
+            token: manifest.downloadToken,
+            localBaseURL: "http://\(LocalWebServer.lanIPAddress() ?? "localhost"):8585",
+            publicBaseURL: UserDefaults.standard.string(forKey: "publicBaseURL"),
+            cloudUploadEnabled: UserDefaults.standard.bool(forKey: "cloudUploadEnabled")
+        )
+        Task.detached(priority: .utility) { [compositor, images, qrPayload] in
+            let img = try? compositor.render(images: images, qrPayload: qrPayload)
             await MainActor.run { [weak self] in self?.currentStripPreview = img }
         }
     }
 
     func handleReviewDecision(photoIndex: Int, action: ReviewAction) {
+        let customerAction: CustomerDisplayAction = action == .keep
+            ? .keep(photoIndex: photoIndex)
+            : .retake(photoIndex: photoIndex)
+        guard !reviewDecisionPending,
+              CustomerDisplayWorkflow.canApply(customerAction, in: stateMachine.phase) else { return }
+        reviewDecisionPending = true
         multipeer.sendControl(.reviewDecision(action: action))
         switch action {
         case .keep:
             Task { @MainActor [weak self] in
-                await self?.acceptShot(photoIndex: photoIndex)
+                guard let self else { return }
+                defer { self.reviewDecisionPending = false }
+                await self.acceptShot(photoIndex: photoIndex)
             }
         case .retake:
             Task { @MainActor [weak self] in
-                await self?.requestRetake(photoIndex: photoIndex, source: .guest)
+                guard let self else { return }
+                defer { self.reviewDecisionPending = false }
+                await self.requestRetake(photoIndex: photoIndex, source: .guest)
             }
         }
     }
@@ -969,9 +994,14 @@ final class BoothCoordinator {
         case .forceStart:
             if stateMachine.phase == .idle || stateMachine.phase == .readyToStart { startSession() }
         case .forceRetake:
-            if case .review(let idx) = stateMachine.phase {
+            if case .review(let idx) = stateMachine.phase,
+               !reviewDecisionPending,
+               CustomerDisplayWorkflow.canApply(.retake(photoIndex: idx), in: stateMachine.phase) {
+                reviewDecisionPending = true
                 Task { @MainActor [weak self] in
-                    await self?.requestRetake(photoIndex: idx, source: .operatorSource)
+                    guard let self else { return }
+                    defer { self.reviewDecisionPending = false }
+                    await self.requestRetake(photoIndex: idx, source: .operatorSource)
                 }
             }
         case .skip:
@@ -1078,6 +1108,7 @@ final class BoothCoordinator {
     private func cancelCurrentSession() async {
         countdownTask?.cancel()
         guard currentSession != nil, var manifest = currentManifest else {
+            reviewDecisionPending = false
             stateMachine.reset()
             return
         }
@@ -1095,6 +1126,7 @@ final class BoothCoordinator {
         gifFrames = [:]
         currentFilteredReviewImages = [:]
         capture.resetStills()
+        reviewDecisionPending = false
         stateMachine.reset()
     }
 
@@ -1302,7 +1334,7 @@ final class BoothCoordinator {
             publicBaseURL: publicBase,
             localBaseURL: "http://\(ip):8585",
             token: token,
-            cloudUploadSucceeded: jobs.first(where: { $0.kind == .cloudUpload })?.status == .succeeded
+            cloudUploadEnabled: UserDefaults.standard.bool(forKey: "cloudUploadEnabled")
         )
         let stripThumb = loadCGImage(from: directory.appendingPathComponent("strip.png"))
             .flatMap { jpegData(from: $0, quality: 0.4) }

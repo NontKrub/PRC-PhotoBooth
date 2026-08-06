@@ -23,10 +23,13 @@ struct EventExperienceEditorView: View {
     )
     @State private var selectedTemplateID: String?
     @State private var previews: [String: CGImage] = [:]
+    @State private var frames: [String: CGImage] = [:]
     @State private var isLoading = true
+    @State private var isLoadingPreviews = false
     @State private var isSaving = false
     @State private var errorMessage: String?
     @State private var editingTemplateID: String?
+    @State private var previewLoadID = UUID()
 
     var body: some View {
         Group {
@@ -34,6 +37,9 @@ struct EventExperienceEditorView: View {
                 ProgressView("Loading experience…")
             } else {
                 Form {
+                    if isLoadingPreviews {
+                        ProgressView("Loading previews…")
+                    }
                     TemplateListView(
                         templates: $document.templates,
                         defaultTemplateID: $document.defaultTemplateID,
@@ -81,7 +87,7 @@ struct EventExperienceEditorView: View {
         .navigationTitle("Guest Experience")
         .toolbar {
             ToolbarItem(placement: .cancellationAction) {
-                Button("Cancel") { dismiss() }
+                Button("Back") { dismiss() }
                     .disabled(isSaving)
             }
             ToolbarItem(placement: .confirmationAction) {
@@ -91,15 +97,38 @@ struct EventExperienceEditorView: View {
                     .disabled(isLoading || isSaving)
             }
         }
-        .task {
+        .task(id: event.id) {
             do {
                 document = try await coordinator.loadExperienceDocument(for: event)
                 selectedTemplateID = document.defaultTemplateID
                 isLoading = false
-                await loadPreviews()
+                previewLoadID = UUID()
+            } catch is CancellationError {
+                return
             } catch {
                 errorMessage = error.localizedDescription
                 isLoading = false
+            }
+        }
+        .task(id: previewLoadID) {
+            guard !isLoading else { return }
+            isLoadingPreviews = true
+            defer { isLoadingPreviews = false }
+            do {
+                try await loadPreviews()
+            } catch is CancellationError {
+                return
+            } catch {
+                errorMessage = error.localizedDescription
+            }
+        }
+        .onChange(of: document.templates) { oldTemplates, newTemplates in
+            let templateIDs = Set(newTemplates.map(\.id))
+            previews = previews.filter { templateIDs.contains($0.key) }
+            for template in newTemplates {
+                if oldTemplates.first(where: { $0.id == template.id }) != template {
+                    previews[template.id] = nil
+                }
             }
         }
         .sheet(item: Binding(
@@ -108,7 +137,7 @@ struct EventExperienceEditorView: View {
         )) { template in
             if let index = document.templates.firstIndex(where: { $0.id == template.id }) {
                 NavigationStack {
-                    TemplateDetailView(template: $document.templates[index]) { url in
+                    TemplateDetailView(template: $document.templates[index], frame: frames[template.id]) { url in
                         importFrame(url, templateID: template.id)
                     } onImportPromptImage: { photoIndex, url in
                         importPromptImage(url, templateID: template.id, photoIndex: photoIndex)
@@ -116,6 +145,7 @@ struct EventExperienceEditorView: View {
                     .navigationTitle(template.name.value(for: operatorLanguage))
                 }
                 .frame(minWidth: 560, minHeight: 620)
+                .task { await loadFrame(templateID: template.id) }
             }
         }
     }
@@ -215,10 +245,32 @@ struct EventExperienceEditorView: View {
                 guard let index = document.templates.firstIndex(where: { $0.id == templateID }) else { return }
                 document.templates[index].frameFileName = imported.fileName
                 document.templates[index].updatedAt = Date()
-                await loadPreviews()
+                await loadFrame(templateID: templateID)
+                previews[templateID] = nil
+                previewLoadID = UUID()
             } catch {
                 errorMessage = error.localizedDescription
             }
+        }
+    }
+
+    private func loadFrame(templateID: String) async {
+        do {
+            guard let data = try await coordinator.experienceStore.readTemplateFrame(
+                eventID: event.id,
+                templateID: templateID
+            ),
+            let source = CGImageSourceCreateWithData(data as CFData, nil),
+            let image = CGImageSourceCreateImageAtIndex(source, 0, nil) else {
+                frames[templateID] = nil
+                return
+            }
+            frames[templateID] = image
+        } catch is CancellationError {
+            return
+        } catch {
+            frames[templateID] = nil
+            errorMessage = "Template frame is missing or corrupt."
         }
     }
 
@@ -240,14 +292,18 @@ struct EventExperienceEditorView: View {
         }
     }
 
-    private func loadPreviews() async {
-        for template in document.templates where template.isEnabled {
-            guard let data = try? await coordinator.experienceStore.readTemplatePreview(
-                eventID: event.id,
-                templateID: template.id
-            ),
-            let source = CGImageSourceCreateWithData(data as CFData, nil),
-            let image = CGImageSourceCreateImageAtIndex(source, 0, nil) else { continue }
+    private func loadPreviews() async throws {
+        let templates = document.templates.filter { $0.isEnabled && previews[$0.id] == nil }
+        guard !templates.isEmpty else { return }
+        let dataByID = try await coordinator.experienceStore.readTemplatePreviews(
+            eventID: event.id,
+            templates: templates
+        )
+        for template in templates {
+            try Task.checkCancellation()
+            guard let data = dataByID[template.id],
+                  let source = CGImageSourceCreateWithData(data as CFData, nil),
+                  let image = CGImageSourceCreateImageAtIndex(source, 0, nil) else { continue }
             previews[template.id] = image
         }
     }
