@@ -4,6 +4,47 @@ import Testing
 
 @Suite("Sony DSLR protocol")
 struct DSLRProtocolTests {
+    @Test("builds PTP command packets")
+    func buildsPTPCommandPackets() {
+        let command = DSLRCameraSource.makePTPCommand(
+            opcode: 0x9201,
+            transactionID: 0x12345678,
+            parameters: [1, 0, 0]
+        )
+
+        #expect(command.count == 24)
+        #expect(DSLRCameraSource.ptpUInt16(command, at: 4) == 0x0001)
+        #expect(DSLRCameraSource.ptpUInt16(command, at: 6) == 0x9201)
+        #expect(DSLRCameraSource.ptpUInt32(command, at: 8) == 0x12345678)
+        #expect(DSLRCameraSource.ptpUInt32(command, at: 12) == 1)
+        #expect(DSLRCameraSource.ptpUInt32(command, at: 16) == 0)
+        #expect(DSLRCameraSource.ptpUInt32(command, at: 20) == 0)
+    }
+
+    @Test("parses PTP response codes without alignment assumptions")
+    func parsesPTPResponseCodes() {
+        #expect(DSLRCameraSource.ptpResponseCode(from: Data([0, 0, 0, 0, 0, 0, 0x01, 0x20])) == 0x2001)
+        #expect(DSLRCameraSource.ptpResponseCode(from: Data([0, 0, 0, 0, 0, 0, 0x1D, 0x20])) == 0x201D)
+        #expect(DSLRCameraSource.ptpResponseCode(from: Data()) == 0)
+        #expect(DSLRCameraSource.ptpResponseCode(from: Data(repeating: 0, count: 7)) == 0)
+
+        let unaligned = Data([0xFF, 0, 0, 0, 0, 0, 0, 0x1D, 0x20]).dropFirst()
+        #expect(DSLRCameraSource.ptpResponseCode(from: Data(unaligned)) == 0x201D)
+    }
+
+    @Test("rejects malformed PTP object-handle arrays")
+    func rejectsMalformedObjectHandles() {
+        #expect(DSLRCameraSource.newestPTPObjectHandle(from: Data()) == nil)
+        #expect(DSLRCameraSource.newestPTPObjectHandle(from: Data([0, 0, 0, 0])) == nil)
+        #expect(DSLRCameraSource.newestPTPObjectHandle(from: Data([2, 0, 0, 0, 1, 0, 0, 0])) == nil)
+        #expect(DSLRCameraSource.newestPTPObjectHandle(from: Data([255, 255, 255, 127])) == nil)
+        #expect(DSLRCameraSource.newestPTPObjectHandle(from: Data([
+            2, 0, 0, 0,
+            1, 0, 0, 0,
+            2, 0, 0, 0,
+        ])) == 2)
+    }
+
     @Test("parses both Sony vendor-code arrays")
     func parsesVendorCodes() {
         // 0x00C8 prefix, then two UInt16 arrays encoded with UInt32 counts.
