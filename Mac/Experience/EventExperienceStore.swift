@@ -98,12 +98,23 @@ actor EventExperienceStore {
     }
 
     func importTemplateFrame(eventID: String, templateID: String, sourceURL: URL) throws -> ImportedTemplateFrame {
-        guard fileManager.fileExists(atPath: sourceURL.path) else { throw EventExperienceError.missingAsset(sourceURL) }
-        guard loadCGImage(from: sourceURL) != nil else { throw EventExperienceError.importFailed("Frame must be a readable image.") }
+        guard fileManager.fileExists(atPath: sourceURL.path),
+              let source = CGImageSourceCreateWithURL(sourceURL as CFURL, nil),
+              let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
+              let width = properties[kCGImagePropertyPixelWidth] as? NSNumber,
+              let height = properties[kCGImagePropertyPixelHeight] as? NSNumber,
+              let image = CGImageSourceCreateThumbnailAtIndex(source, 0, [
+                  kCGImageSourceCreateThumbnailFromImageAlways: true,
+                  kCGImageSourceThumbnailMaxPixelSize: max(width.intValue, height.intValue),
+                  kCGImageSourceCreateThumbnailWithTransform: true
+              ] as CFDictionary),
+              let data = pngData(from: image) else {
+            throw EventExperienceError.importFailed("Frame must be a readable image.")
+        }
         let directory = try templateURL(eventID: eventID, templateID: templateID)
         try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
         let destination = directory.appendingPathComponent("frame.png")
-        try atomicCopy(sourceURL, to: destination)
+        try atomicWrite(data, to: destination)
         return ImportedTemplateFrame(fileName: "frame.png", url: destination)
     }
 
@@ -185,10 +196,8 @@ actor EventExperienceStore {
         return previews
     }
 
-    func readTemplateFrame(eventID: String, templateID: String) throws -> Data? {
-        let document = try load(eventID: eventID)
-        guard let template = document.templates.first(where: { $0.id == templateID }),
-              let fileName = template.frameFileName else { return nil }
+    func readTemplateFrame(eventID: String, templateID: String, fileName: String) throws -> Data? {
+        try Task.checkCancellation()
         let directory = try templateURL(eventID: eventID, templateID: templateID)
         let url = try templateAssetURL(fileName, in: directory)
         guard fileManager.fileExists(atPath: url.path) else { return nil }
@@ -327,6 +336,13 @@ actor EventExperienceStore {
         } else {
             try fileManager.moveItem(at: temporary, to: destination)
         }
+    }
+
+    private func pngData(from image: CGImage) -> Data? {
+        let data = NSMutableData()
+        guard let destination = CGImageDestinationCreateWithData(data, UTType.png.identifier as CFString, 1, nil) else { return nil }
+        CGImageDestinationAddImage(destination, image, nil)
+        return CGImageDestinationFinalize(destination) ? data as Data : nil
     }
 
     private func preserveCorruptDocument(at url: URL) throws -> URL {

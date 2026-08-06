@@ -12,11 +12,6 @@ enum CanvasElementResizeHandle: CaseIterable, Equatable, Sendable {
     }
 }
 
-struct CanvasElementResizeState: Sendable {
-    var handle: CanvasElementResizeHandle
-    var delta: CGSize
-}
-
 enum CanvasElementGeometry {
     static func canvasRect(_ normalizedRect: CGRect, in canvasSize: CGSize) -> CGRect {
         CGRect(
@@ -37,6 +32,28 @@ enum CanvasElementGeometry {
         )
     }
 
+    static func normalizedAndClampedRect(_ rect: CGRect, in canvasSize: CGSize) -> CGRect {
+        guard rect.origin.x.isFinite,
+              rect.origin.y.isFinite,
+              rect.width.isFinite,
+              rect.height.isFinite,
+              canvasSize.width.isFinite,
+              canvasSize.height.isFinite,
+              canvasSize.width > 0,
+              canvasSize.height > 0 else { return .zero }
+
+        let left = min(max(rect.minX, 0), canvasSize.width)
+        let top = min(max(rect.minY, 0), canvasSize.height)
+        let right = min(max(rect.maxX, left), canvasSize.width)
+        let bottom = min(max(rect.maxY, top), canvasSize.height)
+        return CGRect(
+            x: left / canvasSize.width,
+            y: top / canvasSize.height,
+            width: (right - left) / canvasSize.width,
+            height: (bottom - top) / canvasSize.height
+        )
+    }
+
     static func moved(_ rect: CGRect, by delta: CGSize, in canvasSize: CGSize) -> CGRect {
         clamped(rect.offsetBy(dx: delta.width, dy: delta.height), in: canvasSize)
     }
@@ -52,36 +69,51 @@ enum CanvasElementGeometry {
         minimumSize: CGSize,
         in canvasSize: CGSize
     ) -> CGRect {
-        var result = rect
+        guard rect.origin.x.isFinite,
+              rect.origin.y.isFinite,
+              rect.width.isFinite,
+              rect.height.isFinite,
+              delta.width.isFinite,
+              delta.height.isFinite,
+              canvasSize.width.isFinite,
+              canvasSize.height.isFinite,
+              canvasSize.width > 0,
+              canvasSize.height > 0 else { return rect }
+
+        let left = rect.minX
+        let right = rect.maxX
+        let top = rect.minY
+        let bottom = rect.maxY
+        let minimumWidth = min(max(1, minimumSize.width.isFinite ? minimumSize.width : 1), canvasSize.width)
+        let minimumHeight = min(max(1, minimumSize.height.isFinite ? minimumSize.height : 1), canvasSize.height)
+        var newLeft = left
+        var newRight = right
+        var newTop = top
+        var newBottom = bottom
+
         switch handle {
         case .n:
-            result.origin.y += delta.height
-            result.size.height -= delta.height
+            newTop = min(max(top + delta.height, 0), bottom - minimumHeight)
         case .s:
-            result.size.height += delta.height
+            newBottom = max(min(bottom + delta.height, canvasSize.height), top + minimumHeight)
         case .e:
-            result.size.width += delta.width
+            newRight = max(min(right + delta.width, canvasSize.width), left + minimumWidth)
         case .w:
-            result.origin.x += delta.width
-            result.size.width -= delta.width
+            newLeft = min(max(left + delta.width, 0), right - minimumWidth)
         case .ne:
-            result.origin.y += delta.height
-            result.size.height -= delta.height
-            result.size.width += delta.width
+            newTop = min(max(top + delta.height, 0), bottom - minimumHeight)
+            newRight = max(min(right + delta.width, canvasSize.width), left + minimumWidth)
         case .nw:
-            result.origin.x += delta.width
-            result.size.width -= delta.width
-            result.origin.y += delta.height
-            result.size.height -= delta.height
+            newLeft = min(max(left + delta.width, 0), right - minimumWidth)
+            newTop = min(max(top + delta.height, 0), bottom - minimumHeight)
         case .se:
-            result.size.width += delta.width
-            result.size.height += delta.height
+            newRight = max(min(right + delta.width, canvasSize.width), left + minimumWidth)
+            newBottom = max(min(bottom + delta.height, canvasSize.height), top + minimumHeight)
         case .sw:
-            result.origin.x += delta.width
-            result.size.width -= delta.width
-            result.size.height += delta.height
+            newLeft = min(max(left + delta.width, 0), right - minimumWidth)
+            newBottom = max(min(bottom + delta.height, canvasSize.height), top + minimumHeight)
         }
-        return clamped(result, in: canvasSize, minimumSize: minimumSize)
+        return CGRect(x: newLeft, y: newTop, width: newRight - newLeft, height: newBottom - newTop)
     }
 
     static func centeredSquare(in rect: CGRect) -> CGRect {
@@ -112,7 +144,8 @@ struct ResizableCanvasElementView<Content: View>: View {
     @ViewBuilder let content: () -> Content
 
     @GestureState private var dragOffset: CGSize = .zero
-    @GestureState private var resizeState: CanvasElementResizeState? = nil
+    @State private var resizeStartRect: CGRect?
+    @State private var liveResizeRect: CGRect?
 
     init(
         rect: CGRect,
@@ -137,14 +170,7 @@ struct ResizableCanvasElementView<Content: View>: View {
     }
 
     var body: some View {
-        let liveRect = CanvasElementGeometry.resized(
-            rect,
-            by: resizeState?.handle ?? .se,
-            delta: resizeState?.delta ?? .zero,
-            minimumSize: minimumSize,
-            in: canvasSize
-        )
-        let displayRect = liveRect.offsetBy(dx: dragOffset.width, dy: dragOffset.height)
+        let displayRect = (liveResizeRect ?? rect).offsetBy(dx: dragOffset.width, dy: dragOffset.height)
 
         ZStack {
             content()
@@ -165,9 +191,12 @@ struct ResizableCanvasElementView<Content: View>: View {
             if isSelected {
                 ForEach(CanvasElementResizeHandle.allCases, id: \.self) { handle in
                     resizeHandle(handle, in: displayRect)
+                        .zIndex(1)
                 }
             }
         }
+        .frame(width: canvasSize.width, height: canvasSize.height, alignment: .topLeading)
+        .zIndex(isSelected ? 1 : 0)
     }
 
     private func resizeHandle(_ handle: CanvasElementResizeHandle, in rect: CGRect) -> some View {
@@ -183,18 +212,44 @@ struct ResizableCanvasElementView<Content: View>: View {
         case .se: point = CGPoint(x: rect.maxX, y: rect.maxY)
         }
         let size: CGFloat = handle.isCorner ? 10 : 8
-        return Circle()
-            .fill(.white)
-            .overlay(Circle().strokeBorder(Color.accentColor, lineWidth: 1.5))
-            .frame(width: size, height: size)
+        return ZStack {
+            Color.clear
+                .frame(width: 24, height: 24)
+            Circle()
+                .fill(.white)
+                .overlay(Circle().strokeBorder(Color.accentColor, lineWidth: 1.5))
+                .frame(width: size, height: size)
+        }
+            .contentShape(Rectangle())
             .position(point)
             .gesture(
-                DragGesture()
-                    .updating($resizeState) { value, state, _ in
-                        state = CanvasElementResizeState(handle: handle, delta: value.translation)
+                DragGesture(minimumDistance: 0)
+                    .onChanged { value in
+                        if resizeStartRect == nil {
+                            onTap()
+                            resizeStartRect = rect
+                        }
+                        let start = resizeStartRect ?? rect
+                        liveResizeRect = CanvasElementGeometry.resized(
+                            start,
+                            by: handle,
+                            delta: value.translation,
+                            minimumSize: minimumSize,
+                            in: canvasSize
+                        )
                     }
                     .onEnded { value in
-                        onResize(CanvasElementGeometry.resized(rect, by: handle, delta: value.translation, minimumSize: minimumSize, in: canvasSize))
+                        let start = resizeStartRect ?? rect
+                        let finalRect = CanvasElementGeometry.resized(
+                            start,
+                            by: handle,
+                            delta: value.translation,
+                            minimumSize: minimumSize,
+                            in: canvasSize
+                        )
+                        resizeStartRect = nil
+                        liveResizeRect = nil
+                        onResize(finalRect)
                     }
             )
     }

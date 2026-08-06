@@ -115,7 +115,24 @@ struct EventExperienceStoreTests {
         #expect(FileManager.default.fileExists(atPath: directory.appendingPathComponent("frame.png").path))
         #expect((try await store.load(eventID: "event-1")).templates[0].frameFileName == "frame.png")
 
-        let data = try await store.readTemplateFrame(eventID: "event-1", templateID: template.id)
+        let data = try await store.readTemplateFrame(eventID: "event-1", templateID: template.id, fileName: "frame.png")
+        #expect(data != nil)
+        #expect(data.flatMap { CGImageSourceCreateWithData($0 as CFData, nil) } != nil)
+    }
+
+    @Test("reads a frame using an active filename without saved metadata")
+    func readsTemplateFrameWithoutSavedMetadata() async throws {
+        let root = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let template = validTemplate()
+        let store = EventExperienceStore(baseDirectory: root)
+        try await store.save(document(for: template))
+        let directory = root
+            .appendingPathComponent("EventExperiences/event-1/Templates/\(template.id)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        try makeImage().writePNG(to: directory.appendingPathComponent("frame.png"))
+
+        let data = try await store.readTemplateFrame(eventID: "event-1", templateID: template.id, fileName: "frame.png")
         #expect(data != nil)
         #expect(data.flatMap { CGImageSourceCreateWithData($0 as CFData, nil) } != nil)
     }
@@ -124,13 +141,10 @@ struct EventExperienceStoreTests {
     func rejectsUnsafeTemplateFrameFilename() async throws {
         let root = try temporaryDirectory()
         defer { try? FileManager.default.removeItem(at: root) }
-        var template = validTemplate()
-        template.frameFileName = "../outside.png"
         let store = EventExperienceStore(baseDirectory: root)
-        try await store.save(document(for: template))
 
         do {
-            _ = try await store.readTemplateFrame(eventID: "event-1", templateID: template.id)
+            _ = try await store.readTemplateFrame(eventID: "event-1", templateID: "template-1", fileName: "../outside.png")
             Issue.record("Expected unsafe frame filename to be rejected")
         } catch let error as EventExperienceError {
             guard case .invalid = error else { Issue.record("Wrong error: \(error)"); return }

@@ -24,6 +24,8 @@ struct EventExperienceEditorView: View {
     @State private var selectedTemplateID: String?
     @State private var previews: [String: CGImage] = [:]
     @State private var frames: [String: CGImage] = [:]
+    @State private var loadingFrameIDs = Set<String>()
+    @State private var frameErrors: [String: String] = [:]
     @State private var isLoading = true
     @State private var isLoadingPreviews = false
     @State private var isSaving = false
@@ -137,7 +139,19 @@ struct EventExperienceEditorView: View {
         )) { template in
             if let index = document.templates.firstIndex(where: { $0.id == template.id }) {
                 NavigationStack {
-                    TemplateDetailView(template: $document.templates[index], frame: frames[template.id]) { url in
+                    TemplateDetailView(
+                        template: $document.templates[index],
+                        frame: Binding(
+                            get: { frames[template.id] },
+                            set: { image in
+                                if let image { frames[template.id] = image }
+                                else { frames.removeValue(forKey: template.id) }
+                            }
+                        ),
+                        isFrameConfigured: template.frameFileName != nil,
+                        isFrameLoading: loadingFrameIDs.contains(template.id),
+                        frameErrorMessage: frameErrors[template.id]
+                    ) { url in
                         importFrame(url, templateID: template.id)
                     } onImportPromptImage: { photoIndex, url in
                         importPromptImage(url, templateID: template.id, photoIndex: photoIndex)
@@ -245,7 +259,13 @@ struct EventExperienceEditorView: View {
                 guard let index = document.templates.firstIndex(where: { $0.id == templateID }) else { return }
                 document.templates[index].frameFileName = imported.fileName
                 document.templates[index].updatedAt = Date()
-                await loadFrame(templateID: templateID)
+                let data = try Data(contentsOf: imported.url)
+                guard let source = CGImageSourceCreateWithData(data as CFData, nil),
+                      let image = CGImageSourceCreateImageAtIndex(source, 0, nil) else {
+                    throw EventExperienceError.importFailed("Could not decode imported frame.")
+                }
+                frames[templateID] = image
+                frameErrors.removeValue(forKey: templateID)
                 previews[templateID] = nil
                 previewLoadID = UUID()
             } catch {
@@ -255,22 +275,33 @@ struct EventExperienceEditorView: View {
     }
 
     private func loadFrame(templateID: String) async {
+        guard let template = document.templates.first(where: { $0.id == templateID }),
+              let fileName = template.frameFileName else {
+            frames.removeValue(forKey: templateID)
+            frameErrors.removeValue(forKey: templateID)
+            return
+        }
+        loadingFrameIDs.insert(templateID)
+        defer { loadingFrameIDs.remove(templateID) }
         do {
             guard let data = try await coordinator.experienceStore.readTemplateFrame(
                 eventID: event.id,
-                templateID: templateID
+                templateID: templateID,
+                fileName: fileName
             ),
             let source = CGImageSourceCreateWithData(data as CFData, nil),
             let image = CGImageSourceCreateImageAtIndex(source, 0, nil) else {
-                frames[templateID] = nil
+                frames.removeValue(forKey: templateID)
+                frameErrors[templateID] = "Template image unavailable."
                 return
             }
             frames[templateID] = image
+            frameErrors.removeValue(forKey: templateID)
         } catch is CancellationError {
             return
         } catch {
-            frames[templateID] = nil
-            errorMessage = "Template frame is missing or corrupt."
+            frames.removeValue(forKey: templateID)
+            frameErrors[templateID] = "Template image unavailable."
         }
     }
 

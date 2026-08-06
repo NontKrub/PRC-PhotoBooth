@@ -192,10 +192,14 @@ struct FrameSlotEditor: View {
 
     private func resizeSlot(_ slot: BoothSlot, to rect: CGRect, canvasW: CGFloat, canvasH: CGFloat) {
         guard let idx = slotIndex(id: slot.id) else { return }
-        event.slots[idx].normX = max(0, rect.minX / canvasW)
-        event.slots[idx].normY = max(0, rect.minY / canvasH)
-        event.slots[idx].normW = min(1 - event.slots[idx].normX, rect.width / canvasW)
-        event.slots[idx].normH = min(1 - event.slots[idx].normY, rect.height / canvasH)
+        let normalized = CanvasElementGeometry.normalizedAndClampedRect(
+            rect,
+            in: CGSize(width: canvasW, height: canvasH)
+        )
+        event.slots[idx].normX = normalized.minX
+        event.slots[idx].normY = normalized.minY
+        event.slots[idx].normW = normalized.width
+        event.slots[idx].normH = normalized.height
     }
 }
 
@@ -229,7 +233,10 @@ struct TemplateFrameSlotEditor: View {
     let canvasWidth: Double
     let canvasHeight: Double
     let photoCount: Int
-    let frame: CGImage?
+    @Binding var frame: CGImage?
+    let isFrameConfigured: Bool
+    let isFrameLoading: Bool
+    let frameErrorMessage: String?
     @Environment(\.dismiss) private var dismiss
     @State private var selection: TemplateCanvasSelection?
 
@@ -286,14 +293,23 @@ struct TemplateFrameSlotEditor: View {
             ZStack {
                 Color(white: 0.2)
                 ZStack {
-                    if let frame {
+                    if isFrameLoading {
+                        ProgressView("Loading template…")
+                            .frame(width: displaySize.width, height: displaySize.height)
+                    } else if let frame {
                         Image(frame, scale: 1, orientation: .up, label: Text("Template frame"))
                             .resizable()
-                            .scaledToFill()
+                            .interpolation(.high)
                             .frame(width: displaySize.width, height: displaySize.height)
-                            .clipped()
                     } else {
                         Color.white
+                        VStack(spacing: 8) {
+                            Image(systemName: "photo.badge.exclamationmark")
+                            Text(frameErrorMessage ?? (isFrameConfigured ? "Template image unavailable" : "No template image configured"))
+                            Text("Import or replace the frame image.")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
                     }
                     Color.clear
                         .contentShape(Rectangle())
@@ -505,7 +521,7 @@ struct TemplateFrameSlotEditor: View {
             var duplicate = slots[index]
             duplicate.id = UUID().uuidString
             duplicate.zOrder = nextZOrder
-            duplicate.normalizedRect = CanvasElementGeometry.normalizedRect(
+            duplicate.normalizedRect = CanvasElementGeometry.normalizedAndClampedRect(
                 CanvasElementGeometry.duplicated(CanvasElementGeometry.canvasRect(duplicate.normalizedRect, in: canvasSize), offset: offset, in: canvasSize),
                 in: canvasSize
             )
@@ -516,7 +532,7 @@ struct TemplateFrameSlotEditor: View {
             var duplicate = qrCodeElements[index]
             duplicate.id = UUID().uuidString
             duplicate.zOrder = nextZOrder
-            duplicate.normalizedRect = CanvasElementGeometry.normalizedRect(
+            duplicate.normalizedRect = CanvasElementGeometry.normalizedAndClampedRect(
                 CanvasElementGeometry.duplicated(CanvasElementGeometry.canvasRect(duplicate.normalizedRect, in: canvasSize), offset: offset, in: canvasSize),
                 in: canvasSize
             )
@@ -537,11 +553,11 @@ struct TemplateFrameSlotEditor: View {
     private func move(_ selection: TemplateCanvasSelection, by delta: CGSize, in displaySize: CGSize) {
         let current = CanvasElementGeometry.canvasRect(rect(for: selection), in: displaySize)
         let moved = CanvasElementGeometry.moved(current, by: delta, in: displaySize)
-        setRect(for: selection, to: CanvasElementGeometry.normalizedRect(moved, in: displaySize))
+        setRect(for: selection, to: CanvasElementGeometry.normalizedAndClampedRect(moved, in: displaySize))
     }
 
     private func resize(_ selection: TemplateCanvasSelection, to rect: CGRect, in displaySize: CGSize) {
-        setRect(for: selection, to: CanvasElementGeometry.normalizedRect(rect, in: displaySize))
+        setRect(for: selection, to: CanvasElementGeometry.normalizedAndClampedRect(rect, in: displaySize))
     }
 
     private func rect(for selection: TemplateCanvasSelection) -> CGRect {
