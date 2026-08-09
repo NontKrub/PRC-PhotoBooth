@@ -1,4 +1,18 @@
-# PRC PhotoBooth — PR #7 Stabilization and External Display Plan
+# PRC PhotoBooth — v1.3 Reliability + Operations
+
+> The PR #7 stabilization plan below is historical context. The current release work is on `feature/v1.3-reliability-operations`.
+
+## v1.3 implementation status
+
+- Capture Recovery state/actions: implemented for retry receive, retake, deferred indices, and previous-photo fallback.
+- Capture attempt isolation: implemented with IDs and terminal task cleanup in the DSLR source.
+- Network transport: production `NetworkBoothTransport` with framed control/preview channels, Bonjour, heartbeat, reconnect, and session sync; legacy Multipeer remains DEBUG-only fallback.
+- Operations: health snapshot, bounded event log, printer metrics, delivery resolver, authenticated remote operator API/dashboard, and LAN sharing station.
+- Verification: deterministic state, framing, HTTP, auth, gallery/privacy, delivery, and legacy-manifest tests are required before release; physical Sony and interactive GUI checks remain environment-dependent.
+
+---
+
+# Historical: PR #7 Stabilization and External Display Plan
 
 ## Context
 
