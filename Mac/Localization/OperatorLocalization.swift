@@ -139,6 +139,8 @@ func operatorPhaseName(_ phase: BoothPhase, locale: Locale) -> String {
         return "\(operatorString("Captured", locale: locale)) [\(index + 1)]"
     case .review(let index):
         return "\(operatorString("Review", locale: locale)) [\(index + 1)]"
+    case .captureRecovery(let index, _):
+        return "\(operatorString("Capture recovery", locale: locale)) [\(index + 1)]"
     case .processing: return operatorString("Processing", locale: locale)
     case .finished: return operatorString("Finished", locale: locale)
     }

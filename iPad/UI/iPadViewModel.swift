@@ -8,7 +8,7 @@ import CoreGraphics
 @MainActor
 @Observable
 final class iPadViewModel {
-    let multipeer: MultipeerService
+    let multipeer: BoothTransport
     let stateMachine: SessionStateMachine
 
     var latestPreviewImage: CGImage?
@@ -22,9 +22,11 @@ final class iPadViewModel {
     var promptImages: [String: CGImage] = [:]
     private(set) var isSessionRequestPending = false
     private(set) var reviewDecisionPending = false
+    private(set) var recoveryActionPending = false
     var sessionRequestError: String?
     var stripThumbImage: CGImage?
     var isMirrored = false
+    var isBoothPaused = false
     private(set) var previewTransport: PreviewTransport
 
     // USB preview (over cable)
@@ -38,6 +40,7 @@ final class iPadViewModel {
     private var pendingPreviewJPEG: Data?
     private var previewDecodeTask: Task<Void, Never>?
     private var sessionRequestTimeoutTask: Task<Void, Never>?
+    private var countdownTask: Task<Void, Never>?
 #if DEBUG
     private(set) var demoKioskMode = false
 #endif
@@ -46,9 +49,18 @@ final class iPadViewModel {
         previewTransport = PreviewTransport(
             rawValue: UserDefaults.standard.string(forKey: "iPadPreviewTransport") ?? ""
         ) ?? .wireless
-        multipeer = MultipeerService(role: .iPad)
+#if DEBUG
+        if ProcessInfo.processInfo.arguments.contains("--legacy-multipeer") {
+            multipeer = MultipeerService(role: .iPad)
+        } else {
+            multipeer = NetworkBoothTransport(role: .iPad)
+        }
+#else
+        multipeer = NetworkBoothTransport(role: .iPad)
+#endif
         stateMachine = SessionStateMachine()
         setupHandlers()
+        multipeer.start()
         startUSBPreviewClient()
 #if DEBUG
         if ProcessInfo.processInfo.arguments.contains("--demo-kiosk") {
@@ -74,6 +86,12 @@ final class iPadViewModel {
         case .hello(let role) where role == .mac:
             multipeer.sendControl(.hello(role: .iPad))
             multipeer.sendControl(.setPreviewTransport(transport: previewTransport))
+
+        case .sessionSync(let snapshot):
+            applySessionSync(snapshot)
+
+        case .boothPaused(let isPaused):
+            isBoothPaused = isPaused
 
         case .eventConfig(let config):
             eventConfig = config
@@ -105,21 +123,27 @@ final class iPadViewModel {
             isMirrored = mirrored
 
         case .sessionStart:
+            cancelCountdown()
             isSessionRequestPending = false
             reviewDecisionPending = false
+            recoveryActionPending = false
             sessionRequestTimeoutTask?.cancel()
             stateMachine.startSession(config: eventConfig)
 
         case .sessionRequestRejected(let reason):
+            cancelCountdown()
             isSessionRequestPending = false
             reviewDecisionPending = false
+            recoveryActionPending = false
             sessionRequestTimeoutTask?.cancel()
             sessionRequestError = reason
             stateMachine.transition(to: .selectingExperience)
 
         case .sessionPrepared(let config, let presentation):
+            cancelCountdown()
             isSessionRequestPending = false
             reviewDecisionPending = false
+            recoveryActionPending = false
             sessionRequestTimeoutTask?.cancel()
             eventConfig = config
             stateMachine.startSession(config: config, sessionID: presentation.sessionID)
@@ -132,13 +156,22 @@ final class iPadViewModel {
             }
 
         case .beginCountdown(let index, let seconds):
+            recoveryActionPending = false
             reviewDecisionPending = false
             stateMachine.transition(to: .countdown(photoIndex: index, secondsRemaining: seconds))
             runCountdown(photoIndex: index, totalSeconds: seconds)
 
         case .shotCaptured(let index, let thumbData):
+            cancelCountdown()
+            recoveryActionPending = false
             reviewDecisionPending = false
             stateMachine.enterReview(photoIndex: index, thumbnailData: thumbData)
+
+        case .captureRecovery(let index, let failure):
+            cancelCountdown()
+            recoveryActionPending = false
+            reviewDecisionPending = false
+            stateMachine.transition(to: .captureRecovery(photoIndex: index, failure: failure))
 
         case .reviewDecision(let action):
             guard case .review(let idx) = stateMachine.phase else { break }
@@ -153,24 +186,75 @@ final class iPadViewModel {
             }
 
         case .sessionFinished(let qr, let stripData, _):
+            cancelCountdown()
+            recoveryActionPending = false
             reviewDecisionPending = false
             if let data = stripData { stripThumbImage = Self.cgImage(from: data) }
             stateMachine.finishSession(qrPayload: qr)
 
         case .operatorOverride(let action):
+            if case .cancelSession = action { cancelCountdown() }
             stateMachine.operatorOverride(action)
 
         default: break
         }
     }
 
+    private func applySessionSync(_ snapshot: SessionSyncSnapshot) {
+        cancelCountdown()
+        eventConfig = snapshot.config
+        stateMachine.config = snapshot.config
+        selectedLanguage = snapshot.presentation?.language ?? snapshot.config.customerLanguage
+        sessionPresentation = snapshot.presentation
+        promptImages = snapshot.presentation?.prompts.reduce(into: [String: CGImage]()) { result, prompt in
+            if let data = prompt.imageData, let image = Self.cgImage(from: data) {
+                result[prompt.promptID] = image
+            }
+        } ?? [:]
+        isMirrored = snapshot.isMirrored
+        isBoothPaused = snapshot.isBoothPaused
+        recoveryActionPending = false
+        reviewDecisionPending = false
+        guard let sessionID = snapshot.sessionID else {
+            stateMachine.reset()
+            return
+        }
+        stateMachine.startSession(config: snapshot.config, sessionID: sessionID)
+        switch snapshot.phase {
+        case .review(let index):
+            if let data = snapshot.reviewThumbnailData {
+                stateMachine.enterReview(photoIndex: index, thumbnailData: data)
+            } else {
+                stateMachine.transition(to: snapshot.phase)
+            }
+        case .finished:
+            if let data = snapshot.stripThumbnailData { stripThumbImage = Self.cgImage(from: data) }
+            stateMachine.transition(to: snapshot.phase)
+        case .countdown(let index, let seconds):
+            stateMachine.transition(to: snapshot.phase)
+            runCountdown(photoIndex: index, totalSeconds: seconds)
+        default:
+            stateMachine.transition(to: snapshot.phase)
+        }
+    }
+
     private func runCountdown(photoIndex: Int, totalSeconds: Int) {
-        Task {
+        countdownTask?.cancel()
+        countdownTask = Task { @MainActor [weak self] in
+            guard let self else { return }
             for remaining in stride(from: totalSeconds, through: 1, by: -1) {
+                guard !Task.isCancelled else { return }
                 stateMachine.transition(to: .countdown(photoIndex: photoIndex, secondsRemaining: remaining))
                 try? await Task.sleep(for: .seconds(1))
             }
+            guard !Task.isCancelled else { return }
+            self.countdownTask = nil
         }
+    }
+
+    private func cancelCountdown() {
+        countdownTask?.cancel()
+        countdownTask = nil
     }
 
     private func updatePreview(_ jpegData: Data) {
@@ -336,6 +420,7 @@ final class iPadViewModel {
         }
 #endif
         reviewDecisionPending = true
+        cancelCountdown()
         multipeer.sendControl(.reviewDecision(action: .keep))
         stateMachine.keepShot(photoIndex: photoIndex)
     }
@@ -351,12 +436,45 @@ final class iPadViewModel {
         }
 #endif
         reviewDecisionPending = true
+        cancelCountdown()
         multipeer.sendControl(.reviewDecision(action: .retake))
         stateMachine.retakeShot(photoIndex: photoIndex)
     }
 
+    func customerRetryReceive(photoIndex: Int) {
+        sendCaptureRecovery(.retryReceive(photoIndex: photoIndex))
+    }
+
+    func customerRetakeFailedCapture(photoIndex: Int) {
+        sendCaptureRecovery(.retake(photoIndex: photoIndex))
+    }
+
+    func customerContinueAfterCaptureFailure(photoIndex: Int) {
+        sendCaptureRecovery(.continueSession(photoIndex: photoIndex))
+    }
+
+    func customerUsePreviousCapture(photoIndex: Int) {
+        sendCaptureRecovery(.usePrevious(photoIndex: photoIndex))
+    }
+
+    private func sendCaptureRecovery(_ action: CaptureRecoveryAction) {
+        guard !recoveryActionPending else { return }
+        let customerAction: CustomerDisplayAction
+        switch action {
+        case .retryReceive(let index): customerAction = .retryReceive(photoIndex: index)
+        case .retake(let index): customerAction = .retakeFailedCapture(photoIndex: index)
+        case .continueSession(let index): customerAction = .continueAfterCaptureFailure(photoIndex: index)
+        case .usePrevious(let index): customerAction = .usePreviousCapture(photoIndex: index)
+        }
+        guard CustomerDisplayWorkflow.canApply(customerAction, in: stateMachine.phase) else { return }
+        recoveryActionPending = true
+        multipeer.sendControl(.captureRecoveryAction(action: action))
+    }
+
     func customerDone() {
         guard CustomerDisplayWorkflow.canApply(.back, in: stateMachine.phase) else { return }
+        cancelCountdown()
+        recoveryActionPending = false
         reviewDecisionPending = false
         stateMachine.reset()
     }

@@ -14,8 +14,8 @@ enum CameraSourceKind: String, CaseIterable, Identifiable {
 }
 
 // Which channel carries the live preview stream to the iPad.
-// Control messages (session state, countdown, etc.) always go over MultipeerConnectivity —
-// only the high-bandwidth preview frames move between Wi-Fi (MPC) and USB cable.
+// Control messages remain on the reliable BoothTransport control channel;
+// USB is an optional preview-only path.
 enum PreviewConnectionMode: String, CaseIterable, Identifiable {
     case wireless = "Wireless (Wi-Fi)"
     case cable    = "Cable (USB)"
@@ -63,10 +63,11 @@ final class BoothCoordinator {
         )) ?? "\(localBaseURL.trimmingCharacters(in: .whitespacesAndNewlines))/s/\(token)/"
     }
 
-    let multipeer: MultipeerService
+    let multipeer: BoothTransport
     let capture: CaptureService
     let stateMachine: SessionStateMachine
     let server: LocalWebServer
+    let operatorAuth: RemoteOperatorAuth
     let store: DataStore
     let cloudSSHSetup: CloudSSHSetupService
     let manifestStore: SessionManifestStore
@@ -74,6 +75,7 @@ final class BoothCoordinator {
     let jobQueue: SessionJobQueue
     let recoveryService: SessionRecoveryService
     let preflight: BoothPreflightService
+    let operationsEvents: OperationsEventStore
     let printer: PrinterService
     let cloudUpload: CloudUploadService
     let usbPreview = USBPreviewServer()
@@ -104,6 +106,7 @@ final class BoothCoordinator {
         }
     }
     var cameraPermissionGranted: Bool = false
+    private(set) var isBoothPaused = false
     var previewConnectionMode: PreviewConnectionMode {
         get { PreviewConnectionMode(rawValue: UserDefaults.standard.string(forKey: "previewConnectionMode") ?? "") ?? .wireless }
         set { UserDefaults.standard.set(newValue.rawValue, forKey: "previewConnectionMode") }
@@ -123,9 +126,14 @@ final class BoothCoordinator {
     private var retakeCounts: [Int: Int] = [:]
     private var gifFrames: [Int: [CGImage]] = [:]
     private var countdownTask: Task<Void, Never>?
+    private var currentCaptureAttempt: CaptureAttempt?
+    private var hasSeenDSLRConnection = false
+    private var wasDSLRConnected = false
+    private(set) var cameraReconnectCount = 0
     var currentStripPreview: CGImage?
     private(set) var currentFilteredReviewImages: [Int: CGImage] = [:]
     private(set) var currentSessionPresentation: SessionPresentation?
+    private var lastSessionPresentation: SessionPresentation?
     var externalSelection = CustomerSessionSelectionDraft()
 
     // MARK: - External display viewer
@@ -134,10 +142,19 @@ final class BoothCoordinator {
     var isExternalViewerActive: Bool { externalDisplayWindow != nil }
 
     init() {
-        multipeer = MultipeerService(role: .mac)
+#if DEBUG
+        if ProcessInfo.processInfo.arguments.contains("--legacy-multipeer") {
+            multipeer = MultipeerService(role: .mac)
+        } else {
+            multipeer = NetworkBoothTransport(role: .mac)
+        }
+#else
+        multipeer = NetworkBoothTransport(role: .mac)
+#endif
         capture = CaptureService()
         stateMachine = SessionStateMachine()
         server = LocalWebServer(port: 8585)
+        operatorAuth = RemoteOperatorAuth()
         store = DataStore.shared
         cloudSSHSetup = CloudSSHSetupService()
         let runtimeDirectory = Self.runtimeDirectoryURL()
@@ -152,6 +169,7 @@ final class BoothCoordinator {
 #endif
         manifestStore = SessionManifestStore(baseDirectory: runtimeDirectory)
         workspace = SessionWorkspace()
+        operationsEvents = OperationsEventStore(fileURL: runtimeDirectory.appendingPathComponent("operations-events.json"))
         printer = PrinterService()
         cloudUpload = CloudUploadService()
         let jobStore = JobQueueStore(fileURL: runtimeDirectory.appendingPathComponent("jobs.json"))
@@ -211,6 +229,14 @@ final class BoothCoordinator {
             if let ip = LocalWebServer.lanIPAddress() {
                 serverURL = "http://\(ip):8585"
             }
+            await server.configureOperatorHandlers(OperatorWebHandlers(
+                pairingURL: { [weak self] in self?.operatorPairingURL ?? "" },
+                pair: { [weak self] token in self?.operatorAuth.pair(token) },
+                authorize: { [weak self] token in self?.operatorAuth.isValidOperatorToken(token) ?? false },
+                status: { [weak self] in await self?.healthSnapshot() ?? .empty },
+                action: { [weak self] action in await self?.performRemoteOperatorAction(action) ?? false },
+                events: { [weak self] in await self?.operationsEvents.jsonData() ?? Data("[]".utf8) }
+            ))
             try? await server.start()
             _ = await server.waitUntilReady()
             jobQueue.start()
@@ -222,10 +248,71 @@ final class BoothCoordinator {
         }
 
         setupMultipeerHandlers()
+        multipeer.start()
 
         refreshExternalScreens()
         NotificationCenter.default.addObserver(forName: NSApplication.didChangeScreenParametersNotification, object: nil, queue: .main) { [weak self] _ in
             Task { @MainActor [weak self] in self?.refreshExternalScreens() }
+        }
+    }
+
+    var operatorPairingURL: String {
+        let base = serverURL.isEmpty
+            ? "http://\(LocalWebServer.lanIPAddress() ?? "localhost"):8585"
+            : serverURL
+        return "\(base)/operator/pair/\(operatorAuth.pairingTokenValue())"
+    }
+
+    var sharingStationURL: String? {
+        guard let gallery = activeExperienceDocument?.gallery, gallery.mode != .disabled else { return nil }
+        let base = serverURL.isEmpty
+            ? "http://\(LocalWebServer.lanIPAddress() ?? "localhost"):8585"
+            : serverURL
+        return "\(base)/e/\(gallery.eventToken)/station"
+    }
+
+    func performRemoteOperatorAction(_ action: RemoteOperatorAction) async -> Bool {
+        switch action {
+        case .pause:
+            pauseBooth(); return true
+        case .resume:
+            resumeBooth(); return true
+        case .retryFailedJobs:
+            jobQueue.retryAllFailed(); return true
+        case .safeChecks:
+            await runSafePreflight(); return true
+        case .reconnectCamera:
+            guard currentCaptureAttempt == nil else { return false }
+            if cameraSourceKind == .dslr {
+                disconnectDSLR()
+                connectDSLR()
+            } else {
+                capture.stop()
+                startCamera()
+            }
+            return true
+        case .cancelSession:
+            guard currentSession != nil else { return false }
+            await cancelCurrentSession(); return true
+        case .retryReceive, .retake, .continueSession, .usePrevious:
+            guard case .captureRecovery(let index, _) = stateMachine.phase else { return false }
+            let recoveryAction: CaptureRecoveryAction
+            switch action {
+            case .retryReceive: recoveryAction = .retryReceive(photoIndex: index)
+            case .retake: recoveryAction = .retake(photoIndex: index)
+            case .continueSession: recoveryAction = .continueSession(photoIndex: index)
+            case .usePrevious: recoveryAction = .usePrevious(photoIndex: index)
+            default: return false
+            }
+            let customerAction: CustomerDisplayAction = switch recoveryAction {
+            case .retryReceive(let photoIndex): .retryReceive(photoIndex: photoIndex)
+            case .retake(let photoIndex): .retakeFailedCapture(photoIndex: photoIndex)
+            case .continueSession(let photoIndex): .continueAfterCaptureFailure(photoIndex: photoIndex)
+            case .usePrevious(let photoIndex): .usePreviousCapture(photoIndex: photoIndex)
+            }
+            guard CustomerDisplayWorkflow.canApply(customerAction, in: stateMachine.phase) else { return false }
+            handleCaptureRecoveryAction(recoveryAction)
+            return true
         }
     }
 
@@ -505,6 +592,16 @@ final class BoothCoordinator {
         Task { await server.stop() }
     }
 
+    func pauseBooth() {
+        isBoothPaused = true
+        multipeer.sendControl(.boothPaused(isPaused: true))
+    }
+
+    func resumeBooth() {
+        isBoothPaused = false
+        multipeer.sendControl(.boothPaused(isPaused: false))
+    }
+
     // MARK: - Camera permission (M10)
 
     func checkCameraPermission() async {
@@ -738,6 +835,16 @@ final class BoothCoordinator {
     }
 
     private func handleDSLRConnectionStateChanged() {
+        if capture.dslr.isRunning, !wasDSLRConnected {
+            recordOperation(hasSeenDSLRConnection ? .cameraReconnected : .cameraConnected)
+        } else if !capture.dslr.isRunning, wasDSLRConnected {
+            recordOperation(.cameraDisconnected)
+        }
+        if capture.dslr.isRunning, hasSeenDSLRConnection, !wasDSLRConnected {
+            cameraReconnectCount += 1
+        }
+        if capture.dslr.isRunning { hasSeenDSLRConnection = true }
+        wasDSLRConnected = capture.dslr.isRunning
         if capture.dslr.isRunning {
             if cameraSourceKind == .dslr { capture.usesDSLR = true }
             choosePreviewDeviceForDSLR()
@@ -773,6 +880,10 @@ final class BoothCoordinator {
     // MARK: - Session control
 
     func startSession(selection requestedSelection: CustomerSessionSelection? = nil) {
+        guard !isBoothPaused else {
+            errorMessage = "The booth is paused by the operator."
+            return
+        }
         guard currentSession == nil, let event = activeEvent else { return }
         reviewDecisionPending = false
         guard recoveryService.recoverableCaptureSession == nil else {
@@ -882,6 +993,7 @@ final class BoothCoordinator {
                 currentManifestID = manifest.id
                 retakeCounts = [:]
                 gifFrames = [:]
+                currentCaptureAttempt = nil
                 currentFilteredReviewImages = [:]
                 capture.resetStills()
                 stateMachine.startSession(config: config, sessionID: session.id)
@@ -896,6 +1008,8 @@ final class BoothCoordinator {
                     workspace: descriptor
                 )
                 currentSessionPresentation = presentation
+                lastSessionPresentation = presentation
+                recordOperation(.sessionStarted, sessionID: session.id)
                 multipeer.sendControl(.sessionStart)
                 multipeer.sendControl(.eventConfig(config: config))
                 multipeer.sendControl(.sessionPrepared(config: config, presentation: presentation))
@@ -927,6 +1041,17 @@ final class BoothCoordinator {
     }
 
     private func captureShot(photoIndex: Int) async {
+        let attempt = CaptureAttempt()
+        currentCaptureAttempt = attempt
+        recordOperation(.captureStarted, sessionID: currentManifest?.id, photoIndex: photoIndex)
+        await recordCaptureAttempt(
+            attempt,
+            photoIndex: photoIndex,
+            result: .failed,
+            completedAt: nil,
+            reason: "in_progress",
+            receiveDuration: nil
+        )
         do {
             gifFrames[photoIndex] = capture.drainBufferForGIF()
             let image = try await capture.captureStill(for: photoIndex)
@@ -937,11 +1062,128 @@ final class BoothCoordinator {
             }
             stateMachine.enterReview(photoIndex: photoIndex, thumbnailData: thumbData)
             reviewDecisionPending = false
+            await recordCaptureAttempt(
+                attempt,
+                photoIndex: photoIndex,
+                result: .success,
+                completedAt: Date(),
+                reason: nil,
+                receiveDuration: Date().timeIntervalSince(attempt.startedAt)
+            )
+            recordOperation(.captureSucceeded, sessionID: currentManifest?.id, photoIndex: photoIndex, duration: Date().timeIntervalSince(attempt.startedAt))
+            currentCaptureAttempt = nil
             multipeer.sendControl(.shotCaptured(index: photoIndex, thumbnailData: thumbData))
             updateStripPreview()
         } catch {
-            errorMessage = error.localizedDescription
+            let summary = captureFailureSummary(photoIndex: photoIndex, error: error)
+            await recordCaptureAttempt(
+                attempt,
+                photoIndex: photoIndex,
+                result: .failed,
+                completedAt: Date(),
+                reason: error.localizedDescription,
+                receiveDuration: Date().timeIntervalSince(attempt.startedAt)
+            )
+            recordOperation(.captureFailed, sessionID: currentManifest?.id, photoIndex: photoIndex, duration: Date().timeIntervalSince(attempt.startedAt), reason: summary.reason.rawValue)
+            await persistCaptureFailure(photoIndex: photoIndex, error: error)
+            currentCaptureAttempt = nil
+            stateMachine.enterCaptureRecovery(photoIndex: photoIndex, failure: summary)
+            reviewDecisionPending = false
+            multipeer.sendControl(.captureRecovery(photoIndex: photoIndex, failure: summary))
         }
+    }
+
+    private func recordCaptureAttempt(
+        _ attempt: CaptureAttempt,
+        photoIndex: Int,
+        result: CaptureAttemptResult,
+        completedAt: Date?,
+        reason: String?,
+        receiveDuration: Double?
+    ) async {
+        guard var manifest = currentManifest,
+              currentManifestID == manifest.id else { return }
+        var records = manifest.captureAttempts ?? []
+        let record = CaptureAttemptRecord(
+            id: attempt.id.uuidString,
+            photoIndex: photoIndex,
+            startedAt: attempt.startedAt,
+            completedAt: completedAt,
+            result: result,
+            reason: reason,
+            receiveDuration: receiveDuration
+        )
+        if let index = records.firstIndex(where: { $0.id == record.id }) {
+            records[index] = record
+        } else {
+            records.append(record)
+        }
+        manifest.captureAttempts = records
+        manifest.updatedAt = Date()
+        try? await manifestStore.save(manifest)
+        currentManifest = manifest
+    }
+
+    private func persistCaptureFailure(photoIndex: Int, error: Error) async {
+        guard var manifest = currentManifest,
+              currentManifestID == manifest.id else { return }
+        manifest.lastError = error.localizedDescription
+        manifest.nextPhotoIndex = photoIndex
+        manifest.updatedAt = Date()
+        try? await manifestStore.save(manifest)
+        currentManifest = manifest
+        errorMessage = error.localizedDescription
+    }
+
+    private func captureFailureSummary(photoIndex: Int, error: Error) -> CaptureFailureSummary {
+        let reason: CaptureFailureReason
+#if DEBUG
+        if let demoFailure = error as? DemoCaptureFailure {
+            reason = demoFailure.reason
+        } else {
+            reason = captureFailureReason(for: error)
+        }
+#else
+        reason = captureFailureReason(for: error)
+#endif
+        let previous = currentManifest?.shots.first(where: { $0.photoIndex == photoIndex })
+        let hasOtherMissingPhoto = currentManifest?.shots.contains {
+            $0.photoIndex != photoIndex && $0.imageFileName == nil
+        } ?? false
+        let canReceive = (capture.usesDSLR || capture.demoMode)
+            && reason != .cameraDisconnected
+        let message: String
+        switch reason {
+        case .cameraDisconnected:
+            message = "The camera disconnected before the image arrived."
+        case .cameraBusy:
+            message = "The camera is busy. Please try the photo again."
+        default:
+            message = "The camera may have taken the photo, but the image did not reach the booth."
+        }
+        return CaptureFailureSummary(
+            photoIndex: photoIndex,
+            reason: reason,
+            message: message,
+            shutterLikelyFired: reason != .cameraBusy,
+            canRetryReceive: canReceive,
+            canUsePreviousPhoto: previous?.previousImageFileName != nil,
+            canContinueSession: hasOtherMissingPhoto
+        )
+    }
+
+    private func captureFailureReason(for error: Error) -> CaptureFailureReason {
+        if let dslrError = error as? DSLRError,
+           case .cameraDisconnected = dslrError {
+            return .cameraDisconnected
+        }
+        let text = error.localizedDescription.lowercased()
+        if text.contains("busy") { return .cameraBusy }
+        if text.contains("timed out") || text.contains("timeout") { return .transferTimeout }
+        if text.contains("decode") { return .decodeFailed }
+        if text.contains("download") || text.contains("image received") { return .downloadFailed }
+        if text.contains("ptp") { return .ptpFailure }
+        return .unknown
     }
 
     private func updateStripPreview() {
@@ -985,6 +1227,209 @@ final class BoothCoordinator {
                 defer { self.reviewDecisionPending = false }
                 await self.requestRetake(photoIndex: photoIndex, source: .guest)
             }
+        }
+    }
+
+    func handleCaptureRecoveryAction(_ action: CaptureRecoveryAction) {
+        let customerAction: CustomerDisplayAction
+        switch action {
+        case .retryReceive(let photoIndex):
+            customerAction = .retryReceive(photoIndex: photoIndex)
+        case .retake(let photoIndex):
+            customerAction = .retakeFailedCapture(photoIndex: photoIndex)
+        case .continueSession(let photoIndex):
+            customerAction = .continueAfterCaptureFailure(photoIndex: photoIndex)
+        case .usePrevious(let photoIndex):
+            customerAction = .usePreviousCapture(photoIndex: photoIndex)
+        }
+        guard !reviewDecisionPending,
+              CustomerDisplayWorkflow.canApply(customerAction, in: stateMachine.phase) else { return }
+        reviewDecisionPending = true
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            defer { self.reviewDecisionPending = false }
+            switch action {
+            case .retryReceive(let photoIndex):
+                await self.retryReceive(photoIndex: photoIndex)
+            case .retake(let photoIndex):
+                await self.retakeFailedCapture(photoIndex: photoIndex)
+            case .continueSession(let photoIndex):
+                await self.continueAfterCaptureFailure(photoIndex: photoIndex)
+            case .usePrevious(let photoIndex):
+                await self.usePreviousCapture(photoIndex: photoIndex)
+            }
+        }
+    }
+
+    private func retryReceive(photoIndex: Int) async {
+        guard case .captureRecovery(let currentIndex, _) = stateMachine.phase,
+              currentIndex == photoIndex else { return }
+        let attempt = CaptureAttempt()
+        currentCaptureAttempt = attempt
+        do {
+            let image = try await capture.recoverLastCapture()
+            let filtered = try await filterPipeline.apply(stateMachine.config.selectedFilterID, to: image)
+            guard let thumbData = capture.thumbnail(for: filtered) else {
+                throw PhotoFilterError.failedToCreateOutput(stateMachine.config.selectedFilterID)
+            }
+            capture.storeStill(image, for: photoIndex)
+            currentFilteredReviewImages[photoIndex] = filtered
+            stateMachine.enterReview(photoIndex: photoIndex, thumbnailData: thumbData)
+            await recordCaptureAttempt(
+                attempt,
+                photoIndex: photoIndex,
+                result: .transferRecovered,
+                completedAt: Date(),
+                reason: nil,
+                receiveDuration: Date().timeIntervalSince(attempt.startedAt)
+            )
+            recordOperation(.captureRecovered, sessionID: currentManifest?.id, photoIndex: photoIndex, duration: Date().timeIntervalSince(attempt.startedAt))
+            currentCaptureAttempt = nil
+            multipeer.sendControl(.shotCaptured(index: photoIndex, thumbnailData: thumbData))
+            updateStripPreview()
+        } catch {
+            let summary = captureFailureSummary(photoIndex: photoIndex, error: error)
+            await recordCaptureAttempt(
+                attempt,
+                photoIndex: photoIndex,
+                result: .failed,
+                completedAt: Date(),
+                reason: error.localizedDescription,
+                receiveDuration: Date().timeIntervalSince(attempt.startedAt)
+            )
+            await persistCaptureFailure(photoIndex: photoIndex, error: error)
+            stateMachine.enterCaptureRecovery(photoIndex: photoIndex, failure: summary)
+            currentCaptureAttempt = nil
+            multipeer.sendControl(.captureRecovery(photoIndex: photoIndex, failure: summary))
+        }
+    }
+
+    private func retakeFailedCapture(photoIndex: Int) async {
+        guard case .captureRecovery(let currentIndex, _) = stateMachine.phase,
+              currentIndex == photoIndex,
+              var manifest = currentManifest else { return }
+        let current = manifest.shots.first(where: { $0.photoIndex == photoIndex })
+        let count = incrementRetakeCount(in: &retakeCounts, photoIndex: photoIndex)
+        upsertManifestShot(
+            &manifest,
+            photoIndex: photoIndex,
+            imageFileName: nil,
+            gifFrameFileNames: [],
+            retakeCount: count,
+            acceptedAt: nil,
+            previousImageFileName: current?.imageFileName ?? current?.previousImageFileName,
+            previousGifFrameFileNames: current?.gifFrameFileNames.isEmpty == false
+                ? current?.gifFrameFileNames
+                : current?.previousGifFrameFileNames,
+            previousAcceptedAt: current?.acceptedAt ?? current?.previousAcceptedAt
+        )
+        manifest.nextPhotoIndex = photoIndex
+        manifest.status = .capturing
+        manifest.lastError = nil
+        do {
+            try await manifestStore.save(manifest)
+            currentManifest = manifest
+            await recordCaptureAttempt(
+                CaptureAttempt(),
+                photoIndex: photoIndex,
+                result: .retaken,
+                completedAt: Date(),
+                reason: "retaken",
+                receiveDuration: nil
+            )
+            recordOperation(.captureRetried, sessionID: manifest.id, photoIndex: photoIndex)
+            currentCaptureAttempt = nil
+            stateMachine.retakeShot(photoIndex: photoIndex)
+            beginCountdown(photoIndex: photoIndex)
+        } catch {
+            errorMessage = "Could not start retake: \(error.localizedDescription)"
+        }
+    }
+
+    private func continueAfterCaptureFailure(photoIndex: Int) async {
+        guard case .captureRecovery(let currentIndex, _) = stateMachine.phase,
+              currentIndex == photoIndex,
+              var manifest = currentManifest else { return }
+        let next = stateMachine.continueAfterCaptureFailure(photoIndex: photoIndex)
+        guard let next else {
+            errorMessage = "Cannot continue while a required photograph is missing."
+            return
+        }
+        manifest.nextPhotoIndex = next
+        manifest.status = .capturing
+        manifest.updatedAt = Date()
+        do {
+            try await manifestStore.save(manifest)
+            currentManifest = manifest
+            await recordCaptureAttempt(
+                CaptureAttempt(),
+                photoIndex: photoIndex,
+                result: .deferred,
+                completedAt: Date(),
+                reason: "deferred",
+                receiveDuration: nil
+            )
+            recordOperation(.captureDeferred, sessionID: manifest.id, photoIndex: photoIndex)
+            currentCaptureAttempt = nil
+            beginCountdown(photoIndex: next)
+        } catch {
+            errorMessage = "Could not defer photograph: \(error.localizedDescription)"
+        }
+    }
+
+    private func usePreviousCapture(photoIndex: Int) async {
+        guard case .captureRecovery(let currentIndex, _) = stateMachine.phase,
+              currentIndex == photoIndex,
+              var manifest = currentManifest,
+              let previous = manifest.shots.first(where: { $0.photoIndex == photoIndex }),
+              let imageFileName = previous.previousImageFileName else { return }
+        let directory = URL(fileURLWithPath: manifest.absoluteDirectoryPath, isDirectory: true)
+        guard let image = loadCGImage(from: directory.appendingPathComponent(imageFileName)) else {
+            errorMessage = "The previous photograph is no longer available."
+            return
+        }
+        do {
+            let filtered = try await filterPipeline.apply(stateMachine.config.selectedFilterID, to: image)
+            guard let thumbData = capture.thumbnail(for: filtered) else {
+                throw PhotoFilterError.failedToCreateOutput(stateMachine.config.selectedFilterID)
+            }
+            let gifs = previous.previousGifFrameFileNames ?? []
+            upsertManifestShot(
+                &manifest,
+                photoIndex: photoIndex,
+                imageFileName: imageFileName,
+                gifFrameFileNames: gifs,
+                retakeCount: previous.retakeCount,
+                acceptedAt: previous.previousAcceptedAt ?? Date()
+            )
+            manifest.nextPhotoIndex = (0..<manifest.eventConfig.photoCount)
+                .first { index in
+                    manifest.shots.first(where: { $0.photoIndex == index })?.imageFileName == nil
+                } ?? manifest.eventConfig.photoCount
+            manifest.status = manifest.nextPhotoIndex == manifest.eventConfig.photoCount ? .finalizing : .capturing
+            manifest.lastError = nil
+            try await manifestStore.save(manifest)
+            currentManifest = manifest
+            capture.storeStill(image, for: photoIndex)
+            currentFilteredReviewImages[photoIndex] = filtered
+            stateMachine.usePreviousCapture(photoIndex: photoIndex, thumbnailData: thumbData)
+            await recordCaptureAttempt(
+                CaptureAttempt(),
+                photoIndex: photoIndex,
+                result: .usedPrevious,
+                completedAt: Date(),
+                reason: "previous_photo_used",
+                receiveDuration: nil
+            )
+            recordOperation(.previousPhotoUsed, sessionID: manifest.id, photoIndex: photoIndex)
+            currentCaptureAttempt = nil
+            if case .processing = stateMachine.phase {
+                await finalizeSession()
+            } else if case .countdown(let next, _) = stateMachine.phase {
+                beginCountdown(photoIndex: next)
+            }
+        } catch {
+            errorMessage = "Could not restore the previous photograph: \(error.localizedDescription)"
         }
     }
 
@@ -1049,6 +1494,7 @@ final class BoothCoordinator {
                 } ?? manifest.eventConfig.photoCount
             let isComplete = manifest.nextPhotoIndex == manifest.eventConfig.photoCount
             manifest.status = isComplete ? .finalizing : .capturing
+            manifest.lastError = nil
             try await manifestStore.save(manifest)
             currentManifest = manifest
             let session = currentSession ?? store.restoreSessionRecord(from: manifest)
@@ -1081,10 +1527,15 @@ final class BoothCoordinator {
         upsertManifestShot(
             &manifest,
             photoIndex: photoIndex,
-            imageFileName: previous?.imageFileName,
-            gifFrameFileNames: previous?.gifFrameFileNames ?? [],
+            imageFileName: nil,
+            gifFrameFileNames: [],
             retakeCount: count,
-            acceptedAt: previous?.acceptedAt
+            acceptedAt: nil,
+            previousImageFileName: previous?.imageFileName ?? previous?.previousImageFileName,
+            previousGifFrameFileNames: previous?.gifFrameFileNames.isEmpty == false
+                ? previous?.gifFrameFileNames
+                : previous?.previousGifFrameFileNames,
+            previousAcceptedAt: previous?.acceptedAt ?? previous?.previousAcceptedAt
         )
         do {
             try await manifestStore.save(manifest)
@@ -1114,6 +1565,7 @@ final class BoothCoordinator {
         }
         manifest.status = .cancelled
         manifest.cancelledAt = Date()
+        recordOperation(.sessionCancelled, sessionID: manifest.id)
         try? await manifestStore.save(manifest)
         jobQueue.cancelJobs(sessionID: manifest.id)
         try? workspace.removeEntireSession(manifest: manifest)
@@ -1124,6 +1576,7 @@ final class BoothCoordinator {
         currentSessionPresentation = nil
         retakeCounts = [:]
         gifFrames = [:]
+        currentCaptureAttempt = nil
         currentFilteredReviewImages = [:]
         capture.resetStills()
         reviewDecisionPending = false
@@ -1145,10 +1598,12 @@ final class BoothCoordinator {
         currentSession = store.restoreSessionRecord(from: manifest)
         currentSessionPresentation = (try? workspace.loadPresentationSnapshot(manifest: manifest))
             ?? presentation(for: manifest.eventConfig, sessionID: manifest.id)
+        lastSessionPresentation = currentSessionPresentation
         retakeCounts = manifest.shots.reduce(into: [:]) { result, shot in
             result[shot.photoIndex] = shot.retakeCount
         }
         gifFrames = [:]
+        currentCaptureAttempt = nil
         capture.restoreStills(images)
         let thumbnails = images.reduce(into: [Int: Data]()) { result, item in
             if let data = capture.thumbnail(for: item.value) { result[item.key] = data }
@@ -1319,6 +1774,7 @@ final class BoothCoordinator {
         }
         currentManifest = manifest
         lastCompletedSessionID = manifest.id
+        recordOperation(.sessionCompleted, sessionID: manifest.id, duration: Date().timeIntervalSince(manifest.startedAt))
         store.finishSession(
             sessionID: manifest.id,
             stripPath: manifest.stripFileName.map { "\(manifest.relativeDirectoryPath)/\($0)" },
@@ -1347,6 +1803,7 @@ final class BoothCoordinator {
             try? workspace.removeWorkingFiles(manifest: manifest)
         }
         currentSession = nil
+        lastSessionPresentation = currentSessionPresentation
         currentSessionPresentation = nil
     }
 
@@ -1522,41 +1979,38 @@ final class BoothCoordinator {
             if case .review(let idx) = stateMachine.phase {
                 handleReviewDecision(photoIndex: idx, action: action)
             }
+        case .captureRecoveryAction(let action):
+            handleCaptureRecoveryAction(action)
         default: break
         }
     }
 
     // Push current Mac state to iPad after (re)connect so it's never stuck at idle mid-session.
     private func resynciPad() {
-        multipeer.sendControl(.setMirrored(isMirrored: capture.camera.isMirrored))
-        switch stateMachine.phase {
-        case .idle, .selectingExperience, .readyToStart:
-            break
-        case .countdown(let idx, let secs):
-            multipeer.sendControl(.sessionStart)
-            multipeer.sendControl(.eventConfig(config: stateMachine.config))
-            if let presentation = currentSessionPresentation {
-                multipeer.sendControl(.sessionPrepared(config: stateMachine.config, presentation: presentation))
-            }
-            multipeer.sendControl(.beginCountdown(photoIndex: idx, seconds: secs))
-        case .captured(let idx), .review(let idx):
-            if let thumb = stateMachine.keptShots[idx] {
-                multipeer.sendControl(.sessionStart)
-                multipeer.sendControl(.eventConfig(config: stateMachine.config))
-                if let presentation = currentSessionPresentation {
-                    multipeer.sendControl(.sessionPrepared(config: stateMachine.config, presentation: presentation))
-                }
-                multipeer.sendControl(.shotCaptured(index: idx, thumbnailData: thumb))
-            }
-        case .processing:
-            multipeer.sendControl(.sessionStart)
-            multipeer.sendControl(.eventConfig(config: stateMachine.config))
-            if let presentation = currentSessionPresentation {
-                multipeer.sendControl(.sessionPrepared(config: stateMachine.config, presentation: presentation))
-            }
-        case .finished(let qr):
-            multipeer.sendControl(.sessionFinished(qrPayload: qr, stripThumbData: nil, gifThumbData: nil))
+        let phase = stateMachine.phase
+        let sessionID: String? = switch phase {
+        case .idle, .selectingExperience, .readyToStart: nil
+        default: currentSession?.id ?? lastCompletedSessionID
         }
+        let reviewThumbnail: Data? = {
+            guard case .review(let index) = phase else { return nil }
+            return stateMachine.keptShots[index]
+        }()
+        let stripThumbnail: Data? = {
+            guard case .finished = phase else { return nil }
+            return currentStripPreview.flatMap { jpegData(from: $0, quality: 0.4) }
+        }()
+        multipeer.sendControl(.sessionSync(snapshot: SessionSyncSnapshot(
+            config: stateMachine.config,
+            sessionID: sessionID,
+            phase: phase,
+            presentation: currentSessionPresentation ?? lastSessionPresentation,
+            reviewThumbnailData: reviewThumbnail,
+            stripThumbnailData: stripThumbnail,
+            isMirrored: capture.camera.isMirrored,
+            isBoothPaused: isBoothPaused
+        )))
+        multipeer.sendControl(.setMirrored(isMirrored: capture.camera.isMirrored))
     }
 
     // MARK: - Directories
@@ -1577,6 +2031,114 @@ final class BoothCoordinator {
     }
 
     var eventFolderPath: String { picturesOutputDir()?.path ?? "Unavailable" }
+
+    var cameraHealthSnapshot: CameraHealthSnapshot {
+        let dslr = cameraSourceKind == .dslr
+        let connected = capture.isRunning && (!dslr || capture.dslr.isRunning)
+        let selectedName = dslr
+            ? capture.dslr.selectedDeviceName
+            : capture.camera.availableDevices.first(where: { $0.id == capture.camera.selectedDeviceID })?.name
+        return CameraHealthSnapshot(
+            connected: connected,
+            connecting: dslr && capture.dslr.isConnecting,
+            cameraName: selectedName,
+            cameraKind: cameraSourceKind.rawValue,
+            livePreviewActive: dslr ? capture.dslr.isLivePreviewActive : capture.isRunning,
+            previewFPS: dslr ? capture.dslr.measuredPreviewFPS : nil,
+            ptpHealthy: dslr ? capture.dslr.isPTPHealthy : nil,
+            captureInProgress: currentCaptureAttempt != nil,
+            lastCaptureAt: capture.lastCaptureAt,
+            lastCaptureDuration: capture.lastCaptureDuration,
+            lastCaptureError: capture.lastCaptureError,
+            captureSuccessCount: capture.captureSuccessCount,
+            captureFailureCount: capture.captureFailureCount,
+            recoveredTransferCount: capture.recoveredTransferCount,
+            reconnectCount: cameraReconnectCount,
+            batteryLevel: nil
+        )
+    }
+
+    func healthSnapshot() async -> BoothHealthSnapshot {
+        let serverStatus = await server.statusSnapshot()
+        let queue = jobQueue.jobs
+        let connectedPeer: String? = {
+            guard case .connected = multipeer.connectionState else { return nil }
+            return multipeer.peerName.isEmpty ? nil : multipeer.peerName
+        }()
+        let serverHealth: BoothHealthStatus = switch serverStatus.state {
+        case .ready: .healthy
+        case .starting: .unknown
+        case .failed: .unavailable
+        case .stopped: .unavailable
+        }
+        let disk = picturesOutputDir().flatMap {
+            try? $0.resourceValues(forKeys: [.volumeAvailableCapacityKey]).volumeAvailableCapacity
+        }.map(Int64.init)
+        let camera = cameraHealthSnapshot
+        let hasRequiredFailure = queue.contains { !$0.kind.isOptional && $0.status == .failed }
+        let overall: BoothHealthStatus = camera.connected && serverHealth == .healthy && !hasRequiredFailure
+            ? .healthy
+            : camera.connected || serverHealth == .healthy ? .degraded : .unavailable
+        let deliverySessionID = currentSession?.id ?? lastCompletedSessionID
+        let deliveryJobs = deliverySessionID.map { sessionID in queue.filter { $0.sessionID == sessionID } } ?? []
+        return BoothHealthSnapshot(
+            updatedAt: Date(),
+            status: overall,
+            camera: camera,
+            customerDisplayConnected: connectedPeer != nil || isExternalViewerActive,
+            customerDisplayPeer: connectedPeer,
+            controlConnection: connectionLabel(multipeer.connectionState),
+            previewConnection: previewConnectionMode.rawValue,
+            localServer: serverHealth,
+            diskAvailableBytes: disk,
+            queuePending: queue.filter { $0.status == .pending }.count,
+            queueRunning: queue.filter { $0.status == .running }.count,
+            queueRetrying: queue.filter { $0.status == .waitingRetry }.count,
+            queueFailed: queue.filter { $0.status == .failed }.count,
+            printerName: printerLabel,
+            printerStatus: printerStatusLabel,
+            printSuccessCount: printer.printSuccessCount,
+            printFailureCount: printer.printFailureCount,
+            cloudPendingCount: queue.filter { $0.kind == .cloudUpload && ($0.status == .pending || $0.status == .running || $0.status == .waitingRetry) }.count,
+            cloudFailedCount: queue.filter { $0.kind == .cloudUpload && $0.status == .failed }.count,
+            currentSessionID: currentSession?.id,
+            currentPhase: stateMachine.phase.displayName,
+            isBoothPaused: isBoothPaused,
+            delivery: deliveryJobs.isEmpty ? nil : SessionDeliveryResolver.resolve(deliveryJobs)
+        )
+    }
+
+    private var printerLabel: String {
+        switch printer.configuredPrinterStatus() {
+        case .systemDefault: return "System Default"
+        case .available(let name), .unavailable(let name): return name
+        }
+    }
+
+    private var printerStatusLabel: String {
+        switch printer.configuredPrinterStatus() {
+        case .systemDefault, .available: return "available"
+        case .unavailable: return "unavailable"
+        }
+    }
+
+    private func connectionLabel(_ state: BoothConnectionState) -> String {
+        switch state {
+        case .connected(let peer): return "connected: \(peer)"
+        case .connecting: return "connecting"
+        case .disconnected: return "disconnected"
+        }
+    }
+
+    private func recordOperation(
+        _ kind: OperationsEventKind,
+        sessionID: String? = nil,
+        photoIndex: Int? = nil,
+        duration: Double? = nil,
+        reason: String? = nil
+    ) {
+        Task { await operationsEvents.record(kind, sessionID: sessionID, photoIndex: photoIndex, duration: duration, reason: reason) }
+    }
 
     func setEventFolder(_ url: URL) {
         do {
@@ -1630,7 +2192,10 @@ final class BoothCoordinator {
         imageFileName: String?,
         gifFrameFileNames: [String],
         retakeCount: Int,
-        acceptedAt: Date?
+        acceptedAt: Date?,
+        previousImageFileName: String? = nil,
+        previousGifFrameFileNames: [String]? = nil,
+        previousAcceptedAt: Date? = nil
     ) {
         upsertRuntimeShot(
             in: &manifest.shots,
@@ -1638,7 +2203,10 @@ final class BoothCoordinator {
             imageFileName: imageFileName,
             gifFrameFileNames: gifFrameFileNames,
             retakeCount: retakeCount,
-            acceptedAt: acceptedAt
+            acceptedAt: acceptedAt,
+            previousImageFileName: previousImageFileName,
+            previousGifFrameFileNames: previousGifFrameFileNames,
+            previousAcceptedAt: previousAcceptedAt
         )
     }
 }
@@ -1662,14 +2230,20 @@ func upsertRuntimeShot(
     imageFileName: String?,
     gifFrameFileNames: [String],
     retakeCount: Int,
-    acceptedAt: Date?
+    acceptedAt: Date?,
+    previousImageFileName: String? = nil,
+    previousGifFrameFileNames: [String]? = nil,
+    previousAcceptedAt: Date? = nil
 ) {
     let shot = RuntimeShotRecord(
         photoIndex: photoIndex,
         imageFileName: imageFileName,
         gifFrameFileNames: gifFrameFileNames,
         retakeCount: max(0, retakeCount),
-        acceptedAt: acceptedAt
+        acceptedAt: acceptedAt,
+        previousImageFileName: previousImageFileName,
+        previousGifFrameFileNames: previousGifFrameFileNames,
+        previousAcceptedAt: previousAcceptedAt
     )
     if let index = shots.firstIndex(where: { $0.photoIndex == photoIndex }) {
         shots[index] = shot

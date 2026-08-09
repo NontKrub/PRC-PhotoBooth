@@ -539,6 +539,7 @@ struct OperatorConsoleView: View {
         case .countdown:            return .orange
         case .captured:             return .blue
         case .review:               return .purple
+        case .captureRecovery:      return .red
         case .processing:           return .yellow
         case .finished:             return .green
         }

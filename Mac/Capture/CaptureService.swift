@@ -13,8 +13,17 @@ final class CaptureService {
     let dslr: DSLRCameraSource             // used for still capture when usesDSLR == true
 #if DEBUG
     let demoCamera = DemoCameraSource()
+    private var demoFailures: [Int: DemoCaptureFailure] = [:]
+    private var pendingDemoRecoveryImage: CGImage?
 #endif
+    private var lastCaptureImage: CGImage?
     private(set) var demoPreviewImage: CGImage?
+    private(set) var lastCaptureAt: Date?
+    private(set) var lastCaptureDuration: Double?
+    private(set) var lastCaptureError: String?
+    private(set) var captureSuccessCount = 0
+    private(set) var captureFailureCount = 0
+    private(set) var recoveredTransferCount = 0
 
     var usesDSLR = false
     var demoMode = false
@@ -27,6 +36,9 @@ final class CaptureService {
     init() {
         camera = AVFoundationCameraSource()
         dslr = DSLRCameraSource()
+#if DEBUG
+        configureDemoFailures()
+#endif
         camera.onPreviewJPEG = { [weak self] jpeg in
             Task { @MainActor [weak self] in
                 guard let self, !self.usesDSLR else { return }
@@ -84,9 +96,16 @@ final class CaptureService {
     }
 
     func captureStill(for photoIndex: Int) async throws -> CGImage {
+        let startedAt = Date()
+        do {
         var image: CGImage
 #if DEBUG
         if demoMode {
+            if let failure = demoFailures.removeValue(forKey: photoIndex) {
+                // Simulate a fired shutter with an image that remains recoverable.
+                pendingDemoRecoveryImage = try await demoCamera.captureStill()
+                throw failure
+            }
             image = try await demoCamera.captureStill()
         } else {
             if usesDSLR {
@@ -112,7 +131,57 @@ final class CaptureService {
             image = rotated(image, by: captureRotationDegrees) ?? image
         }
         capturedStills[photoIndex] = image
+        lastCaptureImage = image
+        lastCaptureAt = Date()
+        lastCaptureDuration = Date().timeIntervalSince(startedAt)
+        lastCaptureError = nil
+        captureSuccessCount += 1
         return image
+        } catch {
+            lastCaptureAt = Date()
+            lastCaptureDuration = Date().timeIntervalSince(startedAt)
+            lastCaptureError = error.localizedDescription
+            captureFailureCount += 1
+            throw error
+        }
+    }
+
+    func recoverLastCapture() async throws -> CGImage {
+        let startedAt = Date()
+        do {
+#if DEBUG
+        if demoMode {
+            guard let image = pendingDemoRecoveryImage ?? lastCaptureImage else {
+                throw DSLRError.captureFailed("No recoverable image is available.")
+            }
+            pendingDemoRecoveryImage = nil
+            return image
+        }
+#endif
+        guard usesDSLR else {
+            throw DSLRError.captureFailed("The selected camera has no pending transfer to recover.")
+        }
+        var image = try await dslr.recoverLastCapture()
+        if captureRotationDegrees != 0 {
+            image = rotated(image, by: captureRotationDegrees) ?? image
+        }
+        lastCaptureImage = image
+        lastCaptureAt = Date()
+        lastCaptureDuration = Date().timeIntervalSince(startedAt)
+        lastCaptureError = nil
+        recoveredTransferCount += 1
+        return image
+        } catch {
+            lastCaptureAt = Date()
+            lastCaptureDuration = Date().timeIntervalSince(startedAt)
+            lastCaptureError = error.localizedDescription
+            throw error
+        }
+    }
+
+    func storeStill(_ image: CGImage, for photoIndex: Int) {
+        capturedStills[photoIndex] = image
+        lastCaptureImage = image
     }
 
     func captureDiagnosticStill() async throws -> CGImage {
@@ -164,6 +233,10 @@ final class CaptureService {
 
     func resetStills() {
         capturedStills = [:]
+        lastCaptureImage = nil
+#if DEBUG
+        pendingDemoRecoveryImage = nil
+#endif
     }
 
     func restoreStills(_ images: [Int: CGImage]) {
@@ -185,6 +258,31 @@ final class CaptureService {
         return jpegData(from: thumb, quality: 0.6)
     }
 }
+
+#if DEBUG
+struct DemoCaptureFailure: LocalizedError {
+    let reason: CaptureFailureReason
+    var errorDescription: String? { "Demo capture failure: \(reason.rawValue)" }
+}
+
+private extension CaptureService {
+    func configureDemoFailures() {
+        let arguments = ProcessInfo.processInfo.arguments
+        let settings: [(String, CaptureFailureReason)] = [
+            ("--demo-capture-fail-once=", .transferTimeout),
+            ("--demo-capture-transfer-timeout=", .transferTimeout),
+            ("--demo-camera-disconnect-on=", .cameraDisconnected),
+            ("--demo-capture-decode-failure=", .decodeFailed)
+        ]
+        for (prefix, reason) in settings {
+            for argument in arguments where argument.hasPrefix(prefix) {
+                guard let index = Int(argument.dropFirst(prefix.count)), index >= 0 else { continue }
+                demoFailures[index] = DemoCaptureFailure(reason: reason)
+            }
+        }
+    }
+}
+#endif
 
 // MARK: - JPEG encode helper (used by CaptureService and AVFoundationCameraSource)
 

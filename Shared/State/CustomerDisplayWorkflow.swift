@@ -7,6 +7,7 @@ public enum CustomerDisplayScreen: Equatable, Sendable {
     case countdown(photoIndex: Int, secondsRemaining: Int)
     case processing
     case review(photoIndex: Int)
+    case captureRecovery(photoIndex: Int, failure: CaptureFailureSummary)
     case finished
 }
 
@@ -16,6 +17,10 @@ public enum CustomerDisplayAction: Equatable, Sendable {
     case start
     case keep(photoIndex: Int)
     case retake(photoIndex: Int)
+    case retryReceive(photoIndex: Int)
+    case retakeFailedCapture(photoIndex: Int)
+    case continueAfterCaptureFailure(photoIndex: Int)
+    case usePreviousCapture(photoIndex: Int)
     case back
 }
 
@@ -29,6 +34,8 @@ public enum CustomerDisplayWorkflow {
             return .countdown(photoIndex: photoIndex, secondsRemaining: secondsRemaining)
         case .captured, .processing: return .processing
         case .review(let photoIndex): return .review(photoIndex: photoIndex)
+        case .captureRecovery(let photoIndex, let failure):
+            return .captureRecovery(photoIndex: photoIndex, failure: failure)
         case .finished: return .finished
         }
     }
@@ -41,6 +48,18 @@ public enum CustomerDisplayWorkflow {
         case .keep(let photoIndex), .retake(let photoIndex):
             guard case .review(let currentIndex) = phase else { return false }
             return currentIndex == photoIndex
+        case .retryReceive(let photoIndex):
+            guard case .captureRecovery(let currentIndex, let failure) = phase else { return false }
+            return currentIndex == photoIndex && failure.canRetryReceive
+        case .retakeFailedCapture(let photoIndex):
+            guard case .captureRecovery(let currentIndex, _) = phase else { return false }
+            return currentIndex == photoIndex
+        case .continueAfterCaptureFailure(let photoIndex):
+            guard case .captureRecovery(let currentIndex, let failure) = phase else { return false }
+            return currentIndex == photoIndex && failure.canContinueSession
+        case .usePreviousCapture(let photoIndex):
+            guard case .captureRecovery(let currentIndex, let failure) = phase else { return false }
+            return currentIndex == photoIndex && failure.canUsePreviousPhoto
         case .back:
             return phase == .selectingExperience
                 || phase == .readyToStart

@@ -18,6 +18,8 @@ struct iPadContentView: View {
                 CountdownView(photoIndex: idx, secondsRemaining: secs)
             case .review(let idx):
                 ReviewView(photoIndex: idx)
+            case .captureRecovery(let idx, let failure):
+                CaptureRecoveryView(photoIndex: idx, failure: failure)
             case .processing:
                 processingIndicator
             case .finished:
@@ -34,6 +36,20 @@ struct iPadContentView: View {
                 Spacer()
             }
             .padding(24)
+
+            if vm.isBoothPaused && vm.stateMachine.phase == .idle {
+                Color.black.opacity(0.94).ignoresSafeArea()
+                VStack(spacing: 16) {
+                    Image(systemName: "pause.circle.fill")
+                        .font(.system(size: 64))
+                        .foregroundStyle(.white)
+                    Text("Booth temporarily unavailable")
+                        .font(.title.bold())
+                        .foregroundStyle(.white)
+                    Text("Please wait for staff")
+                        .foregroundStyle(.white.opacity(0.75))
+                }
+            }
         }
         .statusBarHidden(true)
         .persistentSystemOverlays(.hidden)

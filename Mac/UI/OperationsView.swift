@@ -7,6 +7,7 @@ struct OperationsView: View {
     @State private var showPrinterConfirmation = false
     @State private var showDiscardConfirmation = false
     @State private var serverStatus = LocalWebServerStatus(state: .stopped, registeredTokenCount: 0)
+    @State private var boothHealth = BoothHealthSnapshot.empty
 
     var body: some View {
         ScrollView {
@@ -18,15 +19,19 @@ struct OperationsView: View {
                 GalleryModerationView()
                 printerSection
                 serverSection
+                healthSection
+                remoteOperatorSection
             }
             .padding(24)
         }
         .navigationTitle("Operations")
         .task {
             await refreshServerStatus()
+            boothHealth = await coordinator.healthSnapshot()
             while !Task.isCancelled {
                 try? await Task.sleep(for: .seconds(2))
                 await refreshServerStatus()
+                boothHealth = await coordinator.healthSnapshot()
             }
         }
         .confirmationDialog(
@@ -222,6 +227,84 @@ struct OperationsView: View {
                 }
             }
         }
+    }
+
+    private var healthSection: some View {
+        GroupBox("Device Health") {
+            let camera = boothHealth.camera
+            VStack(alignment: .leading, spacing: 8) {
+                HStack {
+                    Text(camera.cameraName ?? camera.cameraKind).font(.headline)
+                    Spacer()
+                    Label(camera.connected ? "Connected" : (camera.connecting ? "Connecting" : "Unavailable"),
+                          systemImage: camera.connected ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
+                        .foregroundStyle(camera.connected ? .green : .orange)
+                }
+                HStack(spacing: 18) {
+                    healthValue("Control", boothHealth.controlConnection)
+                    healthValue("Preview", camera.livePreviewActive ? "Active" : "Inactive")
+                    healthValue("PTP", camera.ptpHealthy.map { $0 ? "Healthy" : "Degraded" } ?? "n/a")
+                    healthValue("Failures", "\(camera.captureFailureCount)")
+                    healthValue("Recovered", "\(camera.recoveredTransferCount)")
+                }
+                HStack(spacing: 18) {
+                    healthValue("Last capture", camera.lastCaptureAt.map { $0.formatted(.relative(presentation: .named)) } ?? "—")
+                    healthValue("Receive", camera.lastCaptureDuration.map { String(format: "%.1fs", $0) } ?? "—")
+                    healthValue("Disk", boothHealth.diskAvailableBytes.map(formatBytes) ?? "—")
+                    Spacer()
+                    Button(coordinator.isBoothPaused ? "Resume Booth" : "Pause Booth") {
+                        coordinator.isBoothPaused ? coordinator.resumeBooth() : coordinator.pauseBooth()
+                    }
+                    .buttonStyle(.bordered)
+                }
+                if let delivery = boothHealth.delivery {
+                    Text("Delivery: \(delivery.local.rawValue)" +
+                         (delivery.cloud.map { " · \($0.rawValue)" } ?? "") +
+                         (delivery.print.map { " · \($0.rawValue)" } ?? ""))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+        }
+    }
+
+    private var remoteOperatorSection: some View {
+        GroupBox("Remote Operator") {
+            let pairingURL = coordinator.operatorPairingURL
+            HStack(alignment: .top, spacing: 16) {
+                if let qr = generateQRCode(from: pairingURL) {
+                    Image(nsImage: NSImage(cgImage: qr, size: .zero))
+                        .interpolation(.none)
+                        .resizable()
+                        .frame(width: 130, height: 130)
+                        .accessibilityLabel("Remote operator pairing QR code")
+                }
+                VStack(alignment: .leading, spacing: 7) {
+                    Text("Scan to connect an operator device.")
+                    Text(pairingURL).font(.caption.monospaced()).textSelection(.enabled)
+                    HStack {
+                        Button("Copy Pairing Link") {
+                            NSPasteboard.general.clearContents()
+                            NSPasteboard.general.setString(pairingURL, forType: .string)
+                        }
+                        if let station = coordinator.sharingStationURL {
+                            Text("Sharing Station: \(station)").font(.caption.monospaced()).textSelection(.enabled)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private func healthValue(_ label: String, _ value: String) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(label).font(.caption2).foregroundStyle(.secondary)
+            Text(value).font(.caption.monospaced())
+        }
+    }
+
+    private func formatBytes(_ bytes: Int64) -> String {
+        ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file)
     }
 
     private var readinessTitle: String {

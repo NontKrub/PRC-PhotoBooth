@@ -8,12 +8,35 @@ enum RuntimeSessionStatus: String, Codable, Sendable {
     case failed
 }
 
+enum CaptureAttemptResult: String, Codable, Sendable {
+    case success
+    case transferRecovered
+    case failed
+    case retaken
+    case deferred
+    case usedPrevious
+}
+
+struct CaptureAttemptRecord: Codable, Sendable, Equatable {
+    var id: String
+    var photoIndex: Int
+    var startedAt: Date
+    var completedAt: Date?
+    var result: CaptureAttemptResult
+    var reason: String?
+    var receiveDuration: Double?
+}
+
 struct RuntimeShotRecord: Codable, Sendable, Equatable {
     var photoIndex: Int
     var imageFileName: String?
     var gifFrameFileNames: [String]
     var retakeCount: Int
     var acceptedAt: Date?
+    // Kept while a replacement capture is pending. Optional for old manifests.
+    var previousImageFileName: String?
+    var previousGifFrameFileNames: [String]?
+    var previousAcceptedAt: Date?
 }
 
 struct SessionManifest: Codable, Sendable, Identifiable, Equatable {
@@ -42,6 +65,8 @@ struct SessionManifest: Codable, Sendable, Identifiable, Equatable {
 
     var downloadToken: String
     var shots: [RuntimeShotRecord]
+    // Optional keeps v1.1/v1.2 manifests readable without a migration.
+    var captureAttempts: [CaptureAttemptRecord]?
 
     var lastError: String?
     var updatedAt: Date

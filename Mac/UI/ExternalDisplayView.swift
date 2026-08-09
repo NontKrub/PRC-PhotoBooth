@@ -19,7 +19,7 @@ struct ExternalReviewLayout {
 
 // Customer-facing viewer shown on an external monitor — a Mac-native stand-in for the iPad
 // screen when no iPad is used. Driven directly by BoothCoordinator + SessionStateMachine
-// (same process as the operator console, so no MultipeerConnectivity round-trip is needed).
+// (same process as the operator console, so no transport round-trip is needed).
 struct ExternalDisplayView: View {
     @Environment(BoothCoordinator.self) private var coordinator
     @Environment(SessionStateMachine.self) private var sm
@@ -48,6 +48,8 @@ struct ExternalDisplayView: View {
                 processingContent
             case .review(let idx):
                 reviewContent(photoIndex: idx)
+            case .captureRecovery(let idx, let failure):
+                captureRecoveryContent(photoIndex: idx, failure: failure)
             case .finished(let qr):
                 finishedContent(qrPayload: qr)
             }
@@ -264,6 +266,87 @@ struct ExternalDisplayView: View {
             .padding(.horizontal, max(24, geometry.size.width * 0.04))
             .padding(.vertical, max(20, geometry.size.height * 0.04))
         }
+    }
+
+    private func captureRecoveryContent(photoIndex: Int, failure: CaptureFailureSummary) -> some View {
+        GeometryReader { geometry in
+            let language = displayLanguage
+            VStack(spacing: 22) {
+                Image(systemName: failure.reason == .cameraDisconnected ? "camera.slash" : "exclamationmark.triangle")
+                    .font(.system(size: 54, weight: .semibold))
+                    .foregroundStyle(.orange)
+                Text(LocalizedText(
+                    english: "We couldn't receive Photo \(photoIndex + 1)",
+                    thai: "ไม่สามารถรับภาพที่ \(photoIndex + 1) จากกล้องได้"
+                ).value(for: language))
+                    .font(.system(size: 40, weight: .bold, design: .rounded))
+                    .multilineTextAlignment(.center)
+                    .foregroundStyle(.white)
+                Text(LocalizedText(
+                    english: "The camera may have taken the photo, but it did not transfer to the booth.",
+                    thai: "กล้องอาจถ่ายภาพแล้ว แต่ภาพยังไม่ถูกส่งมายังระบบ"
+                ).value(for: language))
+                    .font(.title2)
+                    .multilineTextAlignment(.center)
+                    .foregroundStyle(.white.opacity(0.65))
+                    .frame(maxWidth: min(720, geometry.size.width * 0.72))
+
+                VStack(spacing: 12) {
+                    if failure.canRetryReceive {
+                        recoveryButton(
+                            LocalizedText(english: "Try Receive Again", thai: "ลองรับภาพอีกครั้ง").value(for: language),
+                            systemImage: "arrow.clockwise",
+                            primary: true,
+                            action: .retryReceive(photoIndex: photoIndex)
+                        )
+                    }
+                    recoveryButton(
+                        LocalizedText(english: "Retake Photo", thai: "ถ่ายใหม่").value(for: language),
+                        systemImage: "camera",
+                        primary: !failure.canRetryReceive,
+                        action: .retake(photoIndex: photoIndex)
+                    )
+                    if failure.canUsePreviousPhoto {
+                        recoveryButton(
+                            LocalizedText(english: "Keep Previous Photo", thai: "ใช้ภาพเดิม").value(for: language),
+                            systemImage: "photo",
+                            primary: false,
+                            action: .usePrevious(photoIndex: photoIndex)
+                        )
+                    }
+                    if failure.canContinueSession {
+                        recoveryButton(
+                            LocalizedText(english: "Continue Session", thai: "ถ่ายภาพถัดไปก่อน").value(for: language),
+                            systemImage: "forward",
+                            primary: false,
+                            action: .continueSession(photoIndex: photoIndex)
+                        )
+                    }
+                }
+                .frame(maxWidth: 440)
+                .disabled(coordinator.reviewDecisionPending)
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .padding(32)
+        }
+    }
+
+    private func recoveryButton(
+        _ title: String,
+        systemImage: String,
+        primary: Bool,
+        action: CaptureRecoveryAction
+    ) -> some View {
+        Button {
+            coordinator.handleCaptureRecoveryAction(action)
+        } label: {
+            Label(title, systemImage: systemImage)
+                .font(.title3.weight(.semibold))
+                .frame(maxWidth: .infinity, minHeight: 64)
+        }
+        .buttonStyle(.borderedProminent)
+        .tint(primary ? .white : .gray.opacity(0.7))
+        .foregroundStyle(primary ? .black : .white)
     }
 
     // MARK: - Finished
