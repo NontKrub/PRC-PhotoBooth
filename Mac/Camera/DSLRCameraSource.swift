@@ -65,6 +65,103 @@ final class DSLRCameraSource: NSObject, CameraSource {
         let errorDescription: String?
     }
 
+    nonisolated static func ptpUInt16(_ data: Data, at offset: Int) -> UInt16? {
+        guard offset >= 0, offset + 2 <= data.count else { return nil }
+        return UInt16(data[offset]) | (UInt16(data[offset + 1]) << 8)
+    }
+
+    nonisolated static func ptpUInt32(_ data: Data, at offset: Int) -> UInt32? {
+        guard offset >= 0, offset + 4 <= data.count else { return nil }
+        return UInt32(data[offset])
+            | (UInt32(data[offset + 1]) << 8)
+            | (UInt32(data[offset + 2]) << 16)
+            | (UInt32(data[offset + 3]) << 24)
+    }
+
+    nonisolated static func ptpResponseCode(from response: Data) -> UInt16 {
+        ptpUInt16(response, at: 6) ?? 0
+    }
+
+    nonisolated static func newestPTPObjectHandle(from data: Data) -> UInt32? {
+        guard let count = ptpUInt32(data, at: 0), count > 0 else { return nil }
+        let requiredLength = 4 + Int(count) * 4
+        guard data.count >= requiredLength else { return nil }
+        return ptpUInt32(data, at: requiredLength - 4)
+    }
+
+    nonisolated static func makePTPCommand(
+        opcode: UInt16,
+        transactionID: UInt32,
+        parameters: [UInt32] = []
+    ) -> Data {
+        let length = 12 + parameters.count * 4
+        var command = Data(count: length)
+        command.withUnsafeMutableBytes { bytes in
+            bytes.storeBytes(of: UInt32(length).littleEndian, toByteOffset: 0, as: UInt32.self)
+            bytes.storeBytes(of: UInt16(0x0001).littleEndian, toByteOffset: 4, as: UInt16.self)
+            bytes.storeBytes(of: opcode.littleEndian, toByteOffset: 6, as: UInt16.self)
+            bytes.storeBytes(of: transactionID.littleEndian, toByteOffset: 8, as: UInt32.self)
+            for (index, parameter) in parameters.enumerated() {
+                bytes.storeBytes(of: parameter.littleEndian, toByteOffset: 12 + index * 4, as: UInt32.self)
+            }
+        }
+        return command
+    }
+
+    // ImageCaptureCore calls this completion on its own XPC queue. Keep it
+    // nonisolated and free of actor state; callers resume on MainActor.
+    nonisolated private static func sendPTPCommand(
+        _ camera: ICCameraDevice,
+        command: Data,
+        outData: Data?,
+        continuation: CheckedContinuation<PTPReply, Never>
+    ) {
+        camera.requestSendPTPCommand(command, outData: outData) { data, response, error in
+            continuation.resume(returning: PTPReply(
+                data: data,
+                responseCode: ptpResponseCode(from: response),
+                errorDescription: error?.localizedDescription
+            ))
+        }
+    }
+
+    private func executePTPCommand(
+        _ camera: ICCameraDevice,
+        command: Data,
+        outData: Data? = nil
+    ) async -> PTPReply {
+        await waitForPTPCommandTurn()
+        defer { finishPTPCommandTurn() }
+        guard connectedCamera === camera, !Task.isCancelled else {
+            return PTPReply(data: Data(), responseCode: 0, errorDescription: "PTP command cancelled")
+        }
+        return await withCheckedContinuation { continuation in
+            Self.sendPTPCommand(camera, command: command, outData: outData, continuation: continuation)
+        }
+    }
+
+    private func nextPTPTransactionID() -> UInt32 {
+        let transactionID = ptpTxID
+        ptpTxID &+= 1
+        return transactionID
+    }
+
+    private func waitForPTPCommandTurn() async {
+        guard isExecutingPTPCommand else {
+            isExecutingPTPCommand = true
+            return
+        }
+        await withCheckedContinuation { ptpCommandWaiters.append($0) }
+    }
+
+    private func finishPTPCommandTurn() {
+        if ptpCommandWaiters.isEmpty {
+            isExecutingPTPCommand = false
+        } else {
+            ptpCommandWaiters.removeFirst().resume()
+        }
+    }
+
     private let browser = ICDeviceBrowser()
     private var camerasByID: [String: ICCameraDevice] = [:]
     private var connectedCamera: ICCameraDevice?
@@ -74,6 +171,8 @@ final class DSLRCameraSource: NSObject, CameraSource {
     private var captureRequestedAt: Date?     // used to filter out old SD card files during cataloging
     private nonisolated let captureFilename = "prc_last_capture.jpg"
     private var ptpTxID: UInt32 = 1
+    private var isExecutingPTPCommand = false
+    private var ptpCommandWaiters: [CheckedContinuation<Void, Never>] = []
     private var pollTask: Task<Void, Never>?    // continuous GetAllDevicePropDesc heartbeat
     private var reopenAfterClose = false
     private var ptpHealthy = false
@@ -212,25 +311,32 @@ final class DSLRCameraSource: NSObject, CameraSource {
     }
 
     private func ptpSonyInit(_ cam: ICCameraDevice) async {
-        ptpSonySDIOConnect(cam, phase: 1)
+        guard connectedCamera === cam, !Task.isCancelled else { return }
+        await ptpSonySDIOConnect(cam, phase: 1)
         try? await Task.sleep(for: .milliseconds(200))
-        ptpSonySDIOConnect(cam, phase: 2)
+        guard connectedCamera === cam, !Task.isCancelled else { return }
+        await ptpSonySDIOConnect(cam, phase: 2)
         try? await Task.sleep(for: .milliseconds(300))
-        ptpSonyGetVendorPropCodes(cam)
+        guard connectedCamera === cam, !Task.isCancelled else { return }
+        await ptpSonyGetVendorPropCodes(cam)
         try? await Task.sleep(for: .milliseconds(300))
-        ptpSonySDIOConnect(cam, phase: 3)
+        guard connectedCamera === cam, !Task.isCancelled else { return }
+        await ptpSonySDIOConnect(cam, phase: 3)
         try? await Task.sleep(for: .milliseconds(300))
+        guard connectedCamera === cam, !Task.isCancelled else { return }
         // Give the controlling application priority, matching libgphoto2's Sony init.
-        ptpSonySetControlAInt8(cam, prop: 0xD25A, value: 1, label: "SetPriorityMode")
+        _ = await ptpSonySetControlAInt8(cam, prop: 0xD25A, value: 1, label: "SetPriorityMode")
         try? await Task.sleep(for: .milliseconds(300))
+        guard connectedCamera === cam, !Task.isCancelled else { return }
         // PcSaveImageFormat (D269): 1=RAW & JPEG, 2=JPEG Only, 3=RAW Only.
         // A booth needs the full-resolution rendered JPEG, not a paired 25 MB
         // RAW whose embedded preview is only 1616x1080.
-        ptpSonySetControlAInt8(cam, prop: 0xD269, value: 2, label: "SetPcSaveJPEGOnly")
+        _ = await ptpSonySetControlAInt8(cam, prop: 0xD269, value: 2, label: "SetPcSaveJPEGOnly")
         try? await Task.sleep(for: .milliseconds(300))
+        guard connectedCamera === cam, !Task.isCancelled else { return }
         // Query D215 once at connection time. If previous clients left PC-save
         // images queued, the response handler drains those RAM-only objects.
-        ptpSonyGetAllDevicePropDesc(cam)
+        await ptpSonyGetAllDevicePropDesc(cam)
         try? await Task.sleep(for: .seconds(2))
         // Do not write 0xD2CA here. It is Sony's FormatMedia action, not the
         // still-image destination. The destination property is 0xD222 and should
@@ -304,6 +410,7 @@ final class DSLRCameraSource: NSObject, CameraSource {
     private func requestSonyLiveViewJPEG(_ cam: ICCameraDevice) async -> Data? {
         let handle = UInt32(0xFFFFC002)
         let info = await sendPTPRequest(cam, opcode: 0x1008, parameter: handle)
+        guard connectedCamera === cam, !Task.isCancelled else { return nil }
         guard info.errorDescription == nil, info.responseCode == 0x2001 else {
             if info.responseCode != 0x2009 && info.responseCode != 0x201D {
                 NSLog("[DSLR] LiveView GetObjectInfo: error=%@ resp=0x%04X",
@@ -313,6 +420,7 @@ final class DSLRCameraSource: NSObject, CameraSource {
         }
 
         let object = await sendPTPRequest(cam, opcode: 0x1009, parameter: handle)
+        guard connectedCamera === cam, !Task.isCancelled else { return nil }
         guard object.errorDescription == nil, object.responseCode == 0x2001 else {
             if object.responseCode != 0x200F && object.responseCode != 0x201D {
                 NSLog("[DSLR] LiveView GetObject: error=%@ resp=0x%04X",
@@ -328,122 +436,64 @@ final class DSLRCameraSource: NSObject, CameraSource {
         opcode: UInt16,
         parameter: UInt32
     ) async -> PTPReply {
-        var command = Data(count: 16)
-        let txID = ptpTxID
-        ptpTxID += 1
-        command.withUnsafeMutableBytes { ptr in
-            ptr.storeBytes(of: UInt32(16).littleEndian,       toByteOffset: 0,  as: UInt32.self)
-            ptr.storeBytes(of: UInt16(0x0001).littleEndian,   toByteOffset: 4,  as: UInt16.self)
-            ptr.storeBytes(of: opcode.littleEndian,           toByteOffset: 6,  as: UInt16.self)
-            ptr.storeBytes(of: txID.littleEndian,             toByteOffset: 8,  as: UInt32.self)
-            ptr.storeBytes(of: parameter.littleEndian,        toByteOffset: 12, as: UInt32.self)
-        }
-        let immutableCommand = command
-
-        return await withCheckedContinuation { continuation in
-            cam.requestSendPTPCommand(immutableCommand, outData: nil) { data, response, error in
-                let code: UInt16 = response.count >= 8
-                    ? response.withUnsafeBytes {
-                        $0.load(fromByteOffset: 6, as: UInt16.self).littleEndian
-                    }
-                    : 0
-                continuation.resume(returning: PTPReply(
-                    data: data,
-                    responseCode: code,
-                    errorDescription: error?.localizedDescription
-                ))
-            }
-        }
+        let command = Self.makePTPCommand(
+            opcode: opcode,
+            transactionID: nextPTPTransactionID(),
+            parameters: [parameter]
+        )
+        return await executePTPCommand(cam, command: command)
     }
 
     private func startPollLoop(_ cam: ICCameraDevice) {
         pollTask?.cancel()
         pollTask = Task { @MainActor [weak self] in
             while !Task.isCancelled {
-                guard let self, self.isRunning else { return }
+                guard let self, self.isRunning, self.connectedCamera === cam else { return }
                 if !self.suppressStatusPoll {
-                    self.ptpSonyGetAllDevicePropDesc(cam)
+                    await self.ptpSonyGetAllDevicePropDesc(cam)
                 }
                 try? await Task.sleep(for: .milliseconds(1500))
             }
         }
     }
 
-    private func ptpSonyGetAllDevicePropDesc(_ cam: ICCameraDevice) {
-        var cmd = Data(count: 12)
-        let txID = ptpTxID; ptpTxID += 1
-        cmd.withUnsafeMutableBytes { ptr in
-            ptr.storeBytes(of: UInt32(12).littleEndian,     toByteOffset: 0, as: UInt32.self)
-            ptr.storeBytes(of: UInt16(0x0001).littleEndian, toByteOffset: 4, as: UInt16.self)
-            ptr.storeBytes(of: UInt16(0x9209).littleEndian, toByteOffset: 6, as: UInt16.self)
-            ptr.storeBytes(of: txID.littleEndian,           toByteOffset: 8, as: UInt32.self)
-        }
-        cam.requestSendPTPCommand(cmd, outData: nil) { [weak self] inData, resp, error in
-            let code: UInt16 = resp.count >= 8
-                ? resp.withUnsafeBytes { $0.load(fromByteOffset: 6, as: UInt16.self).littleEndian }
-                : 0
-            let objectInMemory = Self.parseSonyUInt16CurrentValue(inData, property: 0xD215)
-            Task { @MainActor [weak self] in
-                guard let self else { return }
-                self.notePTPHealth(dataLen: inData.count, responseCode: code)
-                if let objectInMemory {
-                    NSLog("[DSLR] ObjectInMemory=0x%04X", objectInMemory)
-                }
-                // Some Sony bodies update D215 without sending C201/C202. A value
-                // at or above 0x8000 means the PC-save object is ready at the
-                // camera's fixed RAM handle.
-                if let objectInMemory,
-                   objectInMemory >= 0x8000,
-                   self.expectingCapture,
-                   let currentCamera = self.connectedCamera {
-                    NSLog("[DSLR] ObjectInMemory ready via GetAll → reading PC buffer")
-                    self.expectingCapture = false
-                    self.pollTask?.cancel()
-                    self.pollTask = nil
-                    self.ptpGetObject(currentCamera, handle: 0xFFFFC001)
-                } else if let objectInMemory,
-                          objectInMemory >= 0x8000,
-                          self.captureCompletion == nil,
-                          !self.isCapturing,
-                          !self.isDrainingPCBuffer,
-                          let currentCamera = self.connectedCamera {
-                    self.ptpDiscardPCBufferObject(currentCamera)
-                }
-            }
-            NSLog("[DSLR] GetAllDevicePropDesc: %d bytes, resp=0x%04X", inData.count, code)
+    private func ptpSonyGetAllDevicePropDesc(_ cam: ICCameraDevice) async {
+        let command = Self.makePTPCommand(opcode: 0x9209, transactionID: nextPTPTransactionID())
+        let reply = await executePTPCommand(cam, command: command)
+        guard connectedCamera === cam, !Task.isCancelled else { return }
+        notePTPHealth(dataLen: reply.data.count, responseCode: reply.responseCode)
+        NSLog("[DSLR] GetAllDevicePropDesc: %d bytes, resp=0x%04X", reply.data.count, reply.responseCode)
+        let objectInMemory = Self.parseSonyUInt16CurrentValue(reply.data, property: 0xD215)
+        if let objectInMemory { NSLog("[DSLR] ObjectInMemory=0x%04X", objectInMemory) }
+        guard connectedCamera === cam, let objectInMemory, objectInMemory >= 0x8000 else { return }
+        if expectingCapture {
+            NSLog("[DSLR] ObjectInMemory ready via GetAll → reading PC buffer")
+            expectingCapture = false
+            pollTask?.cancel()
+            pollTask = nil
+            await ptpGetObject(cam, handle: 0xFFFFC001)
+        } else if captureCompletion == nil, !isCapturing, !isDrainingPCBuffer {
+            await ptpDiscardPCBufferObject(cam)
         }
     }
 
-    private func ptpSonyGetVendorPropCodes(_ cam: ICCameraDevice) {
+    private func ptpSonyGetVendorPropCodes(_ cam: ICCameraDevice) async {
         // Opcode 0x9202 with param1=0xC8, matching Sony SDIO and libgphoto2.
-        var cmd = Data(count: 16)
-        let txID = ptpTxID; ptpTxID += 1
-        cmd.withUnsafeMutableBytes { ptr in
-            ptr.storeBytes(of: UInt32(16).littleEndian,      toByteOffset: 0,  as: UInt32.self)
-            ptr.storeBytes(of: UInt16(0x0001).littleEndian,  toByteOffset: 4,  as: UInt16.self)
-            ptr.storeBytes(of: UInt16(0x9202).littleEndian,  toByteOffset: 6,  as: UInt16.self) // GetVendorPropCodes
-            ptr.storeBytes(of: txID.littleEndian,            toByteOffset: 8,  as: UInt32.self)
-            ptr.storeBytes(of: UInt32(0xC8).littleEndian,    toByteOffset: 12, as: UInt32.self)
-        }
-        cam.requestSendPTPCommand(cmd, outData: nil) { [weak self] inData, resp, error in
-            if let e = error { NSLog("[DSLR] GetVendorPropCodes error: %@", e.localizedDescription); return }
-            let respCode: UInt16 = resp.count >= 8
-                ? resp.withUnsafeBytes { $0.load(fromByteOffset: 6, as: UInt16.self).littleEndian }
-                : 0
-            Task { @MainActor [weak self] in
-                self?.notePTPHealth(dataLen: inData.count, responseCode: respCode)
-            }
-            NSLog("[DSLR] GetVendorPropCodes: %d data bytes, resp=0x%04X", inData.count, respCode)
-            let codes = Self.parseSonyVendorCodes(inData)
-            NSLog("[DSLR] Vendor props (%d): %@", codes.count,
-                  codes.map { String(format: "0x%04X", $0) }.joined(separator: ", "))
-            Task { @MainActor [weak self] in
-                guard let self else { return }
-                self.sonyVendorPropCodes = codes
-                self.controlSupport.shutter = codes.contains(0xD20D)
-                self.controlSupport.aperture = codes.contains(0x5007) || codes.contains(0xD211)
-            }
-        }
+        let command = Self.makePTPCommand(
+            opcode: 0x9202,
+            transactionID: nextPTPTransactionID(),
+            parameters: [0xC8]
+        )
+        let reply = await executePTPCommand(cam, command: command)
+        guard connectedCamera === cam, !Task.isCancelled else { return }
+        if let error = reply.errorDescription { NSLog("[DSLR] GetVendorPropCodes error: %@", error); return }
+        notePTPHealth(dataLen: reply.data.count, responseCode: reply.responseCode)
+        NSLog("[DSLR] GetVendorPropCodes: %d data bytes, resp=0x%04X", reply.data.count, reply.responseCode)
+        let codes = Self.parseSonyVendorCodes(reply.data)
+        NSLog("[DSLR] Vendor props (%d): %@", codes.count, codes.map { String(format: "0x%04X", $0) }.joined(separator: ", "))
+        sonyVendorPropCodes = codes
+        controlSupport.shutter = codes.contains(0xD20D)
+        controlSupport.aperture = codes.contains(0x5007) || codes.contains(0xD211)
     }
 
     // Sony's 0x9202 payload is: UInt16(0x00C8), then one or two PTP
@@ -552,27 +602,18 @@ final class DSLRCameraSource: NSObject, CameraSource {
         return data.subdata(in: largest)
     }
 
-    private func ptpSonySDIOConnect(_ cam: ICCameraDevice, phase: Int) {
-        var cmd = Data(count: 24)  // 12 header + 3×4 params
-        let txID = ptpTxID; ptpTxID += 1
-        cmd.withUnsafeMutableBytes { ptr in
-            ptr.storeBytes(of: UInt32(24).littleEndian,    toByteOffset: 0,  as: UInt32.self)
-            ptr.storeBytes(of: UInt16(0x0001).littleEndian, toByteOffset: 4, as: UInt16.self)
-            ptr.storeBytes(of: UInt16(0x9201).littleEndian, toByteOffset: 6, as: UInt16.self) // SDIOConnect
-            ptr.storeBytes(of: txID.littleEndian,          toByteOffset: 8,  as: UInt32.self)
-            ptr.storeBytes(of: UInt32(phase).littleEndian, toByteOffset: 12, as: UInt32.self)
-            ptr.storeBytes(of: UInt32(0).littleEndian,     toByteOffset: 16, as: UInt32.self)
-            ptr.storeBytes(of: UInt32(0).littleEndian,     toByteOffset: 20, as: UInt32.self)
-        }
-        cam.requestSendPTPCommand(cmd, outData: nil) { _, resp, error in
-            if let e = error { NSLog("[DSLR] SDIOConnect(%d) error: %@", phase, e.localizedDescription); return }
-            let code: UInt16 = resp.count >= 8
-                ? resp.withUnsafeBytes { $0.load(fromByteOffset: 6, as: UInt16.self).littleEndian }
-                : 0
-            Task { @MainActor [weak self] in self?.notePTPHealth(dataLen: 0, responseCode: code) }
-            NSLog("[DSLR] SDIOConnect(%d) resp=0x%04X (%d bytes) %@",
-                  phase, code, resp.count, resp.isEmpty ? "⚠ empty — PTP may not be working" : "")
-        }
+    private func ptpSonySDIOConnect(_ cam: ICCameraDevice, phase: Int) async {
+        let command = Self.makePTPCommand(
+            opcode: 0x9201,
+            transactionID: nextPTPTransactionID(),
+            parameters: [UInt32(phase), 0, 0]
+        )
+        let reply = await executePTPCommand(cam, command: command)
+        guard connectedCamera === cam, !Task.isCancelled else { return }
+        if let error = reply.errorDescription { NSLog("[DSLR] SDIOConnect(%d) error: %@", phase, error); return }
+        notePTPHealth(dataLen: reply.data.count, responseCode: reply.responseCode)
+        NSLog("[DSLR] SDIOConnect(%d) resp=0x%04X %@", phase, reply.responseCode,
+              reply.responseCode == 0 ? "⚠ empty — PTP may not be working" : "")
     }
 
     // Sony capture: AF half-press → shutter → release.
@@ -636,58 +677,27 @@ final class DSLRCameraSource: NSObject, CameraSource {
     @discardableResult
     private func ptpSonySetControlB(_ cam: ICCameraDevice, prop: UInt16, value: UInt16,
                                     label: String) async -> UInt16 {
-        var cmd = Data(count: 16)
-        let txID = ptpTxID; ptpTxID += 1
-        cmd.withUnsafeMutableBytes { ptr in
-            ptr.storeBytes(of: UInt32(16).littleEndian,     toByteOffset: 0,  as: UInt32.self)
-            ptr.storeBytes(of: UInt16(0x0001).littleEndian, toByteOffset: 4,  as: UInt16.self)
-            ptr.storeBytes(of: UInt16(0x9207).littleEndian, toByteOffset: 6,  as: UInt16.self)
-            ptr.storeBytes(of: txID.littleEndian,           toByteOffset: 8,  as: UInt32.self)
-            ptr.storeBytes(of: UInt32(prop).littleEndian,   toByteOffset: 12, as: UInt32.self)
-        }
+        let cmd = Self.makePTPCommand(opcode: 0x9207, transactionID: nextPTPTransactionID(), parameters: [UInt32(prop)])
         var outData = Data(count: 2)
         outData.withUnsafeMutableBytes {
             $0.storeBytes(of: value.littleEndian, toByteOffset: 0, as: UInt16.self)
         }
-        return await withCheckedContinuation { continuation in
-            cam.requestSendPTPCommand(cmd, outData: outData) { _, resp, error in
-                if let e = error {
-                    NSLog("[DSLR] %@ error: %@", label, e.localizedDescription)
-                    continuation.resume(returning: 0)
-                    return
-                }
-            let code: UInt16 = resp.count >= 8
-                ? resp.withUnsafeBytes { $0.load(fromByteOffset: 6, as: UInt16.self).littleEndian }
-                : 0
-                NSLog("[DSLR] %@ resp=0x%04X (%d bytes)", label, code, resp.count)
-                continuation.resume(returning: code)
-            }
-        }
+        let reply = await executePTPCommand(cam, command: cmd, outData: outData)
+        if let error = reply.errorDescription { NSLog("[DSLR] %@ error: %@", label, error); return 0 }
+        NSLog("[DSLR] %@ resp=0x%04X", label, reply.responseCode)
+        return reply.responseCode
     }
 
     // Sony SDIO_SetExtDevicePropValue (0x9205), used for application priority.
+    @discardableResult
     private func ptpSonySetControlAInt8(_ cam: ICCameraDevice, prop: UInt16, value: Int8,
-                                        label: String) {
-        var cmd = Data(count: 16)
-        let txID = ptpTxID; ptpTxID += 1
-        cmd.withUnsafeMutableBytes { ptr in
-            ptr.storeBytes(of: UInt32(16).littleEndian,     toByteOffset: 0,  as: UInt32.self)
-            ptr.storeBytes(of: UInt16(0x0001).littleEndian, toByteOffset: 4,  as: UInt16.self)
-            ptr.storeBytes(of: UInt16(0x9205).littleEndian, toByteOffset: 6,  as: UInt16.self)
-            ptr.storeBytes(of: txID.littleEndian,           toByteOffset: 8,  as: UInt32.self)
-            ptr.storeBytes(of: UInt32(prop).littleEndian,   toByteOffset: 12, as: UInt32.self)
-        }
+                                        label: String) async -> UInt16 {
+        let cmd = Self.makePTPCommand(opcode: 0x9205, transactionID: nextPTPTransactionID(), parameters: [UInt32(prop)])
         let outData = Data([UInt8(bitPattern: value)])
-        cam.requestSendPTPCommand(cmd, outData: outData) { _, resp, error in
-            if let error {
-                NSLog("[DSLR] %@ error: %@", label, error.localizedDescription)
-                return
-            }
-            let code: UInt16 = resp.count >= 8
-                ? resp.withUnsafeBytes { $0.load(fromByteOffset: 6, as: UInt16.self).littleEndian }
-                : 0
-            NSLog("[DSLR] %@ resp=0x%04X (%d bytes)", label, code, resp.count)
-        }
+        let reply = await executePTPCommand(cam, command: cmd, outData: outData)
+        if let error = reply.errorDescription { NSLog("[DSLR] %@ error: %@", label, error); return 0 }
+        NSLog("[DSLR] %@ resp=0x%04X", label, reply.responseCode)
+        return reply.responseCode
     }
 
     private func startPendingCapturePoll(_ cam: ICCameraDevice) {
@@ -700,7 +710,7 @@ final class DSLRCameraSource: NSObject, CameraSource {
                 guard let cam = self.connectedCamera else { return }
                 if self.tryDownloadFreshestMediaFile(from: cam) { return }
                 NSLog("[DSLR] Capture fallback poll %d/18: GetObjectHandles", attempt)
-                self.ptpGetObjectHandles(cam)
+                await self.ptpGetObjectHandles(cam)
             }
             if self.expectingCapture {
                 self.triggerICCaptureFallback(reason: "No Sony object event or handle after shutter")
@@ -711,274 +721,120 @@ final class DSLRCameraSource: NSObject, CameraSource {
     // Reading Sony's fixed RAM handle consumes one queued PC-save object.
     // DeleteObject is intentionally not used because Sony does not support it
     // for this buffer.
-    private func ptpDiscardPCBufferObject(_ cam: ICCameraDevice) {
+    private func ptpDiscardPCBufferObject(_ cam: ICCameraDevice) async {
         guard !isDrainingPCBuffer else { return }
         isDrainingPCBuffer = true
+        defer { isDrainingPCBuffer = false }
         let handle = UInt32(0xFFFFC001)
-        var infoCmd = Data(count: 16)
-        let infoTxID = ptpTxID; ptpTxID += 1
-        infoCmd.withUnsafeMutableBytes { ptr in
-            ptr.storeBytes(of: UInt32(16).littleEndian,         toByteOffset: 0,  as: UInt32.self)
-            ptr.storeBytes(of: UInt16(0x0001).littleEndian,     toByteOffset: 4,  as: UInt16.self)
-            ptr.storeBytes(of: UInt16(0x1008).littleEndian,     toByteOffset: 6,  as: UInt16.self)
-            ptr.storeBytes(of: infoTxID.littleEndian,           toByteOffset: 8,  as: UInt32.self)
-            ptr.storeBytes(of: handle.littleEndian,             toByteOffset: 12, as: UInt32.self)
-        }
-
-        var objectCmd = Data(count: 16)
-        let objectTxID = ptpTxID; ptpTxID += 1
-        objectCmd.withUnsafeMutableBytes { ptr in
-            ptr.storeBytes(of: UInt32(16).littleEndian,     toByteOffset: 0,  as: UInt32.self)
-            ptr.storeBytes(of: UInt16(0x0001).littleEndian, toByteOffset: 4,  as: UInt16.self)
-            ptr.storeBytes(of: UInt16(0x1009).littleEndian, toByteOffset: 6,  as: UInt16.self)
-            ptr.storeBytes(of: objectTxID.littleEndian,     toByteOffset: 8,  as: UInt32.self)
-            ptr.storeBytes(of: handle.littleEndian,         toByteOffset: 12, as: UInt32.self)
-        }
-        let getObjectCommand = objectCmd
-
         NSLog("[DSLR] Draining one stale PC-buffer object")
-        cam.requestSendPTPCommand(infoCmd, outData: nil) { [weak self] _, infoResp, infoError in
-            let infoCode: UInt16 = infoResp.count >= 8
-                ? infoResp.withUnsafeBytes { $0.load(fromByteOffset: 6, as: UInt16.self).littleEndian }
-                : 0
-            guard infoError == nil, infoCode == 0x2001 else {
-                NSLog("[DSLR] PC-buffer drain info failed: error=%@ resp=0x%04X",
-                      infoError?.localizedDescription ?? "none", infoCode)
-                Task { @MainActor [weak self] in self?.isDrainingPCBuffer = false }
-                return
-            }
-            cam.requestSendPTPCommand(getObjectCommand, outData: nil) { [weak self] data, resp, error in
-                let code: UInt16 = resp.count >= 8
-                    ? resp.withUnsafeBytes { $0.load(fromByteOffset: 6, as: UInt16.self).littleEndian }
-                    : 0
-                NSLog("[DSLR] PC-buffer drain: error=%@ dataLen=%d resp=0x%04X",
-                      error?.localizedDescription ?? "none", data.count, code)
-                Task { @MainActor [weak self] in
-                    guard let self else { return }
-                    self.isDrainingPCBuffer = false
-                    if error == nil, code == 0x2001, !data.isEmpty,
-                       let currentCamera = self.connectedCamera {
-                        self.ptpSonyGetAllDevicePropDesc(currentCamera)
-                    }
-                }
+        let info = await sendPTPRequest(cam, opcode: 0x1008, parameter: handle)
+        guard info.errorDescription == nil, info.responseCode == 0x2001 else {
+            NSLog("[DSLR] PC-buffer drain info failed: error=%@ resp=0x%04X", info.errorDescription ?? "none", info.responseCode)
+            return
+        }
+        let object = await sendPTPRequest(cam, opcode: 0x1009, parameter: handle)
+        NSLog("[DSLR] PC-buffer drain: error=%@ dataLen=%d resp=0x%04X", object.errorDescription ?? "none", object.data.count, object.responseCode)
+        if object.errorDescription == nil, object.responseCode == 0x2001, !object.data.isEmpty,
+           connectedCamera === cam {
+            Task { @MainActor [weak self] in
+                guard let self, self.connectedCamera === cam, !self.isDrainingPCBuffer else { return }
+                await self.ptpSonyGetAllDevicePropDesc(cam)
             }
         }
     }
 
     // Standard MTP GetDevicePropValue (0x1015)
-    private func ptpGetDevicePropValue(_ cam: ICCameraDevice, prop: UInt16, label: String) {
-        var cmd = Data(count: 16)
-        let txID = ptpTxID; ptpTxID += 1
-        cmd.withUnsafeMutableBytes { ptr in
-            ptr.storeBytes(of: UInt32(16).littleEndian,     toByteOffset: 0,  as: UInt32.self)
-            ptr.storeBytes(of: UInt16(0x0001).littleEndian, toByteOffset: 4,  as: UInt16.self)
-            ptr.storeBytes(of: UInt16(0x1015).littleEndian, toByteOffset: 6,  as: UInt16.self)
-            ptr.storeBytes(of: txID.littleEndian,           toByteOffset: 8,  as: UInt32.self)
-            ptr.storeBytes(of: UInt32(prop).littleEndian,   toByteOffset: 12, as: UInt32.self)
-        }
-        cam.requestSendPTPCommand(cmd, outData: nil) { inData, resp, error in
-            if let e = error { NSLog("[DSLR] %@ error: %@", label, e.localizedDescription); return }
-            let code: UInt16 = resp.count >= 8
-                ? resp.withUnsafeBytes { $0.load(fromByteOffset: 6, as: UInt16.self).littleEndian }
-                : 0
-            let hex = inData.prefix(8).map { String(format: "%02X", $0) }.joined(separator: " ")
-            NSLog("[DSLR] %@ resp=0x%04X data(%d)=[%@]", label, code, inData.count, hex)
-        }
+    private func ptpGetDevicePropValue(_ cam: ICCameraDevice, prop: UInt16, label: String) async {
+        let reply = await sendPTPRequest(cam, opcode: 0x1015, parameter: UInt32(prop))
+        if let error = reply.errorDescription { NSLog("[DSLR] %@ error: %@", label, error); return }
+        let hex = reply.data.prefix(8).map { String(format: "%02X", $0) }.joined(separator: " ")
+        NSLog("[DSLR] %@ resp=0x%04X data(%d)=[%@]", label, reply.responseCode, reply.data.count, hex)
     }
 
     // Standard MTP SetDevicePropValue (0x1016) — UInt16 value
-    private func ptpSetDevicePropValue(_ cam: ICCameraDevice, prop: UInt16, value: UInt16, label: String) {
-        var cmd = Data(count: 16)
-        let txID = ptpTxID; ptpTxID += 1
-        cmd.withUnsafeMutableBytes { ptr in
-            ptr.storeBytes(of: UInt32(16).littleEndian,     toByteOffset: 0,  as: UInt32.self)
-            ptr.storeBytes(of: UInt16(0x0001).littleEndian, toByteOffset: 4,  as: UInt16.self)
-            ptr.storeBytes(of: UInt16(0x1016).littleEndian, toByteOffset: 6,  as: UInt16.self)
-            ptr.storeBytes(of: txID.littleEndian,           toByteOffset: 8,  as: UInt32.self)
-            ptr.storeBytes(of: UInt32(prop).littleEndian,   toByteOffset: 12, as: UInt32.self)
-        }
+    private func ptpSetDevicePropValue(_ cam: ICCameraDevice, prop: UInt16, value: UInt16, label: String) async {
         var outData = Data(count: 2)
         outData.withUnsafeMutableBytes { $0.storeBytes(of: value.littleEndian, toByteOffset: 0, as: UInt16.self) }
-        cam.requestSendPTPCommand(cmd, outData: outData) { _, resp, error in
-            if let e = error { NSLog("[DSLR] %@ error: %@", label, e.localizedDescription); return }
-            let code: UInt16 = resp.count >= 8
-                ? resp.withUnsafeBytes { $0.load(fromByteOffset: 6, as: UInt16.self).littleEndian }
-                : 0
-            NSLog("[DSLR] %@ resp=0x%04X (%d bytes)", label, code, resp.count)
-        }
+        let command = Self.makePTPCommand(opcode: 0x1016, transactionID: nextPTPTransactionID(), parameters: [UInt32(prop)])
+        let reply = await executePTPCommand(cam, command: command, outData: outData)
+        if let error = reply.errorDescription { NSLog("[DSLR] %@ error: %@", label, error); return }
+        NSLog("[DSLR] %@ resp=0x%04X", label, reply.responseCode)
     }
 
     // Sony GetDevicePropertyValue (0x9204) — read a single prop value
-    private func ptpSonyReadProp(_ cam: ICCameraDevice, prop: UInt16, label: String) {
-        var cmd = Data(count: 16)
-        let txID = ptpTxID; ptpTxID += 1
-        cmd.withUnsafeMutableBytes { ptr in
-            ptr.storeBytes(of: UInt32(16).littleEndian,     toByteOffset: 0,  as: UInt32.self)
-            ptr.storeBytes(of: UInt16(0x0001).littleEndian, toByteOffset: 4,  as: UInt16.self)
-            ptr.storeBytes(of: UInt16(0x9204).littleEndian, toByteOffset: 6,  as: UInt16.self)
-            ptr.storeBytes(of: txID.littleEndian,           toByteOffset: 8,  as: UInt32.self)
-            ptr.storeBytes(of: UInt32(prop).littleEndian,   toByteOffset: 12, as: UInt32.self)
-        }
-        cam.requestSendPTPCommand(cmd, outData: nil) { inData, resp, error in
-            if let e = error { NSLog("[DSLR] ReadProp %@ error: %@", label, e.localizedDescription); return }
-            let code: UInt16 = resp.count >= 8
-                ? resp.withUnsafeBytes { $0.load(fromByteOffset: 6, as: UInt16.self).littleEndian }
-                : 0
-            let hex = inData.prefix(8).map { String(format: "%02X", $0) }.joined(separator: " ")
-            NSLog("[DSLR] ReadProp %@: resp=0x%04X data(%d)=[%@]", label, code, inData.count, hex)
-        }
+    private func ptpSonyReadProp(_ cam: ICCameraDevice, prop: UInt16, label: String) async {
+        let reply = await sendPTPRequest(cam, opcode: 0x9204, parameter: UInt32(prop))
+        if let error = reply.errorDescription { NSLog("[DSLR] ReadProp %@ error: %@", label, error); return }
+        let hex = reply.data.prefix(8).map { String(format: "%02X", $0) }.joined(separator: " ")
+        NSLog("[DSLR] ReadProp %@: resp=0x%04X data(%d)=[%@]", label, reply.responseCode, reply.data.count, hex)
     }
 
     // GetObjectHandles (0x1007) — fallback download when no ObjectAdded event with handle.
     // Used for Sony PC-save mode (no SD card) where 0xC202 fires instead of 0x4002.
-    private func ptpGetObjectHandles(_ cam: ICCameraDevice) {
-        var cmd = Data(count: 24)  // 3 params
-        let txID = ptpTxID; ptpTxID += 1
-        cmd.withUnsafeMutableBytes { ptr in
-            ptr.storeBytes(of: UInt32(24).littleEndian,         toByteOffset: 0,  as: UInt32.self)
-            ptr.storeBytes(of: UInt16(0x0001).littleEndian,     toByteOffset: 4,  as: UInt16.self)
-            ptr.storeBytes(of: UInt16(0x1007).littleEndian,     toByteOffset: 6,  as: UInt16.self) // GetObjectHandles
-            ptr.storeBytes(of: txID.littleEndian,               toByteOffset: 8,  as: UInt32.self)
-            ptr.storeBytes(of: UInt32(0xFFFFFFFF).littleEndian, toByteOffset: 12, as: UInt32.self) // all storages
-            ptr.storeBytes(of: UInt32(0x00000000).littleEndian, toByteOffset: 16, as: UInt32.self) // all formats
-            ptr.storeBytes(of: UInt32(0xFFFFFFFF).littleEndian, toByteOffset: 20, as: UInt32.self) // all parents
+    private func ptpGetObjectHandles(_ cam: ICCameraDevice) async {
+        let command = Self.makePTPCommand(
+            opcode: 0x1007,
+            transactionID: nextPTPTransactionID(),
+            parameters: [0xFFFFFFFF, 0, 0xFFFFFFFF]
+        )
+        let reply = await executePTPCommand(cam, command: command)
+        guard reply.errorDescription == nil else {
+            NSLog("[DSLR] GetObjectHandles error: %@", reply.errorDescription!)
+            return
         }
-        cam.requestSendPTPCommand(cmd, outData: nil) { [weak self] inData, _, error in
-            if let e = error { NSLog("[DSLR] GetObjectHandles error: %@", e.localizedDescription); return }
-            NSLog("[DSLR] GetObjectHandles returned %d bytes", inData.count)
-            // PTP array: [4 count][4 handle0][4 handle1]...
-            guard inData.count >= 8 else { return }
-            let count = inData.withUnsafeBytes { $0.load(fromByteOffset: 0, as: UInt32.self).littleEndian }
-            NSLog("[DSLR] GetObjectHandles count=%d", count)
-            guard count > 0 else { return }
-            // Download the last handle (newest object)
-            let lastHandle = inData.withUnsafeBytes {
-                $0.load(fromByteOffset: Int(4 + (count - 1) * 4), as: UInt32.self).littleEndian
-            }
-            NSLog("[DSLR] Downloading last handle=0x%08X", lastHandle)
-            Task { @MainActor [weak self] in
-                guard let self, let connectedCamera = self.connectedCamera else { return }
-                self.ptpGetObject(connectedCamera, handle: lastHandle)
-            }
+        NSLog("[DSLR] GetObjectHandles returned %d bytes", reply.data.count)
+        guard let lastHandle = Self.newestPTPObjectHandle(from: reply.data) else {
+            NSLog("[DSLR] GetObjectHandles has no complete handle data (%d bytes)", reply.data.count)
+            return
         }
+        guard connectedCamera === cam else { return }
+        NSLog("[DSLR] Downloading last handle=0x%08X", lastHandle)
+        await ptpGetObject(cam, handle: lastHandle)
     }
 
     // Downloads a captured object by handle.
     // Tries GetObjectInfo first to probe IC's interception, then GetObject (0x1009),
     // then GetPartialObject (0x101B) as fallback.
-    private func ptpGetObject(_ cam: ICCameraDevice, handle: UInt32) {
-        // Step 1: GetObjectInfo (0x1008) — probe whether IC knows about the object.
-        var infoCmd = Data(count: 16)
-        let txInfo = ptpTxID; ptpTxID += 1
-        infoCmd.withUnsafeMutableBytes { ptr in
-            ptr.storeBytes(of: UInt32(16).littleEndian,     toByteOffset: 0,  as: UInt32.self)
-            ptr.storeBytes(of: UInt16(0x0001).littleEndian, toByteOffset: 4,  as: UInt16.self)
-            ptr.storeBytes(of: UInt16(0x1008).littleEndian, toByteOffset: 6,  as: UInt16.self) // GetObjectInfo
-            ptr.storeBytes(of: txInfo.littleEndian,         toByteOffset: 8,  as: UInt32.self)
-            ptr.storeBytes(of: handle.littleEndian,         toByteOffset: 12, as: UInt32.self)
-        }
+    private func ptpGetObject(_ cam: ICCameraDevice, handle: UInt32) async {
+        guard connectedCamera === cam else { return }
         NSLog("[DSLR] GetObjectInfo handle=0x%08X", handle)
-        cam.requestSendPTPCommand(infoCmd, outData: nil) { [weak self] infoData, infoResp, _ in
-            let infoRespCode: UInt16 = infoResp.count >= 8
-                ? infoResp.withUnsafeBytes { $0.load(fromByteOffset: 6, as: UInt16.self).littleEndian }
-                : 0
-            NSLog("[DSLR] GetObjectInfo: %d bytes resp=0x%04X", infoData.count, infoRespCode)
-            // Also check IC's file catalog for the object
-            Task { @MainActor [weak self] in
-                guard let self, let cam = self.connectedCamera else { return }
-                let n = cam.mediaFiles?.count ?? 0
-                NSLog("[DSLR] IC mediaFiles after C201: count=%d", n)
-            }
-            // Step 2: GetObject (0x1009) — IC may intercept (returns 0 bytes)
-            var cmd = Data(count: 16)
-            let txID = (self?.ptpTxID ?? 1); if let s = self { s.ptpTxID += 1 }
-            cmd.withUnsafeMutableBytes { ptr in
-                ptr.storeBytes(of: UInt32(16).littleEndian,   toByteOffset: 0,  as: UInt32.self)
-                ptr.storeBytes(of: UInt16(0x0001).littleEndian, toByteOffset: 4, as: UInt16.self)
-                ptr.storeBytes(of: UInt16(0x1009).littleEndian, toByteOffset: 6, as: UInt16.self)
-                ptr.storeBytes(of: txID.littleEndian,           toByteOffset: 8, as: UInt32.self)
-                ptr.storeBytes(of: handle.littleEndian,         toByteOffset: 12, as: UInt32.self)
-            }
-            NSLog("[DSLR] Sending GetObject handle=0x%08X", handle)
-            cam.requestSendPTPCommand(cmd, outData: nil) { [weak self] inData, objResp, error in
-                let objRespCode: UInt16 = objResp.count >= 8
-                    ? objResp.withUnsafeBytes { $0.load(fromByteOffset: 6, as: UInt16.self).littleEndian }
-                    : 0
-                NSLog("[DSLR] GetObject response: error=%@ dataLen=%d resp=0x%04X",
-                      error?.localizedDescription ?? "none", inData.count, objRespCode)
-                guard let self else { return }
-                if inData.count > 0 {
-                    Task { @MainActor [weak self] in
-                        guard let self else { return }
-                        self.resolveFromData(inData)
-                    }
-                    return
-                }
-                // Step 3: GetPartialObject (0x101B) — IC may not intercept this opcode
-                var partCmd = Data(count: 24) // 3 params: handle, offset, maxBytes
-                let txPart = self.ptpTxID; self.ptpTxID += 1
-                partCmd.withUnsafeMutableBytes { ptr in
-                    ptr.storeBytes(of: UInt32(24).littleEndian,       toByteOffset: 0,  as: UInt32.self)
-                    ptr.storeBytes(of: UInt16(0x0001).littleEndian,   toByteOffset: 4,  as: UInt16.self)
-                    ptr.storeBytes(of: UInt16(0x101B).littleEndian,   toByteOffset: 6,  as: UInt16.self) // GetPartialObject
-                    ptr.storeBytes(of: txPart.littleEndian,           toByteOffset: 8,  as: UInt32.self)
-                    ptr.storeBytes(of: handle.littleEndian,           toByteOffset: 12, as: UInt32.self)
-                    ptr.storeBytes(of: UInt32(0).littleEndian,        toByteOffset: 16, as: UInt32.self) // offset=0
-                    ptr.storeBytes(of: UInt32(0x00FFFFFF).littleEndian, toByteOffset: 20, as: UInt32.self) // max 16MB
-                }
-                NSLog("[DSLR] Trying GetPartialObject handle=0x%08X", handle)
-                cam.requestSendPTPCommand(partCmd, outData: nil) { [weak self] partData, _, partErr in
-                    NSLog("[DSLR] GetPartialObject: error=%@ dataLen=%d",
-                          partErr?.localizedDescription ?? "none", partData.count)
-                    guard let self else { return }
-                    if partData.count > 0 {
-                        Task { @MainActor [weak self] in
-                            guard let self else { return }
-                            self.resolveFromData(partData)
-                        }
-                        return
-                    }
-                    // Step 4: Retry GetPartialObject up to 10x (camera returns 0x201D=DeviceBusy while writing)
-                    Task { @MainActor [weak self] in
-                        guard let self else { return }
-                        var attempt = 0
-                        while attempt < 10 {
-                            attempt += 1
-                            try? await Task.sleep(for: .seconds(3))
-                            guard let cam = self.connectedCamera else { break }
-                            var sonyCmd = Data(count: 24)
-                            let txSony = self.ptpTxID; self.ptpTxID += 1
-                            sonyCmd.withUnsafeMutableBytes { ptr in
-                                ptr.storeBytes(of: UInt32(24).littleEndian,         toByteOffset: 0,  as: UInt32.self)
-                                ptr.storeBytes(of: UInt16(0x0001).littleEndian,     toByteOffset: 4,  as: UInt16.self)
-                                ptr.storeBytes(of: UInt16(0x101B).littleEndian,     toByteOffset: 6,  as: UInt16.self) // GetPartialObject
-                                ptr.storeBytes(of: txSony.littleEndian,             toByteOffset: 8,  as: UInt32.self)
-                                ptr.storeBytes(of: handle.littleEndian,             toByteOffset: 12, as: UInt32.self)
-                                ptr.storeBytes(of: UInt32(0).littleEndian,          toByteOffset: 16, as: UInt32.self)
-                                ptr.storeBytes(of: UInt32(0x00FFFFFF).littleEndian, toByteOffset: 20, as: UInt32.self)
-                            }
-                            NSLog("[DSLR] GetPartialObject retry %d/10 handle=0x%08X", attempt, handle)
-                            let result = await withCheckedContinuation { (cont: CheckedContinuation<(Data, UInt16), Never>) in
-                                cam.requestSendPTPCommand(sonyCmd, outData: nil) { d, r, _ in
-                                    let code: UInt16 = r.count >= 8
-                                        ? r.withUnsafeBytes { $0.load(fromByteOffset: 6, as: UInt16.self).littleEndian }
-                                        : 0
-                                    cont.resume(returning: (d, code))
-                                }
-                            }
-                            NSLog("[DSLR] GetPartialObject retry %d: dataLen=%d resp=0x%04X", attempt, result.0.count, result.1)
-                            if result.0.count > 0 {
-                                self.resolveFromData(result.0)
-                                return
-                            }
-                            if result.1 != 0x201D { break }  // stop retrying if not DeviceBusy
-                        }
-                        NSLog("[DSLR] All download variants exhausted for 0x%08X", handle)
-                        self.failCapture(DSLRError.captureFailed("IC blocks image download"))
-                    }
-                }
-            }
+        let info = await sendPTPRequest(cam, opcode: 0x1008, parameter: handle)
+        NSLog("[DSLR] GetObjectInfo: %d bytes resp=0x%04X", info.data.count, info.responseCode)
+        guard connectedCamera === cam, !Task.isCancelled else { return }
+        NSLog("[DSLR] IC mediaFiles after C201: count=%d", cam.mediaFiles?.count ?? 0)
+
+        let object = await sendPTPRequest(cam, opcode: 0x1009, parameter: handle)
+        NSLog("[DSLR] GetObject response: error=%@ dataLen=%d resp=0x%04X", object.errorDescription ?? "none", object.data.count, object.responseCode)
+        guard connectedCamera === cam, !Task.isCancelled else { return }
+        if !object.data.isEmpty { resolveFromData(object.data); return }
+
+        let partialParameters = [handle, 0, 0x00FFFFFF]
+        let partial = await executePTPCommand(
+            cam,
+            command: Self.makePTPCommand(opcode: 0x101B, transactionID: nextPTPTransactionID(), parameters: partialParameters)
+        )
+        NSLog("[DSLR] GetPartialObject: error=%@ dataLen=%d resp=0x%04X", partial.errorDescription ?? "none", partial.data.count, partial.responseCode)
+        guard connectedCamera === cam, !Task.isCancelled else { return }
+        if !partial.data.isEmpty { resolveFromData(partial.data); return }
+        guard partial.responseCode == 0x201D else {
+            failCapture(DSLRError.captureFailed("IC blocks image download"))
+            return
         }
+
+        for attempt in 1...10 {
+            try? await Task.sleep(for: .seconds(3))
+            guard connectedCamera === cam, !Task.isCancelled else { return }
+            let retry = await executePTPCommand(
+                cam,
+                command: Self.makePTPCommand(opcode: 0x101B, transactionID: nextPTPTransactionID(), parameters: partialParameters)
+            )
+            NSLog("[DSLR] GetPartialObject retry %d/10: dataLen=%d resp=0x%04X", attempt, retry.data.count, retry.responseCode)
+            if !retry.data.isEmpty { resolveFromData(retry.data); return }
+            guard retry.responseCode == 0x201D else { break }
+        }
+        guard connectedCamera === cam, !Task.isCancelled else { return }
+        NSLog("[DSLR] All download variants exhausted for 0x%08X", handle)
+        failCapture(DSLRError.captureFailed("IC blocks image download"))
     }
 
     private func resolveFromData(_ data: Data) {
@@ -1041,11 +897,13 @@ final class DSLRCameraSource: NSObject, CameraSource {
         guard let cam = connectedCamera else { return }
         NSLog("[DSLR] applySettings autoPicture=%d iso=%d flash=%@ cam=%@",
               automaticPictureMode, iso, flashMode.rawValue, cam.name ?? "?")
-        if controlSupport.flash {
-            ptpSet(cam, propCode: 0x500C, value16: flashMode.ptpValue, label: "Set FlashMode")   // FlashMode
-        }
-        if controlSupport.iso && !(isSonyZVE10 && automaticPictureMode) {
-            ptpSet(cam, propCode: 0x5005, value16: UInt16(min(iso, 65535)), label: "Set ISO")  // ExposureIndex ISO
+        let flash = controlSupport.flash ? flashMode.ptpValue : nil
+        let setISO = controlSupport.iso && !(isSonyZVE10 && automaticPictureMode)
+        let isoValue = UInt16(min(iso, 65535))
+        Task { @MainActor [weak self] in
+            guard let self, self.connectedCamera === cam else { return }
+            if let flash { await self.ptpSet(cam, propCode: 0x500C, value16: flash, label: "Set FlashMode") }
+            if setISO { await self.ptpSet(cam, propCode: 0x5005, value16: isoValue, label: "Set ISO") }
         }
         if controlSupport.shutter && !(isSonyZVE10 && automaticPictureMode) {
             // Sony vendor shutter prop (0xD20D) value encoding differs by model and often requires
@@ -1133,48 +991,31 @@ final class DSLRCameraSource: NSObject, CameraSource {
 
     // MARK: - PTP
 
-    private func ptpSet(_ cam: ICCameraDevice, propCode: UInt16, value16: UInt16, label: String) {
+    private func ptpSet(_ cam: ICCameraDevice, propCode: UInt16, value16: UInt16, label: String) async {
         var data = Data(count: 2)
         data.withUnsafeMutableBytes { $0.storeBytes(of: value16.littleEndian, as: UInt16.self) }
-        ptpSetProp(cam, propCode: propCode, data: data, label: label)
+        await ptpSetProp(cam, propCode: propCode, data: data, label: label)
     }
 
-    private func ptpSet(_ cam: ICCameraDevice, propCode: UInt16, value32: UInt32, label: String) {
+    private func ptpSet(_ cam: ICCameraDevice, propCode: UInt16, value32: UInt32, label: String) async {
         var data = Data(count: 4)
         data.withUnsafeMutableBytes { $0.storeBytes(of: value32.littleEndian, as: UInt32.self) }
-        ptpSetProp(cam, propCode: propCode, data: data, label: label)
+        await ptpSetProp(cam, propCode: propCode, data: data, label: label)
     }
 
-    private func ptpSetProp(_ cam: ICCameraDevice, propCode: UInt16, data: Data, label: String) {
+    private func ptpSetProp(_ cam: ICCameraDevice, propCode: UInt16, data: Data, label: String) async {
         // PTP SetDevicePropValue (0x1016): 16-byte command block + data phase
-        var cmd = Data(count: 16)
-        let txID = ptpTxID; ptpTxID += 1
-        cmd.withUnsafeMutableBytes { ptr in
-            ptr.storeBytes(of: UInt32(16).littleEndian,       toByteOffset: 0,  as: UInt32.self)
-            ptr.storeBytes(of: UInt16(0x0001).littleEndian,   toByteOffset: 4,  as: UInt16.self) // Command Block
-            ptr.storeBytes(of: UInt16(0x1016).littleEndian,   toByteOffset: 6,  as: UInt16.self) // SetDevicePropValue
-            ptr.storeBytes(of: txID.littleEndian,             toByteOffset: 8,  as: UInt32.self)
-            ptr.storeBytes(of: UInt32(propCode).littleEndian, toByteOffset: 12, as: UInt32.self)
-        }
-        cam.requestSendPTPCommand(cmd, outData: data) { [weak self] _, resp, error in
-            if let error {
-                Task { @MainActor [weak self] in self?.onError?(error) }
-                return
-            }
-            let code: UInt16 = resp.count >= 8
-                ? resp.withUnsafeBytes { $0.load(fromByteOffset: 6, as: UInt16.self).littleEndian }
-                : 0
-            if code == 0 {
-                NSLog("[DSLR] %@ response was empty/inconclusive (prop=0x%04X) — keeping previous value", label, propCode)
-                return
-            }
-            if code != 0x2001 {
-                let msg = String(format: "%@ failed (prop=0x%04X, resp=0x%04X)", label, propCode, code)
-                NSLog("[DSLR] %@", msg)
-                Task { @MainActor [weak self] in self?.onError?(DSLRError.settingFailed(msg)) }
-            } else {
-                NSLog("[DSLR] %@ ok (prop=0x%04X)", label, propCode)
-            }
+        let command = Self.makePTPCommand(opcode: 0x1016, transactionID: nextPTPTransactionID(), parameters: [UInt32(propCode)])
+        let reply = await executePTPCommand(cam, command: command, outData: data)
+        if let error = reply.errorDescription { onError?(DSLRError.settingFailed(error)); return }
+        if reply.responseCode == 0 {
+            NSLog("[DSLR] %@ response was empty/inconclusive (prop=0x%04X) — keeping previous value", label, propCode)
+        } else if reply.responseCode != 0x2001 {
+            let message = String(format: "%@ failed (prop=0x%04X, resp=0x%04X)", label, propCode, reply.responseCode)
+            NSLog("[DSLR] %@", message)
+            onError?(DSLRError.settingFailed(message))
+        } else {
+            NSLog("[DSLR] %@ ok (prop=0x%04X)", label, propCode)
         }
     }
 
@@ -1281,13 +1122,9 @@ extension DSLRCameraSource: @preconcurrency ICCameraDeviceDelegate {
     nonisolated func cameraDevice(_ camera: ICCameraDevice, didReceivePTPEvent eventData: Data) {
         // ICCameraDevice calls this on its own internal thread — use nonisolated + dispatch to MainActor
         guard eventData.count >= 12 else { return }
-        let code = eventData.withUnsafeBytes { $0.load(fromByteOffset: 6, as: UInt16.self).littleEndian }
-        let handle: UInt32 = eventData.count >= 16
-            ? eventData.withUnsafeBytes { $0.load(fromByteOffset: 12, as: UInt32.self).littleEndian }
-            : 0xFFFFFFFF
-        let param1: UInt32 = eventData.count >= 16
-            ? eventData.withUnsafeBytes { $0.load(fromByteOffset: 12, as: UInt32.self).littleEndian }
-            : 0
+        let code = Self.ptpUInt16(eventData, at: 6) ?? 0
+        let handle = Self.ptpUInt32(eventData, at: 12) ?? 0xFFFFFFFF
+        let param1 = Self.ptpUInt32(eventData, at: 12) ?? 0
         NSLog("[DSLR] PTP event 0x%04X param=0x%08X (%d bytes)", code, param1, eventData.count)
         Task { @MainActor [weak self] in
             guard let self, let cam = self.connectedCamera else { return }
@@ -1300,7 +1137,8 @@ extension DSLRCameraSource: @preconcurrency ICCameraDeviceDelegate {
                 Task { @MainActor [weak self] in
                     guard let self else { return }
                     try? await Task.sleep(for: .milliseconds(500))
-                    self.ptpGetObject(cam, handle: handle)
+                    guard self.connectedCamera === cam else { return }
+                    await self.ptpGetObject(cam, handle: handle)
                 }
                 return
             }
@@ -1315,7 +1153,8 @@ extension DSLRCameraSource: @preconcurrency ICCameraDeviceDelegate {
                 Task { @MainActor [weak self] in
                     guard let self else { return }
                     try? await Task.sleep(for: .milliseconds(500))
-                    self.ptpGetObject(cam, handle: 0xFFFFC001)
+                    guard self.connectedCamera === cam else { return }
+                    await self.ptpGetObject(cam, handle: 0xFFFFC001)
                 }
                 return
             }
@@ -1323,7 +1162,10 @@ extension DSLRCameraSource: @preconcurrency ICCameraDeviceDelegate {
             if code == 0xC203 &&
                 !self.suppressStatusPoll &&
                 !self.isRequestingLiveViewFrame {
-                self.ptpSonyGetAllDevicePropDesc(cam)
+                Task { @MainActor [weak self] in
+                    guard let self, self.connectedCamera === cam else { return }
+                    await self.ptpSonyGetAllDevicePropDesc(cam)
+                }
             }
         }
     }
@@ -1354,6 +1196,7 @@ extension DSLRCameraSource: @preconcurrency ICCameraDeviceDelegate {
         Task { @MainActor [weak self] in
             guard let self else { return }
             await self.ptpSonyInit(cam)   // Sony SDIO vendor init — must precede capture commands
+            guard self.connectedCamera === cam, !Task.isCancelled else { return }
             self.isRunning = true
             self.isConnecting = false
             self.startSonyLiveView(cam)
