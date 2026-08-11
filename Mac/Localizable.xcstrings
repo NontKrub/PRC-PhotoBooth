@@ -12,7 +12,14 @@
       }
     },
     "·" : {
-
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "·"
+          }
+        }
+      }
     },
     "· %@" : {
       "localizations" : {
@@ -70,6 +77,12 @@
           "stringUnit" : {
             "state" : "new",
             "value" : "%1$@ photo slots · %2$@ QR codes"
+          }
+        },
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%1$@ ช่องภาพ · %2$@ คิวอาร์โค้ด"
           }
         }
       }
@@ -131,6 +144,12 @@
         "en" : {
           "stringUnit" : {
             "state" : "new",
+            "value" : "%1$@: %2$@ · %3$@: %4$@"
+          }
+        },
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
             "value" : "%1$@: %2$@ · %3$@: %4$@"
           }
         }
@@ -1041,7 +1060,14 @@
       }
     },
     "Canvas Elements (%@)" : {
-
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "องค์ประกอบผืนงาน (%1$@)"
+          }
+        }
+      }
     },
     "Canvas Size" : {
       "extractionState" : "manual",
@@ -1937,7 +1963,14 @@
       }
     },
     "Element type: Session QR Code" : {
-
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ประเภทองค์ประกอบ: คิวอาร์โค้ดเซสชัน"
+          }
+        }
+      }
     },
     "Enable" : {
       "extractionState" : "manual",
@@ -2548,7 +2581,14 @@
       }
     },
     "Guest Experience is the source of truth. Legacy event layout fields remain as a compatibility mirror." : {
-
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ประสบการณ์ผู้เข้าร่วมเป็นแหล่งข้อมูลหลัก ฟิลด์เลย์เอาต์งานเดิมยังคงเป็นมิเรอร์เพื่อความเข้ากันได้"
+          }
+        }
+      }
     },
     "Guest Selection" : {
       "extractionState" : "manual",
@@ -3907,7 +3947,14 @@
       }
     },
     "Photo Slot" : {
-
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ช่องภาพ"
+          }
+        }
+      }
     },
     "Photo Slots" : {
       "extractionState" : "manual",
@@ -4313,10 +4360,24 @@
       }
     },
     "QR" : {
-
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "คิวอาร์"
+          }
+        }
+      }
     },
     "QR code" : {
-
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "คิวอาร์โค้ด"
+          }
+        }
+      }
     },
     "QR codes use this URL after cloud upload succeeds; otherwise they use the LAN server.\nExample: https://photos.yourdomain.com" : {
       "localizations" : {
@@ -4810,7 +4871,14 @@
       }
     },
     "Scan to connect an operator device." : {
-
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "สแกนเพื่อเชื่อมต่ออุปกรณ์ผู้ควบคุม"
+          }
+        }
+      }
     },
     "Scan to get your photos" : {
       "localizations" : {
@@ -4996,7 +5064,14 @@
       }
     },
     "Session download link" : {
-
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ลิงก์ดาวน์โหลดเซสชัน"
+          }
+        }
+      }
     },
     "Session Phase" : {
       "extractionState" : "manual",
@@ -5010,7 +5085,14 @@
       }
     },
     "Session QR Code" : {
-
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "คิวอาร์โค้ดเซสชัน"
+          }
+        }
+      }
     },
     "Session Recovery" : {
       "extractionState" : "manual",
@@ -5120,7 +5202,14 @@
       }
     },
     "Sharing Station: %@" : {
-
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "สถานีแชร์: %1$@"
+          }
+        }
+      }
     },
     "Show GIF links" : {
       "extractionState" : "manual",
@@ -5511,7 +5600,14 @@
       }
     },
     "Template frame" : {
-
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "เฟรมเทมเพลต"
+          }
+        }
+      }
     },
     "Templates" : {
       "localizations" : {
@@ -5957,7 +6053,14 @@
       }
     },
     "Z%@" : {
-
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Z%1$@"
+          }
+        }
+      }
     },
     "ไทย" : {
       "localizations" : {
