@@ -72,10 +72,16 @@ public struct BoothFrameParser: Sendable {
             guard let channel = BoothTransportChannel(rawValue: rawChannel) else {
                 throw BoothFrameError.unknownChannel(rawChannel)
             }
-            let length = Int(UInt32(buffer[buffer.index(start, offsetBy: 4)]) << 24
-                | UInt32(buffer[buffer.index(start, offsetBy: 5)]) << 16
-                | UInt32(buffer[buffer.index(start, offsetBy: 6)]) << 8
-                | UInt32(buffer[buffer.index(start, offsetBy: 7)]))
+            let lengthStart = buffer.index(start, offsetBy: 4)
+            let lengthByte0 = UInt32(buffer[lengthStart])
+            let lengthByte1 = UInt32(buffer[buffer.index(lengthStart, offsetBy: 1)])
+            let lengthByte2 = UInt32(buffer[buffer.index(lengthStart, offsetBy: 2)])
+            let lengthByte3 = UInt32(buffer[buffer.index(lengthStart, offsetBy: 3)])
+            let rawLength = (lengthByte0 << 24)
+                | (lengthByte1 << 16)
+                | (lengthByte2 << 8)
+                | lengthByte3
+            let length = Int(rawLength)
             guard length <= Self.maximumPayloadLength else {
                 throw BoothFrameError.oversizedPayload(length)
             }

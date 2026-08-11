@@ -11,6 +11,20 @@ struct NetworkFramingTests {
         #expect(try parser.append(encoded) == [BoothNetworkFrame(channel: .control, payload: Data("one".utf8))])
     }
 
+    @Test("decodes a manually constructed big-endian payload length")
+    func manuallyConstructedPayloadLength() throws {
+        let payload = Data(repeating: 0xA5, count: 256)
+        let frame = Data([0x50, 0x52, 0x01, BoothTransportChannel.control.rawValue, 0x00, 0x00, 0x01, 0x00]) + payload
+        var parser = BoothFrameParser()
+
+        let frames = try parser.append(frame)
+
+        #expect(frames.count == 1)
+        #expect(frames[0].channel == .control)
+        #expect(frames[0].payload.count == 256)
+        #expect(parser.bufferedByteCount == 0)
+    }
+
     @Test("handles a split header and payload")
     func fragmentedFrame() throws {
         let encoded = try BoothFrameEncoder.encode(channel: .preview, payload: Data(repeating: 7, count: 64))
