@@ -503,10 +503,67 @@ struct OperatorConsoleView: View {
             if case .finished = sm.phase {
                 Button("Print Again") { showPrintAgainConfirmation = true }
                     .buttonStyle(.bordered)
+                finishedWebDeliveryStatus
             }
             if case .processing = sm.phase {
                 processingStatus
             }
+        }
+    }
+
+    @ViewBuilder
+    private var finishedWebDeliveryStatus: some View {
+        let sessionID = coordinator.lastCompletedSessionID ?? sm.currentSessionID
+        if !sessionID.isEmpty,
+           let job = coordinator.jobQueue.jobs.first(where: {
+               $0.sessionID == sessionID && $0.kind == .cloudUpload
+           }) {
+            VStack(alignment: .leading, spacing: 4) {
+                HStack {
+                    Label("Web upload", systemImage: webDeliveryIcon(job))
+                    Spacer()
+                    Text(webDeliveryStatus(job))
+                        .font(.caption)
+                        .foregroundStyle(webDeliveryColor(job))
+                }
+                if job.status == .failed || job.status == .cancelled {
+                    Text(job.lastError ?? "The QR may not work until the upload is retried.")
+                        .font(.caption2)
+                        .foregroundStyle(.red)
+                    Button("Retry Web Upload") {
+                        coordinator.retryCloudUpload(sessionID: sessionID)
+                    }
+                    .buttonStyle(.bordered)
+                }
+            }
+        }
+    }
+
+    private func webDeliveryStatus(_ job: SessionJob) -> String {
+        switch job.status {
+        case .pending: return "Waiting"
+        case .running: return "Uploading… Attempt \(job.attemptCount)"
+        case .waitingRetry: return "Retry scheduled"
+        case .succeeded: return "Uploaded"
+        case .failed, .cancelled: return "Upload failed"
+        }
+    }
+
+    private func webDeliveryIcon(_ job: SessionJob) -> String {
+        switch job.status {
+        case .pending, .waitingRetry: return "clock"
+        case .running: return "arrow.triangle.2.circlepath"
+        case .succeeded: return "checkmark.circle.fill"
+        case .failed, .cancelled: return "exclamationmark.triangle.fill"
+        }
+    }
+
+    private func webDeliveryColor(_ job: SessionJob) -> Color {
+        switch job.status {
+        case .succeeded: return .green
+        case .failed, .cancelled: return .red
+        case .running, .waitingRetry: return .orange
+        case .pending: return .secondary
         }
     }
 

@@ -348,7 +348,8 @@ final class BoothCoordinator {
 
     func saveExperienceDocument(
         _ document: EventExperienceDocument,
-        for event: BoothEvent
+        for event: BoothEvent,
+        editingSession: EventExperienceEditingSession? = nil
     ) async throws {
         var normalized = document
         normalized.templates.sort {
@@ -360,7 +361,11 @@ final class BoothCoordinator {
         }
         normalized.revision = UUID().uuidString
         normalized.updatedAt = Date()
-        try await experienceStore.save(normalized)
+        if let editingSession {
+            try await experienceStore.commitEditing(editingSession, document: normalized)
+        } else {
+            try await experienceStore.save(normalized)
+        }
         try LegacyEventMirrorService().updateLegacyEvent(event, using: normalized, modelContext: store.context)
         if activeEvent?.id == event.id {
             activeExperienceDocument = normalized
@@ -369,6 +374,32 @@ final class BoothCoordinator {
             sendExperienceCatalog()
             await refreshServerRoutes()
         }
+    }
+
+    func retryCloudUpload(sessionID: String) {
+        guard UserDefaults.standard.bool(forKey: "cloudUploadEnabled") else {
+            errorMessage = "Cloud upload is disabled."
+            return
+        }
+        guard jobQueue.jobs.contains(where: {
+            $0.sessionID == sessionID && $0.kind == .cloudUpload
+        }) else {
+            errorMessage = "No cloud upload job exists for this session."
+            return
+        }
+        guard !(UserDefaults.standard.string(forKey: "cloudSSHHost") ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            errorMessage = "Cloud upload is not configured: SSH host is missing."
+            return
+        }
+        guard let publicBase = UserDefaults.standard.string(forKey: "publicBaseURL"),
+              let url = URL(string: publicBase.trimmingCharacters(in: .whitespacesAndNewlines)),
+              ["http", "https"].contains(url.scheme?.lowercased() ?? ""),
+              url.host != nil else {
+            errorMessage = "Cloud upload is not configured: public URL is missing or invalid."
+            return
+        }
+        jobQueue.forceRequeueCloudUpload(sessionID: sessionID)
     }
 
     private func sendExperienceCatalog() {

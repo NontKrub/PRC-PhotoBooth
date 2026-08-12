@@ -97,17 +97,41 @@ actor EventExperienceStore {
         if fileManager.fileExists(atPath: directory.path) { try fileManager.removeItem(at: directory) }
     }
 
-    func importTemplateFrame(eventID: String, templateID: String, sourceURL: URL) throws -> ImportedTemplateFrame {
+    func beginEditing(eventID: String) throws -> EventExperienceEditingSession {
+        _ = try eventURL(eventID: eventID)
+        let session = EventExperienceEditingSession(id: UUID().uuidString, eventID: eventID)
+        try fileManager.createDirectory(at: try editingSessionURL(session), withIntermediateDirectories: true)
+        return session
+    }
+
+    func discardEditing(_ session: EventExperienceEditingSession) throws {
+        let directory = try editingSessionURL(session)
+        if fileManager.fileExists(atPath: directory.path) { try fileManager.removeItem(at: directory) }
+    }
+
+    func importTemplateFrame(
+        eventID: String,
+        templateID: String,
+        sourceURL: URL,
+        editingSession: EventExperienceEditingSession? = nil
+    ) throws -> ImportedTemplateFrame {
         guard fileManager.fileExists(atPath: sourceURL.path) else { throw EventExperienceError.missingAsset(sourceURL) }
         guard loadCGImage(from: sourceURL) != nil else { throw EventExperienceError.importFailed("Frame must be a readable image.") }
-        let directory = try templateURL(eventID: eventID, templateID: templateID)
+        if let editingSession { try validateEditingSession(editingSession, eventID: eventID) }
+        let directory = try editingSession.map { try stagingTemplateURL($0, templateID: templateID) }
+            ?? templateURL(eventID: eventID, templateID: templateID)
         try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
         let destination = directory.appendingPathComponent("frame.png")
         try atomicCopy(sourceURL, to: destination)
         return ImportedTemplateFrame(fileName: "frame.png", url: destination)
     }
 
-    func importPromptImage(eventID: String, promptID: String, sourceURL: URL) throws -> ImportedPromptImage {
+    func importPromptImage(
+        eventID: String,
+        promptID: String,
+        sourceURL: URL,
+        editingSession: EventExperienceEditingSession? = nil
+    ) throws -> ImportedPromptImage {
         guard fileManager.fileExists(atPath: sourceURL.path),
               let source = CGImageSourceCreateWithURL(sourceURL as CFURL, nil),
               let image = CGImageSourceCreateThumbnailAtIndex(source, 0, [
@@ -118,7 +142,10 @@ actor EventExperienceStore {
               let data = jpegData(from: image, quality: 0.82) else {
             throw EventExperienceError.importFailed("Prompt image must be a readable PNG, JPEG, or HEIC image.")
         }
-        let directory = baseDirectory.appendingPathComponent(eventID, isDirectory: true).appendingPathComponent("Prompts", isDirectory: true)
+        if let editingSession { try validateEditingSession(editingSession, eventID: eventID) }
+        let eventDirectory = try editingSession.map { try stagingEventURL($0) }
+            ?? eventURL(eventID: eventID)
+        let directory = eventDirectory.appendingPathComponent("Prompts", isDirectory: true)
         try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
         let destination = directory.appendingPathComponent("\(promptID).jpg")
         try atomicWrite(data, to: destination)
@@ -134,23 +161,40 @@ actor EventExperienceStore {
         eventID: String,
         sourceTemplateID: String,
         destinationTemplateID: String,
-        promptIDMap: [String: String]
+        promptIDMap: [String: String],
+        editingSession: EventExperienceEditingSession? = nil
     ) throws {
+        if let editingSession { try validateEditingSession(editingSession, eventID: eventID) }
         let source = try templateURL(eventID: eventID, templateID: sourceTemplateID)
-        let destination = try templateURL(eventID: eventID, templateID: destinationTemplateID)
-        guard fileManager.fileExists(atPath: source.path) else { return }
+        let destination = try editingSession.map { try stagingTemplateURL($0, templateID: destinationTemplateID) }
+            ?? templateURL(eventID: eventID, templateID: destinationTemplateID)
+        let stagedSource = try editingSession.map { try stagingTemplateURL($0, templateID: sourceTemplateID) }
+        guard fileManager.fileExists(atPath: source.path)
+                || stagedSource.map({ fileManager.fileExists(atPath: $0.path) }) == true else {
+            return
+        }
         try fileManager.createDirectory(at: destination, withIntermediateDirectories: true)
         for fileName in ["frame.png", "preview.jpg"] {
-            let sourceURL = source.appendingPathComponent(fileName)
+            let stagedAsset = stagedSource.map {
+                $0.appendingPathComponent(fileName)
+            }
+            let sourceURL = stagedAsset.flatMap { fileManager.fileExists(atPath: $0.path) ? $0 : nil }
+                ?? source.appendingPathComponent(fileName)
             if fileManager.fileExists(atPath: sourceURL.path) {
                 try atomicCopy(sourceURL, to: destination.appendingPathComponent(fileName))
             }
         }
-        let prompts = baseDirectory.appendingPathComponent(eventID, isDirectory: true).appendingPathComponent("Prompts", isDirectory: true)
+        let prompts = try editingSession.map { try stagingEventURL($0) }
+            .map { $0.appendingPathComponent("Prompts", isDirectory: true) }
+            ?? eventURL(eventID: eventID).appendingPathComponent("Prompts", isDirectory: true)
         for (oldID, newID) in promptIDMap {
             let sourceURL = prompts.appendingPathComponent("\(oldID).jpg")
-            guard fileManager.fileExists(atPath: sourceURL.path) else { continue }
-            try atomicCopy(sourceURL, to: prompts.appendingPathComponent("\(newID).jpg"))
+            let livePrompts = try eventURL(eventID: eventID).appendingPathComponent("Prompts", isDirectory: true)
+            let liveSourceURL = livePrompts.appendingPathComponent("\(oldID).jpg")
+            let resolvedSource = fileManager.fileExists(atPath: sourceURL.path) ? sourceURL : liveSourceURL
+            guard fileManager.fileExists(atPath: resolvedSource.path) else { continue }
+            try fileManager.createDirectory(at: prompts, withIntermediateDirectories: true)
+            try atomicCopy(resolvedSource, to: prompts.appendingPathComponent("\(newID).jpg"))
         }
     }
 
@@ -185,15 +229,50 @@ actor EventExperienceStore {
         return previews
     }
 
-    func readTemplateFrame(eventID: String, templateID: String) throws -> Data? {
-        let document = try load(eventID: eventID)
-        guard let template = document.templates.first(where: { $0.id == templateID }),
-              let fileName = template.frameFileName else { return nil }
+    func readTemplateFrame(eventID: String, templateID: String, fileName: String) throws -> Data? {
         let directory = try templateURL(eventID: eventID, templateID: templateID)
         let url = try templateAssetURL(fileName, in: directory)
         guard fileManager.fileExists(atPath: url.path) else { return nil }
         try Task.checkCancellation()
         return try Data(contentsOf: url)
+    }
+
+    func commitEditing(
+        _ session: EventExperienceEditingSession,
+        document: EventExperienceDocument
+    ) throws {
+        try validateEditingSession(session, eventID: document.eventID)
+        try validate(document)
+        let stagingDirectory = try editingSessionURL(session)
+        let assets = try stagedAssetPairs(session)
+        let backupDirectory = stagingDirectory.appendingPathComponent(".backup", isDirectory: true)
+        var backups: [(destination: URL, backup: URL?)] = []
+
+        do {
+            for (index, asset) in assets.enumerated() {
+                let backup = backupDirectory.appendingPathComponent(String(index))
+                if fileManager.fileExists(atPath: asset.destination.path) {
+                    try fileManager.createDirectory(at: backupDirectory, withIntermediateDirectories: true)
+                    try fileManager.copyItem(at: asset.destination, to: backup)
+                    backups.append((asset.destination, backup))
+                } else {
+                    backups.append((asset.destination, nil))
+                }
+                try atomicCopy(asset.source, to: asset.destination)
+            }
+            try save(document)
+        } catch {
+            for backup in backups.reversed() {
+                if let backupURL = backup.backup, fileManager.fileExists(atPath: backupURL.path) {
+                    try? atomicCopy(backupURL, to: backup.destination)
+                } else if fileManager.fileExists(atPath: backup.destination.path) {
+                    try? fileManager.removeItem(at: backup.destination)
+                }
+            }
+            throw error
+        }
+
+        try? fileManager.removeItem(at: stagingDirectory)
     }
 
     func readPromptImage(eventID: String, fileName: String) throws -> Data? {
@@ -291,6 +370,86 @@ actor EventExperienceStore {
     private func templateURL(eventID: String, templateID: String) throws -> URL {
         guard !templateID.isEmpty, !templateID.contains("/"), !templateID.contains("\\"), !templateID.contains("\0") else { throw EventExperienceError.invalid("Invalid template ID.") }
         return try eventURL(eventID: eventID).appendingPathComponent("Templates", isDirectory: true).appendingPathComponent(templateID, isDirectory: true)
+    }
+
+    private func editingSessionURL(_ session: EventExperienceEditingSession) throws -> URL {
+        guard !session.id.isEmpty,
+              !session.id.contains("/"),
+              !session.id.contains("\\"),
+              !session.id.contains("\0") else {
+            throw EventExperienceError.invalid("Invalid editor session.")
+        }
+        _ = try eventURL(eventID: session.eventID)
+        return baseDirectory
+            .appendingPathComponent(".editor-staging", isDirectory: true)
+            .appendingPathComponent(session.id, isDirectory: true)
+    }
+
+    private func stagingEventURL(_ session: EventExperienceEditingSession) throws -> URL {
+        try editingSessionURL(session).appendingPathComponent(session.eventID, isDirectory: true)
+    }
+
+    private func stagingTemplateURL(
+        _ session: EventExperienceEditingSession,
+        templateID: String
+    ) throws -> URL {
+        guard !templateID.isEmpty,
+              !templateID.contains("/"),
+              !templateID.contains("\\"),
+              !templateID.contains("\0") else {
+            throw EventExperienceError.invalid("Invalid template ID.")
+        }
+        return try stagingEventURL(session)
+            .appendingPathComponent("Templates", isDirectory: true)
+            .appendingPathComponent(templateID, isDirectory: true)
+    }
+
+    private func validateEditingSession(
+        _ session: EventExperienceEditingSession,
+        eventID: String
+    ) throws {
+        guard session.eventID == eventID else {
+            throw EventExperienceError.invalid("Editor session belongs to another event.")
+        }
+        _ = try editingSessionURL(session)
+    }
+
+    private func stagedAssetPairs(
+        _ session: EventExperienceEditingSession
+    ) throws -> [(source: URL, destination: URL)] {
+        let eventDirectory = try stagingEventURL(session)
+        let liveEventDirectory = try eventURL(eventID: session.eventID)
+        var assets: [(source: URL, destination: URL)] = []
+        let templates = eventDirectory.appendingPathComponent("Templates", isDirectory: true)
+        if fileManager.fileExists(atPath: templates.path) {
+            for templateDirectory in try fileManager.contentsOfDirectory(
+                at: templates,
+                includingPropertiesForKeys: [.isDirectoryKey]
+            ) {
+                guard (try templateDirectory.resourceValues(forKeys: [.isDirectoryKey])).isDirectory == true else {
+                    continue
+                }
+                let templateID = templateDirectory.lastPathComponent
+                let liveTemplate = try templateURL(eventID: session.eventID, templateID: templateID)
+                for fileName in ["frame.png", "preview.jpg"] {
+                    let source = templateDirectory.appendingPathComponent(fileName)
+                    guard fileManager.fileExists(atPath: source.path) else { continue }
+                    assets.append((source, liveTemplate.appendingPathComponent(fileName)))
+                }
+            }
+        }
+
+        let prompts = eventDirectory.appendingPathComponent("Prompts", isDirectory: true)
+        if fileManager.fileExists(atPath: prompts.path) {
+            for source in try fileManager.contentsOfDirectory(at: prompts, includingPropertiesForKeys: nil)
+                where source.pathExtension.lowercased() == "jpg" {
+                let destination = liveEventDirectory
+                    .appendingPathComponent("Prompts", isDirectory: true)
+                    .appendingPathComponent(source.lastPathComponent)
+                assets.append((source, destination))
+            }
+        }
+        return assets
     }
 
     private func templateAssetURL(_ fileName: String, in directory: URL) throws -> URL {
