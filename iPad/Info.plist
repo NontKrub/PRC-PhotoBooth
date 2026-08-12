@@ -17,11 +17,13 @@
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
-	<string>1.2</string>
+	<string>1.3</string>
 	<key>CFBundleVersion</key>
 	<string>3</string>
 	<key>NSBonjourServices</key>
 	<array>
+		<string>_prc-control._tcp</string>
+		<string>_prc-preview._tcp</string>
 		<string>_prc-photobooth._tcp</string>
 		<string>_prc-photobooth._udp</string>
 		<string>_prc-hq._tcp</string>

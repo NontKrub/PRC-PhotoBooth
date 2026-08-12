@@ -109,6 +109,9 @@ struct LocalDownloadRouter: Sendable {
         if components.count == 2 {
             return galleryPage(route)
         }
+        if components.count == 3, components[2] == "station" {
+            return sharingStationPage(route)
+        }
         guard components.count == 4, components[2] == "thumb", components[3].hasSuffix(".jpg"),
               let sessionID = String(components[3].dropLast(4)).removingPercentEncoding,
               let session = route.approvedSessions.first(where: { $0.sessionID == sessionID }),
@@ -228,6 +231,28 @@ struct LocalDownloadRouter: Sendable {
             headers: ["Cache-Control": "no-store"],
             body: Data(html.utf8)
         )
+    }
+
+    private func sharingStationPage(_ route: EventGalleryRouteRegistration) -> LocalDownloadResponse {
+        let title = route.title.htmlEscaped
+        let cards = route.approvedSessions.map { session in
+            let label = session.templateName.htmlEscaped
+            return """
+            <a class="card" href="/s/\(session.downloadToken.htmlEscaped)/">
+              <img src="/e/\(route.eventToken.htmlEscaped)/thumb/\(session.sessionID.htmlEscaped).jpg" alt="\(label)">
+              <span>Tap to view</span>
+            </a>
+            """
+        }.joined(separator: "\n")
+        let empty = route.language == .thai ? "ยังไม่มีรูปภาพที่อนุมัติ" : "No approved sessions yet"
+        let html = """
+        <!DOCTYPE html><html lang="\(route.language == .thai ? "th" : "en")"><head>
+        <meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+        <meta http-equiv="refresh" content="3"><title>\(title) · Sharing Station</title>
+        <style>body{font-family:-apple-system,sans-serif;background:#111;color:#eee;padding:16px;margin:0}h1{text-align:center;font-size:clamp(1.3rem,4vw,2.2rem)}p{text-align:center;color:#aaa}.grid{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;max-width:1100px;margin:24px auto}.card{background:#202020;color:#fff;border-radius:12px;padding:8px;text-decoration:none;text-align:center;font-weight:600}.card img{width:100%;aspect-ratio:1;object-fit:contain;background:#080808;border-radius:8px;display:block;margin-bottom:8px}@media(max-width:600px){.grid{grid-template-columns:repeat(2,1fr)}}</style>
+        </head><body><h1>\(title)</h1><p>Recent Photos · Tap your photo</p><main class="grid">\(cards.isEmpty ? "<p>\(empty.htmlEscaped)</p>" : cards)</main></body></html>
+        """
+        return LocalDownloadResponse(statusCode: 200, reason: "OK", contentType: "text/html; charset=utf-8", headers: ["Cache-Control": "no-store"], body: Data(html.utf8))
     }
 
     private func formattedDate(_ date: Date, language: CustomerLanguage) -> String {

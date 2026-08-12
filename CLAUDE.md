@@ -30,8 +30,10 @@ Two apps share a `Shared/` layer:
 ```
 Shared/
   Models/SharedTypes.swift        — EventConfig, SharedPhotoSlot, SessionOutput, enums
-  Connectivity/Message.swift      — MultipeerConnectivity wire protocol (JSON + raw JPEG)
-  Connectivity/MultipeerService.swift
+  Connectivity/Message.swift      — shared JSON wire protocol and state-sync models
+  Connectivity/BoothTransport.swift — framed channels and transport abstraction
+  Connectivity/NetworkBoothTransport.swift — production Bonjour/TCP transport
+  Connectivity/MultipeerService.swift — temporary DEBUG fallback adapter
   State/BoothPhase.swift          — session state enum
   State/SessionStateMachine.swift — @Observable state machine
 
@@ -40,7 +42,7 @@ Mac/
   UI/BoothCoordinator.swift       — @MainActor @Observable hub; owns all services
   UI/OperatorConsoleView.swift    — camera panel, session controls, strip preview
   UI/EventSetupView.swift         — event CRUD, frame PNG import
-  UI/FrameSlotEditor.swift        — slot drag/resize/duplicate editor
+  UI/TemplateFrameSlotEditor.swift — template slot/QR drag/resize/duplicate editor
   UI/AdminDashboardView.swift     — Charts analytics, CSV export (PIN-gated)
   Camera/CameraSource.swift       — protocol for camera backends
   Camera/AVFoundationCameraSource.swift — built-in/USB/Continuity camera
@@ -61,7 +63,11 @@ iPad/
 
 **Session lifecycle:** `BoothCoordinator.startSession()` → `SessionStateMachine` drives `BoothPhase` → countdown task fires → `CaptureService.captureStill(for:)` → photo stored in `capturedStills[photoIndex]` → `Compositor.render(images:)` composites strip → saved to `Application Support/PRC-PhotoBooth/Sessions/<id>/strip.png`.
 
-**Mac → iPad messaging:** All control messages are `Message` enum encoded as JSON, prefixed with a `PacketChannel` byte (`0x01` = control, `0x02` = raw JPEG preview). `MultipeerService` sends over MPC reliable channel for control, unreliable for preview frames.
+**Mac → iPad messaging:** Control messages are `Message` enum encoded as JSON inside an explicit 8-byte framed Network.framework control stream. Preview JPEGs use a separate latest-frame-wins stream. `NetworkBoothTransport` is production; `MultipeerService` is a DEBUG fallback. Both expose `BoothTransport` so coordinators do not know the transport.
+
+**Capture recovery:** `BoothPhase.captureRecovery` is authoritative for failed receive/decode/PTP attempts. Actions pass through `CustomerDisplayWorkflow.canApply`; `CaptureService`/`DSLRCameraSource` isolate attempt IDs and cancel all terminal tasks. `SessionSyncSnapshot` rebuilds the iPad after reconnect.
+
+**Operations:** `BoothHealthSnapshot` powers both the Mac Operations UI and authenticated `/operator/api/status`. `LocalWebServer` also serves `/e/<event-token>/station`; `EventGalleryStore` remains the only moderation source.
 
 **Photo index / slot duplication:** `BoothSlot.photoIndex` (and `SharedPhotoSlot.photoIndex`) maps a slot to a capture index. Multiple slots with the same `photoIndex` show the same photo — this is how "duplicate" works. `EventConfig.photoCount` is the number of captures; slot count is independent.
 

@@ -8,7 +8,8 @@ PRC PhotoBooth is a SwiftUI photo-booth system for macOS and iPad. The Mac app r
 - Camera support through AVFoundation for built-in, USB, and Continuity Cameras.
 - USB-tethered DSLR/mirrorless capture through ImageCaptureCore, including live preview for supported Sony PTP cameras.
 - Customer workflow with countdowns, photo review, keep/retake decisions, and operator overrides.
-- Live preview over MultipeerConnectivity, with an optional USB-C preview transport for lower-latency wired preview.
+- Network.framework Mac↔iPad control and preview transport with Bonjour discovery, framing, heartbeat, reconnect, and state resynchronization. MultipeerConnectivity remains a debug fallback.
+- Recoverable capture failures with Try Receive Again, Retake, Continue Session, and Keep Previous Photo actions.
 - Composited PNG strips, looping animated GIFs, QR-code download links, and optional printing to a connected Selphy printer.
 - Local guest download server on port `8585`.
 - Booth preflight checks, a non-PIN-gated Operations tab, and persistent processing/upload/print jobs.
@@ -16,6 +17,7 @@ PRC PhotoBooth is a SwiftUI photo-booth system for macOS and iPad. The Mac app r
 - SwiftData persistence, PIN-gated event setup and analytics, CSV export, and an external-display viewer.
 - Version 1.2 guest experience packages with up to eight templates, local Core Image filters, pose prompts, and Thai/English customer choices.
 - Privacy-controlled local event galleries with pending, approved, and hidden moderation states.
+- Camera/booth health diagnostics, persistent operations events, delivery-state visibility, reliability analytics, an authenticated LAN operator dashboard, and an offline sharing station.
 - Debug-only hardware-free demo camera and standalone iPad kiosk flows.
 
 Version 1.2 has no audio countdown. Countdown and pose prompts are visual only.
@@ -23,7 +25,7 @@ Version 1.2 has no audio countdown. Countdown and pose prompts are visual only.
 ## Architecture
 
 ```text
-┌─────────────────────┐       MultipeerConnectivity        ┌─────────────────────┐
+┌─────────────────────┐       Network.framework            ┌─────────────────────┐
 │  macOS operator app │ ─────────────────────────────────▶ │  iPad kiosk app     │
 │                     │   control + wireless preview       │                     │
 │ camera / capture    │ ◀──────── optional USB preview ─── │ start / review / QR │
@@ -33,7 +35,7 @@ Version 1.2 has no audio countdown. Countdown and pose prompts are visual only.
            └── Shared models, session state machine, and message protocol
 ```
 
-Control messages are JSON-encoded and sent reliably. Preview frames are JPEG data sent through a separate high-bandwidth channel. In wired mode, the Mac advertises `_prc-hq._tcp` over Bonjour and the iPad receives preview frames over the USB-C network connection; session controls still use the MultipeerConnectivity channel.
+Control messages are JSON-encoded and sent reliably over a framed Network.framework control connection. Preview JPEGs use a separate latest-frame-wins connection, so preview traffic cannot delay session controls. Bonjour advertises `_prc-control._tcp` and `_prc-preview._tcp`. In wired mode, the existing `_prc-hq._tcp` USB preview path remains available. A DEBUG-only `--legacy-multipeer` flag keeps the old adapter available while hardware migration is validated.
 
 ## Requirements
 
@@ -102,7 +104,7 @@ xcodebuild \
 1. Launch the Mac app and grant camera, microphone, and local-network permissions.
 2. In Event Setup, create an event, choose the number of photos and countdown, import an optional frame PNG, and set the photo slots.
 3. Mark the event as active and select the camera source in the operator console.
-4. Launch the iPad app on the same local network. The apps discover each other automatically through MultipeerConnectivity.
+4. Launch the iPad app on the same local network. The apps discover each other automatically through Network.framework Bonjour.
 5. Choose Wireless or Cable for the preview transport if needed. Cable mode is for the live preview stream; it does not replace the control connection.
 6. Start a session from the iPad or operator console. After each capture, keep the photo or retake it.
 7. Open Operations before an event and run Safe Checks. Run Full Preflight when a diagnostic camera capture or printer test is appropriate.
@@ -145,9 +147,18 @@ The event gallery is local-network only. Disabled galleries publish nothing; app
 Debug builds support hardware-free checks:
 
 ```text
-Mac:  --demo-mode --reset-demo-data
+Mac:  --demo-mode --reset-demo-data --demo-capture-fail-once=1
 iPad: --demo-kiosk
 ```
+
+### Version 1.3 reliability and operations
+
+- A transfer/decode/PTP failure enters Capture Recovery instead of trapping the guest in a dead phase. Recovery can receive the already-fired shutter again, retake, defer the missing index, or restore the accepted image from a transactional retake.
+- Capture attempts have IDs and centrally cancelled timeout/poll/download tasks. Camera removal or a closed ImageCaptureCore session immediately resolves the active capture.
+- `Camera Health` and `Device Health` show connection, PTP, preview FPS, receive time, capture failures, recovered transfers, queue, disk, printer, and local-server status. Printer values are application-observed job metrics only.
+- The Mac serves an authenticated, one-time-paired operator dashboard at `/operator/` and an offline sharing station at `/e/<event-token>/station`. Gallery-disabled, pending, and hidden sessions are not exposed by the station.
+- Operational events are bounded to 30 days/10,000 records and contain session/phase metadata only; they do not store guest names or photo contents.
+- Deterministic DEBUG fault injection supports `--demo-capture-transfer-timeout=1`, `--demo-camera-disconnect-on=1`, and `--demo-capture-decode-failure=1`. Values are zero-based photo indexes.
 
 Use the computer-based GUI workflow after automated tests to inspect Event Setup, selection, prompts, review, moderation, Thai text, and restart persistence.
 
@@ -184,12 +195,14 @@ Finished session files are stored under:
 
 The local web server exposes tokenized download pages at `/s/<token>` and `/s/<token>/`, plus `/health`. Only `strip.png` and an existing `booth.gif` are served. The QR code uses the Mac's LAN address by default, or an optional public base URL configured in Event Setup. Completed sessions older than 60 days are cleaned up when the Mac app starts; cancelled manifests are retained for seven days.
 
+The operator dashboard is LAN-only by deployment intent. Pairing tokens are random, one-use, expire after ten minutes, and are invalidated on app restart; paired operator session tokens are separate temporary credentials. The admin PIN is never placed in a URL.
+
 ## Project layout
 
 ```text
-Mac/       macOS operator app: camera, capture, persistence, server, output, and UI
+Mac/       macOS operator app: camera, capture, persistence, server, output, diagnostics, and UI
 iPad/      iPad customer app and phase-specific SwiftUI screens
-Shared/    models, state machine, QR generation, and connectivity protocol
+Shared/    models, state machine, QR generation, and Network.framework/legacy connectivity adapters
 Tests/     Swift Testing unit tests hosted by the Mac target
 project.yml
            XcodeGen source of truth for targets, dependencies, and build settings

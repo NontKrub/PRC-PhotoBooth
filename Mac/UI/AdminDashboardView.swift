@@ -111,6 +111,7 @@ struct AdminDashboardView: View {
                 VStack(alignment: .leading, spacing: 20) {
                     filterBar
                     summaryRow
+                    reliabilitySection
                     if !dayStats.isEmpty { sessionsPerDayChart }
                     if !dayStats.isEmpty { busyHoursChart }
                     eventBreakdownTable
@@ -205,6 +206,33 @@ struct AdminDashboardView: View {
             StatCard(title: "Photos",      value: "\(totalPhotos)",           icon: "photo.stack",       color: .purple)
             StatCard(title: "Avg Duration",value: formatDuration(avgSessionDuration), icon: "timer", color: .orange)
             StatCard(title: "Events Run",  value: "\(Set(filteredSessions.map(\.eventID)).count)", icon: "calendar", color: .green)
+        }
+    }
+
+    var reliabilitySection: some View {
+        let attempts = enrichedSessions.flatMap { $0.captureAttempts ?? [] }
+        let completedAttempts = attempts.filter { $0.completedAt != nil }
+        let successful = completedAttempts.filter { $0.result == .success || $0.result == .transferRecovered }.count
+        let failed = completedAttempts.filter { $0.result == .failed }.count
+        let receiveDurations = completedAttempts.compactMap(\.receiveDuration)
+        let started = allSessions.filter {
+            $0.startedAt >= startDate && $0.startedAt <= Calendar.current.date(byAdding: .day, value: 1, to: endDate)!
+                && (selectedEventFilter == nil || $0.eventID == selectedEventFilter)
+        }.count
+        let completionRate = started == 0 ? 0 : Double(filteredSessions.count) / Double(started) * 100
+        return GroupBox("Reliability") {
+            LazyVGrid(columns: [GridItem(.adaptive(minimum: 145))], alignment: .leading, spacing: 12) {
+                ReliabilityMetric(title: "Capture Success", value: percentage(successful, total: successful + failed))
+                ReliabilityMetric(title: "Capture Failures", value: String(failed))
+                ReliabilityMetric(title: "Recovered Transfers", value: String(completedAttempts.filter { $0.result == .transferRecovered }.count))
+                ReliabilityMetric(title: "Retakes After Failure", value: String(completedAttempts.filter { $0.result == .retaken }.count))
+                ReliabilityMetric(title: "Deferred Captures", value: String(completedAttempts.filter { $0.result == .deferred }.count))
+                ReliabilityMetric(title: "Avg Receive", value: receiveDurations.isEmpty ? "—" : String(format: "%.1fs", receiveDurations.reduce(0, +) / Double(receiveDurations.count)))
+                ReliabilityMetric(title: "Completion Rate", value: String(format: "%.0f%%", completionRate))
+                ReliabilityMetric(title: "Cancelled Sessions", value: String(max(0, started - filteredSessions.count)))
+                ReliabilityMetric(title: "Prints", value: "\(coordinator.printer.printSuccessCount) ok / \(coordinator.printer.printFailureCount) failed")
+                ReliabilityMetric(title: "Cloud Queue", value: "\(coordinator.jobQueue.jobs.filter { $0.kind == .cloudUpload && $0.status == .failed }.count) failed")
+            }
         }
     }
 
@@ -341,6 +369,11 @@ struct AdminDashboardView: View {
         return "\(s / 60)m \(s % 60)s"
     }
 
+    private func percentage(_ numerator: Int, total: Int) -> String {
+        guard total > 0 else { return "—" }
+        return String(format: "%.1f%%", Double(numerator) / Double(total) * 100)
+    }
+
     // MARK: - CSV export
 
     private func exportCSV() {
@@ -383,6 +416,19 @@ struct AdminDashboardView: View {
 
     private func csvField(_ value: String) -> String {
         "\"\(value.replacingOccurrences(of: "\"", with: "\"\""))\""
+    }
+}
+
+private struct ReliabilityMetric: View {
+    let title: String
+    let value: String
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 3) {
+            Text(title).font(.caption).foregroundStyle(.secondary)
+            Text(value).font(.headline.monospacedDigit())
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
 

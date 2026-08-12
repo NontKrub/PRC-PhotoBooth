@@ -22,5 +22,21 @@ struct CustomerDisplayWorkflowTests {
         #expect(!CustomerDisplayWorkflow.canApply(.keep(photoIndex: 0), in: .review(photoIndex: 1)))
         #expect(!CustomerDisplayWorkflow.canApply(.retake(photoIndex: 1), in: .processing))
         #expect(CustomerDisplayWorkflow.canApply(.back, in: .finished(qrPayload: "qr")))
+
+        let failure = CaptureFailureSummary(
+            photoIndex: 1,
+            reason: .transferTimeout,
+            message: "We couldn't receive this photo.",
+            shutterLikelyFired: true,
+            canRetryReceive: true,
+            canUsePreviousPhoto: true,
+            canContinueSession: true
+        )
+        let recovery = BoothPhase.captureRecovery(photoIndex: 1, failure: failure)
+        #expect(CustomerDisplayWorkflow.canApply(.retryReceive(photoIndex: 1), in: recovery))
+        #expect(CustomerDisplayWorkflow.canApply(.retakeFailedCapture(photoIndex: 1), in: recovery))
+        #expect(CustomerDisplayWorkflow.canApply(.continueAfterCaptureFailure(photoIndex: 1), in: recovery))
+        #expect(CustomerDisplayWorkflow.canApply(.usePreviousCapture(photoIndex: 1), in: recovery))
+        #expect(!CustomerDisplayWorkflow.canApply(.retryReceive(photoIndex: 0), in: recovery))
     }
 }

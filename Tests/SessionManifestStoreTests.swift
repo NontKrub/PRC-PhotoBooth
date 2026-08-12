@@ -85,6 +85,30 @@ struct SessionManifestStoreTests {
         try await store.delete(sessionID: first.id)
         #expect((await store.loadAll()).count == 1)
     }
+
+    @Test("old manifests decode without v1.3 capture fields")
+    func decodesLegacyManifest() throws {
+        let manifest = makeManifest()
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        var object = try #require(JSONSerialization.jsonObject(with: encoder.encode(manifest)) as? [String: Any])
+        object.removeValue(forKey: "captureAttempts")
+        if var shots = object["shots"] as? [[String: Any]], var shot = shots.first {
+            shot.removeValue(forKey: "previousImageFileName")
+            shot.removeValue(forKey: "previousGifFrameFileNames")
+            shot.removeValue(forKey: "previousAcceptedAt")
+            shots[0] = shot
+            object["shots"] = shots
+        }
+        let data = try JSONSerialization.data(withJSONObject: object)
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        let decoded = try decoder.decode(SessionManifest.self, from: data)
+
+        #expect(decoded.id == manifest.id)
+        #expect(decoded.captureAttempts == nil)
+        #expect(decoded.shots[0].previousImageFileName == nil)
+    }
 }
 
 private func makeManifest(id: String = UUID().uuidString) -> SessionManifest {

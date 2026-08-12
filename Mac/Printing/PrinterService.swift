@@ -42,6 +42,11 @@ final class PrinterService {
     private(set) var availablePrinterNames: [String] = []
     private(set) var lastTestResult: PrinterTestResult?
     private(set) var isPrinting = false
+    private(set) var printRequestCount = 0
+    private(set) var printSuccessCount = 0
+    private(set) var printFailureCount = 0
+    private(set) var lastPrintAt: Date?
+    private(set) var lastPrintError: String?
 
     init(backend: any PrinterBackend = AppKitPrinterBackend(), defaults: UserDefaults = .standard) {
         self.backend = backend
@@ -91,9 +96,13 @@ final class PrinterService {
             testDate: Date()
         )
         isPrinting = true
+        printRequestCount += 1
         defer { isPrinting = false }
         do {
             try await backend.submit(request)
+            printSuccessCount += 1
+            lastPrintAt = request.testDate
+            lastPrintError = nil
             lastTestResult = PrinterTestResult(
                 date: request.testDate,
                 printerName: printerName ?? "System Default",
@@ -101,6 +110,9 @@ final class PrinterService {
                 message: "Test print submitted."
             )
         } catch {
+            printFailureCount += 1
+            lastPrintAt = request.testDate
+            lastPrintError = error.localizedDescription
             lastTestResult = PrinterTestResult(
                 date: request.testDate,
                 printerName: printerName ?? "System Default",
@@ -132,10 +144,17 @@ final class PrinterService {
             testDate: Date()
         )
         isPrinting = true
+        printRequestCount += 1
         defer { isPrinting = false }
         do {
             try await backend.submit(request)
+            printSuccessCount += 1
+            lastPrintAt = request.testDate
+            lastPrintError = nil
         } catch {
+            printFailureCount += 1
+            lastPrintAt = request.testDate
+            lastPrintError = error.localizedDescription
             throw JobExecutionError.retryable(error.localizedDescription)
         }
     }

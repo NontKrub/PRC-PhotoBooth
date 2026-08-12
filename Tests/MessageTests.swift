@@ -9,11 +9,45 @@ struct MessageTests {
         let messages: [Message] = [
             .hello(role: .mac),
             .hello(role: .iPad),
+            .helloDetails(hello: BoothTransportHello(role: .mac, deviceID: "mac-test")),
+            .sessionSync(snapshot: SessionSyncSnapshot(
+                config: EventConfig(photoCount: 2),
+                sessionID: "session-test",
+                phase: .captureRecovery(
+                    photoIndex: 1,
+                    failure: CaptureFailureSummary(
+                        photoIndex: 1,
+                        reason: .cameraDisconnected,
+                        message: "Camera disconnected.",
+                        shutterLikelyFired: true,
+                        canRetryReceive: false,
+                        canUsePreviousPhoto: false,
+                        canContinueSession: true
+                    )
+                ),
+                presentation: nil,
+                isMirrored: false,
+                isBoothPaused: true
+            )),
+            .boothPaused(isPaused: true),
             .setMirrored(isMirrored: true),
             .setPreviewTransport(transport: .usb),
             .sessionStart,
             .beginCountdown(photoIndex: 1, seconds: 5),
             .shotCaptured(index: 0, thumbnailData: Data([0x01, 0x02])),
+            .captureRecovery(
+                photoIndex: 1,
+                failure: CaptureFailureSummary(
+                    photoIndex: 1,
+                    reason: .transferTimeout,
+                    message: "We couldn't receive this photo.",
+                    shutterLikelyFired: true,
+                    canRetryReceive: true,
+                    canUsePreviousPhoto: false,
+                    canContinueSession: true
+                )
+            ),
+            .captureRecoveryAction(action: .retryReceive(photoIndex: 1)),
             .reviewDecision(action: .keep),
             .reviewDecision(action: .retake),
             .sessionFinished(qrPayload: "http://192.168.1.1:8585/s/abc", stripThumbData: nil, gifThumbData: nil),

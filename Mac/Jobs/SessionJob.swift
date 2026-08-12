@@ -64,3 +64,54 @@ struct SessionJobRetryPolicy {
         [5, 15, 60, 300, 900, 1800][min(max(attempt, 1) - 1, 5)]
     }
 }
+
+enum SessionDeliveryState: String, Codable, Sendable, Equatable {
+    case localPending = "Local Pending"
+    case localReady = "Local Ready"
+    case localFailed = "Local Failed"
+    case cloudPending = "Cloud Pending"
+    case cloudUploaded = "Cloud Uploaded"
+    case cloudFailed = "Cloud Failed"
+    case printPending = "Print Pending"
+    case printed = "Printed"
+    case printFailed = "Print Failed"
+}
+
+struct SessionDeliveryStatus: Codable, Sendable, Equatable {
+    var local: SessionDeliveryState
+    var cloud: SessionDeliveryState?
+    var print: SessionDeliveryState?
+}
+
+enum SessionDeliveryResolver {
+    static func resolve(_ jobs: [SessionJob]) -> SessionDeliveryStatus {
+        let localJobs = jobs.filter { $0.kind == .renderStrip || $0.kind == .registerDownload }
+        let local: SessionDeliveryState
+        if localJobs.contains(where: { $0.status == .failed }) {
+            local = .localFailed
+        } else if localJobs.count == 2 && localJobs.allSatisfy({ $0.status == .succeeded }) {
+            local = .localReady
+        } else {
+            local = .localPending
+        }
+        return SessionDeliveryStatus(
+            local: local,
+            cloud: state(for: jobs.first(where: { $0.kind == .cloudUpload }), pending: .cloudPending, succeeded: .cloudUploaded, failed: .cloudFailed),
+            print: state(for: jobs.first(where: { $0.kind == .autoPrint }), pending: .printPending, succeeded: .printed, failed: .printFailed)
+        )
+    }
+
+    private static func state(
+        for job: SessionJob?,
+        pending: SessionDeliveryState,
+        succeeded: SessionDeliveryState,
+        failed: SessionDeliveryState
+    ) -> SessionDeliveryState? {
+        guard let job else { return nil }
+        switch job.status {
+        case .succeeded: return succeeded
+        case .failed, .cancelled: return failed
+        case .pending, .running, .waitingRetry: return pending
+        }
+    }
+}

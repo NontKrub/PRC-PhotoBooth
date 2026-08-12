@@ -38,12 +38,8 @@ private final class SessionReference: @unchecked Sendable {
 
 @MainActor
 @Observable
-public final class MultipeerService: NSObject {
-    public enum ConnectionState: Equatable, Sendable {
-        case disconnected
-        case connecting
-        case connected(peerName: String)
-    }
+public final class MultipeerService: NSObject, BoothTransport {
+    public typealias ConnectionState = BoothConnectionState
 
     public private(set) var connectionState: ConnectionState = .disconnected
     public private(set) var peerName: String = ""
@@ -99,6 +95,11 @@ public final class MultipeerService: NSObject {
     }
 
     // MARK: - Session lifecycle
+
+    public func start() {
+        // Multipeer starts discovery during initialization; this keeps the
+        // transport lifecycle compatible with NetworkBoothTransport.
+    }
 
     private func resetPeer() {
         stopDiscovery()

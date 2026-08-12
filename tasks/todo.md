@@ -1,4 +1,22 @@
-# PRC PhotoBooth PR #7 Fix TODO
+# PRC PhotoBooth v1.3 TODO
+
+## v1.3 release gate
+
+- [x] Add recoverable capture phase and guest/External Display recovery actions
+- [x] Isolate DSLR capture attempts and resolve disconnects immediately
+- [x] Persist capture-attempt diagnostics with legacy-compatible decoding
+- [x] Add Network.framework transport, framing, heartbeat, reconnect, and state sync
+- [x] Add unified health/queue/printer/delivery diagnostics
+- [x] Add authenticated LAN operator dashboard and offline sharing station
+- [x] Add HTTP, framing, auth, recovery, delivery, station, and manifest tests
+- [ ] Run final Mac/iPad builds and final test suite after documentation cleanup
+- [ ] Run Computer Control GUI matrix with demo/fault-injection arguments
+- [ ] Run Sony ZV-E10 hardware matrix if hardware is available
+- [ ] Push branch and create the v1.3 PR after all checks
+
+---
+
+# Historical: PR #7 Fix TODO
 
 ## Baseline
 

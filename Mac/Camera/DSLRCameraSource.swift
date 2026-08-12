@@ -167,9 +167,18 @@ final class DSLRCameraSource: NSObject, CameraSource {
     private var connectedCamera: ICCameraDevice?
     // Set before requestTakePicture; resolved after download completes
     private var captureCompletion: CheckedContinuation<CGImage, Error>?
+    private var activeCaptureAttemptID: UUID?
     private var expectingCapture = false
     private var captureRequestedAt: Date?     // used to filter out old SD card files during cataloging
-    private nonisolated let captureFilename = "prc_last_capture.jpg"
+    private var pendingDownloadAttemptID: UUID?
+    private var pendingDownloadFile: ICCameraFile?
+    private var pendingDownloadURL: URL?
+    private var captureTimeoutTask: Task<Void, Never>?
+    private var pendingCapturePollTask: Task<Void, Never>?
+    private enum AttemptTerminalResult {
+        case success(CGImage)
+        case failure(Error)
+    }
     private var ptpTxID: UInt32 = 1
     private var isExecutingPTPCommand = false
     private var ptpCommandWaiters: [CheckedContinuation<Void, Never>] = []
@@ -184,6 +193,9 @@ final class DSLRCameraSource: NSObject, CameraSource {
     private var isRequestingLiveViewFrame = false
     private var liveViewFailureCount = 0
     private var previewFramesPerSecond = 30
+    private var measuredPreviewWindowStartedAt = Date()
+    private var measuredPreviewFrameCount = 0
+    private(set) var measuredPreviewFPS: Double?
     private(set) var isCapturing = false
 
     // Observable settings — sent to camera via PTP on applySettings()
@@ -214,6 +226,7 @@ final class DSLRCameraSource: NSObject, CameraSource {
     var isSonyZVE10: Bool {
         selectedDeviceName?.localizedCaseInsensitiveContains("ZV-E10") == true
     }
+    var isPTPHealthy: Bool { ptpHealthy }
     var onPreviewFrame: ((CVPixelBuffer) -> Void)?
     var onPreviewJPEG: ((Data) -> Void)?
     var onError: ((Error) -> Void)?
@@ -239,12 +252,25 @@ final class DSLRCameraSource: NSObject, CameraSource {
     }
 
     func stop() {
+        if let attemptID = activeCaptureAttemptID {
+            finishCaptureAttempt(
+                attemptID: attemptID,
+                result: .failure(DSLRError.cameraDisconnected)
+            )
+        }
+        captureTimeoutTask?.cancel()
+        captureTimeoutTask = nil
+        pendingCapturePollTask?.cancel()
+        pendingCapturePollTask = nil
         stopSonyLiveView()
         connectedCamera?.requestCloseSession()
         connectedCamera = nil
         isRunning = false
         isConnecting = false
         ptpHealthy = false
+        measuredPreviewFPS = nil
+        measuredPreviewFrameCount = 0
+        measuredPreviewWindowStartedAt = Date()
         controlSupport = DSLRControlSupport()
         onConnectionStateChanged?()
     }
@@ -265,7 +291,9 @@ final class DSLRCameraSource: NSObject, CameraSource {
         }
         return try await withCheckedThrowingContinuation { [weak self] cont in
             guard let self else { cont.resume(throwing: DSLRError.noCamera); return }
+            let attempt = CaptureAttempt()
             isCapturing = true
+            activeCaptureAttemptID = attempt.id
             captureCompletion = cont
             expectingCapture = true
             fallbackTakePictureIssued = false
@@ -276,23 +304,69 @@ final class DSLRCameraSource: NSObject, CameraSource {
                     while self?.isRequestingLiveViewFrame == true {
                         try? await Task.sleep(for: .milliseconds(20))
                     }
-                    await self?.ptpSonyCapture(cam)
+                    guard let self, self.activeCaptureAttemptID == attempt.id else { return }
+                    await self.ptpSonyCapture(cam, attemptID: attempt.id)
                 }
             } else {
                 NSLog("[DSLR] PTP appears unhealthy (empty responses). Falling back to requestTakePicture().")
-                triggerICCaptureFallback(reason: "PTP unhealthy")
+                triggerICCaptureFallback(reason: "PTP unhealthy", attemptID: attempt.id)
             }
-            Task { [weak self] in
+            captureTimeoutTask = Task { @MainActor [weak self] in
                 try? await Task.sleep(for: .seconds(30))
-                await MainActor.run { [weak self] in
-                    guard let self, self.expectingCapture else { return }
-                    if let cam = self.connectedCamera, self.tryDownloadFreshestMediaFile(from: cam) {
-                        return
-                    }
-                    let msg = self.busyRejection
-                        ? "Camera reported Busy and refused the shutter. On the ZV-E10: Setup → USB Connection → PC Remote, switch the photo/movie switch to Photo, and make sure the camera is showing live view (not a menu or playback screen)."
-                        : "Timed out. Check: shutter fires on camera? SD card inserted?"
-                    self.failCapture(DSLRError.captureFailed(msg))
+                guard !Task.isCancelled, let self, self.activeCaptureAttemptID == attempt.id else { return }
+                if let cam = self.connectedCamera, self.tryDownloadFreshestMediaFile(from: cam, attemptID: attempt.id) {
+                    return
+                }
+                let msg = self.busyRejection
+                    ? "Camera reported Busy and refused the shutter. On the ZV-E10: Setup → USB Connection → PC Remote, switch the photo/movie switch to Photo, and make sure the camera is showing live view (not a menu or playback screen)."
+                    : "Timed out. Check: shutter fires on camera? SD card inserted?"
+                self.failCapture(DSLRError.captureFailed(msg), attemptID: attempt.id)
+            }
+        }
+    }
+
+    func recoverLastCapture() async throws -> CGImage {
+        guard let cam = connectedCamera, isRunning else { throw DSLRError.noCamera }
+        guard !isCapturing else { throw DSLRError.captureFailed("A tethered capture is already in progress.") }
+
+        return try await withCheckedThrowingContinuation { [weak self] cont in
+            guard let self else { cont.resume(throwing: DSLRError.noCamera); return }
+            let attempt = CaptureAttempt()
+            isCapturing = true
+            activeCaptureAttemptID = attempt.id
+            captureCompletion = cont
+            expectingCapture = true
+            fallbackTakePictureIssued = false
+            busyRejection = false
+            captureRequestedAt = Date()
+            captureTimeoutTask = Task { @MainActor [weak self] in
+                try? await Task.sleep(for: .seconds(7))
+                guard !Task.isCancelled, let self, self.activeCaptureAttemptID == attempt.id else { return }
+                self.failCapture(
+                    DSLRError.captureFailed("No recoverable image was found."),
+                    attemptID: attempt.id
+                )
+            }
+            pendingCapturePollTask = Task { @MainActor [weak self] in
+                guard let self else { return }
+                await self.ptpGetObject(
+                    cam,
+                    handle: 0xFFFFC001,
+                    attemptID: attempt.id,
+                    failIfEmpty: false
+                )
+                guard self.activeCaptureAttemptID == attempt.id else { return }
+                await self.ptpGetObjectHandles(
+                    cam,
+                    attemptID: attempt.id,
+                    failIfEmpty: false
+                )
+                guard self.activeCaptureAttemptID == attempt.id else { return }
+                if !self.tryDownloadLatestMediaFile(from: cam, attemptID: attempt.id) {
+                    self.failCapture(
+                        DSLRError.captureFailed("No recoverable image was found."),
+                        attemptID: attempt.id
+                    )
                 }
             }
         }
@@ -376,6 +450,13 @@ final class DSLRCameraSource: NSObject, CameraSource {
                     self.latestPreviewImage = image
                     self.rollingBuffer.append(image)
                     self.isLivePreviewActive = true
+                    self.measuredPreviewFrameCount += 1
+                    let elapsed = Date().timeIntervalSince(self.measuredPreviewWindowStartedAt)
+                    if elapsed >= 1 {
+                        self.measuredPreviewFPS = Double(self.measuredPreviewFrameCount) / elapsed
+                        self.measuredPreviewFrameCount = 0
+                        self.measuredPreviewWindowStartedAt = Date()
+                    }
                     self.liveViewFailureCount = 0
                     self.onPreviewJPEG?(jpeg)
                     if wasInactive {
@@ -471,7 +552,9 @@ final class DSLRCameraSource: NSObject, CameraSource {
             expectingCapture = false
             pollTask?.cancel()
             pollTask = nil
-            await ptpGetObject(cam, handle: 0xFFFFC001)
+            if let attemptID = activeCaptureAttemptID {
+                await ptpGetObject(cam, handle: 0xFFFFC001, attemptID: attemptID)
+            }
         } else if captureCompletion == nil, !isCapturing, !isDrainingPCBuffer {
             await ptpDiscardPCBufferObject(cam)
         }
@@ -620,7 +703,8 @@ final class DSLRCameraSource: NSObject, CameraSource {
     // Uses SDIO_ControlDevice (0x9207), Sony's vendor capture opcode.
     // 0xD2C1 = ShutterHalfRelease (AF), 0xD2C2 = ShutterRelease (capture)
     // REQUIRES camera in PC Remote USB mode (Setup → USB Connection → PC Remote)
-    private func ptpSonyCapture(_ cam: ICCameraDevice) async {
+    private func ptpSonyCapture(_ cam: ICCameraDevice, attemptID: UUID) async {
+        guard activeCaptureAttemptID == attemptID, connectedCamera === cam else { return }
         pollTask?.cancel()
         pollTask = nil
         suppressStatusPoll = true
@@ -628,6 +712,7 @@ final class DSLRCameraSource: NSObject, CameraSource {
 
         NSLog("[DSLR] Sony capture: sending AF half-press (0xD2C1=2)...")
         let afCode = await ptpSonySetControlB(cam, prop: 0xD2C1, value: 2, label: "AF-press")
+        guard activeCaptureAttemptID == attemptID, connectedCamera === cam else { return }
         if afCode == 0 {
             // 0 means no PTP response at all (USB pipe stall), not a real camera answer — retry once.
             NSLog("[DSLR] AF-press got no response (USB hiccup?); retrying once")
@@ -637,12 +722,14 @@ final class DSLRCameraSource: NSObject, CameraSource {
         // Sony's reference sequence sends full-press immediately after half-press,
         // then holds both while focus settles.
         try? await Task.sleep(for: .milliseconds(100))
+        guard activeCaptureAttemptID == attemptID, connectedCamera === cam else { return }
 
         var shutterAccepted = false
         var lastCode: UInt16 = 0
         for attempt in 1...3 {
             NSLog("[DSLR] Sony capture: sending shutter attempt %d (0xD2C2=2)...", attempt)
             let code = await ptpSonySetControlB(cam, prop: 0xD2C2, value: 2, label: "Shutter-press")
+            guard activeCaptureAttemptID == attemptID, connectedCamera === cam else { return }
             lastCode = code
             if code == 0x2001 {
                 shutterAccepted = true
@@ -660,17 +747,19 @@ final class DSLRCameraSource: NSObject, CameraSource {
         // Keep both half-press and full-press held while autofocus settles.
         // Sony's reference capture flow allows up to one second here.
         try? await Task.sleep(for: .seconds(1))
+        guard activeCaptureAttemptID == attemptID, connectedCamera === cam else { return }
         _ = await ptpSonySetControlB(cam, prop: 0xD2C2, value: 1, label: "Shutter-release")
         try? await Task.sleep(for: .milliseconds(160))
+        guard activeCaptureAttemptID == attemptID, connectedCamera === cam else { return }
         _ = await ptpSonySetControlB(cam, prop: 0xD2C1, value: 1, label: "AF-release")
 
         guard shutterAccepted else {
-            triggerICCaptureFallback(reason: "Sony shutter command stayed busy")
-            startPendingCapturePoll(cam)
+            triggerICCaptureFallback(reason: "Sony shutter command stayed busy", attemptID: attemptID)
+            startPendingCapturePoll(cam, attemptID: attemptID)
             return
         }
 
-        startPendingCapturePoll(cam)
+        startPendingCapturePoll(cam, attemptID: attemptID)
     }
 
     // libgphoto2 sends Sony shutter control props (D2C1, D2C2) as PTP_DTC_UINT16.
@@ -700,20 +789,28 @@ final class DSLRCameraSource: NSObject, CameraSource {
         return reply.responseCode
     }
 
-    private func startPendingCapturePoll(_ cam: ICCameraDevice) {
-        Task { @MainActor [weak self] in
+    private func startPendingCapturePoll(_ cam: ICCameraDevice, attemptID: UUID) {
+        pendingCapturePollTask?.cancel()
+        pendingCapturePollTask = Task { @MainActor [weak self] in
             guard let self else { return }
             for attempt in 1...18 {
-                guard self.expectingCapture, self.captureCompletion != nil else { return }
+                guard self.activeCaptureAttemptID == attemptID,
+                      self.expectingCapture,
+                      self.captureCompletion != nil else { return }
                 try? await Task.sleep(for: .seconds(1))
-                guard self.expectingCapture, self.captureCompletion != nil else { return }
-                guard let cam = self.connectedCamera else { return }
-                if self.tryDownloadFreshestMediaFile(from: cam) { return }
+                guard self.activeCaptureAttemptID == attemptID,
+                      self.expectingCapture,
+                      self.captureCompletion != nil,
+                      self.connectedCamera === cam else { return }
+                if self.tryDownloadFreshestMediaFile(from: cam, attemptID: attemptID) { return }
                 NSLog("[DSLR] Capture fallback poll %d/18: GetObjectHandles", attempt)
-                await self.ptpGetObjectHandles(cam)
+                await self.ptpGetObjectHandles(cam, attemptID: attemptID)
             }
-            if self.expectingCapture {
-                self.triggerICCaptureFallback(reason: "No Sony object event or handle after shutter")
+            if self.activeCaptureAttemptID == attemptID, self.expectingCapture {
+                self.triggerICCaptureFallback(
+                    reason: "No Sony object event or handle after shutter",
+                    attemptID: attemptID
+                )
             }
         }
     }
@@ -771,42 +868,76 @@ final class DSLRCameraSource: NSObject, CameraSource {
 
     // GetObjectHandles (0x1007) — fallback download when no ObjectAdded event with handle.
     // Used for Sony PC-save mode (no SD card) where 0xC202 fires instead of 0x4002.
-    private func ptpGetObjectHandles(_ cam: ICCameraDevice) async {
+    private func ptpGetObjectHandles(
+        _ cam: ICCameraDevice,
+        attemptID: UUID? = nil,
+        failIfEmpty: Bool = true
+    ) async {
+        if let attemptID {
+            guard activeCaptureAttemptID == attemptID, connectedCamera === cam else { return }
+        } else {
+            guard connectedCamera === cam else { return }
+        }
         let command = Self.makePTPCommand(
             opcode: 0x1007,
             transactionID: nextPTPTransactionID(),
             parameters: [0xFFFFFFFF, 0, 0xFFFFFFFF]
         )
         let reply = await executePTPCommand(cam, command: command)
+        if let attemptID {
+            guard activeCaptureAttemptID == attemptID, connectedCamera === cam else { return }
+        } else {
+            guard connectedCamera === cam else { return }
+        }
         guard reply.errorDescription == nil else {
             NSLog("[DSLR] GetObjectHandles error: %@", reply.errorDescription!)
+            if let attemptID, failIfEmpty {
+                failCapture(DSLRError.captureFailed("Could not query camera objects"), attemptID: attemptID)
+            }
             return
         }
         NSLog("[DSLR] GetObjectHandles returned %d bytes", reply.data.count)
         guard let lastHandle = Self.newestPTPObjectHandle(from: reply.data) else {
             NSLog("[DSLR] GetObjectHandles has no complete handle data (%d bytes)", reply.data.count)
+            if let attemptID, failIfEmpty {
+                failCapture(DSLRError.captureFailed("No image was available from the camera"), attemptID: attemptID)
+            }
             return
         }
         guard connectedCamera === cam else { return }
         NSLog("[DSLR] Downloading last handle=0x%08X", lastHandle)
-        await ptpGetObject(cam, handle: lastHandle)
+        await ptpGetObject(cam, handle: lastHandle, attemptID: attemptID, failIfEmpty: failIfEmpty)
     }
 
     // Downloads a captured object by handle.
     // Tries GetObjectInfo first to probe IC's interception, then GetObject (0x1009),
     // then GetPartialObject (0x101B) as fallback.
-    private func ptpGetObject(_ cam: ICCameraDevice, handle: UInt32) async {
+    private func ptpGetObject(
+        _ cam: ICCameraDevice,
+        handle: UInt32,
+        attemptID: UUID? = nil,
+        failIfEmpty: Bool = true
+    ) async {
         guard connectedCamera === cam else { return }
+        if let attemptID {
+            guard activeCaptureAttemptID == attemptID else { return }
+        }
         NSLog("[DSLR] GetObjectInfo handle=0x%08X", handle)
         let info = await sendPTPRequest(cam, opcode: 0x1008, parameter: handle)
         NSLog("[DSLR] GetObjectInfo: %d bytes resp=0x%04X", info.data.count, info.responseCode)
         guard connectedCamera === cam, !Task.isCancelled else { return }
+        if let attemptID { guard activeCaptureAttemptID == attemptID else { return } }
         NSLog("[DSLR] IC mediaFiles after C201: count=%d", cam.mediaFiles?.count ?? 0)
 
         let object = await sendPTPRequest(cam, opcode: 0x1009, parameter: handle)
         NSLog("[DSLR] GetObject response: error=%@ dataLen=%d resp=0x%04X", object.errorDescription ?? "none", object.data.count, object.responseCode)
         guard connectedCamera === cam, !Task.isCancelled else { return }
-        if !object.data.isEmpty { resolveFromData(object.data); return }
+        if let attemptID { guard activeCaptureAttemptID == attemptID else { return } }
+        if !object.data.isEmpty {
+            if let attemptID { resolveFromData(object.data, attemptID: attemptID) }
+            return
+        }
+        if !failIfEmpty { return }
 
         let partialParameters = [handle, 0, 0x00FFFFFF]
         let partial = await executePTPCommand(
@@ -815,9 +946,15 @@ final class DSLRCameraSource: NSObject, CameraSource {
         )
         NSLog("[DSLR] GetPartialObject: error=%@ dataLen=%d resp=0x%04X", partial.errorDescription ?? "none", partial.data.count, partial.responseCode)
         guard connectedCamera === cam, !Task.isCancelled else { return }
-        if !partial.data.isEmpty { resolveFromData(partial.data); return }
+        if let attemptID { guard activeCaptureAttemptID == attemptID else { return } }
+        if !partial.data.isEmpty {
+            if let attemptID { resolveFromData(partial.data, attemptID: attemptID) }
+            return
+        }
         guard partial.responseCode == 0x201D else {
-            failCapture(DSLRError.captureFailed("IC blocks image download"))
+            if let attemptID {
+                failCapture(DSLRError.captureFailed("IC blocks image download"), attemptID: attemptID)
+            }
             return
         }
 
@@ -829,15 +966,23 @@ final class DSLRCameraSource: NSObject, CameraSource {
                 command: Self.makePTPCommand(opcode: 0x101B, transactionID: nextPTPTransactionID(), parameters: partialParameters)
             )
             NSLog("[DSLR] GetPartialObject retry %d/10: dataLen=%d resp=0x%04X", attempt, retry.data.count, retry.responseCode)
-            if !retry.data.isEmpty { resolveFromData(retry.data); return }
+            guard connectedCamera === cam, !Task.isCancelled else { return }
+            if let attemptID { guard activeCaptureAttemptID == attemptID else { return } }
+            if !retry.data.isEmpty {
+                if let attemptID { resolveFromData(retry.data, attemptID: attemptID) }
+                return
+            }
             guard retry.responseCode == 0x201D else { break }
         }
         guard connectedCamera === cam, !Task.isCancelled else { return }
         NSLog("[DSLR] All download variants exhausted for 0x%08X", handle)
-        failCapture(DSLRError.captureFailed("IC blocks image download"))
+        if let attemptID {
+            failCapture(DSLRError.captureFailed("IC blocks image download"), attemptID: attemptID)
+        }
     }
 
-    private func resolveFromData(_ data: Data) {
+    private func resolveFromData(_ data: Data, attemptID: UUID) {
+        guard activeCaptureAttemptID == attemptID else { return }
         func finish(_ image: CGImage, source: CGImageSource, description: String) {
             let props = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any]
             let orientRaw = props?[kCGImagePropertyOrientation] as? UInt32 ?? 1
@@ -851,12 +996,7 @@ final class DSLRCameraSource: NSObject, CameraSource {
             }
             NSLog("[DSLR] resolveFromData: decoded %dx%d %@ from %d bytes",
                   final.width, final.height, description, data.count)
-            lastCapturedImage = final
-            captureCompletion?.resume(returning: final)
-            captureCompletion = nil
-            expectingCapture = false
-            fallbackTakePictureIssued = false
-            isCapturing = false
+            finishCaptureAttempt(attemptID: attemptID, result: .success(final))
         }
 
         // Direct JPEG, or a response that still contains a 12-byte PTP data header.
@@ -889,7 +1029,10 @@ final class DSLRCameraSource: NSObject, CameraSource {
         }
 
         NSLog("[DSLR] resolveFromData: FAILED to decode %d bytes as JPEG or RAW preview", data.count)
-        failCapture(DSLRError.captureFailed("Could not decode image received from camera"))
+        failCapture(
+            DSLRError.captureFailed("Could not decode image received from camera"),
+            attemptID: attemptID
+        )
     }
 
     // Send current settings to camera via PTP — best-effort, silently ignored if unsupported
@@ -923,13 +1066,22 @@ final class DSLRCameraSource: NSObject, CameraSource {
 
     // MARK: - Download
 
-    func downloadCapturedFile(_ file: ICCameraFile, from cam: ICCameraDevice) {
+    private func downloadCapturedFile(
+        _ file: ICCameraFile,
+        from cam: ICCameraDevice,
+        attemptID: UUID
+    ) {
+        guard activeCaptureAttemptID == attemptID, connectedCamera === cam else { return }
         let tempDir = URL(fileURLWithPath: NSTemporaryDirectory())
+        let url = tempDir.appendingPathComponent("prc_capture_\(attemptID.uuidString).jpg")
+        pendingDownloadAttemptID = attemptID
+        pendingDownloadFile = file
+        pendingDownloadURL = url
         cam.requestDownloadFile(
             file,
             options: [
                 .downloadsDirectoryURL: tempDir,
-                .saveAsFilename: captureFilename,
+                .saveAsFilename: url.lastPathComponent,
                 .overwrite: true
             ],
             downloadDelegate: self,
@@ -946,47 +1098,74 @@ final class DSLRCameraSource: NSObject, CameraSource {
         contextInfo: UnsafeMutableRawPointer?
     ) {
         NSLog("[DSLR] didFinishDownload file=%@ error=%@", file.name ?? "?", error?.localizedDescription ?? "none")
-        if let error {
-            Task { @MainActor [weak self] in self?.failCapture(error) }
-            return
-        }
-        let url = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent(captureFilename)
-        guard let src = CGImageSourceCreateWithURL(url as CFURL, nil),
-              let img = CGImageSourceCreateImageAtIndex(src, 0, nil)
-        else {
-            Task { @MainActor [weak self] in
-                self?.failCapture(DSLRError.captureFailed("Could not decode downloaded image"))
-            }
-            return
-        }
-        // Apply EXIF orientation so the compositor sees an up-right image
-        let props = CGImageSourceCopyPropertiesAtIndex(src, 0, nil) as? [CFString: Any]
-        let orientRaw = props?[kCGImagePropertyOrientation] as? UInt32 ?? 1
-        let orient = CGImagePropertyOrientation(rawValue: orientRaw) ?? .up
-        let final: CGImage
-        if orient != .up {
-            let ci = CIImage(cgImage: img).oriented(orient)
-            final = CIContext().createCGImage(ci, from: ci.extent) ?? img
-        } else {
-            final = img
-        }
-        try? FileManager.default.removeItem(at: url)
+        let downloadedFileName = file.name
+        let downloadErrorMessage = error?.localizedDescription
         Task { @MainActor [weak self] in
-            self?.captureCompletion?.resume(returning: final)
-            self?.captureCompletion = nil
-            self?.lastCapturedImage = final
-            self?.expectingCapture = false
-            self?.fallbackTakePictureIssued = false
-            self?.isCapturing = false
+            guard let self,
+                  let attemptID = self.pendingDownloadAttemptID,
+                  let url = self.pendingDownloadURL,
+                  self.activeCaptureAttemptID == attemptID,
+                  self.pendingDownloadFile?.name == downloadedFileName
+            else { return }
+            if let downloadErrorMessage {
+                self.finishCaptureAttempt(
+                    attemptID: attemptID,
+                    result: .failure(DSLRError.captureFailed(downloadErrorMessage))
+                )
+                return
+            }
+            guard let src = CGImageSourceCreateWithURL(url as CFURL, nil),
+                  let img = CGImageSourceCreateImageAtIndex(src, 0, nil)
+            else {
+                self.finishCaptureAttempt(
+                    attemptID: attemptID,
+                    result: .failure(DSLRError.captureFailed("Could not decode downloaded image"))
+                )
+                return
+            }
+            // Apply EXIF orientation so the compositor sees an up-right image.
+            let props = CGImageSourceCopyPropertiesAtIndex(src, 0, nil) as? [CFString: Any]
+            let orientRaw = props?[kCGImagePropertyOrientation] as? UInt32 ?? 1
+            let orient = CGImagePropertyOrientation(rawValue: orientRaw) ?? .up
+            let final: CGImage
+            if orient != .up {
+                let ci = CIImage(cgImage: img).oriented(orient)
+                final = CIContext().createCGImage(ci, from: ci.extent) ?? img
+            } else {
+                final = img
+            }
+            try? FileManager.default.removeItem(at: url)
+            self.finishCaptureAttempt(attemptID: attemptID, result: .success(final))
         }
     }
 
-    private func failCapture(_ error: Error) {
+    private func finishCaptureAttempt(attemptID: UUID, result: AttemptTerminalResult) {
+        guard activeCaptureAttemptID == attemptID else { return }
+        captureTimeoutTask?.cancel()
+        captureTimeoutTask = nil
+        pendingCapturePollTask?.cancel()
+        pendingCapturePollTask = nil
+        pendingDownloadAttemptID = nil
+        pendingDownloadFile = nil
+        pendingDownloadURL = nil
         expectingCapture = false
         fallbackTakePictureIssued = false
         isCapturing = false
-        captureCompletion?.resume(throwing: error)
+        activeCaptureAttemptID = nil
+
+        let completion = captureCompletion
         captureCompletion = nil
+        switch result {
+        case .success(let image):
+            lastCapturedImage = image
+            completion?.resume(returning: image)
+        case .failure(let error):
+            completion?.resume(throwing: error)
+        }
+    }
+
+    private func failCapture(_ error: Error, attemptID: UUID) {
+        finishCaptureAttempt(attemptID: attemptID, result: .failure(error))
     }
 
     // MARK: - PTP
@@ -1024,8 +1203,8 @@ final class DSLRCameraSource: NSObject, CameraSource {
     }
 
     // Fallback when Sony does not emit ObjectAdded/C202 reliably.
-    private func tryDownloadFreshestMediaFile(from cam: ICCameraDevice) -> Bool {
-        guard expectingCapture else { return false }
+    private func tryDownloadFreshestMediaFile(from cam: ICCameraDevice, attemptID: UUID) -> Bool {
+        guard activeCaptureAttemptID == attemptID, expectingCapture else { return false }
         let all = (cam.mediaFiles ?? []).compactMap { $0 as? ICCameraFile }
         guard !all.isEmpty else { return false }
 
@@ -1041,12 +1220,30 @@ final class DSLRCameraSource: NSObject, CameraSource {
 
         NSLog("[DSLR] Fallback catalog download: %@ (created=%@)", file.name ?? "?", String(describing: file.creationDate))
         expectingCapture = false
-        downloadCapturedFile(file, from: cam)
+        downloadCapturedFile(file, from: cam, attemptID: attemptID)
         return true
     }
 
-    private func triggerICCaptureFallback(reason: String) {
-        guard expectingCapture, !fallbackTakePictureIssued, let cam = connectedCamera else { return }
+    private func tryDownloadLatestMediaFile(from cam: ICCameraDevice, attemptID: UUID) -> Bool {
+        guard activeCaptureAttemptID == attemptID, expectingCapture else { return false }
+        let all = (cam.mediaFiles ?? []).compactMap { $0 as? ICCameraFile }
+        guard !all.isEmpty else { return false }
+        let jpegExts: Set<String> = ["jpg", "jpeg"]
+        let sorted = all.sorted { ($0.creationDate ?? .distantPast) > ($1.creationDate ?? .distantPast) }
+        guard let file = sorted.first(where: { jpegExts.contains(fileExt($0.name)) }) ?? sorted.first else {
+            return false
+        }
+        NSLog("[DSLR] Recovery catalog download: %@", file.name ?? "?")
+        expectingCapture = false
+        downloadCapturedFile(file, from: cam, attemptID: attemptID)
+        return true
+    }
+
+    private func triggerICCaptureFallback(reason: String, attemptID: UUID) {
+        guard activeCaptureAttemptID == attemptID,
+              expectingCapture,
+              !fallbackTakePictureIssued,
+              let cam = connectedCamera else { return }
         fallbackTakePictureIssued = true
         NSLog("[DSLR] Triggering requestTakePicture fallback (%@)", reason)
         cam.requestTakePicture()
@@ -1081,6 +1278,12 @@ extension DSLRCameraSource: @preconcurrency ICDeviceBrowserDelegate {
         availableDevices.removeAll { $0.id == id }
         if selectedDeviceID == id { selectedDeviceID = availableDevices.first?.id }
         if connectedCamera === cam {
+            if let attemptID = activeCaptureAttemptID {
+                finishCaptureAttempt(
+                    attemptID: attemptID,
+                    result: .failure(DSLRError.cameraDisconnected)
+                )
+            }
             connectedCamera = nil; isRunning = false
             isConnecting = false
             controlSupport = DSLRControlSupport()
@@ -1111,9 +1314,10 @@ extension DSLRCameraSource: @preconcurrency ICCameraDeviceDelegate {
         let jpegExts: Set<String> = ["jpg", "jpeg"]
         guard let file = freshFiles.first(where: { jpegExts.contains(fileExt($0.name)) }) ?? freshFiles.first
         else { return }
+        guard let attemptID = activeCaptureAttemptID else { return }
         NSLog("[DSLR] downloading: %@", file.name ?? "?")
         expectingCapture = false
-        downloadCapturedFile(file, from: camera)
+        downloadCapturedFile(file, from: camera, attemptID: attemptID)
     }
 
     func cameraDevice(_ camera: ICCameraDevice, didRemove items: [ICCameraItem]) { }
@@ -1131,14 +1335,16 @@ extension DSLRCameraSource: @preconcurrency ICCameraDeviceDelegate {
             NSLog("[DSLR] PTP event 0x%04X (expectingCapture=%d)", code, self.expectingCapture ? 1 : 0)
             // ObjectAdded: standard (0x4002) or Sony vendor (0xC201)
             if (code == 0x4002 || code == 0xC201) && self.expectingCapture {
+                guard let attemptID = self.activeCaptureAttemptID else { return }
                 NSLog("[DSLR] ObjectAdded handle=0x%08X → stopping poll, waiting 1s then ptpGetObject", handle)
                 self.expectingCapture = false
                 self.pollTask?.cancel(); self.pollTask = nil  // stop hammering camera during download
                 Task { @MainActor [weak self] in
                     guard let self else { return }
                     try? await Task.sleep(for: .milliseconds(500))
-                    guard self.connectedCamera === cam else { return }
-                    await self.ptpGetObject(cam, handle: handle)
+                    guard self.connectedCamera === cam,
+                          self.activeCaptureAttemptID == attemptID else { return }
+                    await self.ptpGetObject(cam, handle: handle, attemptID: attemptID)
                 }
                 return
             }
@@ -1147,14 +1353,16 @@ extension DSLRCameraSource: @preconcurrency ICCameraDeviceDelegate {
             // Other property changes (focus, exposure, etc.) must not consume the
             // pending capture.
             if code == 0xC202 && param1 == 0xD215 && self.expectingCapture {
+                guard let attemptID = self.activeCaptureAttemptID else { return }
                 NSLog("[DSLR] Sony ObjectInMemory changed → reading PC buffer")
                 self.expectingCapture = false
                 self.pollTask?.cancel(); self.pollTask = nil
                 Task { @MainActor [weak self] in
                     guard let self else { return }
                     try? await Task.sleep(for: .milliseconds(500))
-                    guard self.connectedCamera === cam else { return }
-                    await self.ptpGetObject(cam, handle: 0xFFFFC001)
+                    guard self.connectedCamera === cam,
+                          self.activeCaptureAttemptID == attemptID else { return }
+                    await self.ptpGetObject(cam, handle: 0xFFFFC001, attemptID: attemptID)
                 }
                 return
             }
@@ -1205,6 +1413,12 @@ extension DSLRCameraSource: @preconcurrency ICCameraDeviceDelegate {
     }
 
     func device(_ device: ICDevice, didCloseSessionWithError error: Error?) {
+        if let attemptID = activeCaptureAttemptID {
+            finishCaptureAttempt(
+                attemptID: attemptID,
+                result: .failure(DSLRError.cameraDisconnected)
+            )
+        }
         stopSonyLiveView()
         pollTask?.cancel(); pollTask = nil
         NSLog("[DSLR] didCloseSession error=%@ reopen=%d", error?.localizedDescription ?? "none", reopenAfterClose ? 1 : 0)
@@ -1220,6 +1434,12 @@ extension DSLRCameraSource: @preconcurrency ICCameraDeviceDelegate {
     }
     func didRemove(_ device: ICDevice) {
         guard let cam = device as? ICCameraDevice, connectedCamera === cam else { return }
+        if let attemptID = activeCaptureAttemptID {
+            finishCaptureAttempt(
+                attemptID: attemptID,
+                result: .failure(DSLRError.cameraDisconnected)
+            )
+        }
         stopSonyLiveView()
         pollTask?.cancel(); pollTask = nil
         connectedCamera = nil; isRunning = false

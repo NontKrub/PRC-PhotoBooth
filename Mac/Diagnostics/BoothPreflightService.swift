@@ -118,7 +118,7 @@ final class BoothPreflightService {
             let ok = context.usbPreviewSupported && context.usbPreviewClientConnected
             return result(.previewTransport, "Preview transport", ok ? "USB preview client is connected." : "Cable mode requires a supported USB listener and connected client.", ok ? .passed : .failed, .required, now)
         }
-        return result(.previewTransport, "Preview transport", "Multipeer preview connection is active.", .passed, .required, now)
+        return result(.previewTransport, "Preview transport", "Wireless preview transport is active.", .passed, .required, now)
     }
 
     private func outputFolderResult(_ url: URL?, now: Date) -> PreflightCheckResult {
