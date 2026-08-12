@@ -75,6 +75,11 @@ struct ImportedPromptImage: Sendable, Equatable {
     var url: URL
 }
 
+struct EventExperienceEditingSession: Sendable, Equatable {
+    var id: String
+    var eventID: String
+}
+
 enum EventExperienceError: LocalizedError, Equatable {
     case invalidEventID
     case missing(URL)

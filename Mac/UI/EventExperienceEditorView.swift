@@ -30,6 +30,7 @@ struct EventExperienceEditorView: View {
     @State private var errorMessage: String?
     @State private var editingTemplateID: String?
     @State private var previewLoadID = UUID()
+    @State private var editingSession: EventExperienceEditingSession?
 
     var body: some View {
         Group {
@@ -87,7 +88,7 @@ struct EventExperienceEditorView: View {
         .navigationTitle("Guest Experience")
         .toolbar {
             ToolbarItem(placement: .cancellationAction) {
-                Button("Back") { dismiss() }
+                Button("Back", action: discardAndDismiss)
                     .disabled(isSaving)
             }
             ToolbarItem(placement: .confirmationAction) {
@@ -98,14 +99,19 @@ struct EventExperienceEditorView: View {
             }
         }
         .task(id: event.id) {
+            var session: EventExperienceEditingSession?
             do {
+                session = try await coordinator.experienceStore.beginEditing(eventID: event.id)
                 document = try await coordinator.loadExperienceDocument(for: event)
+                editingSession = session
                 selectedTemplateID = document.defaultTemplateID
                 isLoading = false
                 previewLoadID = UUID()
             } catch is CancellationError {
+                if let session { try? await coordinator.experienceStore.discardEditing(session) }
                 return
             } catch {
+                if let session { try? await coordinator.experienceStore.discardEditing(session) }
                 errorMessage = error.localizedDescription
                 isLoading = false
             }
@@ -125,6 +131,7 @@ struct EventExperienceEditorView: View {
         .onChange(of: document.templates) { oldTemplates, newTemplates in
             let templateIDs = Set(newTemplates.map(\.id))
             previews = previews.filter { templateIDs.contains($0.key) }
+            frames = frames.filter { templateIDs.contains($0.key) }
             for template in newTemplates {
                 if oldTemplates.first(where: { $0.id == template.id }) != template {
                     previews[template.id] = nil
@@ -147,6 +154,11 @@ struct EventExperienceEditorView: View {
                 .frame(minWidth: 560, minHeight: 620)
                 .task { await loadFrame(templateID: template.id) }
             }
+        }
+        .onDisappear {
+            guard let session = editingSession else { return }
+            editingSession = nil
+            Task { try? await coordinator.experienceStore.discardEditing(session) }
         }
     }
 
@@ -192,7 +204,8 @@ struct EventExperienceEditorView: View {
                 eventID: event.id,
                 sourceTemplateID: source.id,
                 destinationTemplateID: copy.id,
-                promptIDMap: promptIDMap
+                promptIDMap: promptIDMap,
+                editingSession: editingSession
             )
         }
     }
@@ -240,12 +253,18 @@ struct EventExperienceEditorView: View {
                 let imported = try await coordinator.experienceStore.importTemplateFrame(
                     eventID: event.id,
                     templateID: templateID,
-                    sourceURL: url
+                    sourceURL: url,
+                    editingSession: editingSession
                 )
                 guard let index = document.templates.firstIndex(where: { $0.id == templateID }) else { return }
                 document.templates[index].frameFileName = imported.fileName
                 document.templates[index].updatedAt = Date()
-                await loadFrame(templateID: templateID)
+                guard let source = CGImageSourceCreateWithURL(imported.url as CFURL, nil),
+                      let image = CGImageSourceCreateImageAtIndex(source, 0, nil) else {
+                    frames[templateID] = nil
+                    throw EventExperienceError.importFailed("Imported frame could not be decoded.")
+                }
+                frames[templateID] = image
                 previews[templateID] = nil
                 previewLoadID = UUID()
             } catch {
@@ -256,15 +275,23 @@ struct EventExperienceEditorView: View {
 
     private func loadFrame(templateID: String) async {
         do {
+            guard frames[templateID] == nil else { return }
+            guard let template = document.templates.first(where: { $0.id == templateID }),
+                  let fileName = template.frameFileName else {
+                frames[templateID] = nil
+                return
+            }
             guard let data = try await coordinator.experienceStore.readTemplateFrame(
                 eventID: event.id,
-                templateID: templateID
+                templateID: templateID,
+                fileName: fileName
             ),
             let source = CGImageSourceCreateWithData(data as CFData, nil),
             let image = CGImageSourceCreateImageAtIndex(source, 0, nil) else {
                 frames[templateID] = nil
                 return
             }
+            guard frames[templateID] == nil else { return }
             frames[templateID] = image
         } catch is CancellationError {
             return
@@ -283,7 +310,8 @@ struct EventExperienceEditorView: View {
                 let imported = try await coordinator.experienceStore.importPromptImage(
                     eventID: event.id,
                     promptID: promptID,
-                    sourceURL: url
+                    sourceURL: url,
+                    editingSession: editingSession
                 )
                 document.templates[templateIndex].posePrompts[promptIndex].imageFileName = imported.fileName
             } catch {
@@ -312,7 +340,12 @@ struct EventExperienceEditorView: View {
         isSaving = true
         Task {
             do {
-                try await coordinator.saveExperienceDocument(document, for: event)
+                try await coordinator.saveExperienceDocument(
+                    document,
+                    for: event,
+                    editingSession: editingSession
+                )
+                editingSession = nil
                 for template in document.templates {
                     _ = try await coordinator.experienceStore.rebuildPreview(
                         eventID: event.id,
@@ -325,6 +358,18 @@ struct EventExperienceEditorView: View {
                 errorMessage = error.localizedDescription
                 isSaving = false
             }
+        }
+    }
+
+    private func discardAndDismiss() {
+        guard let session = editingSession else {
+            dismiss()
+            return
+        }
+        editingSession = nil
+        Task {
+            try? await coordinator.experienceStore.discardEditing(session)
+            dismiss()
         }
     }
 

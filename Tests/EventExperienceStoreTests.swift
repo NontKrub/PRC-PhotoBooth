@@ -115,8 +115,35 @@ struct EventExperienceStoreTests {
         #expect(FileManager.default.fileExists(atPath: directory.appendingPathComponent("frame.png").path))
         #expect((try await store.load(eventID: "event-1")).templates[0].frameFileName == "frame.png")
 
-        let data = try await store.readTemplateFrame(eventID: "event-1", templateID: template.id)
+        let data = try await store.readTemplateFrame(
+            eventID: "event-1",
+            templateID: template.id,
+            fileName: "frame.png"
+        )
         #expect(data != nil)
+        #expect(data.flatMap { CGImageSourceCreateWithData($0 as CFData, nil) } != nil)
+    }
+
+    @Test("reads a draft frame filename without reloading the persisted document")
+    func readsDraftFrameBeforeSave() async throws {
+        let root = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let template = validTemplate()
+        let store = EventExperienceStore(baseDirectory: root)
+        try await store.save(document(for: template))
+
+        let directory = root.appendingPathComponent(
+            "EventExperiences/event-1/Templates/\(template.id)",
+            isDirectory: true
+        )
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        try makeImage().writePNG(to: directory.appendingPathComponent("frame.png"))
+
+        let data = try await store.readTemplateFrame(
+            eventID: "event-1",
+            templateID: template.id,
+            fileName: "frame.png"
+        )
         #expect(data.flatMap { CGImageSourceCreateWithData($0 as CFData, nil) } != nil)
     }
 
@@ -130,11 +157,106 @@ struct EventExperienceStoreTests {
         try await store.save(document(for: template))
 
         do {
-            _ = try await store.readTemplateFrame(eventID: "event-1", templateID: template.id)
+            _ = try await store.readTemplateFrame(
+                eventID: "event-1",
+                templateID: template.id,
+                fileName: template.frameFileName!
+            )
             Issue.record("Expected unsafe frame filename to be rejected")
         } catch let error as EventExperienceError {
             guard case .invalid = error else { Issue.record("Wrong error: \(error)"); return }
         }
+    }
+
+    @Test("staged frame replacement is discarded without touching the live asset")
+    func discardsStagedFrameReplacement() async throws {
+        let root = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        var template = validTemplate()
+        template.frameFileName = "frame.png"
+        let store = EventExperienceStore(baseDirectory: root)
+        let document = document(for: template)
+        try await store.save(document)
+
+        let liveURL = root.appendingPathComponent(
+            "EventExperiences/event-1/Templates/\(template.id)/frame.png"
+        )
+        try FileManager.default.createDirectory(at: liveURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+        let original = try pngData(from: makeImage(color: CGColor(red: 1, green: 0, blue: 0, alpha: 1)))
+        try original.write(to: liveURL)
+        let replacement = root.appendingPathComponent("replacement.png")
+        try pngData(from: makeImage(color: CGColor(red: 0, green: 0, blue: 1, alpha: 1))).write(to: replacement)
+
+        let session = try await store.beginEditing(eventID: "event-1")
+        let imported = try await store.importTemplateFrame(
+            eventID: "event-1",
+            templateID: template.id,
+            sourceURL: replacement,
+            editingSession: session
+        )
+        #expect(imported.url.path.contains(".editor-staging"))
+        #expect(try Data(contentsOf: liveURL) == original)
+
+        try await store.discardEditing(session)
+        #expect(try Data(contentsOf: liveURL) == original)
+    }
+
+    @Test("saving an editor session commits the staged replacement")
+    func commitsStagedFrameReplacement() async throws {
+        let root = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        var template = validTemplate()
+        template.frameFileName = "frame.png"
+        let store = EventExperienceStore(baseDirectory: root)
+        let document = document(for: template)
+        try await store.save(document)
+
+        let liveURL = root.appendingPathComponent(
+            "EventExperiences/event-1/Templates/\(template.id)/frame.png"
+        )
+        try FileManager.default.createDirectory(at: liveURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try pngData(from: makeImage(color: CGColor(red: 1, green: 0, blue: 0, alpha: 1))).write(to: liveURL)
+        let replacement = root.appendingPathComponent("replacement.png")
+        let replacementData = try pngData(from: makeImage(color: CGColor(red: 0, green: 0, blue: 1, alpha: 1)))
+        try replacementData.write(to: replacement)
+
+        let session = try await store.beginEditing(eventID: "event-1")
+        _ = try await store.importTemplateFrame(
+            eventID: "event-1",
+            templateID: template.id,
+            sourceURL: replacement,
+            editingSession: session
+        )
+        try await store.commitEditing(session, document: document)
+
+        #expect(try Data(contentsOf: liveURL) == replacementData)
+        #expect((try await store.load(eventID: "event-1")).templates[0].frameFileName == "frame.png")
+    }
+
+    @Test("new staged frame disappears when editing is cancelled")
+    func discardsNewStagedFrame() async throws {
+        let root = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let template = validTemplate()
+        let store = EventExperienceStore(baseDirectory: root)
+        try await store.save(document(for: template))
+        let source = root.appendingPathComponent("replacement.png")
+        try pngData(from: makeImage(color: CGColor(red: 0, green: 0, blue: 1, alpha: 1))).write(to: source)
+
+        let session = try await store.beginEditing(eventID: "event-1")
+        _ = try await store.importTemplateFrame(
+            eventID: "event-1",
+            templateID: template.id,
+            sourceURL: source,
+            editingSession: session
+        )
+        try await store.discardEditing(session)
+
+        let liveURL = root.appendingPathComponent(
+            "EventExperiences/event-1/Templates/\(template.id)/frame.png"
+        )
+        #expect(!FileManager.default.fileExists(atPath: liveURL.path))
+        #expect((try await store.load(eventID: "event-1")).templates[0].frameFileName == nil)
     }
 
     @Test("bulk preview reads skip missing assets")
@@ -290,11 +412,20 @@ struct EventExperienceStoreTests {
     }
 }
 
-private func makeImage() -> CGImage {
+private func makeImage(
+    color: CGColor = CGColor(red: 0.8, green: 0.3, blue: 0.2, alpha: 1)
+) -> CGImage {
     let context = CGContext(data: nil, width: 16, height: 16, bitsPerComponent: 8, bytesPerRow: 0, space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
-    context.setFillColor(CGColor(red: 0.8, green: 0.3, blue: 0.2, alpha: 1))
+    context.setFillColor(color)
     context.fill(CGRect(x: 0, y: 0, width: 16, height: 16))
     return context.makeImage()!
+}
+
+private func pngData(from image: CGImage) throws -> Data {
+    let url = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + ".png")
+    defer { try? FileManager.default.removeItem(at: url) }
+    try image.writePNG(to: url)
+    return try Data(contentsOf: url)
 }
 
 private extension CGImage {

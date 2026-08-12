@@ -8,6 +8,7 @@ struct OperationsView: View {
     @State private var showDiscardConfirmation = false
     @State private var serverStatus = LocalWebServerStatus(state: .stopped, registeredTokenCount: 0)
     @State private var boothHealth = BoothHealthSnapshot.empty
+    @State private var manifests: [String: SessionManifest] = [:]
 
     var body: some View {
         ScrollView {
@@ -15,6 +16,7 @@ struct OperationsView: View {
                 readinessSummary
                 preflightResults
                 recoverySection
+                webDeliverySection
                 queueSection
                 GalleryModerationView()
                 printerSection
@@ -27,10 +29,12 @@ struct OperationsView: View {
         .navigationTitle("Operations")
         .task {
             await refreshServerStatus()
+            await refreshManifests()
             boothHealth = await coordinator.healthSnapshot()
             while !Task.isCancelled {
                 try? await Task.sleep(for: .seconds(2))
                 await refreshServerStatus()
+                await refreshManifests()
                 boothHealth = await coordinator.healthSnapshot()
             }
         }
@@ -140,6 +144,103 @@ struct OperationsView: View {
         }
     }
 
+    private var webDeliverySection: some View {
+        GroupBox("Web Delivery") {
+            let jobs = coordinator.jobQueue.jobs
+                .filter { $0.kind == .cloudUpload }
+                .sorted { $0.createdAt > $1.createdAt }
+            if jobs.isEmpty {
+                Text(UserDefaults.standard.bool(forKey: "cloudUploadEnabled")
+                     ? "No completed sessions have a web upload job."
+                     : "Not configured")
+                    .foregroundStyle(.secondary)
+            } else {
+                VStack(alignment: .leading, spacing: 10) {
+                    ForEach(jobs) { job in
+                        webDeliveryRow(job)
+                        if job.id != jobs.last?.id { Divider() }
+                    }
+                }
+            }
+        }
+    }
+
+    private func webDeliveryRow(_ job: SessionJob) -> some View {
+        let manifest = manifests[job.sessionID]
+        let title = manifest?.eventName ?? "Session \(job.sessionID.prefix(8))"
+        return VStack(alignment: .leading, spacing: 5) {
+            HStack {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(title).font(.subheadline.bold())
+                    if let startedAt = manifest?.startedAt {
+                        Text(startedAt, style: .date)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    Text(job.sessionID)
+                        .font(.caption2.monospaced())
+                        .foregroundStyle(.tertiary)
+                }
+                Spacer()
+                Label(webDeliveryStatus(job), systemImage: webDeliveryIcon(job))
+                    .foregroundStyle(webDeliveryColor(job))
+            }
+            if job.status == .succeeded {
+                Text("Last successful upload: \(job.updatedAt.formatted(date: .omitted, time: .shortened))")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            if job.status == .waitingRetry, let next = job.nextAttemptAt {
+                (Text("Retry scheduled ") + Text(next, style: .relative))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            if let error = job.lastError, job.status == .failed || job.status == .cancelled {
+                Text("Error: \(error)")
+                    .font(.caption)
+                    .foregroundStyle(.red)
+            }
+            if job.status == .failed || job.status == .cancelled || job.status == .succeeded {
+                HStack {
+                    Spacer()
+                    Button(job.status == .succeeded ? "Re-upload Web Files" : "Retry Web Upload") {
+                        coordinator.retryCloudUpload(sessionID: job.sessionID)
+                    }
+                    .buttonStyle(.bordered)
+                }
+            }
+        }
+        .padding(.vertical, 4)
+    }
+
+    private func webDeliveryStatus(_ job: SessionJob) -> String {
+        switch job.status {
+        case .pending: return "Waiting"
+        case .running: return "Uploading… Attempt \(job.attemptCount)"
+        case .waitingRetry: return "Retry scheduled"
+        case .succeeded: return "Uploaded"
+        case .failed, .cancelled: return "Upload failed"
+        }
+    }
+
+    private func webDeliveryIcon(_ job: SessionJob) -> String {
+        switch job.status {
+        case .pending, .waitingRetry: return "clock"
+        case .running: return "arrow.triangle.2.circlepath"
+        case .succeeded: return "checkmark.circle.fill"
+        case .failed, .cancelled: return "exclamationmark.triangle.fill"
+        }
+    }
+
+    private func webDeliveryColor(_ job: SessionJob) -> Color {
+        switch job.status {
+        case .succeeded: return .green
+        case .failed, .cancelled: return .red
+        case .running, .waitingRetry: return .orange
+        case .pending: return .secondary
+        }
+    }
+
     private var queueSection: some View {
         GroupBox("Persistent Queue") {
             VStack(alignment: .leading, spacing: 10) {
@@ -166,7 +267,7 @@ struct OperationsView: View {
                             Spacer()
                             Text(operatorJobStatusName(job.status, locale: locale))
                                 .foregroundStyle(job.status == .failed ? .red : .secondary)
-                            if job.status == .failed || job.status == .cancelled {
+                            if (job.status == .failed || job.status == .cancelled) && job.kind != .cloudUpload {
                                 Button("Retry") { coordinator.jobQueue.retry(jobID: job.id) }
                             }
                             if job.kind.isOptional && job.status != .succeeded && job.status != .cancelled {
@@ -374,6 +475,16 @@ struct OperationsView: View {
 
     private func refreshServerStatus() async {
         serverStatus = await coordinator.server.statusSnapshot()
+    }
+
+    private func refreshManifests() async {
+        var loaded: [String: SessionManifest] = [:]
+        for result in await coordinator.manifestStore.loadAll() {
+            if case .loaded(let manifest) = result {
+                loaded[manifest.id] = manifest
+            }
+        }
+        manifests = loaded
     }
 
     private func openFolder(for sessionID: String) {

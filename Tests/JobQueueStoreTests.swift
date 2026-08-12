@@ -60,6 +60,64 @@ struct JobQueueStoreTests {
         #expect(retried?.nextAttemptAt != nil)
     }
 
+    @Test("force requeue resets every recoverable cloud upload state")
+    func forceRequeuesCloudUploads() async throws {
+        let file = try temporaryFile()
+        defer { try? FileManager.default.removeItem(at: file.deletingLastPathComponent()) }
+        let store = JobQueueStore(fileURL: file)
+
+        for (sessionID, status) in [
+            ("failed", SessionJobStatus.failed),
+            ("cancelled", SessionJobStatus.cancelled),
+            ("succeeded", SessionJobStatus.succeeded)
+        ] {
+            var job = try await store.enqueue(sessionID: sessionID, kind: .cloudUpload)
+            job.status = status
+            job.attemptCount = 4
+            job.lastError = "old error"
+            try await store.update(job)
+
+            #expect(try await store.forceRequeueCloudUpload(sessionID: sessionID) == .queued)
+            let queued = await store.snapshot().first { $0.sessionID == sessionID }
+            #expect(queued?.status == .pending)
+            #expect(queued?.attemptCount == 0)
+            #expect(queued?.lastError == nil)
+            #expect(queued?.nextAttemptAt != nil)
+        }
+    }
+
+    @Test("force requeue never creates a duplicate or overlaps an upload")
+    func forceRequeueDoesNotDuplicate() async throws {
+        let file = try temporaryFile()
+        defer { try? FileManager.default.removeItem(at: file.deletingLastPathComponent()) }
+        let store = JobQueueStore(fileURL: file)
+        let job = try await store.enqueue(sessionID: "session", kind: .cloudUpload)
+
+        #expect(try await store.forceRequeueCloudUpload(sessionID: "session") == .alreadyQueued)
+        var running = job
+        running.status = .running
+        try await store.update(running)
+        #expect(try await store.forceRequeueCloudUpload(sessionID: "session") == .alreadyRunning)
+        #expect((await store.snapshot().filter { $0.kind == .cloudUpload }).count == 1)
+        #expect(try await store.forceRequeueCloudUpload(sessionID: "missing") == .notFound)
+    }
+
+    @Test("force requeue survives store recreation")
+    func forceRequeuePersists() async throws {
+        let file = try temporaryFile()
+        defer { try? FileManager.default.removeItem(at: file.deletingLastPathComponent()) }
+        let store = JobQueueStore(fileURL: file)
+        var job = try await store.enqueue(sessionID: "session", kind: .cloudUpload)
+        job.status = .succeeded
+        try await store.update(job)
+
+        #expect(try await store.forceRequeueCloudUpload(sessionID: "session") == .queued)
+        let reloaded = JobQueueStore(fileURL: file)
+        let loaded = try await reloaded.load()
+        #expect(loaded[0].status == .pending)
+        #expect(loaded[0].attemptCount == 0)
+    }
+
     @Test("corrupt queue is preserved before a new empty queue is created")
     func preservesCorruptQueue() async throws {
         let file = try temporaryFile()

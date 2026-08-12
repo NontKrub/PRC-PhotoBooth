@@ -25,6 +25,13 @@ enum SessionJobStatus: String, Codable, Sendable {
     case cancelled
 }
 
+enum CloudUploadRequeueResult: String, Sendable, Equatable {
+    case queued
+    case alreadyQueued
+    case alreadyRunning
+    case notFound
+}
+
 struct SessionJob: Codable, Sendable, Identifiable, Equatable {
     var id: String
     var sessionID: String

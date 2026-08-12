@@ -111,6 +111,31 @@ actor JobQueueStore {
         try persist()
     }
 
+    func forceRequeueCloudUpload(sessionID: String) throws -> CloudUploadRequeueResult {
+        try ensureLoaded()
+        guard let index = jobs.firstIndex(where: {
+            $0.sessionID == sessionID && $0.kind == .cloudUpload
+        }) else {
+            return .notFound
+        }
+
+        switch jobs[index].status {
+        case .pending, .waitingRetry:
+            return .alreadyQueued
+        case .running:
+            return .alreadyRunning
+        case .failed, .cancelled, .succeeded:
+            jobs[index].status = .pending
+            jobs[index].attemptCount = 0
+            jobs[index].lastAttemptAt = nil
+            jobs[index].nextAttemptAt = Date()
+            jobs[index].lastError = nil
+            jobs[index].updatedAt = Date()
+            try persist()
+            return .queued
+        }
+    }
+
     func cancel(jobID: String) throws {
         try ensureLoaded()
         guard let index = jobs.firstIndex(where: { $0.id == jobID }) else {

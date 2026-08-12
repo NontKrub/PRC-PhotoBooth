@@ -72,6 +72,18 @@ final class SessionJobQueue {
         }
     }
 
+    func forceRequeueCloudUpload(sessionID: String) {
+        Task { [weak self] in
+            guard let self else { return }
+            do {
+                _ = try await store.forceRequeueCloudUpload(sessionID: sessionID)
+                await reload()
+            } catch {
+                lastQueueError = error.localizedDescription
+            }
+        }
+    }
+
     func cancel(jobID: String) {
         Task { [weak self] in
             guard let self else { return }
