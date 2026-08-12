@@ -31,6 +31,10 @@ enum PreviewFrameRate: Int, CaseIterable, Identifiable {
     var label: String { "\(rawValue) FPS" }
 }
 
+func shouldScheduleAutomaticCloudRetry(previous: Bool?, isSatisfied: Bool) -> Bool {
+    isSatisfied && previous != true
+}
+
 enum SelphyPaperSize: String, CaseIterable {
     case postcard   = "Postcard (4×6\")"
     case lSize      = "L-size (3.5×5\")"
@@ -446,7 +450,7 @@ final class BoothCoordinator {
             automaticCloudRetryTask?.cancel()
             return
         }
-        guard previous == false, isSatisfied else { return }
+        guard shouldScheduleAutomaticCloudRetry(previous: previous, isSatisfied: isSatisfied) else { return }
 
         let now = Date()
         guard lastAutomaticCloudRetryAt.map({ now.timeIntervalSince($0) >= 60 }) ?? true else { return }

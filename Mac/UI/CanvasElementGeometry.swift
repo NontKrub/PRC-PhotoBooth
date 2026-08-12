@@ -52,36 +52,34 @@ enum CanvasElementGeometry {
         minimumSize: CGSize,
         in canvasSize: CGSize
     ) -> CGRect {
-        var result = rect
+        let canvasWidth = max(0, canvasSize.width)
+        let canvasHeight = max(0, canvasSize.height)
+        let minimumWidth = min(max(0, minimumSize.width), canvasWidth)
+        let minimumHeight = min(max(0, minimumSize.height), canvasHeight)
+        var minX = rect.minX
+        var maxX = rect.maxX
+        var minY = rect.minY
+        var maxY = rect.maxY
+
         switch handle {
-        case .n:
-            result.origin.y += delta.height
-            result.size.height -= delta.height
-        case .s:
-            result.size.height += delta.height
-        case .e:
-            result.size.width += delta.width
-        case .w:
-            result.origin.x += delta.width
-            result.size.width -= delta.width
-        case .ne:
-            result.origin.y += delta.height
-            result.size.height -= delta.height
-            result.size.width += delta.width
-        case .nw:
-            result.origin.x += delta.width
-            result.size.width -= delta.width
-            result.origin.y += delta.height
-            result.size.height -= delta.height
-        case .se:
-            result.size.width += delta.width
-            result.size.height += delta.height
-        case .sw:
-            result.origin.x += delta.width
-            result.size.width -= delta.width
-            result.size.height += delta.height
+        case .e, .ne, .se:
+            maxX = min(canvasWidth, max(rect.minX + minimumWidth, rect.maxX + delta.width))
+        case .w, .nw, .sw:
+            minX = max(0, min(rect.maxX - minimumWidth, rect.minX + delta.width))
+        case .n, .s:
+            break
         }
-        return clamped(result, in: canvasSize, minimumSize: minimumSize)
+
+        switch handle {
+        case .s, .se, .sw:
+            maxY = min(canvasHeight, max(rect.minY + minimumHeight, rect.maxY + delta.height))
+        case .n, .ne, .nw:
+            minY = max(0, min(rect.maxY - minimumHeight, rect.minY + delta.height))
+        case .e, .w:
+            break
+        }
+
+        return CGRect(x: minX, y: minY, width: maxX - minX, height: maxY - minY)
     }
 
     static func centeredSquare(in rect: CGRect) -> CGRect {
@@ -156,7 +154,7 @@ struct ResizableCanvasElementView<Content: View>: View {
                 .rotationEffect(.degrees(rotation))
                 .position(x: displayRect.midX, y: displayRect.midY)
                 .gesture(
-                    DragGesture()
+                    DragGesture(minimumDistance: 0, coordinateSpace: .named("templateCanvas"))
                         .updating($dragOffset) { value, state, _ in state = value.translation }
                         .onEnded { value in onMove(value.translation) }
                 )
@@ -189,7 +187,7 @@ struct ResizableCanvasElementView<Content: View>: View {
             .frame(width: size, height: size)
             .position(point)
             .gesture(
-                DragGesture()
+                DragGesture(minimumDistance: 0, coordinateSpace: .named("templateCanvas"))
                     .updating($resizeState) { value, state, _ in
                         state = CanvasElementResizeState(handle: handle, delta: value.translation)
                     }

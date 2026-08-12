@@ -162,6 +162,7 @@
 		E7844ED89C59CFA0E17C68C4 /* PosePromptEditorView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1EFBA7CF460CA59D772AB1E9 /* PosePromptEditorView.swift */; };
 		E7A4A772F43B6E96507D63AA /* OperationsEventStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5B435DCD844E924213791141 /* OperationsEventStore.swift */; };
 		E7F1277532E131CF5071E3B7 /* USBPreviewServer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 24B980C65250404308C88BB0 /* USBPreviewServer.swift */; };
+		E8AA2531C3A4B2B73E4D3A34 /* BoothCoordinatorNetworkTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 162B4A929E4EF65C80C9A8FF /* BoothCoordinatorNetworkTests.swift */; };
 		E8F396F836BFEB40E41AE51A /* GIFEncoderTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A14B450ECDDDD6F417C43FA1 /* GIFEncoderTests.swift */; };
 		ECC4A6D04D406ADD63544BFD /* MultipeerConnectivity.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = DAF3E4AAFB2FE72146AD824D /* MultipeerConnectivity.framework */; };
 		ECC689CDFF77127F98ACEC45 /* CustomerExperienceCatalogBuilder.swift in Sources */ = {isa = PBXBuildFile; fileRef = B514D8A1659956BF413A3CB0 /* CustomerExperienceCatalogBuilder.swift */; };
@@ -197,6 +198,7 @@
 		11154D021EC68E28E4E445E8 /* LocalizedText.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LocalizedText.swift; sourceTree = "<group>"; };
 		1277D5F99824D66627D593C2 /* MacApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MacApp.swift; sourceTree = "<group>"; };
 		13511087CFED7C8D2178B904 /* SessionJob.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionJob.swift; sourceTree = "<group>"; };
+		162B4A929E4EF65C80C9A8FF /* BoothCoordinatorNetworkTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BoothCoordinatorNetworkTests.swift; sourceTree = "<group>"; };
 		170BAF86F05EDCDC1C6C158A /* RemoteOperatorAuthTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteOperatorAuthTests.swift; sourceTree = "<group>"; };
 		173D59BE35314817C6D77D0E /* ImageCaptureCore.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = ImageCaptureCore.framework; path = System/Library/Frameworks/ImageCaptureCore.framework; sourceTree = SDKROOT; };
 		1EFBA7CF460CA59D772AB1E9 /* PosePromptEditorView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PosePromptEditorView.swift; sourceTree = "<group>"; };
@@ -677,6 +679,7 @@
 			children = (
 				2B555DBC71B145823AD802CE /* .gitkeep */,
 				8EE3B99F5C1FD036A5A483B7 /* ActiveCameraPreviewTests.swift */,
+				162B4A929E4EF65C80C9A8FF /* BoothCoordinatorNetworkTests.swift */,
 				4346C88E68A8DD1C20ECE9EC /* CanvasElementGeometryTests.swift */,
 				6F48DF1659531A153398C215 /* CaptureRecoveryTests.swift */,
 				68AD6CCBF1B3CB849C8CA5A9 /* CloudSSHSetupTests.swift */,
@@ -994,6 +997,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				57B1E22E23EC8495A2B93C4C /* ActiveCameraPreviewTests.swift in Sources */,
+				E8AA2531C3A4B2B73E4D3A34 /* BoothCoordinatorNetworkTests.swift in Sources */,
 				F98E430CB67E8376857BBF40 /* CanvasElementGeometryTests.swift in Sources */,
 				5B6B36CA0C3D8A5763039026 /* CaptureRecoveryTests.swift in Sources */,
 				061B8A6BAAC97D0554975F74 /* CloudSSHSetupTests.swift in Sources */,

@@ -224,7 +224,8 @@ struct OperationsView: View {
         case .running: return "Uploading… Attempt \(job.attemptCount)"
         case .waitingRetry: return "Retry scheduled"
         case .succeeded: return "Uploaded"
-        case .failed, .cancelled: return "Upload failed"
+        case .failed: return "Upload failed"
+        case .cancelled: return "Upload cancelled"
         }
     }
 
@@ -233,14 +234,16 @@ struct OperationsView: View {
         case .pending, .waitingRetry: return "clock"
         case .running: return "arrow.triangle.2.circlepath"
         case .succeeded: return "checkmark.circle.fill"
-        case .failed, .cancelled: return "exclamationmark.triangle.fill"
+        case .failed: return "exclamationmark.triangle.fill"
+        case .cancelled: return "xmark.circle.fill"
         }
     }
 
     private func webDeliveryColor(_ job: SessionJob) -> Color {
         switch job.status {
         case .succeeded: return .green
-        case .failed, .cancelled: return .red
+        case .failed: return .red
+        case .cancelled: return .secondary
         case .running, .waitingRetry: return .orange
         case .pending: return .secondary
         }

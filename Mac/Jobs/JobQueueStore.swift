@@ -80,7 +80,8 @@ actor JobQueueStore {
             lastAttemptAt: nil,
             nextAttemptAt: now,
             attemptCount: 0,
-            lastError: nil
+            lastError: nil,
+            lastFailureDisposition: nil
         )
         jobs.append(job)
         try persist()
@@ -127,6 +128,7 @@ actor JobQueueStore {
         jobs[index].lastAttemptAt = nil
         jobs[index].nextAttemptAt = Date()
         jobs[index].lastError = nil
+        jobs[index].lastFailureDisposition = nil
         jobs[index].updatedAt = Date()
         try persist()
     }
@@ -150,6 +152,7 @@ actor JobQueueStore {
             jobs[index].lastAttemptAt = nil
             jobs[index].nextAttemptAt = Date()
             jobs[index].lastError = nil
+            jobs[index].lastFailureDisposition = nil
             jobs[index].updatedAt = Date()
             try persist()
             return .queued
@@ -160,12 +163,15 @@ actor JobQueueStore {
         try ensureLoaded()
         let now = Date()
         var count = 0
-        for index in jobs.indices where jobs[index].kind == .cloudUpload && jobs[index].status == .failed {
+        for index in jobs.indices where jobs[index].kind == .cloudUpload
+            && jobs[index].status == .failed
+            && jobs[index].lastFailureDisposition == .retryable {
             jobs[index].status = .pending
             jobs[index].attemptCount = 0
             jobs[index].lastAttemptAt = nil
             jobs[index].nextAttemptAt = now
             jobs[index].lastError = nil
+            jobs[index].lastFailureDisposition = nil
             jobs[index].updatedAt = now
             count += 1
         }

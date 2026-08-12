@@ -2081,6 +2081,9 @@
         }
       }
     },
+    "Error: %@" : {
+
+    },
     "EV" : {
       "localizations" : {
         "th" : {
@@ -2968,6 +2971,9 @@
           }
         }
       }
+    },
+    "Last successful upload: %@" : {
+
     },
     "Layout" : {
       "extractionState" : "manual",
@@ -4717,6 +4723,9 @@
         }
       }
     },
+    "Retry scheduled " : {
+
+    },
     "Review" : {
       "extractionState" : "manual",
       "localizations" : {
@@ -5760,6 +5769,9 @@
           }
         }
       }
+    },
+    "The printed QR is still valid. Retrying the upload will restore the same link." : {
+
     },
     "This Mac can't verify its owner right now. Try your PIN." : {
       "extractionState" : "manual",

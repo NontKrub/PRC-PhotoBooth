@@ -156,11 +156,18 @@ struct ProcessCloudCommandRunner: CloudCommandRunning {
     }
 
     fileprivate static func terminate(_ process: Process, processGroupConfigured: Bool) {
-        guard process.isRunning else { return }
-        process.terminate()
+        let processID = process.processIdentifier
+        if processGroupConfigured {
+            _ = kill(-processID, SIGTERM)
+        } else if process.isRunning {
+            process.terminate()
+        }
         DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 0.25) {
-            guard process.isRunning else { return }
-            _ = kill(processGroupConfigured ? -process.processIdentifier : process.processIdentifier, SIGKILL)
+            if processGroupConfigured {
+                _ = kill(-processID, SIGKILL)
+            } else if process.isRunning {
+                _ = kill(processID, SIGKILL)
+            }
         }
     }
 
@@ -262,7 +269,7 @@ private final class ProcessRunState: @unchecked Sendable {
         }
         terminalError = error
         if let process {
-            if process.isRunning {
+            if process.isRunning || processGroupConfigured {
                 processToTerminate = (process, processGroupConfigured)
             }
         } else {
@@ -394,7 +401,6 @@ actor CloudUploadService {
         let publishedDirectory = "\(publishedRoot)/\(manifest.id)-\(UUID().uuidString)"
         let remoteSessions = "\(remoteRoot)/s"
         let page = cloudDownloadPageHTML(
-            token: manifest.downloadToken,
             hasGIF: manifest.gifFileName != nil
         )
         try page.write(
@@ -465,11 +471,15 @@ actor CloudUploadService {
             }
         } catch let error as JobExecutionError {
             throw error
+        } catch is CancellationError {
+            throw CancellationError()
         } catch {
+            if Task.isCancelled { throw CancellationError() }
             throw JobExecutionError.retryable(
                 "Upload completed but public download verification failed: \(error.localizedDescription)"
             )
         }
+        try Task.checkCancellation()
 
         let cleanupCommand = [
             "find \(Self.shellQuoted(publishedRoot)) -maxdepth 1 -mindepth 1 -type d",
@@ -511,7 +521,11 @@ actor CloudUploadService {
     ) async throws {
         let result: CloudCommandResult
         do {
+            try Task.checkCancellation()
             result = try await runner.run(executable: executable, arguments: arguments, timeout: timeout)
+            try Task.checkCancellation()
+        } catch is CancellationError {
+            throw CancellationError()
         } catch {
             throw JobExecutionError.retryable(
                 "Cloud upload \(label) \(error.localizedDescription)."
@@ -568,9 +582,9 @@ actor CloudUploadService {
     }
 }
 
-private func cloudDownloadPageHTML(token: String, hasGIF: Bool) -> String {
+private func cloudDownloadPageHTML(hasGIF: Bool) -> String {
     let gifLink = hasGIF
-        ? #"<p><a href="/s/\#(token)/booth.gif" download="photobooth.gif">Save GIF</a></p>"#
+        ? #"<p><a href="booth.gif" download="photobooth.gif">Save GIF</a></p>"#
         : ""
     return """
     <!DOCTYPE html>
@@ -579,8 +593,8 @@ private func cloudDownloadPageHTML(token: String, hasGIF: Bool) -> String {
     <title>PRC Photo Booth — Your Photos</title></head>
     <body style="font-family:-apple-system,sans-serif;text-align:center;padding:2rem">
     <h1>✨ Your Photo Strip</h1>
-    <img src="/s/\(token)/strip.png" alt="Photo Strip" style="max-width:90vw">
-    <p><a href="/s/\(token)/strip.png" download="photobooth-strip.png">Save Strip</a></p>
+    <img src="strip.png" alt="Photo Strip" style="max-width:90vw">
+    <p><a href="strip.png" download="photobooth-strip.png">Save Strip</a></p>
     \(gifLink)
     </body>
     </html>

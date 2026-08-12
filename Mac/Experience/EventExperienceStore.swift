@@ -176,31 +176,50 @@ actor EventExperienceStore {
                 || stagedSource.map({ fileManager.fileExists(atPath: $0.path) }) == true else {
             return
         }
-        try fileManager.createDirectory(at: destination, withIntermediateDirectories: true)
-        for fileName in ["frame.png", "preview.jpg"] {
-            let stagedAsset = stagedSource.map {
-                $0.appendingPathComponent(fileName)
-            }
-            let sourceURL = stagedAsset.flatMap { fileManager.fileExists(atPath: $0.path) ? $0 : nil }
-                ?? source.appendingPathComponent(fileName)
-            if fileManager.fileExists(atPath: sourceURL.path) {
-                try atomicCopy(sourceURL, to: destination.appendingPathComponent(fileName))
-            }
+        guard !fileManager.fileExists(atPath: destination.path) else {
+            throw EventExperienceError.invalid("Destination template already exists.")
         }
-        let prompts = try editingSession.map { try stagingEventURL($0) }
-            .map { $0.appendingPathComponent("Prompts", isDirectory: true) }
-            ?? eventURL(eventID: eventID).appendingPathComponent("Prompts", isDirectory: true)
-        for (oldID, newID) in promptIDMap {
-            guard isSafePathComponent(oldID), isSafePathComponent(newID) else {
-                throw EventExperienceError.invalid("Invalid prompt ID.")
+
+        var copiedPromptURLs: [URL] = []
+        do {
+            try fileManager.createDirectory(at: destination, withIntermediateDirectories: true)
+            for fileName in ["frame.png", "preview.jpg"] {
+                let stagedAsset = stagedSource.map {
+                    $0.appendingPathComponent(fileName)
+                }
+                let sourceURL = stagedAsset.flatMap { fileManager.fileExists(atPath: $0.path) ? $0 : nil }
+                    ?? source.appendingPathComponent(fileName)
+                if fileManager.fileExists(atPath: sourceURL.path) {
+                    try atomicCopy(sourceURL, to: destination.appendingPathComponent(fileName))
+                }
             }
-            let sourceURL = prompts.appendingPathComponent("\(oldID).jpg")
-            let livePrompts = try eventURL(eventID: eventID).appendingPathComponent("Prompts", isDirectory: true)
-            let liveSourceURL = livePrompts.appendingPathComponent("\(oldID).jpg")
-            let resolvedSource = fileManager.fileExists(atPath: sourceURL.path) ? sourceURL : liveSourceURL
-            guard fileManager.fileExists(atPath: resolvedSource.path) else { continue }
-            try fileManager.createDirectory(at: prompts, withIntermediateDirectories: true)
-            try atomicCopy(resolvedSource, to: prompts.appendingPathComponent("\(newID).jpg"))
+
+            let prompts = try editingSession.map { try stagingEventURL($0) }
+                .map { $0.appendingPathComponent("Prompts", isDirectory: true) }
+                ?? eventURL(eventID: eventID).appendingPathComponent("Prompts", isDirectory: true)
+            for (oldID, newID) in promptIDMap {
+                guard isSafePathComponent(oldID), isSafePathComponent(newID) else {
+                    throw EventExperienceError.invalid("Invalid prompt ID.")
+                }
+                let sourceURL = prompts.appendingPathComponent("\(oldID).jpg")
+                let livePrompts = try eventURL(eventID: eventID).appendingPathComponent("Prompts", isDirectory: true)
+                let liveSourceURL = livePrompts.appendingPathComponent("\(oldID).jpg")
+                let resolvedSource = fileManager.fileExists(atPath: sourceURL.path) ? sourceURL : liveSourceURL
+                guard fileManager.fileExists(atPath: resolvedSource.path) else { continue }
+                try fileManager.createDirectory(at: prompts, withIntermediateDirectories: true)
+                let destinationURL = prompts.appendingPathComponent("\(newID).jpg")
+                guard !fileManager.fileExists(atPath: destinationURL.path) else {
+                    throw EventExperienceError.invalid("Destination prompt already exists.")
+                }
+                try atomicCopy(resolvedSource, to: destinationURL)
+                copiedPromptURLs.append(destinationURL)
+            }
+        } catch {
+            for promptURL in copiedPromptURLs {
+                try? fileManager.removeItem(at: promptURL)
+            }
+            try? fileManager.removeItem(at: destination)
+            throw error
         }
     }
 

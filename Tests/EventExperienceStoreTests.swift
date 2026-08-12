@@ -185,6 +185,68 @@ struct EventExperienceStoreTests {
         ).path))
     }
 
+    @Test("failed template duplication removes partial staged assets before save")
+    func failedDuplicationCleansStagedAssets() async throws {
+        let root = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        var sourceTemplate = validTemplate(id: "template-a")
+        sourceTemplate.frameFileName = "frame.png"
+        let prompt = PosePromptDefinition(
+            id: "prompt-a",
+            photoIndex: 0,
+            title: LocalizedText(english: "Pose"),
+            imageFileName: "prompt-a.jpg"
+        )
+        sourceTemplate.posePrompts = [prompt]
+        let store = EventExperienceStore(baseDirectory: root)
+        let document = document(for: sourceTemplate)
+        try await store.save(document)
+
+        let sourceFrame = root.appendingPathComponent(
+            "EventExperiences/event-1/Templates/template-a/frame.png"
+        )
+        try FileManager.default.createDirectory(at: sourceFrame.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try pngData(from: makeImage()).write(to: sourceFrame)
+        let sourcePrompt = root.appendingPathComponent("EventExperiences/event-1/Prompts/prompt-a.jpg")
+        try FileManager.default.createDirectory(at: sourcePrompt.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try Data([1, 2, 3]).write(to: sourcePrompt)
+
+        let session = try await store.beginEditing(eventID: "event-1")
+        let stagingEvent = root.appendingPathComponent(
+            "EventExperiences/.editor-staging/\(session.id)/event-1"
+        )
+        try FileManager.default.createDirectory(at: stagingEvent, withIntermediateDirectories: true)
+        let promptsBlocker = stagingEvent.appendingPathComponent("Prompts")
+        try Data([9]).write(to: promptsBlocker)
+
+        do {
+            try await store.duplicateTemplateAssets(
+                eventID: "event-1",
+                sourceTemplateID: sourceTemplate.id,
+                destinationTemplateID: "template-b",
+                promptIDMap: ["prompt-a": "prompt-b"],
+                editingSession: session
+            )
+            Issue.record("Expected prompt duplication to fail")
+        } catch {
+            // Expected: the prompt directory is deliberately a file.
+        }
+
+        let stagedTemplate = stagingEvent.appendingPathComponent("Templates/template-b")
+        #expect(!FileManager.default.fileExists(atPath: stagedTemplate.path))
+        try FileManager.default.removeItem(at: promptsBlocker)
+        try await store.commitEditing(session, document: document)
+
+        let loaded = try await store.load(eventID: "event-1")
+        #expect(loaded.templates.map(\.id) == ["template-a"])
+        #expect(!FileManager.default.fileExists(atPath: root.appendingPathComponent(
+            "EventExperiences/event-1/Templates/template-b"
+        ).path))
+        #expect(!FileManager.default.fileExists(atPath: root.appendingPathComponent(
+            "EventExperiences/event-1/Prompts/prompt-b.jpg"
+        ).path))
+    }
+
     @Test("draft-aware preview reads prefer staged assets")
     func draftAwarePreviewReadsPreferStagedAssets() async throws {
         let root = try temporaryDirectory()

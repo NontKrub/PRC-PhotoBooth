@@ -16,16 +16,19 @@ struct CloudUploadServiceTests {
             withIntermediateDirectories: true
         )
         try Data([2]).write(to: directory.appendingPathComponent(".work/should-not-upload"))
+        try Data([3]).write(to: directory.appendingPathComponent("booth.gif"))
 
         let runner = TestCloudCommandRunner()
         let verifier = TestCloudURLVerifier()
         let service = CloudUploadService(runner: runner, verifier: verifier)
+        var manifest = makeManifest(directory: directory)
+        manifest.gifFileName = "booth.gif"
         try await service.upload(
-            manifest: makeManifest(directory: directory),
+            manifest: manifest,
             configuration: CloudUploadConfiguration(
                 sshHost: "booth-host",
                 remoteBasePath: "/srv/photos",
-                publicBaseURL: "https://photos.example"
+                publicBaseURL: "https://photos.example/photobooth"
             )
         )
 
@@ -46,8 +49,13 @@ struct CloudUploadServiceTests {
         #expect(commands[3].arguments.last?.contains("find") == true)
         #expect(commands[3].arguments.last?.contains("session-*") == true)
         #expect(commands[3].arguments.last?.contains("! -path") == true)
-        #expect((await verifier.urls).first?.path == "/s/token/strip.png")
-        #expect(FileManager.default.fileExists(atPath: directory.appendingPathComponent("index.html").path))
+        #expect((await verifier.urls).first?.path == "/photobooth/s/token/strip.png")
+        let page = try String(contentsOf: directory.appendingPathComponent("index.html"), encoding: .utf8)
+        #expect(page.contains(#"src="strip.png""#))
+        #expect(page.contains(#"href="strip.png""#))
+        #expect(page.contains(#"href="booth.gif""#))
+        #expect(!page.contains(#"src="/s/"#))
+        #expect(!page.contains(#"href="/s/"#))
     }
 
     @Test("cleanup failure does not downgrade verified cloud delivery")
@@ -254,6 +262,42 @@ struct CloudUploadServiceTests {
         #expect(try Data(contentsOf: strip) == original)
     }
 
+    @Test("cancelling an upload propagates cancellation and skips publish")
+    func cancellingUploadSkipsPublish() async throws {
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try Data([1]).write(to: directory.appendingPathComponent("strip.png"))
+        let runner = CancellationAwareCloudCommandRunner()
+        let service = CloudUploadService(runner: runner, verifier: TestCloudURLVerifier())
+        let task = Task {
+            try await service.upload(
+                manifest: makeManifest(directory: directory),
+                configuration: CloudUploadConfiguration(
+                    sshHost: "host",
+                    remoteBasePath: "/srv/photos",
+                    publicBaseURL: "https://photos.example"
+                )
+            )
+        }
+
+        for _ in 0..<100 {
+            if await runner.commands.count == 2 { break }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        #expect(await runner.commands.count == 2)
+        task.cancel()
+
+        do {
+            _ = try await task.value
+            Issue.record("Expected upload cancellation")
+        } catch is CancellationError {
+            // Expected.
+        } catch {
+            Issue.record("Expected CancellationError, got \(error)")
+        }
+        #expect(await runner.commands.count == 2)
+    }
+
     @Test("process runner terminates a command that exceeds its timeout")
     func processRunnerTimesOut() async throws {
         do {
@@ -343,6 +387,34 @@ struct CloudUploadServiceTests {
         }
         #expect(kill(childPID, 0) != 0)
     }
+
+    @Test("cancelling after the shell exits still kills its process-group child")
+    func processRunnerKillsChildAfterParentExits() async throws {
+        let pidFile = FileManager.default.temporaryDirectory
+            .appendingPathComponent("PRC-Cloud-parent-exit-child-(UUID().uuidString).txt")
+        defer { try? FileManager.default.removeItem(at: pidFile) }
+        let quotedPIDFile = "'\(pidFile.path)'"
+
+        let task = Task {
+            try await ProcessCloudCommandRunner().run(
+                executable: "/bin/sh",
+                arguments: ["-c", "sleep 10 & child=$!; echo $child > \(quotedPIDFile); sleep 0.2"],
+                timeout: 20
+            )
+        }
+        try await waitForFile(pidFile)
+        let childPID = try #require(Int32(try String(contentsOf: pidFile, encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines)))
+        try await Task.sleep(for: .milliseconds(100))
+        task.cancel()
+
+        for _ in 0..<20 where kill(childPID, 0) == 0 {
+            try await Task.sleep(for: .milliseconds(25))
+        }
+        let childAlive = kill(childPID, 0) == 0
+        #expect(!childAlive)
+        if childAlive { _ = kill(childPID, SIGKILL) }
+        _ = try? await task.value
+    }
 }
 
 private actor TestCloudCommandRunner: CloudCommandRunning {
@@ -370,6 +442,18 @@ private actor TestCloudCommandRunner: CloudCommandRunning {
         return failures.removeValue(forKey: index)
             ?? nextResult
             ?? CloudCommandResult(exitCode: 0, output: "")
+    }
+}
+
+private actor CancellationAwareCloudCommandRunner: CloudCommandRunning {
+    private(set) var commands: [String] = []
+
+    func run(executable: String, arguments: [String], timeout: TimeInterval) async throws -> CloudCommandResult {
+        commands.append(executable)
+        if commands.count == 2 {
+            try await Task.sleep(for: .seconds(10))
+        }
+        return CloudCommandResult(exitCode: 0, output: "")
     }
 }
 

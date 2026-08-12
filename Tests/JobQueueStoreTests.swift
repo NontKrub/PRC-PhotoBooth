@@ -50,6 +50,7 @@ struct JobQueueStoreTests {
         failed.status = .failed
         failed.attemptCount = 4
         failed.lastError = "printer offline"
+        failed.lastFailureDisposition = .permanent
         try await store.update(failed)
         try await store.retry(jobID: failed.id)
 
@@ -57,6 +58,7 @@ struct JobQueueStoreTests {
         #expect(retried?.status == .pending)
         #expect(retried?.attemptCount == 0)
         #expect(retried?.lastError == nil)
+        #expect(retried?.lastFailureDisposition == nil)
         #expect(retried?.nextAttemptAt != nil)
     }
 
@@ -82,6 +84,7 @@ struct JobQueueStoreTests {
             #expect(queued?.status == .pending)
             #expect(queued?.attemptCount == 0)
             #expect(queued?.lastError == nil)
+            #expect(queued?.lastFailureDisposition == nil)
             #expect(queued?.nextAttemptAt != nil)
         }
     }
@@ -127,7 +130,17 @@ struct JobQueueStoreTests {
         failed.status = .failed
         failed.attemptCount = 4
         failed.lastError = "offline"
+        failed.lastFailureDisposition = .retryable
         try await store.update(failed)
+        var permanent = try await store.enqueue(sessionID: "permanent", kind: .cloudUpload)
+        permanent.status = .failed
+        permanent.lastError = "strip missing"
+        permanent.lastFailureDisposition = .permanent
+        try await store.update(permanent)
+        var legacy = try await store.enqueue(sessionID: "legacy", kind: .cloudUpload)
+        legacy.status = .failed
+        legacy.lastError = "old queue error"
+        try await store.update(legacy)
         var succeeded = try await store.enqueue(sessionID: "succeeded", kind: .cloudUpload)
         succeeded.status = .succeeded
         try await store.update(succeeded)
@@ -139,6 +152,8 @@ struct JobQueueStoreTests {
         let jobs = await store.snapshot()
         #expect(jobs.first { $0.sessionID == "failed" }?.status == .pending)
         #expect(jobs.first { $0.sessionID == "failed" }?.attemptCount == 0)
+        #expect(jobs.first { $0.sessionID == "permanent" }?.status == .failed)
+        #expect(jobs.first { $0.sessionID == "legacy" }?.status == .failed)
         #expect(jobs.first { $0.sessionID == "succeeded" }?.status == .succeeded)
         #expect(jobs.first { $0.sessionID == "cancelled" }?.status == .cancelled)
     }

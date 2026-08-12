@@ -25,6 +25,11 @@ enum SessionJobStatus: String, Codable, Sendable {
     case cancelled
 }
 
+enum SessionJobFailureDisposition: String, Codable, Sendable {
+    case retryable
+    case permanent
+}
+
 enum CloudUploadRequeueResult: String, Sendable, Equatable {
     case queued
     case alreadyQueued
@@ -45,6 +50,7 @@ struct SessionJob: Codable, Sendable, Identifiable, Equatable {
 
     var attemptCount: Int
     var lastError: String?
+    var lastFailureDisposition: SessionJobFailureDisposition? = nil
 }
 
 enum JobExecutionError: LocalizedError, Sendable {

@@ -43,6 +43,8 @@ final class SessionJobExecutor: SessionJobExecuting {
         let manifest: SessionManifest
         do {
             manifest = try await manifestStore.load(sessionID: job.sessionID)
+        } catch is CancellationError {
+            throw CancellationError()
         } catch {
             throw JobExecutionError.permanent(error.localizedDescription)
         }

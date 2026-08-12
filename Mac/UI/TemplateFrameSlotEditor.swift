@@ -105,6 +105,7 @@ struct TemplateFrameSlotEditor: View {
                 }
                 .frame(width: displaySize.width, height: displaySize.height)
                 .clipped()
+                .coordinateSpace(name: "templateCanvas")
             }
         }
     }
