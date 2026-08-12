@@ -40,6 +40,7 @@ struct RuntimeShotRecord: Codable, Sendable, Equatable {
 }
 
 struct SessionCloudDeliverySnapshot: Codable, Sendable, Equatable {
+    // Retry uses the original host and path so a Settings change cannot redirect an old QR upload.
     var publicBaseURL: String
     var remoteBasePath: String
     var sshHost: String

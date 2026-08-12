@@ -131,6 +131,69 @@ struct CloudUploadServiceTests {
         }
     }
 
+    @Test("HTTP errors and empty bodies remain retryable")
+    func rejectsUnusablePublicDownload() async throws {
+        for response in [(404, Int64(1)), (200, Int64(0))] {
+            let directory = try temporaryDirectory()
+            defer { try? FileManager.default.removeItem(at: directory) }
+            try Data([1]).write(to: directory.appendingPathComponent("strip.png"))
+            let verifier = TestCloudURLVerifier()
+            await verifier.setResponse(statusCode: response.0, contentLength: response.1)
+            let service = CloudUploadService(
+                runner: TestCloudCommandRunner(),
+                verifier: verifier
+            )
+
+            do {
+                try await service.upload(
+                    manifest: makeManifest(directory: directory),
+                    configuration: CloudUploadConfiguration(
+                        sshHost: "host",
+                        remoteBasePath: "/srv/photos",
+                        publicBaseURL: "https://photos.example"
+                    )
+                )
+                Issue.record("Expected public verification failure for HTTP \(response.0)")
+            } catch let error as JobExecutionError {
+                guard case .retryable(let message) = error else {
+                    Issue.record("Expected retryable public verification error")
+                    continue
+                }
+                #expect(message.contains("HTTP \(response.0)"))
+            }
+        }
+    }
+
+    @Test("missing GIF is an actionable permanent upload error")
+    func rejectsMissingGIF() async throws {
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try Data([1]).write(to: directory.appendingPathComponent("strip.png"))
+        let runner = TestCloudCommandRunner()
+        let service = CloudUploadService(runner: runner)
+        var manifest = makeManifest(directory: directory)
+        manifest.gifFileName = "booth.gif"
+
+        do {
+            try await service.upload(
+                manifest: manifest,
+                configuration: CloudUploadConfiguration(
+                    sshHost: "host",
+                    remoteBasePath: "/srv/photos",
+                    publicBaseURL: "https://photos.example"
+                )
+            )
+            Issue.record("Expected missing GIF failure")
+        } catch let error as JobExecutionError {
+            guard case .permanent(let message) = error else {
+                Issue.record("Expected permanent missing-GIF error")
+                return
+            }
+            #expect(message == "Local booth.gif is missing; cannot re-upload.")
+        }
+        #expect((await runner.commands).isEmpty)
+    }
+
     @Test("missing strip is an actionable permanent upload error")
     func rejectsMissingStrip() async throws {
         let directory = try temporaryDirectory()

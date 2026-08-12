@@ -442,12 +442,15 @@ final class BoothCoordinator {
     private func handleNetworkPathChange(isSatisfied: Bool) {
         let previous = lastNetworkSatisfied
         lastNetworkSatisfied = isSatisfied
+        if !isSatisfied {
+            automaticCloudRetryTask?.cancel()
+            return
+        }
         guard previous == false, isSatisfied else { return }
 
         let now = Date()
         guard lastAutomaticCloudRetryAt.map({ now.timeIntervalSince($0) >= 60 }) ?? true else { return }
         automaticCloudRetryTask?.cancel()
-        lastAutomaticCloudRetryAt = now
         automaticCloudRetryTask = Task { @MainActor [weak self] in
             do {
                 try await Task.sleep(for: .seconds(3))
@@ -455,6 +458,8 @@ final class BoothCoordinator {
                 return
             }
             guard let self, !Task.isCancelled, self.lastNetworkSatisfied == true else { return }
+            self.lastAutomaticCloudRetryAt = Date()
+            self.automaticCloudRetryTask = nil
             self.jobQueue.retryFailedCloudUploads()
         }
     }
