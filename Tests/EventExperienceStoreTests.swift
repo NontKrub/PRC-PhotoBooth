@@ -225,6 +225,39 @@ struct EventExperienceStoreTests {
         try await store.discardEditing(session)
     }
 
+    @Test("singular preview reads an unsaved duplicated template")
+    func readsUnsavedDuplicatedTemplatePreview() async throws {
+        let root = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        var sourceTemplate = validTemplate(id: "template-a")
+        sourceTemplate.previewFileName = "preview.jpg"
+        let store = EventExperienceStore(baseDirectory: root)
+        try await store.save(document(for: sourceTemplate))
+
+        let sourceURL = root.appendingPathComponent(
+            "EventExperiences/event-1/Templates/template-a/preview.jpg"
+        )
+        try FileManager.default.createDirectory(at: sourceURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+        let expected = Data([4, 5, 6])
+        try expected.write(to: sourceURL)
+
+        let session = try await store.beginEditing(eventID: "event-1")
+        try await store.duplicateTemplateAssets(
+            eventID: "event-1",
+            sourceTemplateID: sourceTemplate.id,
+            destinationTemplateID: "template-b",
+            promptIDMap: [:],
+            editingSession: session
+        )
+
+        #expect(try await store.readTemplatePreview(
+            eventID: "event-1",
+            templateID: "template-b",
+            editingSession: session
+        ) == expected)
+        try await store.discardEditing(session)
+    }
+
     @Test("duplicated staged frame saves into live template assets")
     func savesDuplicatedStagedFrame() async throws {
         let root = try temporaryDirectory()

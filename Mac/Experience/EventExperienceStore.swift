@@ -211,8 +211,17 @@ actor EventExperienceStore {
     ) throws -> Data? {
         try Task.checkCancellation()
         let document = try load(eventID: eventID)
-        guard let template = document.templates.first(where: { $0.id == templateID }),
-              let fileName = template.previewFileName else { return nil }
+        guard let template = document.templates.first(where: { $0.id == templateID }) else {
+            guard editingSession != nil,
+                  let url = try resolvedTemplateAssetURL(
+                      eventID: eventID,
+                      templateID: templateID,
+                      fileName: "preview.jpg",
+                      editingSession: editingSession
+                  ) else { return nil }
+            return try Data(contentsOf: url)
+        }
+        guard let fileName = template.previewFileName else { return nil }
         try Task.checkCancellation()
         return try readTemplatePreviewData(
             eventID: eventID,
