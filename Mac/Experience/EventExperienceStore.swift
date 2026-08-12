@@ -198,41 +198,58 @@ actor EventExperienceStore {
         }
     }
 
-    func readTemplatePreview(eventID: String, templateID: String) throws -> Data? {
+    func readTemplatePreview(
+        eventID: String,
+        templateID: String,
+        editingSession: EventExperienceEditingSession? = nil
+    ) throws -> Data? {
         try Task.checkCancellation()
         let document = try load(eventID: eventID)
         guard let template = document.templates.first(where: { $0.id == templateID }),
               let fileName = template.previewFileName else { return nil }
-        let directory = try templateURL(eventID: eventID, templateID: templateID)
-        let url = try templateAssetURL(fileName, in: directory)
-        guard fileManager.fileExists(atPath: url.path) else { return nil }
         try Task.checkCancellation()
-        return try Data(contentsOf: url)
+        return try readTemplatePreviewData(
+            eventID: eventID,
+            template: template,
+            fileName: fileName,
+            editingSession: editingSession
+        )
     }
 
     func readTemplatePreviews(
         eventID: String,
-        templates: [EventTemplateDefinition]
+        templates: [EventTemplateDefinition],
+        editingSession: EventExperienceEditingSession? = nil
     ) throws -> [String: Data] {
         try Task.checkCancellation()
         var previews: [String: Data] = [:]
         for template in templates {
             try Task.checkCancellation()
             guard let fileName = template.previewFileName else { continue }
-            let directory = try templateURL(eventID: eventID, templateID: template.id)
-            let url = try templateAssetURL(fileName, in: directory)
-            guard fileManager.fileExists(atPath: url.path) else { continue }
-            let data = try Data(contentsOf: url)
+            guard let data = try readTemplatePreviewData(
+                eventID: eventID,
+                template: template,
+                fileName: fileName,
+                editingSession: editingSession
+            ) else { continue }
             try Task.checkCancellation()
             previews[template.id] = data
         }
         return previews
     }
 
-    func readTemplateFrame(eventID: String, templateID: String, fileName: String) throws -> Data? {
-        let directory = try templateURL(eventID: eventID, templateID: templateID)
-        let url = try templateAssetURL(fileName, in: directory)
-        guard fileManager.fileExists(atPath: url.path) else { return nil }
+    func readTemplateFrame(
+        eventID: String,
+        templateID: String,
+        fileName: String,
+        editingSession: EventExperienceEditingSession? = nil
+    ) throws -> Data? {
+        guard let url = try resolvedTemplateAssetURL(
+            eventID: eventID,
+            templateID: templateID,
+            fileName: fileName,
+            editingSession: editingSession
+        ) else { return nil }
         try Task.checkCancellation()
         return try Data(contentsOf: url)
     }
@@ -463,6 +480,66 @@ actor EventExperienceStore {
             throw EventExperienceError.invalid("Invalid template asset name.")
         }
         return url
+    }
+
+    private func resolvedTemplateAssetURL(
+        eventID: String,
+        templateID: String,
+        fileName: String,
+        editingSession: EventExperienceEditingSession?
+    ) throws -> URL? {
+        let liveDirectory = try templateURL(eventID: eventID, templateID: templateID)
+        let liveURL = try templateAssetURL(fileName, in: liveDirectory)
+        if let stagingURL = try stagedTemplateAssetURL(
+            eventID: eventID,
+            templateID: templateID,
+            fileName: fileName,
+            editingSession: editingSession
+        ) { return stagingURL }
+        return fileManager.fileExists(atPath: liveURL.path) ? liveURL : nil
+    }
+
+    private func stagedTemplateAssetURL(
+        eventID: String,
+        templateID: String,
+        fileName: String,
+        editingSession: EventExperienceEditingSession?
+    ) throws -> URL? {
+        guard let editingSession else { return nil }
+        try validateEditingSession(editingSession, eventID: eventID)
+        let stagingDirectory = try stagingTemplateURL(editingSession, templateID: templateID)
+        let stagingURL = try templateAssetURL(fileName, in: stagingDirectory)
+        return fileManager.fileExists(atPath: stagingURL.path) ? stagingURL : nil
+    }
+
+    private func readTemplatePreviewData(
+        eventID: String,
+        template: EventTemplateDefinition,
+        fileName: String,
+        editingSession: EventExperienceEditingSession?
+    ) throws -> Data? {
+        if let frameFileName = template.frameFileName,
+           let stagedFrameURL = try stagedTemplateAssetURL(
+               eventID: eventID,
+               templateID: template.id,
+               fileName: frameFileName,
+               editingSession: editingSession
+           ),
+           let frame = loadCGImage(from: stagedFrameURL) {
+            let preview = try TemplatePreviewRenderer().render(template: template, frame: frame)
+            guard let data = jpegData(from: preview, quality: 0.82) else {
+                throw TemplatePreviewError.encodingFailed
+            }
+            return data
+        }
+
+        guard let url = try resolvedTemplateAssetURL(
+            eventID: eventID,
+            templateID: template.id,
+            fileName: fileName,
+            editingSession: editingSession
+        ) else { return nil }
+        return try Data(contentsOf: url)
     }
 
     private func atomicCopy(_ source: URL, to destination: URL) throws {

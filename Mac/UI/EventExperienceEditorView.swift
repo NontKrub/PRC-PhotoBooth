@@ -199,14 +199,24 @@ struct EventExperienceEditorView: View {
             return prompt
         }
         document.templates.append(copy)
-        Task {
-            try? await coordinator.experienceStore.duplicateTemplateAssets(
-                eventID: event.id,
-                sourceTemplateID: source.id,
-                destinationTemplateID: copy.id,
-                promptIDMap: promptIDMap,
-                editingSession: editingSession
-            )
+        Task { @MainActor in
+            do {
+                try await coordinator.experienceStore.duplicateTemplateAssets(
+                    eventID: event.id,
+                    sourceTemplateID: source.id,
+                    destinationTemplateID: copy.id,
+                    promptIDMap: promptIDMap,
+                    editingSession: editingSession
+                )
+                frames[copy.id] = frames[source.id]
+                previews[copy.id] = previews[source.id]
+                previewLoadID = UUID()
+            } catch {
+                document.templates.removeAll { $0.id == copy.id }
+                frames.removeValue(forKey: copy.id)
+                previews.removeValue(forKey: copy.id)
+                errorMessage = error.localizedDescription
+            }
         }
     }
 
@@ -284,7 +294,8 @@ struct EventExperienceEditorView: View {
             guard let data = try await coordinator.experienceStore.readTemplateFrame(
                 eventID: event.id,
                 templateID: templateID,
-                fileName: fileName
+                fileName: fileName,
+                editingSession: editingSession
             ),
             let source = CGImageSourceCreateWithData(data as CFData, nil),
             let image = CGImageSourceCreateImageAtIndex(source, 0, nil) else {
@@ -325,7 +336,8 @@ struct EventExperienceEditorView: View {
         guard !templates.isEmpty else { return }
         let dataByID = try await coordinator.experienceStore.readTemplatePreviews(
             eventID: event.id,
-            templates: templates
+            templates: templates,
+            editingSession: editingSession
         )
         for template in templates {
             try Task.checkCancellation()

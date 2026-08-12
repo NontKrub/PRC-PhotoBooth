@@ -147,6 +147,124 @@ struct EventExperienceStoreTests {
         #expect(data.flatMap { CGImageSourceCreateWithData($0 as CFData, nil) } != nil)
     }
 
+    @Test("reads a duplicated staged frame before saving")
+    func readsDuplicatedStagedFrameBeforeSave() async throws {
+        let root = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        var sourceTemplate = validTemplate(id: "template-a")
+        sourceTemplate.frameFileName = "frame.png"
+        let store = EventExperienceStore(baseDirectory: root)
+        try await store.save(document(for: sourceTemplate))
+
+        let sourceURL = root.appendingPathComponent(
+            "EventExperiences/event-1/Templates/template-a/frame.png"
+        )
+        try FileManager.default.createDirectory(at: sourceURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+        let sourceData = try pngData(from: makeImage())
+        try sourceData.write(to: sourceURL)
+
+        let session = try await store.beginEditing(eventID: "event-1")
+        try await store.duplicateTemplateAssets(
+            eventID: "event-1",
+            sourceTemplateID: sourceTemplate.id,
+            destinationTemplateID: "template-b",
+            promptIDMap: [:],
+            editingSession: session
+        )
+
+        let data = try await store.readTemplateFrame(
+            eventID: "event-1",
+            templateID: "template-b",
+            fileName: "frame.png",
+            editingSession: session
+        )
+        #expect(data == sourceData)
+        try await store.discardEditing(session)
+        #expect(!FileManager.default.fileExists(atPath: root.appendingPathComponent(
+            "EventExperiences/event-1/Templates/template-b"
+        ).path))
+    }
+
+    @Test("draft-aware preview reads prefer staged assets")
+    func draftAwarePreviewReadsPreferStagedAssets() async throws {
+        let root = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        var sourceTemplate = validTemplate(id: "template-a")
+        sourceTemplate.previewFileName = "preview.jpg"
+        let store = EventExperienceStore(baseDirectory: root)
+        try await store.save(document(for: sourceTemplate))
+
+        let livePreviewURL = root.appendingPathComponent(
+            "EventExperiences/event-1/Templates/template-a/preview.jpg"
+        )
+        try FileManager.default.createDirectory(at: livePreviewURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try Data([9]).write(to: livePreviewURL)
+
+        let session = try await store.beginEditing(eventID: "event-1")
+        try await store.duplicateTemplateAssets(
+            eventID: "event-1",
+            sourceTemplateID: sourceTemplate.id,
+            destinationTemplateID: "template-b",
+            promptIDMap: [:],
+            editingSession: session
+        )
+        let stagedURL = root.appendingPathComponent("EventExperiences").appendingPathComponent(
+            ".editor-staging/\(session.id)/event-1/Templates/template-b/preview.jpg"
+        )
+        let expected = Data([1, 2, 3])
+        try expected.write(to: stagedURL)
+
+        var duplicate = sourceTemplate
+        duplicate.id = "template-b"
+        let previews = try await store.readTemplatePreviews(
+            eventID: "event-1",
+            templates: [duplicate],
+            editingSession: session
+        )
+        #expect(previews[duplicate.id] == expected)
+        try await store.discardEditing(session)
+    }
+
+    @Test("duplicated staged frame saves into live template assets")
+    func savesDuplicatedStagedFrame() async throws {
+        let root = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        var sourceTemplate = validTemplate(id: "template-a")
+        sourceTemplate.frameFileName = "frame.png"
+        let store = EventExperienceStore(baseDirectory: root)
+        var document = document(for: sourceTemplate)
+        try await store.save(document)
+
+        let sourceURL = root.appendingPathComponent(
+            "EventExperiences/event-1/Templates/template-a/frame.png"
+        )
+        try FileManager.default.createDirectory(at: sourceURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try pngData(from: makeImage()).write(to: sourceURL)
+
+        let session = try await store.beginEditing(eventID: "event-1")
+        try await store.duplicateTemplateAssets(
+            eventID: "event-1",
+            sourceTemplateID: sourceTemplate.id,
+            destinationTemplateID: "template-b",
+            promptIDMap: [:],
+            editingSession: session
+        )
+        var duplicate = sourceTemplate
+        duplicate.id = "template-b"
+        document.templates.append(duplicate)
+        try await store.commitEditing(session, document: document)
+
+        let liveURL = root.appendingPathComponent(
+            "EventExperiences/event-1/Templates/template-b/frame.png"
+        )
+        #expect(FileManager.default.fileExists(atPath: liveURL.path))
+        #expect(try await store.readTemplateFrame(
+            eventID: "event-1",
+            templateID: "template-b",
+            fileName: "frame.png"
+        ) != nil)
+    }
+
     @Test("rejects traversal in a template frame filename")
     func rejectsUnsafeTemplateFrameFilename() async throws {
         let root = try temporaryDirectory()
