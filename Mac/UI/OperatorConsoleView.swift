@@ -520,16 +520,24 @@ struct OperatorConsoleView: View {
            }) {
             VStack(alignment: .leading, spacing: 4) {
                 HStack {
-                    Label("Web upload", systemImage: webDeliveryIcon(job))
+                    Label("Web Delivery", systemImage: webDeliveryIcon(job))
                     Spacer()
                     Text(webDeliveryStatus(job))
                         .font(.caption)
                         .foregroundStyle(webDeliveryColor(job))
                 }
+                if job.status == .waitingRetry, let next = job.nextAttemptAt {
+                    (Text("Retry scheduled ") + Text(next, style: .relative))
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
                 if job.status == .failed || job.status == .cancelled {
                     Text(job.lastError ?? "The QR may not work until the upload is retried.")
                         .font(.caption2)
                         .foregroundStyle(.red)
+                    Text("The printed QR is still valid. Retrying the upload will restore the same link.")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
                     Button("Retry Web Upload") {
                         coordinator.retryCloudUpload(sessionID: sessionID)
                     }

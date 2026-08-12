@@ -485,6 +485,7 @@ actor CloudUploadService {
                 timeout: Timeout.ssh
             )
         } catch {
+            if Task.isCancelled { throw error }
             NSLog("[Cloud] Cloud upload succeeded, but stale remote versions could not be cleaned: \(error.localizedDescription)")
         }
     }

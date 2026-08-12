@@ -200,6 +200,11 @@ struct OperationsView: View {
                     .font(.caption)
                     .foregroundStyle(.red)
             }
+            if job.status == .failed || job.status == .cancelled {
+                Text("The printed QR is still valid. Retrying the upload will restore the same link.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
             if job.status == .failed || job.status == .cancelled || job.status == .succeeded {
                 HStack {
                     Spacer()
