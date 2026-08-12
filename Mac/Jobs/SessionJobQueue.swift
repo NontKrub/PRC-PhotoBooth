@@ -102,6 +102,18 @@ final class SessionJobQueue {
         }
     }
 
+    func retryFailedCloudUploads() {
+        Task { [weak self] in
+            guard let self else { return }
+            do {
+                _ = try await store.requeueFailedCloudUploads()
+                await reload()
+            } catch {
+                lastQueueError = error.localizedDescription
+            }
+        }
+    }
+
     func cancel(jobID: String) {
         Task { [weak self] in
             guard let self else { return }

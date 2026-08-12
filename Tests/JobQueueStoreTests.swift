@@ -118,6 +118,31 @@ struct JobQueueStoreTests {
         #expect(loaded[0].attemptCount == 0)
     }
 
+    @Test("automatic cloud recovery requeues failed uploads only")
+    func requeuesFailedCloudUploadsOnly() async throws {
+        let file = try temporaryFile()
+        defer { try? FileManager.default.removeItem(at: file.deletingLastPathComponent()) }
+        let store = JobQueueStore(fileURL: file)
+        var failed = try await store.enqueue(sessionID: "failed", kind: .cloudUpload)
+        failed.status = .failed
+        failed.attemptCount = 4
+        failed.lastError = "offline"
+        try await store.update(failed)
+        var succeeded = try await store.enqueue(sessionID: "succeeded", kind: .cloudUpload)
+        succeeded.status = .succeeded
+        try await store.update(succeeded)
+        var cancelled = try await store.enqueue(sessionID: "cancelled", kind: .cloudUpload)
+        cancelled.status = .cancelled
+        try await store.update(cancelled)
+
+        #expect(try await store.requeueFailedCloudUploads() == 1)
+        let jobs = await store.snapshot()
+        #expect(jobs.first { $0.sessionID == "failed" }?.status == .pending)
+        #expect(jobs.first { $0.sessionID == "failed" }?.attemptCount == 0)
+        #expect(jobs.first { $0.sessionID == "succeeded" }?.status == .succeeded)
+        #expect(jobs.first { $0.sessionID == "cancelled" }?.status == .cancelled)
+    }
+
     @Test("corrupt queue is preserved before a new empty queue is created")
     func preservesCorruptQueue() async throws {
         let file = try temporaryFile()

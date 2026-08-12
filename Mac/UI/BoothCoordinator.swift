@@ -6,6 +6,7 @@ import ImageIO
 import SwiftData
 import Observation
 import AVFoundation
+import Network
 
 enum CameraSourceKind: String, CaseIterable, Identifiable {
     case avFoundation = "Built-in / USB / Continuity"
@@ -128,6 +129,10 @@ final class BoothCoordinator {
     private var countdownTask: Task<Void, Never>?
     private var currentCaptureAttempt: CaptureAttempt?
     private var hasSeenDSLRConnection = false
+    private let networkMonitor = NWPathMonitor()
+    private var lastNetworkSatisfied: Bool?
+    private var automaticCloudRetryTask: Task<Void, Never>?
+    private var lastAutomaticCloudRetryAt: Date?
     private var wasDSLRConnected = false
     private(set) var cameraReconnectCount = 0
     var currentStripPreview: CGImage?
@@ -249,6 +254,12 @@ final class BoothCoordinator {
 
         setupMultipeerHandlers()
         multipeer.start()
+        networkMonitor.pathUpdateHandler = { [weak self] path in
+            Task { @MainActor [weak self] in
+                self?.handleNetworkPathChange(isSatisfied: path.status == .satisfied)
+            }
+        }
+        networkMonitor.start(queue: DispatchQueue(label: "PRC-PhotoBooth.NetworkMonitor"))
 
         refreshExternalScreens()
         NotificationCenter.default.addObserver(forName: NSApplication.didChangeScreenParametersNotification, object: nil, queue: .main) { [weak self] _ in
@@ -426,6 +437,26 @@ final class BoothCoordinator {
                 ?? CloudUploadConfiguration.defaultRemoteBasePath,
             sshHost: UserDefaults.standard.string(forKey: "cloudSSHHost") ?? ""
         )
+    }
+
+    private func handleNetworkPathChange(isSatisfied: Bool) {
+        let previous = lastNetworkSatisfied
+        lastNetworkSatisfied = isSatisfied
+        guard previous == false, isSatisfied else { return }
+
+        let now = Date()
+        guard lastAutomaticCloudRetryAt.map({ now.timeIntervalSince($0) >= 60 }) ?? true else { return }
+        automaticCloudRetryTask?.cancel()
+        lastAutomaticCloudRetryAt = now
+        automaticCloudRetryTask = Task { @MainActor [weak self] in
+            do {
+                try await Task.sleep(for: .seconds(3))
+            } catch {
+                return
+            }
+            guard let self, !Task.isCancelled, self.lastNetworkSatisfied == true else { return }
+            self.jobQueue.retryFailedCloudUploads()
+        }
     }
 
     private func sendExperienceCatalog() {

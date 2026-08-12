@@ -156,6 +156,23 @@ actor JobQueueStore {
         }
     }
 
+    func requeueFailedCloudUploads() throws -> Int {
+        try ensureLoaded()
+        let now = Date()
+        var count = 0
+        for index in jobs.indices where jobs[index].kind == .cloudUpload && jobs[index].status == .failed {
+            jobs[index].status = .pending
+            jobs[index].attemptCount = 0
+            jobs[index].lastAttemptAt = nil
+            jobs[index].nextAttemptAt = now
+            jobs[index].lastError = nil
+            jobs[index].updatedAt = now
+            count += 1
+        }
+        if count > 0 { try persist() }
+        return count
+    }
+
     func cancel(jobID: String) throws {
         try ensureLoaded()
         guard let index = jobs.firstIndex(where: { $0.id == jobID }) else {
