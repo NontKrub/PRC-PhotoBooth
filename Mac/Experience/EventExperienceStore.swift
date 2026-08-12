@@ -132,6 +132,9 @@ actor EventExperienceStore {
         sourceURL: URL,
         editingSession: EventExperienceEditingSession? = nil
     ) throws -> ImportedPromptImage {
+        guard isSafePathComponent(promptID) else {
+            throw EventExperienceError.invalid("Invalid prompt ID.")
+        }
         guard fileManager.fileExists(atPath: sourceURL.path),
               let source = CGImageSourceCreateWithURL(sourceURL as CFURL, nil),
               let image = CGImageSourceCreateThumbnailAtIndex(source, 0, [
@@ -188,6 +191,9 @@ actor EventExperienceStore {
             .map { $0.appendingPathComponent("Prompts", isDirectory: true) }
             ?? eventURL(eventID: eventID).appendingPathComponent("Prompts", isDirectory: true)
         for (oldID, newID) in promptIDMap {
+            guard isSafePathComponent(oldID), isSafePathComponent(newID) else {
+                throw EventExperienceError.invalid("Invalid prompt ID.")
+            }
             let sourceURL = prompts.appendingPathComponent("\(oldID).jpg")
             let livePrompts = try eventURL(eventID: eventID).appendingPathComponent("Prompts", isDirectory: true)
             let liveSourceURL = livePrompts.appendingPathComponent("\(oldID).jpg")
@@ -293,7 +299,7 @@ actor EventExperienceStore {
     }
 
     func readPromptImage(eventID: String, fileName: String) throws -> Data? {
-        guard !fileName.contains("/") else { throw EventExperienceError.invalid("Invalid prompt asset name.") }
+        guard isSafePathComponent(fileName) else { throw EventExperienceError.invalid("Invalid prompt asset name.") }
         let url = try eventURL(eventID: eventID).appendingPathComponent("Prompts", isDirectory: true).appendingPathComponent(fileName)
         guard fileManager.fileExists(atPath: url.path) else { return nil }
         return try Data(contentsOf: url)
@@ -376,7 +382,7 @@ actor EventExperienceStore {
     }
 
     private func eventURL(eventID: String) throws -> URL {
-        guard !eventID.isEmpty, !eventID.contains("/"), !eventID.contains("\\"), !eventID.contains("\0") else { throw EventExperienceError.invalidEventID }
+        guard isSafePathComponent(eventID) else { throw EventExperienceError.invalidEventID }
         return baseDirectory.appendingPathComponent(eventID, isDirectory: true)
     }
 
@@ -385,15 +391,12 @@ actor EventExperienceStore {
     }
 
     private func templateURL(eventID: String, templateID: String) throws -> URL {
-        guard !templateID.isEmpty, !templateID.contains("/"), !templateID.contains("\\"), !templateID.contains("\0") else { throw EventExperienceError.invalid("Invalid template ID.") }
+        guard isSafePathComponent(templateID) else { throw EventExperienceError.invalid("Invalid template ID.") }
         return try eventURL(eventID: eventID).appendingPathComponent("Templates", isDirectory: true).appendingPathComponent(templateID, isDirectory: true)
     }
 
     private func editingSessionURL(_ session: EventExperienceEditingSession) throws -> URL {
-        guard !session.id.isEmpty,
-              !session.id.contains("/"),
-              !session.id.contains("\\"),
-              !session.id.contains("\0") else {
+        guard isSafePathComponent(session.id) else {
             throw EventExperienceError.invalid("Invalid editor session.")
         }
         _ = try eventURL(eventID: session.eventID)
@@ -410,10 +413,7 @@ actor EventExperienceStore {
         _ session: EventExperienceEditingSession,
         templateID: String
     ) throws -> URL {
-        guard !templateID.isEmpty,
-              !templateID.contains("/"),
-              !templateID.contains("\\"),
-              !templateID.contains("\0") else {
+        guard isSafePathComponent(templateID) else {
             throw EventExperienceError.invalid("Invalid template ID.")
         }
         return try stagingEventURL(session)
@@ -470,8 +470,7 @@ actor EventExperienceStore {
     }
 
     private func templateAssetURL(_ fileName: String, in directory: URL) throws -> URL {
-        guard !fileName.isEmpty,
-              !fileName.contains(where: { $0 == "/" || $0 == "\\" || $0 == "\0" }),
+        guard isSafePathComponent(fileName),
               fileName == URL(fileURLWithPath: fileName).lastPathComponent else {
             throw EventExperienceError.invalid("Invalid template asset name.")
         }
@@ -480,6 +479,13 @@ actor EventExperienceStore {
             throw EventExperienceError.invalid("Invalid template asset name.")
         }
         return url
+    }
+
+    private func isSafePathComponent(_ value: String) -> Bool {
+        !value.isEmpty
+            && value != "."
+            && value != ".."
+            && !value.contains(where: { $0 == "/" || $0 == "\\" || $0 == "\0" })
     }
 
     private func resolvedTemplateAssetURL(

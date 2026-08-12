@@ -286,6 +286,41 @@ struct EventExperienceStoreTests {
         }
     }
 
+    @Test("rejects dot and separator path components")
+    func rejectsUnsafePathComponents() async throws {
+        let root = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let template = validTemplate()
+        let store = EventExperienceStore(baseDirectory: root)
+        try await store.save(document(for: template))
+
+        for fileName in [".", "..", "/absolute.png", "a\\b", "a\0b"] {
+            do {
+                _ = try await store.readTemplateFrame(
+                    eventID: "event-1",
+                    templateID: template.id,
+                    fileName: fileName
+                )
+                Issue.record("Expected unsafe filename to be rejected: \(fileName)")
+            } catch is EventExperienceError {
+                // Expected.
+            }
+        }
+
+        do {
+            _ = try await store.readTemplateFrame(eventID: "..", templateID: template.id, fileName: "frame.png")
+            Issue.record("Expected unsafe event ID to be rejected")
+        } catch is EventExperienceError {
+            // Expected.
+        }
+        do {
+            _ = try await store.readTemplateFrame(eventID: "event-1", templateID: "..", fileName: "frame.png")
+            Issue.record("Expected unsafe template ID to be rejected")
+        } catch is EventExperienceError {
+            // Expected.
+        }
+    }
+
     @Test("staged frame replacement is discarded without touching the live asset")
     func discardsStagedFrameReplacement() async throws {
         let root = try temporaryDirectory()
