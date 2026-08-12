@@ -30,7 +30,7 @@ struct CloudUploadServiceTests {
         )
 
         let commands = await runner.commands
-        #expect(commands.count == 3)
+        #expect(commands.count == 4)
         #expect(commands[0].arguments.contains("booth-host"))
         #expect(commands[0].arguments.last?.contains("mkdir -p") == true)
         #expect(commands[0].arguments.contains("BatchMode=yes"))
@@ -43,8 +43,32 @@ struct CloudUploadServiceTests {
         #expect(commands[2].arguments.last?.contains("test -s") == true)
         #expect(commands[2].arguments.last?.contains("ln -sfn") == true)
         #expect(commands[2].arguments.last?.contains("/token") == true)
+        #expect(commands[3].arguments.last?.contains("find") == true)
+        #expect(commands[3].arguments.last?.contains("session-*") == true)
+        #expect(commands[3].arguments.last?.contains("! -path") == true)
         #expect((await verifier.urls).first?.path == "/s/token/strip.png")
         #expect(FileManager.default.fileExists(atPath: directory.appendingPathComponent("index.html").path))
+    }
+
+    @Test("cleanup failure does not downgrade verified cloud delivery")
+    func cleanupFailureIsNonFatal() async throws {
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try Data([1]).write(to: directory.appendingPathComponent("strip.png"))
+        let runner = TestCloudCommandRunner()
+        await runner.failCommand(at: 3, exitCode: 1, output: "permission denied")
+        let service = CloudUploadService(runner: runner, verifier: TestCloudURLVerifier())
+
+        try await service.upload(
+            manifest: makeManifest(directory: directory),
+            configuration: CloudUploadConfiguration(
+                sshHost: "host",
+                remoteBasePath: "/srv/photos",
+                publicBaseURL: "https://photos.example"
+            )
+        )
+
+        #expect((await runner.commands).count == 4)
     }
 
     @Test("returns command, exit status, and output on failure")

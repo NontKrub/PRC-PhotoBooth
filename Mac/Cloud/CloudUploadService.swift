@@ -460,6 +460,23 @@ actor CloudUploadService {
                 "Upload completed but public download verification failed: \(error.localizedDescription)"
             )
         }
+
+        let cleanupCommand = [
+            "find \(Self.shellQuoted(publishedRoot)) -maxdepth 1 -mindepth 1 -type d",
+            "-name \(Self.shellQuoted("\(manifest.id)-*"))",
+            "! -path \(Self.shellQuoted(publishedDirectory))",
+            "-exec rm -rf -- {} +"
+        ].joined(separator: " ")
+        do {
+            try await run(
+                label: "clean stale published versions",
+                executable: "/usr/bin/ssh",
+                arguments: Self.sshArguments(host: configuration.sshHost, command: cleanupCommand),
+                timeout: Timeout.ssh
+            )
+        } catch {
+            NSLog("[Cloud] Cloud upload succeeded, but stale remote versions could not be cleaned: \(error.localizedDescription)")
+        }
     }
 
     private func requiredFile(_ fileName: String, in directory: URL, message: String) throws -> URL {
