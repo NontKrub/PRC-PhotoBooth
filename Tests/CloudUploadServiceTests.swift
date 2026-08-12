@@ -1,5 +1,6 @@
 import Testing
 import Foundation
+import Darwin
 
 @testable import PRC_PhotoBooth_Mac
 
@@ -182,6 +183,79 @@ struct CloudUploadServiceTests {
             }
         }
     }
+
+    @Test("process runner drains large stdout without timing out")
+    func processRunnerDrainsLargeStdout() async throws {
+        let result = try await ProcessCloudCommandRunner().run(
+            executable: "/bin/sh",
+            arguments: ["-c", "head -c 200000 /dev/zero"],
+            timeout: 2
+        )
+
+        #expect(result.exitCode == 0)
+        #expect(result.output.contains("[output truncated]"))
+        #expect(result.output.utf8.count <= ProcessCloudCommandRunner.maximumOutputBytes + 128)
+    }
+
+    @Test("process runner drains large stderr without timing out")
+    func processRunnerDrainsLargeStderr() async throws {
+        let result = try await ProcessCloudCommandRunner().run(
+            executable: "/bin/sh",
+            arguments: ["-c", "head -c 200000 /dev/zero 1>&2"],
+            timeout: 2
+        )
+
+        #expect(result.exitCode == 0)
+        #expect(result.output.contains("[output truncated]"))
+        #expect(result.output.utf8.count <= ProcessCloudCommandRunner.maximumOutputBytes + 128)
+    }
+
+    @Test("cancelling a process runner terminates the child promptly")
+    func processRunnerCancelsPromptly() async throws {
+        let startedAt = Date()
+        let task = Task {
+            try await ProcessCloudCommandRunner().run(
+                executable: "/bin/sh",
+                arguments: ["-c", "sleep 2"],
+                timeout: 10
+            )
+        }
+        try await Task.sleep(for: .milliseconds(100))
+        task.cancel()
+
+        do {
+            _ = try await task.value
+            Issue.record("Expected process cancellation")
+        } catch is CancellationError {
+            // Expected.
+        }
+        #expect(Date().timeIntervalSince(startedAt) < 1)
+    }
+
+    @Test("cancelling a process runner terminates process-group children")
+    func processRunnerCancelsProcessGroupChildren() async throws {
+        let pidFile = FileManager.default.temporaryDirectory
+            .appendingPathComponent("PRC-Cloud-child-\(UUID().uuidString).txt")
+        defer { try? FileManager.default.removeItem(at: pidFile) }
+        let quotedPIDFile = "'\(pidFile.path)'"
+
+        let task = Task {
+            try await ProcessCloudCommandRunner().run(
+                executable: "/bin/sh",
+                arguments: ["-c", "sleep 10 & child=$!; echo $child > \(quotedPIDFile); wait $child"],
+                timeout: 20
+            )
+        }
+        try await waitForFile(pidFile)
+        let childPID = try #require(Int32(try String(contentsOf: pidFile, encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines)))
+        task.cancel()
+        _ = try? await task.value
+
+        for _ in 0..<20 where kill(childPID, 0) == 0 {
+            try await Task.sleep(for: .milliseconds(25))
+        }
+        #expect(kill(childPID, 0) != 0)
+    }
 }
 
 private actor TestCloudCommandRunner: CloudCommandRunning {
@@ -257,4 +331,12 @@ private func temporaryDirectory() throws -> URL {
         .appendingPathComponent("PRC-Cloud-\(UUID().uuidString)")
     try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
     return directory
+}
+
+private func waitForFile(_ url: URL) async throws {
+    for _ in 0..<40 {
+        if FileManager.default.fileExists(atPath: url.path) { return }
+        try await Task.sleep(for: .milliseconds(25))
+    }
+    throw CocoaError(.fileNoSuchFile)
 }

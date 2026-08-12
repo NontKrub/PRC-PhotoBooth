@@ -37,53 +37,260 @@ protocol CloudCommandRunning: Sendable {
 }
 
 struct ProcessCloudCommandRunner: CloudCommandRunning {
+    static let maximumOutputBytes = 128 * 1024
+
     func run(
         executable: String,
         arguments: [String],
         timeout: TimeInterval
     ) async throws -> CloudCommandResult {
-        try await withCheckedThrowingContinuation { continuation in
-            DispatchQueue.global(qos: .userInitiated).async {
-                let process = Process()
-                process.executableURL = URL(fileURLWithPath: executable)
-                process.arguments = arguments
-                var environment = ProcessInfo.processInfo.environment
-                environment["PATH"] = "/opt/homebrew/bin:/usr/local/bin:" + (environment["PATH"] ?? "/usr/bin:/bin")
-                process.environment = environment
-
-                let pipe = Pipe()
-                process.standardOutput = pipe
-                process.standardError = pipe
-                do {
-                    try process.run()
-                } catch {
-                    continuation.resume(throwing: CloudCommandError.launchFailed(error.localizedDescription))
-                    return
+        let state = ProcessRunState()
+        return try await withTaskCancellationHandler(operation: {
+            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<CloudCommandResult, Error>) in
+                state.setContinuation(continuation)
+                DispatchQueue.global(qos: .userInitiated).async {
+                    Self.runProcess(
+                        executable: executable,
+                        arguments: arguments,
+                        timeout: timeout,
+                        state: state
+                    )
                 }
-
-                let processID = process.processIdentifier
-                let processGroupConfigured = setpgid(processID, processID) == 0
-                let deadline = Date().addingTimeInterval(timeout)
-                while process.isRunning && Date() < deadline {
-                    Thread.sleep(forTimeInterval: 0.1)
-                }
-                if process.isRunning {
-                    process.terminate()
-                    Thread.sleep(forTimeInterval: 0.1)
-                    if process.isRunning {
-                        _ = kill(processGroupConfigured ? -processID : processID, SIGKILL)
-                    }
-                    process.waitUntilExit()
-                    continuation.resume(throwing: CloudCommandError.timedOut(timeout))
-                    return
-                }
-
-                let data = pipe.fileHandleForReading.readDataToEndOfFile()
-                continuation.resume(returning: CloudCommandResult(
-                    exitCode: process.terminationStatus,
-                    output: String(data: data, encoding: .utf8) ?? ""
-                ))
             }
+        }, onCancel: {
+            state.requestTermination(CancellationError())
+        })
+    }
+
+    private static func runProcess(
+        executable: String,
+        arguments: [String],
+        timeout: TimeInterval,
+        state: ProcessRunState
+    ) {
+        let stdoutPipe = Pipe()
+        let stderrPipe = Pipe()
+        let stdout = BoundedProcessOutputBuffer(maximumBytes: maximumOutputBytes / 2)
+        let stderr = BoundedProcessOutputBuffer(maximumBytes: maximumOutputBytes / 2)
+        let readers = DispatchGroup()
+        drain(stdoutPipe.fileHandleForReading, into: stdout, group: readers)
+        drain(stderrPipe.fileHandleForReading, into: stderr, group: readers)
+
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: executable)
+        process.arguments = arguments
+        var environment = ProcessInfo.processInfo.environment
+        environment["PATH"] = "/opt/homebrew/bin:/usr/local/bin:" + (environment["PATH"] ?? "/usr/bin:/bin")
+        process.environment = environment
+        process.standardOutput = stdoutPipe
+        process.standardError = stderrPipe
+        process.terminationHandler = { process in
+            readers.notify(queue: .global(qos: .utility)) {
+                let result = CloudCommandResult(
+                    exitCode: process.terminationStatus,
+                    output: combinedOutput(stdout: stdout, stderr: stderr)
+                )
+                if let error = state.terminationError {
+                    state.complete(.failure(error))
+                } else {
+                    state.complete(.success(result))
+                }
+            }
+        }
+
+        guard !state.isFinished else {
+            stdoutPipe.fileHandleForWriting.closeFile()
+            stderrPipe.fileHandleForWriting.closeFile()
+            return
+        }
+
+        do {
+            try process.run()
+        } catch {
+            stdoutPipe.fileHandleForWriting.closeFile()
+            stderrPipe.fileHandleForWriting.closeFile()
+            state.complete(.failure(CloudCommandError.launchFailed(error.localizedDescription)))
+            return
+        }
+
+        let processGroupConfigured = setpgid(process.processIdentifier, process.processIdentifier) == 0
+        if state.install(process: process, processGroupConfigured: processGroupConfigured) {
+            terminate(process, processGroupConfigured: processGroupConfigured)
+        }
+
+        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + timeout) {
+            state.requestTermination(CloudCommandError.timedOut(timeout))
+        }
+    }
+
+    private static func drain(
+        _ handle: FileHandle,
+        into buffer: BoundedProcessOutputBuffer,
+        group: DispatchGroup
+    ) {
+        group.enter()
+        DispatchQueue.global(qos: .utility).async {
+            defer {
+                handle.closeFile()
+                group.leave()
+            }
+            while true {
+                do {
+                    guard let data = try handle.read(upToCount: 16 * 1024), !data.isEmpty else { return }
+                    buffer.append(data)
+                } catch {
+                    return
+                }
+            }
+        }
+    }
+
+    fileprivate static func terminate(_ process: Process, processGroupConfigured: Bool) {
+        guard process.isRunning else { return }
+        process.terminate()
+        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 0.25) {
+            guard process.isRunning else { return }
+            _ = kill(processGroupConfigured ? -process.processIdentifier : process.processIdentifier, SIGKILL)
+        }
+    }
+
+    private static func combinedOutput(
+        stdout: BoundedProcessOutputBuffer,
+        stderr: BoundedProcessOutputBuffer
+    ) -> String {
+        let stdoutText = stdout.string
+        let stderrText = stderr.string
+        switch (stdoutText.isEmpty, stderrText.isEmpty) {
+        case (true, true): return ""
+        case (false, true): return "stdout:\n\(stdoutText)"
+        case (true, false): return "stderr:\n\(stderrText)"
+        case (false, false): return "stdout:\n\(stdoutText)\nstderr:\n\(stderrText)"
+        }
+    }
+}
+
+private final class BoundedProcessOutputBuffer: @unchecked Sendable {
+    private let maximumBytes: Int
+    private let lock = NSLock()
+    private var data = Data()
+    private var truncated = false
+
+    init(maximumBytes: Int) {
+        self.maximumBytes = maximumBytes
+    }
+
+    var string: String {
+        lock.lock()
+        let snapshot = data
+        let wasTruncated = truncated
+        lock.unlock()
+        let text = String(data: snapshot, encoding: .utf8) ?? ""
+        return wasTruncated ? "[output truncated]\n\(text)" : text
+    }
+
+    func append(_ chunk: Data) {
+        lock.lock()
+        data.append(chunk)
+        if data.count > maximumBytes {
+            data = Data(data.suffix(maximumBytes))
+            truncated = true
+        }
+        lock.unlock()
+    }
+}
+
+private final class ProcessRunState: @unchecked Sendable {
+    private let lock = NSLock()
+    private var process: Process?
+    private var processGroupConfigured = false
+    private var finished = false
+    private var terminalError: Error?
+    private var continuation: CheckedContinuation<CloudCommandResult, Error>?
+    private var pendingResult: Result<CloudCommandResult, Error>?
+
+    var isFinished: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return finished
+    }
+
+    var terminationError: Error? {
+        lock.lock()
+        defer { lock.unlock() }
+        return terminalError
+    }
+
+    func setContinuation(_ continuation: CheckedContinuation<CloudCommandResult, Error>) {
+        lock.lock()
+        if let pendingResult {
+            self.pendingResult = nil
+            lock.unlock()
+            resume(continuation, with: pendingResult)
+        } else {
+            self.continuation = continuation
+            lock.unlock()
+        }
+    }
+
+    func install(process: Process, processGroupConfigured: Bool) -> Bool {
+        lock.lock()
+        self.process = process
+        self.processGroupConfigured = processGroupConfigured
+        let shouldTerminate = finished || terminalError != nil
+        lock.unlock()
+        return shouldTerminate
+    }
+
+    func requestTermination(_ error: Error) {
+        var processToTerminate: (Process, Bool)?
+        var finishImmediately = false
+
+        lock.lock()
+        guard !finished, terminalError == nil else {
+            lock.unlock()
+            return
+        }
+        terminalError = error
+        if let process {
+            if process.isRunning {
+                processToTerminate = (process, processGroupConfigured)
+            }
+        } else {
+            finishImmediately = true
+        }
+        lock.unlock()
+
+        if let (process, processGroupConfigured) = processToTerminate {
+            ProcessCloudCommandRunner.terminate(process, processGroupConfigured: processGroupConfigured)
+        } else if finishImmediately {
+            complete(.failure(error))
+        }
+    }
+
+    func complete(_ result: Result<CloudCommandResult, Error>) {
+        lock.lock()
+        guard !finished else {
+            lock.unlock()
+            return
+        }
+        finished = true
+        if let continuation {
+            self.continuation = nil
+            lock.unlock()
+            resume(continuation, with: result)
+        } else {
+            pendingResult = result
+            lock.unlock()
+        }
+    }
+
+    private func resume(
+        _ continuation: CheckedContinuation<CloudCommandResult, Error>,
+        with result: Result<CloudCommandResult, Error>
+    ) {
+        switch result {
+        case .success(let value): continuation.resume(returning: value)
+        case .failure(let error): continuation.resume(throwing: error)
         }
     }
 }
