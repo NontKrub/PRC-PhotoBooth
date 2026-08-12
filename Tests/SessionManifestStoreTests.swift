@@ -93,6 +93,7 @@ struct SessionManifestStoreTests {
         encoder.dateEncodingStrategy = .iso8601
         var object = try #require(JSONSerialization.jsonObject(with: encoder.encode(manifest)) as? [String: Any])
         object.removeValue(forKey: "captureAttempts")
+        object.removeValue(forKey: "cloudDelivery")
         if var shots = object["shots"] as? [[String: Any]], var shot = shots.first {
             shot.removeValue(forKey: "previousImageFileName")
             shot.removeValue(forKey: "previousGifFrameFileNames")
@@ -107,7 +108,24 @@ struct SessionManifestStoreTests {
 
         #expect(decoded.id == manifest.id)
         #expect(decoded.captureAttempts == nil)
+        #expect(decoded.cloudDelivery == nil)
         #expect(decoded.shots[0].previousImageFileName == nil)
+    }
+
+    @Test("persists session-stable cloud delivery settings")
+    func persistsCloudDeliverySnapshot() async throws {
+        let root = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = SessionManifestStore(baseDirectory: root)
+        var manifest = makeManifest()
+        manifest.cloudDelivery = SessionCloudDeliverySnapshot(
+            publicBaseURL: "https://old.example",
+            remoteBasePath: "/srv/old-photos",
+            sshHost: "old-host"
+        )
+
+        try await store.create(manifest)
+        #expect(try await store.load(sessionID: manifest.id).cloudDelivery == manifest.cloudDelivery)
     }
 }
 

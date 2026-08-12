@@ -107,6 +107,26 @@ struct SessionJobQueueTests {
         #expect(await queue.job(status: .succeeded, kind: .registerDownload) != nil)
         #expect(await queue.job(status: .failed, kind: .renderGIF) != nil)
     }
+
+    @Test("manual cloud requeue reports the store result")
+    @MainActor
+    func reportsCloudRequeueResult() async throws {
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = JobQueueStore(fileURL: directory.appendingPathComponent("jobs.json"))
+        var job = try await store.enqueue(sessionID: "session", kind: .cloudUpload)
+        job.status = .failed
+        try await store.update(job)
+        let queue = SessionJobQueue(store: store, executor: TestJobExecutor())
+        queue.start()
+
+        let result = RequeueResultBox()
+        queue.forceRequeueCloudUpload(sessionID: "session") { value in
+            Task { await result.set(value) }
+        }
+        try await waitUntil { await result.value != nil }
+        #expect(await result.value == .queued)
+    }
 }
 
 @MainActor
@@ -184,6 +204,14 @@ private actor AsyncGate {
         let continuations = waiters
         waiters.removeAll()
         continuations.forEach { $0.resume() }
+    }
+}
+
+private actor RequeueResultBox {
+    private(set) var value: CloudUploadRequeueResult?
+
+    func set(_ value: CloudUploadRequeueResult) {
+        self.value = value
     }
 }
 

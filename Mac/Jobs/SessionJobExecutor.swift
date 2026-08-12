@@ -97,8 +97,10 @@ final class SessionJobExecutor: SessionJobExecuting {
                 qrPayload = try SessionQRCodePayloadResolver.resolve(
                     token: manifest.downloadToken,
                     localBaseURL: "http://\(LocalWebServer.lanIPAddress() ?? "localhost"):\(server.port)",
-                    publicBaseURL: defaults.string(forKey: "publicBaseURL"),
-                    cloudUploadEnabled: defaults.bool(forKey: "cloudUploadEnabled")
+                    publicBaseURL: manifest.cloudDelivery?.publicBaseURL
+                        ?? defaults.string(forKey: "publicBaseURL"),
+                    cloudUploadEnabled: manifest.cloudDelivery != nil
+                        || defaults.bool(forKey: "cloudUploadEnabled")
                 )
             }
             strip = try compositor.render(images: filteredImages, qrPayload: qrPayload)
@@ -208,10 +210,10 @@ final class SessionJobExecutor: SessionJobExecuting {
     }
 
     private func upload(_ manifest: SessionManifest) async throws {
-        guard defaults.bool(forKey: "cloudUploadEnabled") else {
+        guard manifest.cloudDelivery != nil || defaults.bool(forKey: "cloudUploadEnabled") else {
             throw JobExecutionError.permanent("Cloud upload disabled in Settings")
         }
-        let configuration = CloudUploadConfiguration(
+        let configuration = manifest.cloudDelivery.map(CloudUploadConfiguration.init) ?? CloudUploadConfiguration(
             sshHost: defaults.string(forKey: "cloudSSHHost") ?? "",
             remoteBasePath: defaults.string(forKey: "cloudRemotePath")
                 ?? CloudUploadConfiguration.defaultRemoteBasePath,

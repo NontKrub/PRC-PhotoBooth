@@ -86,12 +86,16 @@ final class SessionJobQueue {
         }
     }
 
-    func forceRequeueCloudUpload(sessionID: String) {
+    func forceRequeueCloudUpload(
+        sessionID: String,
+        completion: ((CloudUploadRequeueResult) -> Void)? = nil
+    ) {
         Task { [weak self] in
             guard let self else { return }
             do {
-                _ = try await store.forceRequeueCloudUpload(sessionID: sessionID)
+                let result = try await store.forceRequeueCloudUpload(sessionID: sessionID)
                 await reload()
+                completion?(result)
             } catch {
                 lastQueueError = error.localizedDescription
             }

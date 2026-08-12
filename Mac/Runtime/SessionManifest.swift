@@ -39,6 +39,12 @@ struct RuntimeShotRecord: Codable, Sendable, Equatable {
     var previousAcceptedAt: Date?
 }
 
+struct SessionCloudDeliverySnapshot: Codable, Sendable, Equatable {
+    var publicBaseURL: String
+    var remoteBasePath: String
+    var sshHost: String
+}
+
 struct SessionManifest: Codable, Sendable, Identifiable, Equatable {
     static let currentSchemaVersion = 1
 
@@ -65,6 +71,8 @@ struct SessionManifest: Codable, Sendable, Identifiable, Equatable {
 
     var downloadToken: String
     var shots: [RuntimeShotRecord]
+    // Optional keeps older manifests recoverable with current Settings as a fallback.
+    var cloudDelivery: SessionCloudDeliverySnapshot?
     // Optional keeps v1.1/v1.2 manifests readable without a migration.
     var captureAttempts: [CaptureAttemptRecord]?
 

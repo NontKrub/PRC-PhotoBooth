@@ -9,6 +9,16 @@ struct CloudUploadConfiguration: Sendable {
     var publicBaseURL: String
 }
 
+extension CloudUploadConfiguration {
+    init(snapshot: SessionCloudDeliverySnapshot) {
+        self.init(
+            sshHost: snapshot.sshHost,
+            remoteBasePath: snapshot.remoteBasePath,
+            publicBaseURL: snapshot.publicBaseURL
+        )
+    }
+}
+
 struct CloudCommandResult: Sendable, Equatable {
     var exitCode: Int32
     var output: String

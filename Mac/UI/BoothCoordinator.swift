@@ -377,29 +377,55 @@ final class BoothCoordinator {
     }
 
     func retryCloudUpload(sessionID: String) {
-        guard UserDefaults.standard.bool(forKey: "cloudUploadEnabled") else {
-            errorMessage = "Cloud upload is disabled."
-            return
-        }
         guard jobQueue.jobs.contains(where: {
             $0.sessionID == sessionID && $0.kind == .cloudUpload
         }) else {
             errorMessage = "No cloud upload job exists for this session."
             return
         }
-        guard !(UserDefaults.standard.string(forKey: "cloudSSHHost") ?? "")
-            .trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-            errorMessage = "Cloud upload is not configured: SSH host is missing."
-            return
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            let manifest = try? await manifestStore.load(sessionID: sessionID)
+            let snapshot = manifest?.cloudDelivery
+            if snapshot == nil && !UserDefaults.standard.bool(forKey: "cloudUploadEnabled") {
+                errorMessage = "Cloud upload is disabled."
+                return
+            }
+
+            let sshHost = (snapshot?.sshHost ?? UserDefaults.standard.string(forKey: "cloudSSHHost") ?? "")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !sshHost.isEmpty else {
+                errorMessage = "Cloud upload is not configured: SSH host is missing."
+                return
+            }
+            let publicBase = (snapshot?.publicBaseURL ?? UserDefaults.standard.string(forKey: "publicBaseURL") ?? "")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            guard let url = URL(string: publicBase),
+                  ["http", "https"].contains(url.scheme?.lowercased() ?? ""),
+                  url.host != nil else {
+                errorMessage = "Cloud upload is not configured: public URL is missing or invalid."
+                return
+            }
+
+            jobQueue.forceRequeueCloudUpload(sessionID: sessionID) { [weak self] result in
+                self?.errorMessage = switch result {
+                case .queued: "Web upload queued."
+                case .alreadyQueued: "Web upload is already waiting."
+                case .alreadyRunning: "Web upload is already running."
+                case .notFound: "No web upload job exists for this session."
+                }
+            }
         }
-        guard let publicBase = UserDefaults.standard.string(forKey: "publicBaseURL"),
-              let url = URL(string: publicBase.trimmingCharacters(in: .whitespacesAndNewlines)),
-              ["http", "https"].contains(url.scheme?.lowercased() ?? ""),
-              url.host != nil else {
-            errorMessage = "Cloud upload is not configured: public URL is missing or invalid."
-            return
-        }
-        jobQueue.forceRequeueCloudUpload(sessionID: sessionID)
+    }
+
+    private func currentCloudDeliverySnapshot() -> SessionCloudDeliverySnapshot? {
+        guard UserDefaults.standard.bool(forKey: "cloudUploadEnabled") else { return nil }
+        return SessionCloudDeliverySnapshot(
+            publicBaseURL: UserDefaults.standard.string(forKey: "publicBaseURL") ?? "",
+            remoteBasePath: UserDefaults.standard.string(forKey: "cloudRemotePath")
+                ?? CloudUploadConfiguration.defaultRemoteBasePath,
+            sshHost: UserDefaults.standard.string(forKey: "cloudSSHHost") ?? ""
+        )
     }
 
     private func sendExperienceCatalog() {
@@ -1015,6 +1041,7 @@ final class BoothCoordinator {
                             acceptedAt: nil
                         )
                     },
+                    cloudDelivery: currentCloudDeliverySnapshot(),
                     lastError: nil,
                     updatedAt: Date()
                 )
@@ -1228,8 +1255,10 @@ final class BoothCoordinator {
         let qrPayload = config.qrCodeElements.isEmpty ? nil : try? SessionQRCodePayloadResolver.resolve(
             token: manifest.downloadToken,
             localBaseURL: "http://\(LocalWebServer.lanIPAddress() ?? "localhost"):8585",
-            publicBaseURL: UserDefaults.standard.string(forKey: "publicBaseURL"),
-            cloudUploadEnabled: UserDefaults.standard.bool(forKey: "cloudUploadEnabled")
+            publicBaseURL: manifest.cloudDelivery?.publicBaseURL
+                ?? UserDefaults.standard.string(forKey: "publicBaseURL"),
+            cloudUploadEnabled: manifest.cloudDelivery != nil
+                || UserDefaults.standard.bool(forKey: "cloudUploadEnabled")
         )
         Task.detached(priority: .utility) { [compositor, images, qrPayload] in
             let img = try? compositor.render(images: images, qrPayload: qrPayload)
@@ -1689,7 +1718,7 @@ final class BoothCoordinator {
         }
         currentManifest = manifest
         jobQueue.enqueueFinalizationJobs(for: manifest)
-        if UserDefaults.standard.bool(forKey: "cloudUploadEnabled") {
+        if manifest.cloudDelivery != nil || UserDefaults.standard.bool(forKey: "cloudUploadEnabled") {
             jobQueue.enqueueCloudUpload(for: manifest)
         }
         if UserDefaults.standard.bool(forKey: "selphyAutoPrintAfterSession") &&
@@ -1814,14 +1843,16 @@ final class BoothCoordinator {
 
         let directory = URL(fileURLWithPath: manifest.absoluteDirectoryPath, isDirectory: true)
         let token = manifest.downloadToken
-        let publicBase = UserDefaults.standard.string(forKey: "publicBaseURL")?
+        let publicBase = (manifest.cloudDelivery?.publicBaseURL
+            ?? UserDefaults.standard.string(forKey: "publicBaseURL"))?
             .trimmingCharacters(in: CharacterSet(charactersIn: "/ "))
         let ip = LocalWebServer.lanIPAddress() ?? "localhost"
         let qr = Self.downloadURL(
             publicBaseURL: publicBase,
             localBaseURL: "http://\(ip):8585",
             token: token,
-            cloudUploadEnabled: UserDefaults.standard.bool(forKey: "cloudUploadEnabled")
+            cloudUploadEnabled: manifest.cloudDelivery != nil
+                || UserDefaults.standard.bool(forKey: "cloudUploadEnabled")
         )
         let stripThumb = loadCGImage(from: directory.appendingPathComponent("strip.png"))
             .flatMap { jpegData(from: $0, quality: 0.4) }
