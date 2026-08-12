@@ -96,6 +96,26 @@ actor JobQueueStore {
         try persist()
     }
 
+    func claim(jobID: String, now: Date = Date()) throws -> SessionJob? {
+        try ensureLoaded()
+        guard let index = jobs.firstIndex(where: { $0.id == jobID }) else {
+            throw JobQueueStoreError.missingJob(jobID)
+        }
+        guard jobs[index].status == .pending
+                || (jobs[index].status == .waitingRetry
+                    && (jobs[index].nextAttemptAt.map { $0 <= now } ?? true)) else {
+            return nil
+        }
+
+        jobs[index].status = .running
+        jobs[index].attemptCount += 1
+        jobs[index].lastAttemptAt = now
+        jobs[index].nextAttemptAt = nil
+        jobs[index].updatedAt = now
+        try persist()
+        return jobs[index]
+    }
+
     func retry(jobID: String) throws {
         try ensureLoaded()
         guard let index = jobs.firstIndex(where: { $0.id == jobID }) else {

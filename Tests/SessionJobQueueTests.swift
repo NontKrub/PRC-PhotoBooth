@@ -5,6 +5,37 @@ import Foundation
 
 @Suite("SessionJobQueue")
 struct SessionJobQueueTests {
+    @Test("cloud upload does not block another session's finalization")
+    @MainActor
+    func cloudUploadDoesNotBlockAnotherSession() async throws {
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let executor = BlockingCloudJobExecutor()
+        let queue = SessionJobQueue(
+            store: JobQueueStore(fileURL: directory.appendingPathComponent("jobs.json")),
+            executor: executor
+        )
+        let sessionA = makeManifest()
+        let sessionB = makeManifest()
+
+        queue.start()
+        queue.enqueueFinalizationJobs(for: sessionA)
+        try await waitUntil { await executor.snapshot().kinds.count == 3 }
+        queue.enqueueCloudUpload(for: sessionA)
+        try await waitUntil { await executor.snapshot().cloudUploadStarted }
+
+        queue.enqueueFinalizationJobs(for: sessionB)
+        try await waitUntil {
+            await queue.job(sessionID: sessionB.id, status: .succeeded, kind: .renderStrip) != nil
+        }
+
+        #expect(await executor.snapshot().cloudUploadStarted)
+        #expect(await executor.snapshot().cloudUploadCompleted == false)
+
+        await executor.releaseCloudUpload()
+        try await waitUntil { await executor.snapshot().cloudUploadCompleted }
+    }
+
     @Test("runs required jobs in priority order and one at a time")
     @MainActor
     func runsRequiredJobsInOrder() async throws {
@@ -110,9 +141,59 @@ private final class TestJobExecutor: SessionJobExecuting {
     func snapshot() -> Snapshot { snapshotValue }
 }
 
+@MainActor
+private final class BlockingCloudJobExecutor: SessionJobExecuting {
+    struct Snapshot: Sendable {
+        var kinds: [SessionJobKind] = []
+        var cloudUploadStarted = false
+        var cloudUploadCompleted = false
+    }
+
+    private let cloudGate = AsyncGate()
+    private var snapshotValue = Snapshot()
+
+    func execute(_ job: SessionJob) async throws {
+        snapshotValue.kinds.append(job.kind)
+        if job.kind == .cloudUpload {
+            snapshotValue.cloudUploadStarted = true
+            await cloudGate.wait()
+            snapshotValue.cloudUploadCompleted = true
+        }
+    }
+
+    func snapshot() -> Snapshot { snapshotValue }
+
+    func releaseCloudUpload() async {
+        await cloudGate.open()
+    }
+}
+
+private actor AsyncGate {
+    private var isOpen = false
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+
+    func wait() async {
+        if isOpen { return }
+        await withCheckedContinuation { continuation in
+            waiters.append(continuation)
+        }
+    }
+
+    func open() {
+        isOpen = true
+        let continuations = waiters
+        waiters.removeAll()
+        continuations.forEach { $0.resume() }
+    }
+}
+
 private extension SessionJobQueue {
     func job(status: SessionJobStatus, kind: SessionJobKind) async -> SessionJob? {
         jobs.first { $0.status == status && $0.kind == kind }
+    }
+
+    func job(sessionID: String, status: SessionJobStatus, kind: SessionJobKind) async -> SessionJob? {
+        jobs.first { $0.sessionID == sessionID && $0.status == status && $0.kind == kind }
     }
 }
 
