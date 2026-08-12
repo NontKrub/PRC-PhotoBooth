@@ -210,16 +210,26 @@ final class SessionJobExecutor: SessionJobExecuting {
     }
 
     private func upload(_ manifest: SessionManifest) async throws {
-        guard manifest.cloudDelivery != nil || defaults.bool(forKey: "cloudUploadEnabled") else {
+        guard let configuration = Self.cloudUploadConfiguration(for: manifest, defaults: defaults) else {
             throw JobExecutionError.permanent("Cloud upload disabled in Settings")
         }
-        let configuration = manifest.cloudDelivery.map(CloudUploadConfiguration.init) ?? CloudUploadConfiguration(
+        try await cloudUpload.upload(manifest: manifest, configuration: configuration)
+    }
+
+    static func cloudUploadConfiguration(
+        for manifest: SessionManifest,
+        defaults: UserDefaults
+    ) -> CloudUploadConfiguration? {
+        if let snapshot = manifest.cloudDelivery {
+            return CloudUploadConfiguration(snapshot: snapshot)
+        }
+        guard defaults.bool(forKey: "cloudUploadEnabled") else { return nil }
+        return CloudUploadConfiguration(
             sshHost: defaults.string(forKey: "cloudSSHHost") ?? "",
             remoteBasePath: defaults.string(forKey: "cloudRemotePath")
                 ?? CloudUploadConfiguration.defaultRemoteBasePath,
             publicBaseURL: defaults.string(forKey: "publicBaseURL") ?? ""
         )
-        try await cloudUpload.upload(manifest: manifest, configuration: configuration)
     }
 
     private func printStrip(_ manifest: SessionManifest) async throws {

@@ -127,6 +127,29 @@ struct SessionManifestStoreTests {
         try await store.create(manifest)
         #expect(try await store.load(sessionID: manifest.id).cloudDelivery == manifest.cloudDelivery)
     }
+
+    @Test("session cloud snapshot takes precedence over changed Settings")
+    @MainActor
+    func cloudSnapshotTakesPrecedence() throws {
+        let defaults = try #require(UserDefaults(suiteName: "PRC-Cloud-(UUID().uuidString)"))
+        var manifest = makeManifest()
+        manifest.cloudDelivery = SessionCloudDeliverySnapshot(
+            publicBaseURL: "https://old.example",
+            remoteBasePath: "/srv/old-photos",
+            sshHost: "old-host"
+        )
+        defaults.set(false, forKey: "cloudUploadEnabled")
+        defaults.set("https://new.example", forKey: "publicBaseURL")
+        defaults.set("/srv/new-photos", forKey: "cloudRemotePath")
+        defaults.set("new-host", forKey: "cloudSSHHost")
+
+        let configuration = try #require(
+            SessionJobExecutor.cloudUploadConfiguration(for: manifest, defaults: defaults)
+        )
+        #expect(configuration.publicBaseURL == "https://old.example")
+        #expect(configuration.remoteBasePath == "/srv/old-photos")
+        #expect(configuration.sshHost == "old-host")
+    }
 }
 
 private func makeManifest(id: String = UUID().uuidString) -> SessionManifest {
