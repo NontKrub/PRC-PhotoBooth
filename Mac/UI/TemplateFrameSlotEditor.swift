@@ -131,13 +131,18 @@ struct TemplateFrameSlotEditor: View {
 
     @ViewBuilder
     private func elementView(_ element: TemplateCanvasElement, in displaySize: CGSize) -> some View {
+        let minimumElementSize = CGSize(
+            width: displaySize.width / CGFloat(max(canvasWidth, 1)),
+            height: displaySize.height / CGFloat(max(canvasHeight, 1))
+        )
+
         switch element {
         case .photo(let slot):
             ResizableCanvasElementView(
                 rect: CanvasElementGeometry.canvasRect(slot.normalizedRect, in: displaySize),
                 rotation: slot.rotation,
                 isSelected: selection == .photo(slot.id),
-                minimumSize: CGSize(width: 40, height: 40),
+                minimumSize: minimumElementSize,
                 canvasSize: displaySize,
                 onTap: { selection = .photo(slot.id) },
                 onMove: { move(.photo(slot.id), by: $0, in: displaySize) },
@@ -157,7 +162,7 @@ struct TemplateFrameSlotEditor: View {
                 rect: CanvasElementGeometry.canvasRect(element.normalizedRect, in: displaySize),
                 rotation: element.rotation,
                 isSelected: selection == .qrCode(element.id),
-                minimumSize: CGSize(width: 40, height: 40),
+                minimumSize: minimumElementSize,
                 canvasSize: displaySize,
                 onTap: { selection = .qrCode(element.id) },
                 onMove: { move(.qrCode(element.id), by: $0, in: displaySize) },

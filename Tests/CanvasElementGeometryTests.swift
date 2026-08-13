@@ -6,6 +6,7 @@ import Testing
 @Suite("Canvas element geometry")
 struct CanvasElementGeometryTests {
     private let canvas = CGSize(width: 400, height: 600)
+    private let freeformMinimum = CGSize(width: 0.5, height: 0.5)
 
     @Test("moving clamps an element inside the canvas")
     func moveClampsToCanvas() {
@@ -19,11 +20,13 @@ struct CanvasElementGeometryTests {
             CGRect(x: 100, y: 100, width: 100, height: 100),
             by: .nw,
             delta: CGSize(width: 300, height: 300),
-            minimumSize: CGSize(width: 40, height: 40),
+            minimumSize: freeformMinimum,
             in: canvas
         )
-        #expect(result.width >= 40)
-        #expect(result.height >= 40)
+        #expect(result.width >= freeformMinimum.width)
+        #expect(result.height >= freeformMinimum.height)
+        #expect(result.width > 0)
+        #expect(result.height > 0)
         #expect(result.minX >= 0)
         #expect(result.minY >= 0)
     }
@@ -37,7 +40,7 @@ struct CanvasElementGeometryTests {
                 base,
                 by: .e,
                 delta: CGSize(width: CGFloat(delta), height: 0),
-                minimumSize: CGSize(width: 40, height: 40),
+                minimumSize: freeformMinimum,
                 in: canvas
             )
 
@@ -48,7 +51,7 @@ struct CanvasElementGeometryTests {
     @Test("cardinal resize handles keep opposite edge fixed")
     func cardinalResizeKeepsOppositeEdgeFixed() {
         let base = CGRect(x: 100, y: 100, width: 100, height: 100)
-        let minimumSize = CGSize(width: 40, height: 40)
+        let minimumSize = freeformMinimum
 
         #expect(CanvasElementGeometry.resized(base, by: .e, delta: CGSize(width: 7, height: 0), minimumSize: minimumSize, in: canvas) == CGRect(x: 100, y: 100, width: 107, height: 100))
         #expect(CanvasElementGeometry.resized(base, by: .w, delta: CGSize(width: 7, height: 0), minimumSize: minimumSize, in: canvas) == CGRect(x: 107, y: 100, width: 93, height: 100))
@@ -59,7 +62,7 @@ struct CanvasElementGeometryTests {
     @Test("corner resize handles keep both opposite edges fixed")
     func cornerResizeKeepsOppositeEdgesFixed() {
         let base = CGRect(x: 100, y: 100, width: 100, height: 100)
-        let minimumSize = CGSize(width: 40, height: 40)
+        let minimumSize = freeformMinimum
 
         #expect(CanvasElementGeometry.resized(base, by: .nw, delta: CGSize(width: 7, height: 9), minimumSize: minimumSize, in: canvas) == CGRect(x: 107, y: 109, width: 93, height: 91))
         #expect(CanvasElementGeometry.resized(base, by: .ne, delta: CGSize(width: 7, height: 9), minimumSize: minimumSize, in: canvas) == CGRect(x: 100, y: 109, width: 107, height: 91))
@@ -76,7 +79,7 @@ struct CanvasElementGeometryTests {
                 base,
                 by: .e,
                 delta: CGSize(width: CGFloat(delta), height: 0),
-                minimumSize: CGSize(width: 40, height: 40),
+                minimumSize: freeformMinimum,
                 in: canvas
             )
 
@@ -84,22 +87,134 @@ struct CanvasElementGeometryTests {
         }
     }
 
-    @Test("resize stops one pixel at a time at minimum size")
-    func resizeStopsAtMinimumSize() {
+    @Test("east resize reaches one source pixel without a grid-cell stop")
+    func eastResizeReachesOneSourcePixelWithoutGridCellStop() {
         let base = CGRect(x: 100, y: 100, width: 100, height: 100)
-        let expectedWidths = [43, 42, 41, 40, 40]
 
-        for (delta, expectedWidth) in zip([57, 58, 59, 60, 61], expectedWidths) {
+        for expectedWidth in stride(from: CGFloat(100), through: 1, by: -1) {
             let result = CanvasElementGeometry.resized(
                 base,
                 by: .e,
-                delta: CGSize(width: -CGFloat(delta), height: 0),
-                minimumSize: CGSize(width: 40, height: 40),
+                delta: CGSize(width: expectedWidth - base.width, height: 0),
+                minimumSize: CGSize(width: 1, height: 1),
                 in: canvas
             )
 
-            #expect(result.width == CGFloat(expectedWidth))
+            #expect(result.minX == base.minX)
+            #expect(result.width == expectedWidth)
+            #expect(result.width > 0)
         }
+    }
+
+    @Test("cardinal resize handles reach one source pixel")
+    func cardinalResizeReachesOneSourcePixel() {
+        let base = CGRect(x: 100, y: 100, width: 100, height: 100)
+        let cases: [(CanvasElementResizeHandle, CGSize, CGRect)] = [
+            (.e, CGSize(width: -99, height: 0), CGRect(x: 100, y: 100, width: 1, height: 100)),
+            (.w, CGSize(width: 99, height: 0), CGRect(x: 199, y: 100, width: 1, height: 100)),
+            (.n, CGSize(width: 0, height: 99), CGRect(x: 100, y: 199, width: 100, height: 1)),
+            (.s, CGSize(width: 0, height: -99), CGRect(x: 100, y: 100, width: 100, height: 1))
+        ]
+
+        for (handle, delta, expected) in cases {
+            let result = CanvasElementGeometry.resized(
+                base,
+                by: handle,
+                delta: delta,
+                minimumSize: CGSize(width: 1, height: 1),
+                in: canvas
+            )
+
+            #expect(result == expected)
+            #expect(result.width > 0)
+            #expect(result.height > 0)
+        }
+    }
+
+    @Test("corner resize handles reach a near one-by-one element")
+    func cornerResizeReachesNearOneByOneElement() {
+        let base = CGRect(x: 100, y: 100, width: 100, height: 100)
+        let cases: [(CanvasElementResizeHandle, CGSize, CGRect)] = [
+            (.nw, CGSize(width: 99, height: 99), CGRect(x: 199, y: 199, width: 1, height: 1)),
+            (.ne, CGSize(width: -99, height: 99), CGRect(x: 100, y: 199, width: 1, height: 1)),
+            (.sw, CGSize(width: 99, height: -99), CGRect(x: 199, y: 100, width: 1, height: 1)),
+            (.se, CGSize(width: -99, height: -99), CGRect(x: 100, y: 100, width: 1, height: 1))
+        ]
+
+        for (handle, delta, expected) in cases {
+            let result = CanvasElementGeometry.resized(
+                base,
+                by: handle,
+                delta: delta,
+                minimumSize: CGSize(width: 1, height: 1),
+                in: canvas
+            )
+
+            #expect(result == expected)
+            #expect(result.width > 0)
+            #expect(result.height > 0)
+        }
+    }
+
+    @Test("fractional pointer movement is not rounded or quantized")
+    func fractionalPointerMovementIsPreserved() {
+        let base = CGRect(x: 100, y: 100, width: 100, height: 100)
+
+        for delta in [CGFloat(0.25), 0.5, 1.25, 7.75] {
+            let east = CanvasElementGeometry.resized(
+                base,
+                by: .e,
+                delta: CGSize(width: delta, height: 0),
+                minimumSize: freeformMinimum,
+                in: canvas
+            )
+            let west = CanvasElementGeometry.resized(
+                base,
+                by: .w,
+                delta: CGSize(width: delta, height: 0),
+                minimumSize: freeformMinimum,
+                in: canvas
+            )
+
+            #expect(east.minX == base.minX)
+            #expect(east.width == base.width + delta)
+            #expect(west.maxX == base.maxX)
+            #expect(west.minX == base.minX + delta)
+        }
+    }
+
+    @Test("canvas boundary clamps fractional resize continuously")
+    func canvasBoundaryClampsFractionalResizeContinuously() {
+        let base = CGRect(x: 300, y: 100, width: 50, height: 100)
+        let expectedMaxX: [CGFloat] = [397.25, 398.75, 400, 400]
+
+        for (delta, expected) in zip([47.25, 48.75, 50.25, 51.75], expectedMaxX) {
+            let result = CanvasElementGeometry.resized(
+                base,
+                by: .e,
+                delta: CGSize(width: delta, height: 0),
+                minimumSize: freeformMinimum,
+                in: canvas
+            )
+
+            #expect(result.minX == base.minX)
+            #expect(result.maxX == expected)
+            #expect(result.width > 0)
+        }
+    }
+
+    @Test("visual grid spacing does not affect resize geometry")
+    func visualGridSpacingDoesNotAffectResizeGeometry() {
+        let base = CGRect(x: 100, y: 100, width: 100, height: 100)
+        let delta = CGSize(width: -41.25, height: 7.75)
+
+        // Grid spacing is decorative and intentionally absent from resize inputs.
+        let resultAt40PointGrid = CanvasElementGeometry.resized(base, by: .se, delta: delta, minimumSize: freeformMinimum, in: canvas)
+        let resultAt80PointGrid = CanvasElementGeometry.resized(base, by: .se, delta: delta, minimumSize: freeformMinimum, in: canvas)
+
+        #expect(resultAt40PointGrid == resultAt80PointGrid)
+        #expect(resultAt40PointGrid.width == 58.75)
+        #expect(resultAt40PointGrid.height == 107.75)
     }
 
     @Test("duplicate offset is clamped at the bottom-right edge")
