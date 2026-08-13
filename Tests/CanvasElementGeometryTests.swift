@@ -217,6 +217,78 @@ struct CanvasElementGeometryTests {
         #expect(resultAt40PointGrid.height == 107.75)
     }
 
+    @Test("resize release matches live preview for both signs on every handle")
+    func resizeReleaseMatchesLivePreview() {
+        let base = CGRect(x: 250, y: 250, width: 300, height: 200)
+        let canvas = CGSize(width: 1000, height: 1000)
+        let translations: [(CanvasElementResizeHandle, [CGSize])] = [
+            (.n, [CGSize(width: 0, height: 40), CGSize(width: 0, height: -40)]),
+            (.s, [CGSize(width: 0, height: 40), CGSize(width: 0, height: -40)]),
+            (.e, [CGSize(width: 40, height: 0), CGSize(width: -40, height: 0)]),
+            (.w, [CGSize(width: 40, height: 0), CGSize(width: -40, height: 0)]),
+            (.ne, [CGSize(width: 40, height: 40), CGSize(width: -40, height: -40)]),
+            (.nw, [CGSize(width: 40, height: 40), CGSize(width: -40, height: -40)]),
+            (.se, [CGSize(width: 40, height: 40), CGSize(width: -40, height: -40)]),
+            (.sw, [CGSize(width: 40, height: 40), CGSize(width: -40, height: -40)])
+        ]
+
+        for (handle, handleTranslations) in translations {
+            for translation in handleTranslations {
+                let (liveRect, committedRect, doubleAppliedRect) = resizeGestureResults(
+                    base: base,
+                    handle: handle,
+                    translation: translation,
+                    minimumSize: freeformMinimum,
+                    canvasSize: canvas
+                )
+
+                #expect(committedRect == liveRect)
+                #expect(doubleAppliedRect != liveRect)
+            }
+        }
+
+        let (liveRect, committedRect, _) = resizeGestureResults(
+            base: base,
+            handle: .e,
+            translation: CGSize(width: 40, height: 0),
+            minimumSize: freeformMinimum,
+            canvasSize: canvas
+        )
+        #expect(liveRect.width == 340)
+        #expect(committedRect.width == 340)
+    }
+
+    private func resizeGestureResults(
+        base: CGRect,
+        handle: CanvasElementResizeHandle,
+        translation: CGSize,
+        minimumSize: CGSize,
+        canvasSize: CGSize
+    ) -> (liveRect: CGRect, committedRect: CGRect, doubleAppliedRect: CGRect) {
+        let liveRect = CanvasElementGeometry.resized(
+            base,
+            by: handle,
+            delta: translation,
+            minimumSize: minimumSize,
+            in: canvasSize
+        )
+        let committedRect = CanvasElementGeometry.resized(
+            base,
+            by: handle,
+            delta: translation,
+            minimumSize: minimumSize,
+            in: canvasSize
+        )
+        let doubleAppliedRect = CanvasElementGeometry.resized(
+            liveRect,
+            by: handle,
+            delta: translation,
+            minimumSize: minimumSize,
+            in: canvasSize
+        )
+        return (liveRect, committedRect, doubleAppliedRect)
+    }
+
     @Test("duplicate offset is clamped at the bottom-right edge")
     func duplicateClampsAtEdge() {
         let result = CanvasElementGeometry.duplicated(CGRect(x: 330, y: 530, width: 60, height: 60), offset: CGSize(width: 30, height: 30), in: canvas)

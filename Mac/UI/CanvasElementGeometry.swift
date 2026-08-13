@@ -168,17 +168,17 @@ struct ResizableCanvasElementView<Content: View>: View {
         }
     }
 
-    private func resizeHandle(_ handle: CanvasElementResizeHandle, in rect: CGRect) -> some View {
+    private func resizeHandle(_ handle: CanvasElementResizeHandle, in displayRect: CGRect) -> some View {
         let point: CGPoint
         switch handle {
-        case .nw: point = CGPoint(x: rect.minX, y: rect.minY)
-        case .n: point = CGPoint(x: rect.midX, y: rect.minY)
-        case .ne: point = CGPoint(x: rect.maxX, y: rect.minY)
-        case .w: point = CGPoint(x: rect.minX, y: rect.midY)
-        case .e: point = CGPoint(x: rect.maxX, y: rect.midY)
-        case .sw: point = CGPoint(x: rect.minX, y: rect.maxY)
-        case .s: point = CGPoint(x: rect.midX, y: rect.maxY)
-        case .se: point = CGPoint(x: rect.maxX, y: rect.maxY)
+        case .nw: point = CGPoint(x: displayRect.minX, y: displayRect.minY)
+        case .n: point = CGPoint(x: displayRect.midX, y: displayRect.minY)
+        case .ne: point = CGPoint(x: displayRect.maxX, y: displayRect.minY)
+        case .w: point = CGPoint(x: displayRect.minX, y: displayRect.midY)
+        case .e: point = CGPoint(x: displayRect.maxX, y: displayRect.midY)
+        case .sw: point = CGPoint(x: displayRect.minX, y: displayRect.maxY)
+        case .s: point = CGPoint(x: displayRect.midX, y: displayRect.maxY)
+        case .se: point = CGPoint(x: displayRect.maxX, y: displayRect.maxY)
         }
         let size: CGFloat = handle.isCorner ? 10 : 8
         return Circle()
@@ -192,7 +192,14 @@ struct ResizableCanvasElementView<Content: View>: View {
                         state = CanvasElementResizeState(handle: handle, delta: value.translation)
                     }
                     .onEnded { value in
-                        onResize(CanvasElementGeometry.resized(rect, by: handle, delta: value.translation, minimumSize: minimumSize, in: canvasSize))
+                        let finalRect = CanvasElementGeometry.resized(
+                            self.rect,
+                            by: handle,
+                            delta: value.translation,
+                            minimumSize: minimumSize,
+                            in: canvasSize
+                        )
+                        onResize(finalRect)
                     }
             )
     }
