@@ -39,6 +39,14 @@ final class iPadViewModel {
     private var recvBuf = Data()
     private var pendingPreviewJPEG: Data?
     private var previewDecodeTask: Task<Void, Never>?
+    private var previewStaleTask: Task<Void, Never>?
+    private var lastPreviewFrameAt: Date?
+#if DEBUG
+    private var previewMetricsStartedAt = Date()
+    private var previewFramesReceived = 0
+    private var previewFramesCoalesced = 0
+    private var previewFramesDisplayed = 0
+#endif
     private var sessionRequestTimeoutTask: Task<Void, Never>?
     private var countdownTask: Task<Void, Never>?
     private var sessionMessageGate = SessionMessageGate()
@@ -63,6 +71,7 @@ final class iPadViewModel {
         setupHandlers()
         multipeer.start()
         startUSBPreviewClient()
+        startPreviewStaleMonitor()
 #if DEBUG
         if ProcessInfo.processInfo.arguments.contains("--demo-kiosk") {
             demoKioskMode = true
@@ -78,7 +87,8 @@ final class iPadViewModel {
             self?.handleMessage(msg)
         }
         multipeer.onPreviewFrame = { [weak self] jpegData in
-            self?.updatePreview(jpegData)
+            guard let self, self.previewTransport == .wireless else { return }
+            self.updatePreview(jpegData)
         }
     }
 
@@ -326,21 +336,68 @@ final class iPadViewModel {
     }
 
     private func updatePreview(_ jpegData: Data) {
+        if pendingPreviewJPEG != nil, previewDecodeTask != nil {
+#if DEBUG
+            previewFramesCoalesced += 1
+#endif
+        }
         pendingPreviewJPEG = jpegData
+        lastPreviewFrameAt = Date()
+#if DEBUG
+        previewFramesReceived += 1
+#endif
         guard previewDecodeTask == nil else { return }
 
         previewDecodeTask = Task { @MainActor [weak self] in
             guard let self else { return }
+            defer { self.previewDecodeTask = nil }
             while let jpeg = self.pendingPreviewJPEG {
                 self.pendingPreviewJPEG = nil
                 let image = await Task.detached(priority: .userInitiated) {
                     Self.cgImage(from: jpeg)
                 }.value
                 guard !Task.isCancelled else { return }
-                self.latestPreviewImage = image
+                if let image {
+                    self.latestPreviewImage = image
+#if DEBUG
+                    self.previewFramesDisplayed += 1
+#endif
+                }
             }
-            self.previewDecodeTask = nil
+            self.logPreviewMetricsIfNeeded()
         }
+    }
+
+    private func startPreviewStaleMonitor() {
+        previewStaleTask?.cancel()
+        previewStaleTask = Task { @MainActor [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .milliseconds(500))
+                guard let self, !Task.isCancelled else { return }
+                guard let lastPreviewFrameAt = self.lastPreviewFrameAt,
+                      Date().timeIntervalSince(lastPreviewFrameAt) > 3 else { continue }
+                self.lastPreviewFrameAt = nil
+                self.latestPreviewImage = nil
+            }
+        }
+    }
+
+    private func logPreviewMetricsIfNeeded() {
+#if DEBUG
+        let now = Date()
+        guard now.timeIntervalSince(previewMetricsStartedAt) >= 2 else { return }
+        NSLog(
+            "[iPad] Preview state=%@ received=%d coalesced=%d displayed=%d",
+            String(describing: multipeer.connectionState),
+            previewFramesReceived,
+            previewFramesCoalesced,
+            previewFramesDisplayed
+        )
+        previewMetricsStartedAt = now
+        previewFramesReceived = 0
+        previewFramesCoalesced = 0
+        previewFramesDisplayed = 0
+#endif
     }
 
     private nonisolated static func cgImage(from data: Data) -> CGImage? {
@@ -664,14 +721,26 @@ final class iPadViewModel {
                 guard let self, let data, error == nil else { return }
                 // ponytail: O(n) removeFirst; acceptable for ≤30fps preview frames
                 self.recvBuf.append(data)
+                guard self.recvBuf.count <= 4 + BoothFrameParser.maximumPayloadLength else {
+                    self.recvBuf.removeAll(keepingCapacity: false)
+                    self.usbConnection?.cancel()
+                    return
+                }
                 while self.recvBuf.count >= 4 {
                     let frameLen = self.recvBuf.prefix(4).withUnsafeBytes {
                         Int(UInt32(bigEndian: $0.load(as: UInt32.self)))
                     }
+                    guard frameLen > 0, frameLen <= BoothFrameParser.maximumPayloadLength else {
+                        self.recvBuf.removeAll(keepingCapacity: false)
+                        self.usbConnection?.cancel()
+                        return
+                    }
                     guard self.recvBuf.count >= 4 + frameLen else { break }
                     let jpeg = self.recvBuf.subdata(in: 4..<(4 + frameLen))
                     self.recvBuf.removeFirst(4 + frameLen)
-                    self.updatePreview(jpeg)
+                    if self.previewTransport == .usb {
+                        self.updatePreview(jpeg)
+                    }
                 }
                 self.receiveUSBFrame()
             }

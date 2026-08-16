@@ -2,7 +2,14 @@
   "sourceLanguage" : "en",
   "strings" : {
     "%@" : {
-
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%1$@"
+          }
+        }
+      }
     },
     "%@ photos" : {
       "extractionState" : "stale",
@@ -59,7 +66,14 @@
       }
     },
     "Booth temporarily unavailable" : {
-
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "บูธไม่พร้อมใช้งานชั่วคราว"
+          }
+        }
+      }
     },
     "Choose your experience" : {
       "localizations" : {
@@ -252,7 +266,14 @@
       }
     },
     "Please wait for staff" : {
-
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "กรุณารอเจ้าหน้าที่"
+          }
+        }
+      }
     },
     "Preview" : {
       "localizations" : {

@@ -2082,7 +2082,14 @@
       }
     },
     "Error: %@" : {
-
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ข้อผิดพลาด: %1$@"
+          }
+        }
+      }
     },
     "EV" : {
       "localizations" : {
@@ -2973,7 +2980,14 @@
       }
     },
     "Last successful upload: %@" : {
-
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "อัปโหลดสำเร็จล่าสุด: %1$@"
+          }
+        }
+      }
     },
     "Layout" : {
       "extractionState" : "manual",
@@ -4724,7 +4738,14 @@
       }
     },
     "Retry scheduled " : {
-
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ตั้งเวลาลองใหม่ "
+          }
+        }
+      }
     },
     "Review" : {
       "extractionState" : "manual",
@@ -5771,7 +5792,14 @@
       }
     },
     "The printed QR is still valid. Retrying the upload will restore the same link." : {
-
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "คิวอาร์ที่พิมพ์ยังใช้งานได้ การลองอัปโหลดใหม่จะคงลิงก์เดิมไว้"
+          }
+        }
+      }
     },
     "This Mac can't verify its owner right now. Try your PIN." : {
       "extractionState" : "manual",

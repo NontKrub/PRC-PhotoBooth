@@ -5,6 +5,7 @@ import Network
 public final class NetworkBoothTransport: BoothTransport {
     private static let controlServiceType = "_prc-control._tcp"
     private static let previewServiceType = "_prc-preview._tcp"
+    private static let previewIdentityCapability = "preview-identity"
     private static let heartbeatInterval: TimeInterval = 2
     private static let heartbeatTimeout: TimeInterval = 8
 
@@ -28,16 +29,26 @@ public final class NetworkBoothTransport: BoothTransport {
     private var previewConnection: NWConnection?
     private var controlParser = BoothFrameParser()
     private var previewParser = BoothFrameParser()
-    private var previewWriteInFlight = false
-    private var pendingPreviewFrame: Data?
+    private var previewFrames = LatestFrameCoalescer()
     private var heartbeatTimer: Timer?
-    private var lastMessageAt = Date.distantPast
+    private var lastControlMessageAt = Date.distantPast
     private var reconnectTask: Task<Void, Never>?
     private var reconnectAttempt = 0
     private var shouldReconnect = true
     private var controlEndpointDescription: String?
     private var previewEndpointDescription: String?
     private var didReceiveHello = false
+    private var expectedPeerDeviceID: String?
+    private var previewPeerID: String?
+    private var previewPeerSupportsIdentity = false
+    private var didSendPreviewHello = false
+    private var previewIdentityVerified = false
+#if DEBUG
+    private var previewMetricsStartedAt = Date()
+    private var previewFramesSubmitted = 0
+    private var previewFramesSent = 0
+    private var previewCoalescedAtLastMetrics = 0
+#endif
 
     public init(role: DeviceRole) {
         self.role = role
@@ -73,9 +84,10 @@ public final class NetworkBoothTransport: BoothTransport {
         previewConnection?.cancel()
         controlConnection = nil
         previewConnection = nil
-        pendingPreviewFrame = nil
-        previewWriteInFlight = false
+        previewFrames.reset()
         didReceiveHello = false
+        expectedPeerDeviceID = nil
+        resetPreviewIdentity()
         setDisconnected()
     }
 
@@ -84,8 +96,12 @@ public final class NetworkBoothTransport: BoothTransport {
     }
 
     public func sendPreviewFrame(_ jpegData: Data) {
-        pendingPreviewFrame = jpegData
+        previewFrames.enqueue(jpegData)
+#if DEBUG
+        previewFramesSubmitted += 1
+#endif
         flushPreviewFrame()
+        logPreviewMetricsIfNeeded()
     }
 
     private func startListener(channel: BoothTransportChannel) {
@@ -99,7 +115,7 @@ public final class NetworkBoothTransport: BoothTransport {
             return
         }
         listener.service = NWListener.Service(
-            name: "PRC PhotoBooth \(channel == .control ? "Control" : "Preview")",
+            name: "PRC PhotoBooth \(channel == .control ? "Control" : "Preview") \(deviceID)",
             type: channel == .control ? Self.controlServiceType : Self.previewServiceType
         )
         listener.stateUpdateHandler = { [weak self] state in
@@ -130,9 +146,9 @@ public final class NetworkBoothTransport: BoothTransport {
         let serviceType = channel == .control ? Self.controlServiceType : Self.previewServiceType
         let browser = NWBrowser(for: .bonjour(type: serviceType, domain: nil), using: .tcp)
         browser.browseResultsChangedHandler = { [weak self] results, _ in
-            guard let endpoint = results.first?.endpoint else { return }
             Task { @MainActor [weak self] in
                 guard let self else { return }
+                guard let endpoint = self.endpointToConnect(from: results, channel: channel) else { return }
                 self.connect(to: endpoint, channel: channel)
             }
         }
@@ -150,26 +166,58 @@ public final class NetworkBoothTransport: BoothTransport {
         if channel == .control { controlBrowser = browser } else { previewBrowser = browser }
     }
 
+    private func endpointToConnect(
+        from results: Set<NWBrowser.Result>,
+        channel: BoothTransportChannel
+    ) -> NWEndpoint? {
+        let endpoints = results.map(\.endpoint)
+        guard !endpoints.isEmpty else { return nil }
+
+        if channel == .preview {
+            guard !peerName.isEmpty else { return nil }
+            if let matching = endpoints.first(where: { serviceName(from: $0)?.contains(peerName) == true }) {
+                return matching
+            }
+            return endpoints.count == 1 ? endpoints[0] : nil
+        }
+
+        if let expectedPeerDeviceID,
+           let matching = endpoints.first(where: { serviceName(from: $0)?.contains(expectedPeerDeviceID) == true }) {
+            return matching
+        }
+        return endpoints[0]
+    }
+
+    private func serviceName(from endpoint: NWEndpoint) -> String? {
+        guard case let .service(name, _, _, _) = endpoint else { return nil }
+        return name
+    }
+
     private func accept(_ connection: NWConnection, channel: BoothTransportChannel) {
         if channel == .control {
+            resetPreviewConnection()
             controlConnection?.cancel()
             controlConnection = connection
             controlEndpointDescription = connection.endpoint.debugDescription
             didReceiveHello = false
             controlParser = BoothFrameParser()
         } else {
+            previewFrames.reset()
             previewConnection?.cancel()
             previewConnection = connection
             previewEndpointDescription = connection.endpoint.debugDescription
             previewParser = BoothFrameParser()
+            resetPreviewIdentity()
         }
         configure(connection, channel: channel)
     }
 
     private func connect(to endpoint: NWEndpoint, channel: BoothTransportChannel) {
+        if channel == .preview, peerName.isEmpty { return }
         let description = endpoint.debugDescription
         if channel == .control {
             guard controlConnection == nil || controlEndpointDescription != description else { return }
+            resetPreviewConnection()
             controlConnection?.cancel()
             controlConnection = NWConnection(to: endpoint, using: .tcp)
             controlEndpointDescription = description
@@ -178,10 +226,12 @@ public final class NetworkBoothTransport: BoothTransport {
             if let connection = controlConnection { configure(connection, channel: channel) }
         } else {
             guard previewConnection == nil || previewEndpointDescription != description else { return }
+            previewFrames.reset()
             previewConnection?.cancel()
             previewConnection = NWConnection(to: endpoint, using: .tcp)
             previewEndpointDescription = description
             previewParser = BoothFrameParser()
+            resetPreviewIdentity()
             if let connection = previewConnection { configure(connection, channel: channel) }
         }
     }
@@ -199,6 +249,7 @@ public final class NetworkBoothTransport: BoothTransport {
                         self.sendTransportHello()
                     } else {
                         self.receive(on: connection, channel: channel)
+                        self.sendPreviewHello(on: connection)
                     }
                 case .failed, .cancelled:
                     self.connectionDidClose(connection, channel: channel)
@@ -235,9 +286,9 @@ public final class NetworkBoothTransport: BoothTransport {
             } else {
                 frames = try previewParser.append(data)
             }
-            lastMessageAt = Date()
+            if channel == .control { lastControlMessageAt = Date() }
             for frame in frames {
-                guard frame.channel == channel || (channel == .control && frame.channel == .heartbeat) else {
+                guard frame.channel == channel || frame.channel == .heartbeat else {
                     continue
                 }
                 switch frame.channel {
@@ -245,8 +296,9 @@ public final class NetworkBoothTransport: BoothTransport {
                     guard let message = try? Message.decoded(from: frame.payload) else { continue }
                     handleControl(message)
                 case .heartbeat:
-                    break
+                    if channel == .preview { handlePreviewHello(frame.payload) }
                 case .preview:
+                    guard previewIdentityVerified else { continue }
                     onPreviewFrame?(frame.payload)
                 case .asset:
                     break
@@ -270,14 +322,25 @@ public final class NetworkBoothTransport: BoothTransport {
             }
             didReceiveHello = true
             peerName = hello.deviceID
+            expectedPeerDeviceID = hello.deviceID
+            previewPeerSupportsIdentity = hello.capabilities.contains(Self.previewIdentityCapability)
             connectedPeerNames = [hello.deviceID]
             connectionState = .connected(peerName: hello.deviceID)
             reconnectAttempt = 0
-            lastMessageAt = Date()
+            lastControlMessageAt = Date()
             startHeartbeat()
+            validatePreviewIdentity()
+            if role == .iPad, previewConnection == nil {
+                // The preview browser may have received its first result before
+                // control identified the Mac. Recreate it so that result is
+                // evaluated against this exact peer ID.
+                previewBrowser?.cancel()
+                previewBrowser = nil
+                startBrowser(channel: .preview)
+            }
             onControlMessage?(.hello(role: hello.role))
         case .heartbeat:
-            lastMessageAt = Date()
+            lastControlMessageAt = Date()
         default:
             guard didReceiveHello else { return }
             onControlMessage?(message)
@@ -292,6 +355,58 @@ public final class NetworkBoothTransport: BoothTransport {
         )
     }
 
+    private func sendPreviewHello(on connection: NWConnection) {
+        guard let payload = try? JSONEncoder().encode(
+            BoothTransportHello(role: role, deviceID: deviceID)
+        ), let frame = try? BoothFrameEncoder.encode(channel: .heartbeat, payload: payload) else {
+            connectionDidClose(connection, channel: .preview, reason: "preview hello encoding failed")
+            return
+        }
+        connection.send(content: frame, completion: .contentProcessed { [weak self, weak connection] error in
+            Task { @MainActor [weak self] in
+                guard let self, let connection,
+                      self.isCurrent(connection, channel: .preview) else { return }
+                if let error {
+                    self.connectionDidClose(connection, channel: .preview, reason: error.localizedDescription)
+                    return
+                }
+                self.didSendPreviewHello = true
+                self.flushPreviewFrame()
+            }
+        })
+    }
+
+    private func handlePreviewHello(_ payload: Data) {
+        guard let hello = try? JSONDecoder().decode(BoothTransportHello.self, from: payload) else {
+            connectionDidClose(previewConnection, channel: .preview, reason: "invalid preview hello")
+            return
+        }
+        let expectedRole: DeviceRole = role == .mac ? .iPad : .mac
+        guard hello.protocolVersion == BoothTransportHello.currentProtocolVersion,
+              hello.role == expectedRole else {
+            connectionDidClose(previewConnection, channel: .preview, reason: "incompatible preview hello")
+            return
+        }
+        previewPeerID = hello.deviceID
+        validatePreviewIdentity()
+    }
+
+    private func validatePreviewIdentity() {
+        guard didReceiveHello else { return }
+        if !previewPeerSupportsIdentity {
+            previewIdentityVerified = true
+            flushPreviewFrame()
+            return
+        }
+        guard let previewPeerID else { return }
+        guard previewPeerID == peerName else {
+            connectionDidClose(previewConnection, channel: .preview, reason: "preview peer does not match control peer")
+            return
+        }
+        previewIdentityVerified = true
+        flushPreviewFrame()
+    }
+
     private func send(_ message: Message, on connection: NWConnection?, channel: BoothTransportChannel) {
         guard let connection else { return }
         guard let payload = try? message.encoded(),
@@ -302,23 +417,66 @@ public final class NetworkBoothTransport: BoothTransport {
     }
 
     private func flushPreviewFrame() {
-        guard !previewWriteInFlight,
+        guard didSendPreviewHello,
+              previewIdentityVerified,
               let connection = previewConnection,
-              let jpeg = pendingPreviewFrame else { return }
-        pendingPreviewFrame = nil
-        previewWriteInFlight = true
+              let jpeg = previewFrames.startNext() else { return }
+        sendPreviewFrame(jpeg, on: connection)
+    }
+
+    private func sendPreviewFrame(_ jpeg: Data, on connection: NWConnection) {
         guard let frame = try? BoothFrameEncoder.encode(channel: .preview, payload: jpeg) else {
-            previewWriteInFlight = false
+            let next = previewFrames.completeWrite()
+            if let next { sendPreviewFrame(next, on: connection) }
             return
         }
+#if DEBUG
+        previewFramesSent += 1
+#endif
         connection.send(content: frame, completion: .contentProcessed { [weak self] error in
             Task { @MainActor [weak self] in
-                guard let self else { return }
-                if let error { print("[Network] preview send failed: \(error.localizedDescription)") }
-                self.previewWriteInFlight = false
-                self.flushPreviewFrame()
+                guard let self,
+                      self.isCurrent(connection, channel: .preview) else { return }
+                if let error {
+                    print("[Network] preview send failed: \(error.localizedDescription)")
+                    self.previewFrames.resetWriteState()
+                    self.connectionDidClose(connection, channel: .preview, reason: error.localizedDescription)
+                    return
+                }
+                if let next = self.previewFrames.completeWrite() {
+                    self.sendPreviewFrame(next, on: connection)
+                }
+                self.logPreviewMetricsIfNeeded()
             }
         })
+    }
+
+    private func logPreviewMetricsIfNeeded() {
+#if DEBUG
+        let now = Date()
+        guard now.timeIntervalSince(previewMetricsStartedAt) >= 2 else { return }
+        let state = previewIdentityVerified ? "ready" : "waiting"
+        NSLog(
+            "[Network] Preview state=%@ submitted=%d sent=%d coalesced=%d control=%@",
+            state,
+            previewFramesSubmitted,
+            previewFramesSent,
+            max(0, previewFrames.coalescedFrameCount - previewCoalescedAtLastMetrics),
+            connectionStateLabel
+        )
+        previewMetricsStartedAt = now
+        previewFramesSubmitted = 0
+        previewFramesSent = 0
+        previewCoalescedAtLastMetrics = previewFrames.coalescedFrameCount
+#endif
+    }
+
+    private var connectionStateLabel: String {
+        switch connectionState {
+        case .disconnected: return "disconnected"
+        case .connecting: return "connecting"
+        case .connected: return "connected"
+        }
     }
 
     private func startHeartbeat() {
@@ -326,7 +484,7 @@ public final class NetworkBoothTransport: BoothTransport {
         heartbeatTimer = Timer.scheduledTimer(withTimeInterval: Self.heartbeatInterval, repeats: true) { [weak self] _ in
             Task { @MainActor [weak self] in
                 guard let self, self.didReceiveHello else { return }
-                if Date().timeIntervalSince(self.lastMessageAt) > Self.heartbeatTimeout {
+                if Date().timeIntervalSince(self.lastControlMessageAt) > Self.heartbeatTimeout {
                     self.connectionDidClose(self.controlConnection, channel: .control, reason: "heartbeat timeout")
                 } else {
                     self.sendControl(.heartbeat)
@@ -345,6 +503,7 @@ public final class NetworkBoothTransport: BoothTransport {
             didReceiveHello = false
             heartbeatTimer?.invalidate()
             heartbeatTimer = nil
+            resetPreviewConnection()
             setDisconnected()
             scheduleReconnect()
         } else {
@@ -352,8 +511,13 @@ public final class NetworkBoothTransport: BoothTransport {
             previewConnection?.cancel()
             previewConnection = nil
             previewEndpointDescription = nil
-            previewWriteInFlight = false
-            flushPreviewFrame()
+            previewFrames.reset()
+            resetPreviewIdentity()
+            if role == .iPad {
+                previewBrowser?.cancel()
+                previewBrowser = nil
+            }
+            scheduleReconnect()
         }
     }
 
@@ -365,6 +529,25 @@ public final class NetworkBoothTransport: BoothTransport {
         peerName = ""
         connectedPeerNames = []
         connectionState = .disconnected
+    }
+
+    private func resetPreviewConnection() {
+        previewConnection?.cancel()
+        previewConnection = nil
+        previewEndpointDescription = nil
+        previewFrames.reset()
+        resetPreviewIdentity()
+        if role == .iPad {
+            previewBrowser?.cancel()
+            previewBrowser = nil
+        }
+    }
+
+    private func resetPreviewIdentity() {
+        previewPeerID = nil
+        previewPeerSupportsIdentity = false
+        didSendPreviewHello = false
+        previewIdentityVerified = false
     }
 
     private func scheduleReconnect() {

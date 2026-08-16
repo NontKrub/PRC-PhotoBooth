@@ -112,7 +112,7 @@ public struct BoothTransportHello: Codable, Sendable, Equatable {
         role: DeviceRole,
         appVersion: String = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "dev",
         deviceID: String = UUID().uuidString,
-        capabilities: [String] = ["control", "preview", "state-sync"]
+        capabilities: [String] = ["control", "preview", "state-sync", "preview-identity"]
     ) {
         self.protocolVersion = Self.currentProtocolVersion
         self.appVersion = appVersion

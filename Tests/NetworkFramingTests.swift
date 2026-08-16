@@ -60,6 +60,18 @@ struct NetworkFramingTests {
         #expect(try parser.append(first + second).map(\.payload) == [Data("a".utf8), Data("b".utf8)])
     }
 
+    @Test("a reconnect starts with a fresh parser")
+    func parserResetAfterReconnect() throws {
+        let encoded = try BoothFrameEncoder.encode(channel: .control, payload: Data("fresh".utf8))
+        var parser = BoothFrameParser()
+        #expect(try parser.append(Data(encoded.prefix(4))).isEmpty)
+
+        parser = BoothFrameParser()
+        #expect(try parser.append(encoded) == [
+            BoothNetworkFrame(channel: .control, payload: Data("fresh".utf8))
+        ])
+    }
+
     @Test("rejects invalid header values")
     func invalidHeader() throws {
         var parser = BoothFrameParser()

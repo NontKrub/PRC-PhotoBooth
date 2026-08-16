@@ -65,6 +65,17 @@ final class DSLRCameraSource: NSObject, CameraSource {
         let errorDescription: String?
     }
 
+    private enum PTPCommandPriority: Int {
+        case normal
+        case liveView
+        case capture
+    }
+
+    private struct PTPCommandWaiter {
+        let priority: PTPCommandPriority
+        let continuation: CheckedContinuation<Void, Never>
+    }
+
     nonisolated static func ptpUInt16(_ data: Data, at offset: Int) -> UInt16? {
         guard offset >= 0, offset + 2 <= data.count else { return nil }
         return UInt16(data[offset]) | (UInt16(data[offset + 1]) << 8)
@@ -136,9 +147,10 @@ final class DSLRCameraSource: NSObject, CameraSource {
     private func executePTPCommand(
         _ camera: ICCameraDevice,
         command: Data,
-        outData: Data? = nil
+        outData: Data? = nil,
+        priority: PTPCommandPriority = .normal
     ) async -> PTPReply {
-        await waitForPTPCommandTurn()
+        await waitForPTPCommandTurn(priority: priority)
         defer { finishPTPCommandTurn() }
         guard connectedCamera === camera, !Task.isCancelled else {
             return PTPReply(data: Data(), responseCode: 0, errorDescription: "PTP command cancelled")
@@ -154,19 +166,35 @@ final class DSLRCameraSource: NSObject, CameraSource {
         return transactionID
     }
 
-    private func waitForPTPCommandTurn() async {
+    private func waitForPTPCommandTurn(priority: PTPCommandPriority) async {
         guard isExecutingPTPCommand else {
             isExecutingPTPCommand = true
             return
         }
-        await withCheckedContinuation { ptpCommandWaiters.append($0) }
+        await withCheckedContinuation {
+            ptpCommandWaiters.append(PTPCommandWaiter(priority: priority, continuation: $0))
+        }
     }
 
     private func finishPTPCommandTurn() {
         if ptpCommandWaiters.isEmpty {
             isExecutingPTPCommand = false
         } else {
-            ptpCommandWaiters.removeFirst().resume()
+            var nextIndex = 0
+            for index in ptpCommandWaiters.indices.dropFirst()
+            where ptpCommandWaiters[index].priority.rawValue > ptpCommandWaiters[nextIndex].priority.rawValue {
+                nextIndex = index
+            }
+            let waiter = ptpCommandWaiters.remove(at: nextIndex)
+            waiter.continuation.resume()
+        }
+    }
+
+    private func cancelQueuedPTPCommands() {
+        let waiters = ptpCommandWaiters
+        ptpCommandWaiters.removeAll()
+        for waiter in waiters {
+            waiter.continuation.resume()
         }
     }
 
@@ -189,7 +217,7 @@ final class DSLRCameraSource: NSObject, CameraSource {
     }
     private var ptpTxID: UInt32 = 1
     private var isExecutingPTPCommand = false
-    private var ptpCommandWaiters: [CheckedContinuation<Void, Never>] = []
+    private var ptpCommandWaiters: [PTPCommandWaiter] = []
     private var pollTask: Task<Void, Never>?    // continuous GetAllDevicePropDesc heartbeat
     private var reopenAfterClose = false
     private var ptpHealthy = false
@@ -199,11 +227,19 @@ final class DSLRCameraSource: NSObject, CameraSource {
     private var isDrainingPCBuffer = false
     private var liveViewTask: Task<Void, Never>?
     private var isRequestingLiveViewFrame = false
+    private var isLiveViewLoopRunning: Bool { liveViewTask != nil }
     private var liveViewFailureCount = 0
     private var previewFramesPerSecond = 30
     private var measuredPreviewWindowStartedAt = Date()
     private var measuredPreviewFrameCount = 0
     private(set) var measuredPreviewFPS: Double?
+    private var previewPTPRequestCount = 0
+    private var previewPTPRequestDurationTotal: TimeInterval = 0
+    private var previewFramesEmitted = 0
+    private var previewMetricsWindowStartedAt = Date()
+    private(set) var averagePreviewPTPRequestDuration: TimeInterval?
+    private(set) var previewTemporaryFailureCount = 0
+    private var lastStatusPollAt = Date.distantPast
     private(set) var isCapturing = false
 
     // Observable settings — sent to camera via PTP on applySettings()
@@ -271,14 +307,15 @@ final class DSLRCameraSource: NSObject, CameraSource {
         pendingCapturePollTask?.cancel()
         pendingCapturePollTask = nil
         stopSonyLiveView()
+        pollTask?.cancel()
+        pollTask = nil
         connectedCamera?.requestCloseSession()
         connectedCamera = nil
+        cancelQueuedPTPCommands()
         isRunning = false
         isConnecting = false
         ptpHealthy = false
-        measuredPreviewFPS = nil
-        measuredPreviewFrameCount = 0
-        measuredPreviewWindowStartedAt = Date()
+        resetPreviewMetrics()
         controlSupport = DSLRControlSupport()
         onConnectionStateChanged?()
     }
@@ -446,43 +483,61 @@ final class DSLRCameraSource: NSObject, CameraSource {
                     continue
                 }
 
+                let iterationStartedAt = ProcessInfo.processInfo.systemUptime
                 self.isRequestingLiveViewFrame = true
+                let requestStartedAt = ProcessInfo.processInfo.systemUptime
                 let jpeg = await self.requestSonyLiveViewJPEG(cam)
+                let requestDuration = ProcessInfo.processInfo.systemUptime - requestStartedAt
                 self.isRequestingLiveViewFrame = false
+                self.recordPreviewRequest(duration: requestDuration, succeeded: jpeg != nil)
 
                 guard !Task.isCancelled else { return }
-                if let jpeg,
-                   let source = CGImageSourceCreateWithData(jpeg as CFData, nil),
-                   let image = CGImageSourceCreateImageAtIndex(source, 0, nil) {
-                    let wasInactive = !self.isLivePreviewActive
-                    self.latestPreviewImage = image
-                    self.rollingBuffer.append(image)
-                    self.isLivePreviewActive = true
-                    self.measuredPreviewFrameCount += 1
-                    let elapsed = Date().timeIntervalSince(self.measuredPreviewWindowStartedAt)
-                    if elapsed >= 1 {
-                        self.measuredPreviewFPS = Double(self.measuredPreviewFrameCount) / elapsed
-                        self.measuredPreviewFrameCount = 0
-                        self.measuredPreviewWindowStartedAt = Date()
-                    }
-                    self.liveViewFailureCount = 0
+                if let jpeg {
+                    // Forward original Sony JPEG before local decode. The network path
+                    // does not need a decode/re-encode cycle.
                     self.onPreviewJPEG?(jpeg)
-                    if wasInactive {
-                        NSLog("[DSLR] Sony live preview active: %dx%d, %d bytes",
-                              image.width, image.height, jpeg.count)
+                    self.previewFramesEmitted += 1
+
+                    if let source = CGImageSourceCreateWithData(jpeg as CFData, nil),
+                       let image = CGImageSourceCreateImageAtIndex(source, 0, nil) {
+                        let wasInactive = !self.isLivePreviewActive
+                        self.latestPreviewImage = image
+                        self.rollingBuffer.append(image)
+                        self.isLivePreviewActive = true
+                        self.measuredPreviewFrameCount += 1
+                        let elapsed = Date().timeIntervalSince(self.measuredPreviewWindowStartedAt)
+                        if elapsed >= 1 {
+                            self.measuredPreviewFPS = Double(self.measuredPreviewFrameCount) / elapsed
+                            self.measuredPreviewFrameCount = 0
+                            self.measuredPreviewWindowStartedAt = Date()
+                        }
+                        self.liveViewFailureCount = 0
+                        if wasInactive {
+                            NSLog("[DSLR] Sony live preview active: %dx%d, %d bytes",
+                                  image.width, image.height, jpeg.count)
+                        }
+                    } else {
+                        self.liveViewFailureCount += 1
+                        if self.liveViewFailureCount >= 12 {
+                            self.isLivePreviewActive = false
+                        }
                     }
-                    // PTP request time also counts toward the interval. A Sony
-                    // body may not sustain the selected rate, but avoid adding
-                    // an artificial 14 FPS ceiling on top of that limitation.
-                    let delay = max(1, 1_000 / self.previewFramesPerSecond)
-                    try? await Task.sleep(for: .milliseconds(delay))
                 } else {
                     self.liveViewFailureCount += 1
                     if self.liveViewFailureCount >= 12 {
                         self.isLivePreviewActive = false
                     }
-                    try? await Task.sleep(for: .milliseconds(80))
                 }
+
+                let elapsed = ProcessInfo.processInfo.systemUptime - iterationStartedAt
+                let remaining = Self.previewSleepInterval(
+                    targetFramesPerSecond: self.previewFramesPerSecond,
+                    elapsed: elapsed
+                )
+                if remaining > 0 {
+                    try? await Task.sleep(for: .seconds(remaining))
+                }
+                self.logPreviewMetricsIfNeeded()
             }
         }
     }
@@ -494,11 +549,58 @@ final class DSLRCameraSource: NSObject, CameraSource {
         liveViewFailureCount = 0
         isLivePreviewActive = false
         latestPreviewImage = nil
+        resetPreviewMetrics()
+    }
+
+    private func resetPreviewMetrics() {
+        measuredPreviewFPS = nil
+        measuredPreviewFrameCount = 0
+        measuredPreviewWindowStartedAt = Date()
+        previewPTPRequestCount = 0
+        previewPTPRequestDurationTotal = 0
+        previewFramesEmitted = 0
+        previewMetricsWindowStartedAt = Date()
+        averagePreviewPTPRequestDuration = nil
+        previewTemporaryFailureCount = 0
+    }
+
+    private func recordPreviewRequest(duration: TimeInterval, succeeded: Bool) {
+        previewPTPRequestCount += 1
+        previewPTPRequestDurationTotal += duration
+        if !succeeded { previewTemporaryFailureCount += 1 }
+    }
+
+    private func logPreviewMetricsIfNeeded() {
+#if DEBUG
+        let now = Date()
+        guard now.timeIntervalSince(previewMetricsWindowStartedAt) >= 2 else { return }
+        let averageDuration = previewPTPRequestCount == 0
+            ? 0
+            : previewPTPRequestDurationTotal / Double(previewPTPRequestCount)
+        averagePreviewPTPRequestDuration = averageDuration
+        NSLog(
+            "[DSLR] Sony preview requested=%d FPS received=%.1f emitted=%d avgPTP=%.1fms temporaryFailures=%d",
+            previewFramesPerSecond,
+            measuredPreviewFPS ?? 0,
+            previewFramesEmitted,
+            averageDuration * 1_000,
+            previewTemporaryFailureCount
+        )
+        previewMetricsWindowStartedAt = now
+        previewPTPRequestCount = 0
+        previewPTPRequestDurationTotal = 0
+        previewFramesEmitted = 0
+#endif
     }
 
     private func requestSonyLiveViewJPEG(_ cam: ICCameraDevice) async -> Data? {
         let handle = UInt32(0xFFFFC002)
-        let info = await sendPTPRequest(cam, opcode: 0x1008, parameter: handle)
+        let info = await sendPTPRequest(
+            cam,
+            opcode: 0x1008,
+            parameter: handle,
+            priority: .liveView
+        )
         guard connectedCamera === cam, !Task.isCancelled else { return nil }
         guard info.errorDescription == nil, info.responseCode == 0x2001 else {
             if info.responseCode != 0x2009 && info.responseCode != 0x201D {
@@ -508,7 +610,12 @@ final class DSLRCameraSource: NSObject, CameraSource {
             return nil
         }
 
-        let object = await sendPTPRequest(cam, opcode: 0x1009, parameter: handle)
+        let object = await sendPTPRequest(
+            cam,
+            opcode: 0x1009,
+            parameter: handle,
+            priority: .liveView
+        )
         guard connectedCamera === cam, !Task.isCancelled else { return nil }
         guard object.errorDescription == nil, object.responseCode == 0x2001 else {
             if object.responseCode != 0x200F && object.responseCode != 0x201D {
@@ -523,30 +630,44 @@ final class DSLRCameraSource: NSObject, CameraSource {
     private func sendPTPRequest(
         _ cam: ICCameraDevice,
         opcode: UInt16,
-        parameter: UInt32
+        parameter: UInt32,
+        priority: PTPCommandPriority = .normal
     ) async -> PTPReply {
         let command = Self.makePTPCommand(
             opcode: opcode,
             transactionID: nextPTPTransactionID(),
             parameters: [parameter]
         )
-        return await executePTPCommand(cam, command: command)
+        return await executePTPCommand(cam, command: command, priority: priority)
     }
 
     private func startPollLoop(_ cam: ICCameraDevice) {
         pollTask?.cancel()
         pollTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .seconds(1.5))
             while !Task.isCancelled {
                 guard let self, self.isRunning, self.connectedCamera === cam else { return }
-                if !self.suppressStatusPoll {
+                if self.canStartStatusPoll {
                     await self.ptpSonyGetAllDevicePropDesc(cam)
                 }
-                try? await Task.sleep(for: .milliseconds(1500))
+                let interval = self.isLiveViewLoopRunning ? 5.0 : 1.5
+                try? await Task.sleep(for: .seconds(interval))
             }
         }
     }
 
+    private var canStartStatusPoll: Bool {
+        guard !suppressStatusPoll,
+              !isCapturing,
+              !isDrainingPCBuffer,
+              !isRequestingLiveViewFrame else { return false }
+        let minimumInterval = isLiveViewLoopRunning ? 5.0 : 1.5
+        return Date().timeIntervalSince(lastStatusPollAt) >= minimumInterval
+    }
+
     private func ptpSonyGetAllDevicePropDesc(_ cam: ICCameraDevice) async {
+        guard connectedCamera === cam, canStartStatusPoll else { return }
+        lastStatusPollAt = Date()
         let command = Self.makePTPCommand(opcode: 0x9209, transactionID: nextPTPTransactionID())
         let reply = await executePTPCommand(cam, command: command)
         guard connectedCamera === cam, !Task.isCancelled else { return }
@@ -563,7 +684,7 @@ final class DSLRCameraSource: NSObject, CameraSource {
             if let attemptID = activeCaptureAttemptID {
                 await ptpGetObject(cam, handle: 0xFFFFC001, attemptID: attemptID)
             }
-        } else if captureCompletion == nil, !isCapturing, !isDrainingPCBuffer {
+        } else if captureCompletion == nil, !isCapturing, !isDrainingPCBuffer, !isLiveViewLoopRunning {
             await ptpDiscardPCBufferObject(cam)
         }
     }
@@ -713,8 +834,6 @@ final class DSLRCameraSource: NSObject, CameraSource {
     // REQUIRES camera in PC Remote USB mode (Setup → USB Connection → PC Remote)
     private func ptpSonyCapture(_ cam: ICCameraDevice, attemptID: UUID) async {
         guard activeCaptureAttemptID == attemptID, connectedCamera === cam else { return }
-        pollTask?.cancel()
-        pollTask = nil
         suppressStatusPoll = true
         defer { suppressStatusPoll = false }
 
@@ -779,7 +898,12 @@ final class DSLRCameraSource: NSObject, CameraSource {
         outData.withUnsafeMutableBytes {
             $0.storeBytes(of: value.littleEndian, toByteOffset: 0, as: UInt16.self)
         }
-        let reply = await executePTPCommand(cam, command: cmd, outData: outData)
+        let reply = await executePTPCommand(
+            cam,
+            command: cmd,
+            outData: outData,
+            priority: .capture
+        )
         if let error = reply.errorDescription { NSLog("[DSLR] %@ error: %@", label, error); return 0 }
         NSLog("[DSLR] %@ resp=0x%04X", label, reply.responseCode)
         return reply.responseCode
@@ -891,7 +1015,11 @@ final class DSLRCameraSource: NSObject, CameraSource {
             transactionID: nextPTPTransactionID(),
             parameters: [0xFFFFFFFF, 0, 0xFFFFFFFF]
         )
-        let reply = await executePTPCommand(cam, command: command)
+        let reply = await executePTPCommand(
+            cam,
+            command: command,
+            priority: attemptID == nil ? .normal : .capture
+        )
         if let attemptID {
             guard activeCaptureAttemptID == attemptID, connectedCamera === cam else { return }
         } else {
@@ -930,14 +1058,15 @@ final class DSLRCameraSource: NSObject, CameraSource {
         if let attemptID {
             guard activeCaptureAttemptID == attemptID else { return }
         }
+        let priority: PTPCommandPriority = attemptID == nil ? .normal : .capture
         NSLog("[DSLR] GetObjectInfo handle=0x%08X", handle)
-        let info = await sendPTPRequest(cam, opcode: 0x1008, parameter: handle)
+        let info = await sendPTPRequest(cam, opcode: 0x1008, parameter: handle, priority: priority)
         NSLog("[DSLR] GetObjectInfo: %d bytes resp=0x%04X", info.data.count, info.responseCode)
         guard connectedCamera === cam, !Task.isCancelled else { return }
         if let attemptID { guard activeCaptureAttemptID == attemptID else { return } }
         NSLog("[DSLR] IC mediaFiles after C201: count=%d", cam.mediaFiles?.count ?? 0)
 
-        let object = await sendPTPRequest(cam, opcode: 0x1009, parameter: handle)
+        let object = await sendPTPRequest(cam, opcode: 0x1009, parameter: handle, priority: priority)
         NSLog("[DSLR] GetObject response: error=%@ dataLen=%d resp=0x%04X", object.errorDescription ?? "none", object.data.count, object.responseCode)
         guard connectedCamera === cam, !Task.isCancelled else { return }
         if let attemptID { guard activeCaptureAttemptID == attemptID else { return } }
@@ -950,7 +1079,8 @@ final class DSLRCameraSource: NSObject, CameraSource {
         let partialParameters = [handle, 0, 0x00FFFFFF]
         let partial = await executePTPCommand(
             cam,
-            command: Self.makePTPCommand(opcode: 0x101B, transactionID: nextPTPTransactionID(), parameters: partialParameters)
+            command: Self.makePTPCommand(opcode: 0x101B, transactionID: nextPTPTransactionID(), parameters: partialParameters),
+            priority: priority
         )
         NSLog("[DSLR] GetPartialObject: error=%@ dataLen=%d resp=0x%04X", partial.errorDescription ?? "none", partial.data.count, partial.responseCode)
         guard connectedCamera === cam, !Task.isCancelled else { return }
@@ -971,7 +1101,8 @@ final class DSLRCameraSource: NSObject, CameraSource {
             guard connectedCamera === cam, !Task.isCancelled else { return }
             let retry = await executePTPCommand(
                 cam,
-                command: Self.makePTPCommand(opcode: 0x101B, transactionID: nextPTPTransactionID(), parameters: partialParameters)
+                command: Self.makePTPCommand(opcode: 0x101B, transactionID: nextPTPTransactionID(), parameters: partialParameters),
+                priority: priority
             )
             NSLog("[DSLR] GetPartialObject retry %d/10: dataLen=%d resp=0x%04X", attempt, retry.data.count, retry.responseCode)
             guard connectedCamera === cam, !Task.isCancelled else { return }
@@ -1292,8 +1423,14 @@ extension DSLRCameraSource: @preconcurrency ICDeviceBrowserDelegate {
                     result: .failure(DSLRError.cameraDisconnected)
                 )
             }
-            connectedCamera = nil; isRunning = false
+            stopSonyLiveView()
+            pollTask?.cancel()
+            pollTask = nil
+            connectedCamera = nil
+            cancelQueuedPTPCommands()
+            isRunning = false
             isConnecting = false
+            ptpHealthy = false
             controlSupport = DSLRControlSupport()
             onConnectionStateChanged?()
             onError?(DSLRError.cameraDisconnected)
@@ -1344,9 +1481,8 @@ extension DSLRCameraSource: @preconcurrency ICCameraDeviceDelegate {
             // ObjectAdded: standard (0x4002) or Sony vendor (0xC201)
             if (code == 0x4002 || code == 0xC201) && self.expectingCapture {
                 guard let attemptID = self.activeCaptureAttemptID else { return }
-                NSLog("[DSLR] ObjectAdded handle=0x%08X → stopping poll, waiting 1s then ptpGetObject", handle)
+                NSLog("[DSLR] ObjectAdded handle=0x%08X → pausing status work, waiting 1s then ptpGetObject", handle)
                 self.expectingCapture = false
-                self.pollTask?.cancel(); self.pollTask = nil  // stop hammering camera during download
                 Task { @MainActor [weak self] in
                     guard let self else { return }
                     try? await Task.sleep(for: .milliseconds(500))
@@ -1364,7 +1500,6 @@ extension DSLRCameraSource: @preconcurrency ICCameraDeviceDelegate {
                 guard let attemptID = self.activeCaptureAttemptID else { return }
                 NSLog("[DSLR] Sony ObjectInMemory changed → reading PC buffer")
                 self.expectingCapture = false
-                self.pollTask?.cancel(); self.pollTask = nil
                 Task { @MainActor [weak self] in
                     guard let self else { return }
                     try? await Task.sleep(for: .milliseconds(500))
@@ -1377,6 +1512,7 @@ extension DSLRCameraSource: @preconcurrency ICCameraDeviceDelegate {
             // 0xC203 = Sony status update — requires GetAllDevicePropDesc response to advance camera state
             if code == 0xC203 &&
                 !self.suppressStatusPoll &&
+                !self.isCapturing &&
                 !self.isRequestingLiveViewFrame {
                 Task { @MainActor [weak self] in
                     guard let self, self.connectedCamera === cam else { return }
@@ -1398,6 +1534,7 @@ extension DSLRCameraSource: @preconcurrency ICCameraDeviceDelegate {
         if let error {
             isConnecting = false
             connectedCamera = nil
+            cancelQueuedPTPCommands()
             isRunning = false
             onConnectionStateChanged?()
             let msg = "Could not open camera session: \(error.localizedDescription). "
@@ -1411,11 +1548,14 @@ extension DSLRCameraSource: @preconcurrency ICCameraDeviceDelegate {
         // state covers it, not just the IC session-open call.
         Task { @MainActor [weak self] in
             guard let self else { return }
+            self.ptpHealthy = false
+            self.lastStatusPollAt = .distantPast
             await self.ptpSonyInit(cam)   // Sony SDIO vendor init — must precede capture commands
             guard self.connectedCamera === cam, !Task.isCancelled else { return }
             self.isRunning = true
             self.isConnecting = false
             self.startSonyLiveView(cam)
+            self.startPollLoop(cam)
             self.onConnectionStateChanged?()
         }
     }
@@ -1429,12 +1569,15 @@ extension DSLRCameraSource: @preconcurrency ICCameraDeviceDelegate {
         }
         stopSonyLiveView()
         pollTask?.cancel(); pollTask = nil
+        ptpHealthy = false
         NSLog("[DSLR] didCloseSession error=%@ reopen=%d", error?.localizedDescription ?? "none", reopenAfterClose ? 1 : 0)
         if reopenAfterClose, let cam = connectedCamera {
             reopenAfterClose = false
             NSLog("[DSLR] Reopening IC session to reset D2CA state")
             cam.requestOpenSession()
         } else {
+            connectedCamera = nil
+            cancelQueuedPTPCommands()
             isConnecting = false
             isRunning = false
             onConnectionStateChanged?()
@@ -1450,8 +1593,11 @@ extension DSLRCameraSource: @preconcurrency ICCameraDeviceDelegate {
         }
         stopSonyLiveView()
         pollTask?.cancel(); pollTask = nil
-        connectedCamera = nil; isRunning = false
+        connectedCamera = nil
+        cancelQueuedPTPCommands()
+        isRunning = false
         isConnecting = false
+        ptpHealthy = false
         controlSupport = DSLRControlSupport()
         onConnectionStateChanged?()
         onError?(DSLRError.cameraDisconnected)
