@@ -32,6 +32,20 @@ func operatorCameraSourceName(_ source: CameraSourceKind, locale: Locale) -> Str
     operatorString(source.rawValue, locale: locale)
 }
 
+@MainActor
+func operatorConnectingRoute(_ status: BoothConnectionStatus, locale: Locale) -> String {
+    switch status.routeState {
+    case .connectingLAN:
+        return operatorString("Connecting via LAN…", locale: locale)
+    case .connectingWiFi where status.requestedNetwork == .lan:
+        return operatorString("Switching to Wi-Fi fallback…", locale: locale)
+    case .connectingWiFi:
+        return operatorString("Connecting via Wi-Fi…", locale: locale)
+    case .disconnected, .connectedLAN, .connectedWiFi, .fallbackWiFi:
+        return operatorString("Connecting…", locale: locale)
+    }
+}
+
 func operatorPaperSizeName(_ size: SelphyPaperSize, locale: Locale) -> String {
     operatorString(size.rawValue, locale: locale)
 }

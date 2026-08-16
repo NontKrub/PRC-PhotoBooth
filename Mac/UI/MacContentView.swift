@@ -209,7 +209,7 @@ struct SettingsView: View {
                             .foregroundStyle(status.isFallbackActive ? .orange : .secondary)
                     }
                 } else if case .connecting = status.state {
-                    Label("No iPads connected", systemImage: "ipad.slash")
+                    Label(operatorConnectingRoute(status, locale: locale), systemImage: "network")
                         .foregroundStyle(.secondary)
                 } else if peers.isEmpty {
                     Label("No iPads connected", systemImage: "ipad.slash")

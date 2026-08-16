@@ -45,6 +45,20 @@ public enum BoothNetworkRouteCommand: Equatable, Sendable {
     case none
 }
 
+struct BoothRouteDiscoverySelection: Equatable, Sendable {
+    private(set) var selectedInterface: BoothNetworkInterfacePolicy?
+
+    mutating func select(_ interface: BoothNetworkInterfacePolicy) -> Bool {
+        guard selectedInterface == nil else { return false }
+        selectedInterface = interface
+        return true
+    }
+
+    mutating func reset() {
+        selectedInterface = nil
+    }
+}
+
 public struct BoothNetworkRouteMachine: Equatable, Sendable {
     public private(set) var preference: BoothNetworkPreference
     public private(set) var state: BoothNetworkRouteState = .disconnected
@@ -102,6 +116,21 @@ public struct BoothNetworkRouteMachine: Equatable, Sendable {
         case .connectingLAN, .connectedLAN:
             return startWiFiIfAvailable(wifiAvailable, fallback: true)
         case .disconnected, .connectingWiFi, .connectedWiFi, .fallbackWiFi:
+            return .none
+        }
+    }
+
+    public mutating func wifiPathChanged(isAvailable: Bool, lanAvailable: Bool) -> BoothNetworkRouteCommand {
+        guard !isAvailable else { return .none }
+        switch state {
+        case .connectingWiFi, .connectedWiFi, .fallbackWiFi:
+            if preference == .lan, lanAvailable {
+                state = .connectingLAN
+                return .startLAN
+            }
+            state = .disconnected
+            return .unavailable
+        case .disconnected, .connectingLAN, .connectedLAN:
             return .none
         }
     }

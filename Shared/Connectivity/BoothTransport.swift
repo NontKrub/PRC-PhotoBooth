@@ -131,6 +131,18 @@ struct LatestFrameCoalescer: Sendable {
     }
 }
 
+struct BoothTransportCallbackGate: Sendable {
+    private(set) var generation = 0
+
+    mutating func invalidate() {
+        generation &+= 1
+    }
+
+    func accepts(_ generation: Int) -> Bool {
+        generation == self.generation
+    }
+}
+
 public struct BoothNetworkFrame: Equatable, Sendable {
     public let channel: BoothTransportChannel
     public let payload: Data

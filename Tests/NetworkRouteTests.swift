@@ -66,4 +66,103 @@ struct NetworkRouteTests {
         #expect(route.state == .fallbackWiFi(peer: "iPad"))
         #expect(route.transportDisconnected(lanAvailable: true, wifiAvailable: true) == .startLAN)
     }
+
+    @Test("Wi-Fi loss stays unavailable when Wi-Fi is selected")
+    func selectedWiFiLossDoesNotSwitchToLAN() {
+        var route = BoothNetworkRouteMachine(preference: .wifi)
+        _ = route.start(lanAvailable: true, wifiAvailable: true)
+        _ = route.wifiConnected(peer: "iPad", fallback: false)
+
+        let command = route.wifiPathChanged(isAvailable: false, lanAvailable: true)
+
+        #expect(command == .unavailable)
+        #expect(route.state == .disconnected)
+    }
+
+    @Test("Wi-Fi fallback loss retries available LAN")
+    func fallbackWiFiLossRetriesLAN() {
+        var route = BoothNetworkRouteMachine(preference: .lan)
+        _ = route.start(lanAvailable: false, wifiAvailable: true)
+        _ = route.wifiConnected(peer: "iPad", fallback: true)
+
+        let command = route.wifiPathChanged(isAvailable: false, lanAvailable: true)
+
+        #expect(command == .startLAN)
+        #expect(route.state == .connectingLAN)
+    }
+
+    @Test("Wi-Fi fallback loss becomes unavailable without LAN")
+    func fallbackWiFiLossWithoutLANIsUnavailable() {
+        var route = BoothNetworkRouteMachine(preference: .lan)
+        _ = route.start(lanAvailable: false, wifiAvailable: true)
+        _ = route.wifiConnected(peer: "iPad", fallback: true)
+
+        let command = route.wifiPathChanged(isAvailable: false, lanAvailable: false)
+
+        #expect(command == .unavailable)
+        #expect(route.state == .disconnected)
+    }
+}
+
+@Suite("iPad route discovery policy")
+struct RouteDiscoveryPolicyTests {
+    @Test("First Wi-Fi candidate wins")
+    func selectsWiFi() {
+        var selection = BoothRouteDiscoverySelection()
+
+        let accepted = selection.select(.wifi)
+
+        #expect(accepted)
+        #expect(selection.selectedInterface == .wifi)
+    }
+
+    @Test("First LAN candidate wins")
+    func selectsLAN() {
+        var selection = BoothRouteDiscoverySelection()
+
+        let accepted = selection.select(.wiredEthernet)
+
+        #expect(accepted)
+        #expect(selection.selectedInterface == .wiredEthernet)
+    }
+
+    @Test("Later candidate cannot replace first result")
+    func firstCandidateWins() {
+        var selection = BoothRouteDiscoverySelection()
+
+        let acceptedWiFi = selection.select(.wifi)
+        let acceptedLAN = selection.select(.wiredEthernet)
+
+        #expect(acceptedWiFi)
+        #expect(!acceptedLAN)
+        #expect(selection.selectedInterface == .wifi)
+    }
+
+    @Test("Reset permits a new discovery cycle")
+    func resetPermitsNewSelection() {
+        var selection = BoothRouteDiscoverySelection()
+        _ = selection.select(.wifi)
+
+        selection.reset()
+
+        #expect(selection.selectedInterface == nil)
+        let accepted = selection.select(.wiredEthernet)
+
+        #expect(accepted)
+        #expect(selection.selectedInterface == .wiredEthernet)
+    }
+}
+
+@Suite("Transport callback policy")
+struct TransportCallbackPolicyTests {
+    @Test("Callback from previous transport generation is ignored")
+    func staleCallbackIsIgnored() {
+        var gate = BoothTransportCallbackGate()
+        let connectionAGeneration = gate.generation
+
+        gate.invalidate()
+
+        #expect(!gate.accepts(connectionAGeneration))
+        #expect(gate.accepts(gate.generation))
+    }
 }

@@ -195,7 +195,7 @@ struct OperatorConsoleView: View {
             case .unavailable: "Connected"
             }
             return "iPad connected: \(name) · \(route)"
-        case .connecting:          return operatorString("iPad not connected", locale: locale)
+        case .connecting:          return operatorConnectingRoute(coordinator.connectionStatus, locale: locale)
         case .disconnected:        return operatorString("iPad not connected", locale: locale)
         }
     }
