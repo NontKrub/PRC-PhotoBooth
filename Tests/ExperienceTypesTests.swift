@@ -34,6 +34,7 @@ struct ExperienceTypesTests {
         #expect(config.experienceRevision.isEmpty)
         #expect(config.eventGalleryPath == nil)
         #expect(config.qrCodeElements.isEmpty)
+        #expect(config.gifQualityPreset == .balanced)
     }
 
     @Test("V1.2 EventConfig fields round trip")
@@ -50,11 +51,40 @@ struct ExperienceTypesTests {
             qrCodeElements: [
                 SharedQRCodeElement(id: "qr-1", normalizedRect: CGRect(x: 0.1, y: 0.2, width: 0.2, height: 0.2), rotation: 5, zOrder: 3),
                 SharedQRCodeElement(id: "qr-2", normalizedRect: CGRect(x: 0.6, y: 0.7, width: 0.15, height: 0.15), zOrder: 4)
-            ]
+            ],
+            gifQualityPreset: .high
         )
         let data = try JSONEncoder().encode(config)
         let decoded = try JSONDecoder().decode(EventConfig.self, from: data)
         #expect(decoded == config)
+    }
+
+    @Test("GIF quality presets provide the intended defaults")
+    func gifQualityPresetValues() {
+        #expect(GIFQualityPreset.compact.maxDimension == 320)
+        #expect(GIFQualityPreset.compact.frameRate == 8)
+        #expect(GIFQualityPreset.compact.frameCount == 40)
+        #expect(GIFQualityPreset.balanced.maxDimension == 360)
+        #expect(GIFQualityPreset.balanced.frameRate == 8)
+        #expect(GIFQualityPreset.balanced.frameCount == 40)
+        #expect(abs(GIFQualityPreset.balanced.duration - 5) < 0.001)
+        #expect(GIFQualityPreset.high.maxDimension == 480)
+        #expect(GIFQualityPreset.high.frameRate == 12)
+        #expect(GIFQualityPreset.high.frameCount == 60)
+    }
+
+    @Test("legacy experience documents default GIF quality to Balanced")
+    func legacyExperienceDocumentDefaultsGIFQuality() throws {
+        let document = makeExperienceDocument()
+        var object = try #require(JSONSerialization.jsonObject(with: JSONEncoder().encode(document)) as? [String: Any])
+        object.removeValue(forKey: "gifQualityPreset")
+
+        let decoded = try JSONDecoder().decode(
+            EventExperienceDocument.self,
+            from: JSONSerialization.data(withJSONObject: object)
+        )
+
+        #expect(decoded.gifQualityPreset == .balanced)
     }
 
     @Test("legacy EventTemplateDefinition decodes without QR elements")
@@ -239,6 +269,7 @@ struct ExperienceTypesTests {
         )
 
         #expect(config.qrCodeElements == qrElements)
+        #expect(config.gifQualityPreset == .balanced)
     }
 
     private func makeExperienceDocument() -> EventExperienceDocument {

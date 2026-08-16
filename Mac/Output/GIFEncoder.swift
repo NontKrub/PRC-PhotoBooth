@@ -6,7 +6,7 @@ import UniformTypeIdentifiers
 struct GIFFrameSampler {
     let targetFramesPerShot: Int
 
-    init(targetFramesPerShot: Int = 60) {
+    init(targetFramesPerShot: Int = GIFQualityPreset.balanced.frameCount) {
         self.targetFramesPerShot = targetFramesPerShot
     }
 
@@ -40,7 +40,12 @@ struct GIFEncoder {
     let frameDelay: Double      // seconds per frame
     let maxDimension: Int       // downscale to this before encoding
 
-    init(frameDelay: Double = 1.0 / 12.0, maxDimension: Int = 480) {
+    init(preset: GIFQualityPreset = .balanced) {
+        self.frameDelay = preset.frameDelay
+        self.maxDimension = preset.maxDimension
+    }
+
+    init(frameDelay: Double, maxDimension: Int = GIFQualityPreset.high.maxDimension) {
         self.frameDelay = frameDelay
         self.maxDimension = maxDimension
     }
@@ -84,6 +89,38 @@ struct GIFEncoder {
         guard CGImageDestinationFinalize(dest) else { throw GIFError.finalizeFailed }
     }
 
+    func encodeAsync(
+        frameCount: Int,
+        to url: URL,
+        frameProvider: (Int) async throws -> CGImage
+    ) async throws {
+        guard frameCount > 0 else { throw GIFError.noFrames }
+        guard frameDelay > 0 else { throw GIFError.invalidFrameDelay }
+        guard let dest = CGImageDestinationCreateWithURL(
+            url as CFURL, UTType.gif.identifier as CFString, frameCount, nil
+        ) else { throw GIFError.destinationFailed }
+
+        let fileProps: [CFString: Any] = [
+            kCGImagePropertyGIFDictionary: [kCGImagePropertyGIFLoopCount: 0]
+        ]
+        CGImageDestinationSetProperties(dest, fileProps as CFDictionary)
+        let frameProps: [CFString: Any] = [
+            kCGImagePropertyGIFDictionary: [
+                kCGImagePropertyGIFDelayTime: frameDelay,
+                kCGImagePropertyGIFUnclampedDelayTime: frameDelay
+            ]
+        ]
+
+        for index in 0..<frameCount {
+            try Task.checkCancellation()
+            let frame = try await frameProvider(index)
+            let scaled = scaledDown(frame) ?? frame
+            CGImageDestinationAddImage(dest, scaled, frameProps as CFDictionary)
+        }
+
+        guard CGImageDestinationFinalize(dest) else { throw GIFError.finalizeFailed }
+    }
+
     private func scaledDown(_ image: CGImage) -> CGImage? {
         let w = image.width
         let h = image.height
@@ -114,8 +151,8 @@ enum GIFError: LocalizedError {
     }
 }
 
-// Renders one complete template per timeline tick. Source frame arrays stay
-// bounded to sampled inputs; final composite frames are streamed to ImageIO.
+// Renders one complete template per timeline tick. Source frames are decoded
+// lazily and only the last filtered frame per animated slot is retained.
 struct TemplateGIFRenderer {
     let compositor: Compositor
     let filterPipeline: PhotoFilterPipeline
@@ -125,8 +162,8 @@ struct TemplateGIFRenderer {
     init(
         compositor: Compositor,
         filterPipeline: PhotoFilterPipeline,
-        sampler: GIFFrameSampler = GIFFrameSampler(),
-        encoder: GIFEncoder = GIFEncoder()
+        sampler: GIFFrameSampler = GIFFrameSampler(targetFramesPerShot: GIFQualityPreset.balanced.frameCount),
+        encoder: GIFEncoder = GIFEncoder(preset: .balanced)
     ) {
         self.compositor = compositor
         self.filterPipeline = filterPipeline
@@ -145,37 +182,57 @@ struct TemplateGIFRenderer {
         let shots = manifest.shots.sorted { $0.photoIndex < $1.photoIndex }
         guard shots.contains(where: { !$0.gifFrameFileNames.isEmpty }) else { return false }
 
-        var framesByPhoto: [Int: [CGImage]] = [:]
+        var animatedURLsByPhoto: [Int: [URL]] = [:]
+        var sampledIndicesByPhoto: [Int: [Int]] = [:]
+        var stillImagesByPhoto: [Int: CGImage] = [:]
         for shot in shots {
+            try Task.checkCancellation()
             guard let accepted = acceptedImages[shot.photoIndex] else {
                 throw TemplateGIFRendererError.missingAcceptedImage(shot.photoIndex)
             }
-            let sourceFrames: [CGImage]
             if shot.gifFrameFileNames.isEmpty {
-                sourceFrames = Array(repeating: accepted, count: sampler.targetFramesPerShot)
+                stillImagesByPhoto[shot.photoIndex] = try await filterPipeline.apply(
+                    manifest.eventConfig.selectedFilterID,
+                    to: accepted
+                )
             } else {
                 let names = shot.gifFrameFileNames.sorted {
                     $0.localizedStandardCompare($1) == .orderedAscending
                 }
-                sourceFrames = try sampler.sampleIndices(sourceCount: names.count).map { index in
-                    let url = try safeURL(names[index], in: directory)
-                    guard let image = loadCGImage(from: url) else {
-                        throw TemplateGIFRendererError.missingGIFFrame(names[index])
-                    }
-                    return image
+                guard !names.isEmpty else {
+                    throw TemplateGIFRendererError.zeroUsableFrames(shot.photoIndex)
                 }
+                animatedURLsByPhoto[shot.photoIndex] = try names.map { try safeURL($0, in: directory) }
+                sampledIndicesByPhoto[shot.photoIndex] = sampler.sampleIndices(sourceCount: names.count)
             }
-            framesByPhoto[shot.photoIndex] = try await filterPipeline.apply(
-                manifest.eventConfig.selectedFilterID,
-                to: sourceFrames
-            )
         }
 
         let qrImage = try compositor.makeQRCode(payload: qrPayload)
-        try encoder.encode(frameCount: sampler.targetFramesPerShot, to: destination) { index in
-            let images = Dictionary(uniqueKeysWithValues: framesByPhoto.compactMap { photoIndex, frames in
-                frames.indices.contains(index) ? (photoIndex, frames[index]) : nil
-            })
+        var lastFilteredFrame: [Int: (sourceIndex: Int, image: CGImage)] = [:]
+        try await encoder.encodeAsync(frameCount: sampler.targetFramesPerShot, to: destination) { index in
+            try Task.checkCancellation()
+            var images = stillImagesByPhoto
+            for (photoIndex, urls) in animatedURLsByPhoto {
+                guard let sampledIndices = sampledIndicesByPhoto[photoIndex],
+                      sampledIndices.indices.contains(index) else {
+                    throw TemplateGIFRendererError.zeroUsableFrames(photoIndex)
+                }
+                let sourceIndex = sampledIndices[index]
+                if let cached = lastFilteredFrame[photoIndex], cached.sourceIndex == sourceIndex {
+                    images[photoIndex] = cached.image
+                    continue
+                }
+                guard urls.indices.contains(sourceIndex),
+                      let sourceImage = loadCGImage(from: urls[sourceIndex]) else {
+                    throw TemplateGIFRendererError.missingGIFFrame(urls[sourceIndex].lastPathComponent)
+                }
+                let filtered = try await filterPipeline.apply(
+                    manifest.eventConfig.selectedFilterID,
+                    to: sourceImage
+                )
+                lastFilteredFrame[photoIndex] = (sourceIndex, filtered)
+                images[photoIndex] = filtered
+            }
             return try compositor.render(images: images, qrImage: qrImage, maxDimension: encoder.maxDimension)
         }
         return true
@@ -194,12 +251,14 @@ enum TemplateGIFRendererError: LocalizedError {
     case missingAcceptedImage(Int)
     case missingGIFFrame(String)
     case invalidGIFFramePath(String)
+    case zeroUsableFrames(Int)
 
     var errorDescription: String? {
         switch self {
         case .missingAcceptedImage(let index): return "Accepted photograph is missing for index \(index)."
         case .missingGIFFrame(let path): return "GIF frame is missing or corrupt: \(path)"
         case .invalidGIFFramePath(let path): return "Invalid GIF frame path: \(path)"
+        case .zeroUsableFrames(let index): return "No usable GIF frames for photo index \(index)."
         }
     }
 }

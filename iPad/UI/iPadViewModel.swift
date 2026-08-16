@@ -491,7 +491,8 @@ final class iPadViewModel {
             templateID: templateID,
             templateName: option?.name ?? LocalizedText(),
             selectedFilterID: filterID,
-            customerLanguage: selectedLanguage
+            customerLanguage: selectedLanguage,
+            gifQualityPreset: eventConfig.gifQualityPreset
         )
         stateMachine.startSession(config: eventConfig)
     }

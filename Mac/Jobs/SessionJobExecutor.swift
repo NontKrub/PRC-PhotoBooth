@@ -1,5 +1,6 @@
 import Foundation
 import CoreGraphics
+import ImageIO
 
 @MainActor
 final class SessionJobExecutor: SessionJobExecuting {
@@ -199,9 +200,12 @@ final class SessionJobExecutor: SessionJobExecuting {
                 foregroundOverlayPNG: foreground
             )
             let qrPayload = try qrPayload(for: manifest)
+            let preset = manifest.eventConfig.gifQualityPreset
             let didRender = try await TemplateGIFRenderer(
                 compositor: compositor,
-                filterPipeline: filterPipeline
+                filterPipeline: filterPipeline,
+                sampler: GIFFrameSampler(targetFramesPerShot: preset.frameCount),
+                encoder: GIFEncoder(preset: preset)
             ).render(
                 manifest: manifest,
                 acceptedImages: acceptedImages,
@@ -210,6 +214,13 @@ final class SessionJobExecutor: SessionJobExecuting {
                 to: temporary
             )
             guard didRender else { return }
+            let attributes = try? FileManager.default.attributesOfItem(atPath: temporary.path)
+            let byteCount = (attributes?[.size] as? NSNumber)?.int64Value ?? 0
+            guard byteCount > 0,
+                  let source = CGImageSourceCreateWithURL(temporary as CFURL, nil),
+                  CGImageSourceGetCount(source) > 0 else {
+                throw JobExecutionError.permanent("GIF output was empty or invalid.")
+            }
             try replaceFile(at: destination, with: temporary)
             var updated = try await manifestStore.load(sessionID: manifest.id)
             updated.gifFileName = "booth.gif"
@@ -222,6 +233,8 @@ final class SessionJobExecutor: SessionJobExecuting {
                 stripPath: nil,
                 gifPath: "\(manifest.relativeDirectoryPath)/booth.gif"
             )
+        } catch is CancellationError {
+            throw CancellationError()
         } catch let error as JobExecutionError {
             throw error
         } catch {

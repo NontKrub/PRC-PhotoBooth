@@ -651,7 +651,8 @@ final class BoothCoordinator {
             templateName: template.name,
             selectedFilterID: externalSelection.filterID,
             customerLanguage: externalSelection.language,
-            experienceRevision: catalog.revision
+            experienceRevision: catalog.revision,
+            gifQualityPreset: activeExperienceDocument?.gifQualityPreset ?? .balanced
         )
         stateMachine.setReadyToStart()
     }

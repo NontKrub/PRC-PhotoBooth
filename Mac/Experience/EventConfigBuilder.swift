@@ -38,7 +38,8 @@ struct EventConfigBuilder {
             posePrompts: prompts,
             experienceRevision: document.revision,
             eventGalleryPath: galleryPath,
-            qrCodeElements: template.qrCodeElements
+            qrCodeElements: template.qrCodeElements,
+            gifQualityPreset: document.gifQualityPreset
         )
     }
 }
