@@ -23,15 +23,25 @@ actor EventExperienceStore {
             try atomicCopy(source, to: destination)
             frameFileName = "frame.png"
         }
+        let photoCount = min(max(event.photoCount, 1), 8)
+        let slots = event.slots.isEmpty
+            ? (0..<photoCount).map {
+                SharedPhotoSlot(
+                    normalizedRect: CGRect(x: 0, y: 0, width: 1, height: 1),
+                    zOrder: $0,
+                    photoIndex: $0
+                )
+            }
+            : event.slots
         let template = EventTemplateDefinition(
             id: templateID,
             name: LocalizedText(english: event.name),
-            photoCount: min(max(event.photoCount, 1), 8),
+            photoCount: photoCount,
             canvasWidth: event.canvasWidth,
             canvasHeight: event.canvasHeight,
             frameFileName: frameFileName,
             previewFileName: "preview.jpg",
-            slots: event.slots,
+            slots: slots,
             posePrompts: []
         )
         let document = EventExperienceDocument(
@@ -48,7 +58,7 @@ actor EventExperienceStore {
             gallery: EventGalleryConfiguration(title: LocalizedText(english: event.name), language: .english)
         )
         let frame = frameFileName.flatMap { loadCGImage(from: templateDirectory.appendingPathComponent($0)) }
-        let preview = try TemplatePreviewRenderer().render(template: template, frame: frame)
+        let preview = try TemplatePreviewRenderer().render(template: template, frame: frame, foregroundOverlay: nil)
         try TemplatePreviewRenderer().saveJPEG(preview, to: templateDirectory.appendingPathComponent("preview.jpg"))
         try save(document)
         return document
@@ -126,6 +136,30 @@ actor EventExperienceStore {
         return ImportedTemplateFrame(fileName: "frame.png", url: destination)
     }
 
+    func importTemplateForegroundOverlay(
+        eventID: String,
+        templateID: String,
+        sourceURL: URL,
+        editingSession: EventExperienceEditingSession? = nil
+    ) throws -> ImportedTemplateForegroundOverlay {
+        guard fileManager.fileExists(atPath: sourceURL.path),
+              let source = CGImageSourceCreateWithURL(sourceURL as CFURL, nil),
+              CGImageSourceGetType(source) == UTType.png.identifier as CFString,
+              let image = CGImageSourceCreateImageAtIndex(source, 0, nil),
+              image.alphaInfo != .none,
+              image.alphaInfo != .noneSkipFirst,
+              image.alphaInfo != .noneSkipLast else {
+            throw EventExperienceError.importFailed("Foreground overlay must be a readable PNG with transparency.")
+        }
+        if let editingSession { try validateEditingSession(editingSession, eventID: eventID) }
+        let directory = try editingSession.map { try stagingTemplateURL($0, templateID: templateID) }
+            ?? templateURL(eventID: eventID, templateID: templateID)
+        try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
+        let destination = directory.appendingPathComponent("foreground.png")
+        try atomicCopy(sourceURL, to: destination)
+        return ImportedTemplateForegroundOverlay(fileName: "foreground.png", url: destination)
+    }
+
     func importPromptImage(
         eventID: String,
         promptID: String,
@@ -183,7 +217,7 @@ actor EventExperienceStore {
         var copiedPromptURLs: [URL] = []
         do {
             try fileManager.createDirectory(at: destination, withIntermediateDirectories: true)
-            for fileName in ["frame.png", "preview.jpg"] {
+            for fileName in ["frame.png", "foreground.png", "preview.jpg"] {
                 let stagedAsset = stagedSource.map {
                     $0.appendingPathComponent(fileName)
                 }
@@ -288,12 +322,27 @@ actor EventExperienceStore {
         return try Data(contentsOf: url)
     }
 
+    func readTemplateForegroundOverlay(
+        eventID: String,
+        templateID: String,
+        fileName: String,
+        editingSession: EventExperienceEditingSession? = nil
+    ) throws -> Data? {
+        try readTemplateFrame(
+            eventID: eventID,
+            templateID: templateID,
+            fileName: fileName,
+            editingSession: editingSession
+        )
+    }
+
     func commitEditing(
         _ session: EventExperienceEditingSession,
         document: EventExperienceDocument
     ) throws {
         try validateEditingSession(session, eventID: document.eventID)
         try validate(document)
+        let previous = try load(eventID: document.eventID)
         let stagingDirectory = try editingSessionURL(session)
         let assets = try stagedAssetPairs(session)
         let backupDirectory = stagingDirectory.appendingPathComponent(".backup", isDirectory: true)
@@ -312,6 +361,13 @@ actor EventExperienceStore {
                 try atomicCopy(asset.source, to: asset.destination)
             }
             try save(document)
+            for oldTemplate in previous.templates {
+                guard oldTemplate.foregroundOverlayFileName != nil,
+                      document.templates.first(where: { $0.id == oldTemplate.id })?.foregroundOverlayFileName == nil else { continue }
+                let url = try templateURL(eventID: document.eventID, templateID: oldTemplate.id)
+                    .appendingPathComponent("foreground.png")
+                try? fileManager.removeItem(at: url)
+            }
         } catch {
             for backup in backups.reversed() {
                 if let backupURL = backup.backup, fileManager.fileExists(atPath: backupURL.path) {
@@ -344,7 +400,10 @@ actor EventExperienceStore {
             .flatMap { try? templateAssetURL($0, in: directory) }
             .flatMap { loadCGImage(from: $0) }
         let previewURL = directory.appendingPathComponent("preview.jpg")
-        let image = try TemplatePreviewRenderer().render(template: template, frame: frame)
+        let foreground = template.foregroundOverlayFileName
+            .flatMap { try? templateAssetURL($0, in: directory) }
+            .flatMap { loadCGImage(from: $0) }
+        let image = try TemplatePreviewRenderer().render(template: template, frame: frame, foregroundOverlay: foreground)
         try TemplatePreviewRenderer().saveJPEG(image, to: previewURL)
         document.templates[index].previewFileName = "preview.jpg"
         document.templates[index].updatedAt = Date()
@@ -476,7 +535,7 @@ actor EventExperienceStore {
                 }
                 let templateID = templateDirectory.lastPathComponent
                 let liveTemplate = try templateURL(eventID: session.eventID, templateID: templateID)
-                for fileName in ["frame.png", "preview.jpg"] {
+                for fileName in ["frame.png", "foreground.png", "preview.jpg"] {
                     let source = templateDirectory.appendingPathComponent(fileName)
                     guard fileManager.fileExists(atPath: source.path) else { continue }
                     assets.append((source, liveTemplate.appendingPathComponent(fileName)))
@@ -560,7 +619,15 @@ actor EventExperienceStore {
                editingSession: editingSession
            ),
            let frame = loadCGImage(from: stagedFrameURL) {
-            let preview = try TemplatePreviewRenderer().render(template: template, frame: frame)
+            let foreground = template.foregroundOverlayFileName
+                .flatMap { try? resolvedTemplateAssetURL(
+                    eventID: eventID,
+                    templateID: template.id,
+                    fileName: $0,
+                    editingSession: editingSession
+                ) }
+                .flatMap { loadCGImage(from: $0) }
+            let preview = try TemplatePreviewRenderer().render(template: template, frame: frame, foregroundOverlay: foreground)
             guard let data = jpegData(from: preview, quality: 0.82) else {
                 throw TemplatePreviewError.encodingFailed
             }

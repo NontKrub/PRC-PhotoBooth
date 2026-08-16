@@ -666,6 +666,16 @@ final class BoothCoordinator {
             .appendingPathComponent(fileName)
     }
 
+    private func selectedTemplateForegroundOverlayURL(_ template: EventTemplateDefinition, eventID: String) -> URL? {
+        guard let fileName = template.foregroundOverlayFileName else { return nil }
+        return appSupportDir()?
+            .appendingPathComponent("EventExperiences", isDirectory: true)
+            .appendingPathComponent(eventID, isDirectory: true)
+            .appendingPathComponent("Templates", isDirectory: true)
+            .appendingPathComponent(template.id, isDirectory: true)
+            .appendingPathComponent(fileName)
+    }
+
     private func makePresentation(
         sessionID: String,
         config: EventConfig,
@@ -1165,6 +1175,7 @@ final class BoothCoordinator {
             return
         }
         let frameURL = selectedTemplateFrameURL(validated.template, eventID: event.id)
+        let foregroundURL = selectedTemplateForegroundOverlayURL(validated.template, eventID: event.id)
 
         Task { @MainActor [weak self] in
             guard let self else { return }
@@ -1175,7 +1186,8 @@ final class BoothCoordinator {
                     eventName: config.eventName,
                     outputRoot: outputRoot,
                     startedAt: session.startedAt,
-                    frameSourceURL: frameURL
+                    frameSourceURL: frameURL,
+                    foregroundOverlaySourceURL: foregroundURL
                 )
                 createdDirectory = URL(fileURLWithPath: descriptor.absoluteDirectoryPath, isDirectory: true)
                 let manifest = SessionManifest(
@@ -1193,6 +1205,7 @@ final class BoothCoordinator {
                     relativeDirectoryPath: descriptor.relativeDirectoryPath,
                     absoluteDirectoryPath: descriptor.absoluteDirectoryPath,
                     frameSnapshotFileName: descriptor.frameSnapshotFileName,
+                    foregroundOverlaySnapshotFileName: descriptor.foregroundOverlaySnapshotFileName,
                     stripFileName: nil,
                     gifFileName: nil,
                     downloadToken: session.downloadToken,
@@ -2208,7 +2221,8 @@ final class BoothCoordinator {
             sessionMappings[manifest.downloadToken] = SessionRouteRegistration(
                 sessionDirectory: directory,
                 language: manifest.eventConfig.customerLanguage,
-                eventGalleryPath: galleryPath
+                eventGalleryPath: galleryPath,
+                gifExpected: manifest.shots.contains(where: { !$0.gifFrameFileNames.isEmpty })
             )
         }
         await server.replaceSessionRoutes(sessionMappings)
@@ -2614,7 +2628,8 @@ final class BoothCoordinator {
             outputRootPath: manifest.outputRootPath,
             relativeDirectoryPath: manifest.relativeDirectoryPath,
             absoluteDirectoryPath: manifest.absoluteDirectoryPath,
-            frameSnapshotFileName: manifest.frameSnapshotFileName
+            frameSnapshotFileName: manifest.frameSnapshotFileName,
+            foregroundOverlaySnapshotFileName: manifest.foregroundOverlaySnapshotFileName
         )
     }
 

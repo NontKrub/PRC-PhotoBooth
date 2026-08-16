@@ -42,7 +42,8 @@ struct LocalDownloadRouter: Sendable {
             SessionRouteRegistration(
                 sessionDirectory: $0.sessionDirectory.standardizedFileURL,
                 language: $0.language,
-                eventGalleryPath: $0.eventGalleryPath
+                eventGalleryPath: $0.eventGalleryPath,
+                gifExpected: $0.gifExpected
             )
         }
         self.galleryRoutes = galleryRoutes
@@ -132,9 +133,12 @@ struct LocalDownloadRouter: Sendable {
         let gifURL = directory.appendingPathComponent("booth.gif")
         let isThai = registration.language == .thai
         let gifLabel = isThai ? "ดาวน์โหลด GIF" : "Download GIF"
-        let gifButton = FileManager.default.fileExists(atPath: gifURL.path)
+        let gifReady = FileManager.default.fileExists(atPath: gifURL.path)
+        let gifButton = gifReady
             ? #"<a class="btn secondary" href="/s/\#(token)/booth.gif" download="photobooth.gif">⬇ \#(gifLabel)</a>"#
-            : ""
+            : registration.gifExpected
+                ? "<p id=\"gif-status\">\(isThai ? "กำลังเตรียม GIF…" : "Animated GIF preparing…")</p><meta http-equiv=\"refresh\" content=\"2\">"
+                : ""
         let galleryButton: String = {
             guard let path = registration.eventGalleryPath else { return "" }
             let label = isThai ? "ดูแกลเลอรีของงาน" : "View event gallery"

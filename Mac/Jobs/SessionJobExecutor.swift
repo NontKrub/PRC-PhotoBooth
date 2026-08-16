@@ -88,8 +88,21 @@ final class SessionJobExecutor: SessionJobExecuting {
         }
 
         let directory = sessionDirectory(for: manifest)
-        let frame = try loadFrame(for: manifest, in: directory)
-        let compositor = Compositor(config: manifest.eventConfig, framePNG: frame)
+        let frame = try loadImage(
+            named: manifest.frameSnapshotFileName,
+            label: "Frame",
+            in: directory
+        )
+        let foreground = try loadImage(
+            named: manifest.foregroundOverlaySnapshotFileName,
+            label: "Foreground overlay",
+            in: directory
+        )
+        let compositor = Compositor(
+            config: manifest.eventConfig,
+            framePNG: frame,
+            foregroundOverlayPNG: foreground
+        )
         let strip: CGImage
         do {
             let qrPayload: String?
@@ -143,7 +156,8 @@ final class SessionJobExecutor: SessionJobExecuting {
             registration: SessionRouteRegistration(
                 sessionDirectory: directory,
                 language: manifest.eventConfig.customerLanguage,
-                eventGalleryPath: manifest.eventConfig.eventGalleryPath
+                eventGalleryPath: manifest.eventConfig.eventGalleryPath,
+                gifExpected: manifest.shots.contains(where: { !$0.gifFrameFileNames.isEmpty })
             )
         )
     }
@@ -162,30 +176,7 @@ final class SessionJobExecutor: SessionJobExecuting {
 
     private func renderGIF(_ manifest: SessionManifest) async throws {
         let directory = sessionDirectory(for: manifest)
-        let sampler = GIFFrameSampler()
-        let sampledShots = try manifest.shots
-            .sorted { $0.photoIndex < $1.photoIndex }
-            .map { shot -> [CGImage] in
-                guard !shot.gifFrameFileNames.isEmpty else {
-                    NSLog("[GIF] No frames for shot %d; omitting animation contribution", shot.photoIndex)
-                    return []
-                }
-
-                let frames = try shot.gifFrameFileNames.sorted {
-                    $0.localizedStandardCompare($1) == .orderedAscending
-                }.map { path -> CGImage in
-                    let url = directory.appendingPathComponent(path).standardizedFileURL
-                    guard url.path.hasPrefix(directory.path + "/"),
-                          let image = loadCGImage(from: url) else {
-                        throw JobExecutionError.permanent("GIF frame is missing or corrupt: \(path)")
-                    }
-                    return image
-                }
-                return sampler.sample(frames)
-            }
-        let frames = sampledShots.flatMap { $0 }
-
-        guard !frames.isEmpty else {
+        guard manifest.shots.contains(where: { !$0.gifFrameFileNames.isEmpty }) else {
             var updated = try await manifestStore.load(sessionID: manifest.id)
             updated.gifFileName = nil
             try await manifestStore.save(updated)
@@ -195,8 +186,30 @@ final class SessionJobExecutor: SessionJobExecuting {
         let temporary = directory.appendingPathComponent(".booth-\(UUID().uuidString).gif")
         defer { try? FileManager.default.removeItem(at: temporary) }
         do {
-            let filteredFrames = try await filterPipeline.apply(manifest.eventConfig.selectedFilterID, to: frames)
-            try GIFEncoder().encode(frames: filteredFrames, to: temporary)
+            let acceptedImages = try workspace.loadAcceptedImages(manifest: manifest)
+            let frame = try loadImage(named: manifest.frameSnapshotFileName, label: "Frame", in: directory)
+            let foreground = try loadImage(
+                named: manifest.foregroundOverlaySnapshotFileName,
+                label: "Foreground overlay",
+                in: directory
+            )
+            let compositor = Compositor(
+                config: manifest.eventConfig,
+                framePNG: frame,
+                foregroundOverlayPNG: foreground
+            )
+            let qrPayload = try qrPayload(for: manifest)
+            let didRender = try await TemplateGIFRenderer(
+                compositor: compositor,
+                filterPipeline: filterPipeline
+            ).render(
+                manifest: manifest,
+                acceptedImages: acceptedImages,
+                directory: directory,
+                qrPayload: qrPayload,
+                to: temporary
+            )
+            guard didRender else { return }
             try replaceFile(at: destination, with: temporary)
             var updated = try await manifestStore.load(sessionID: manifest.id)
             updated.gifFileName = "booth.gif"
@@ -248,14 +261,24 @@ final class SessionJobExecutor: SessionJobExecuting {
         URL(fileURLWithPath: manifest.absoluteDirectoryPath, isDirectory: true).standardizedFileURL
     }
 
-    private func loadFrame(for manifest: SessionManifest, in directory: URL) throws -> CGImage? {
-        guard let name = manifest.frameSnapshotFileName else { return nil }
+    private func loadImage(named name: String?, label: String, in directory: URL) throws -> CGImage? {
+        guard let name else { return nil }
         let url = directory.appendingPathComponent(name).standardizedFileURL
         guard url.path.hasPrefix(directory.path + "/"),
               let image = loadCGImage(from: url) else {
-            throw JobExecutionError.permanent("Frame snapshot is missing or corrupt: \(name)")
+            throw JobExecutionError.permanent("\(label) snapshot is missing or corrupt: \(name)")
         }
         return image
+    }
+
+    private func qrPayload(for manifest: SessionManifest) throws -> String? {
+        guard !manifest.eventConfig.qrCodeElements.isEmpty else { return nil }
+        return try SessionQRCodePayloadResolver.resolve(
+            token: manifest.downloadToken,
+            localBaseURL: "http://\(LocalWebServer.lanIPAddress() ?? "localhost"):\(server.port)",
+            publicBaseURL: manifest.cloudDelivery?.publicBaseURL ?? defaults.string(forKey: "publicBaseURL"),
+            cloudUploadEnabled: manifest.cloudDelivery != nil || defaults.bool(forKey: "cloudUploadEnabled")
+        )
     }
 
     private func savePNGAtomically(_ image: CGImage, compositor: Compositor, to url: URL) throws {

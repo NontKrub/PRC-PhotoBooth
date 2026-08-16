@@ -6,6 +6,7 @@ struct SessionWorkspaceDescriptor: Codable, Sendable, Equatable {
     var relativeDirectoryPath: String
     var absoluteDirectoryPath: String
     var frameSnapshotFileName: String?
+    var foregroundOverlaySnapshotFileName: String? = nil
 }
 
 struct SavedCaptureFiles: Sendable, Equatable {
@@ -49,7 +50,8 @@ struct SessionWorkspace: Sendable {
         eventName: String,
         outputRoot: URL,
         startedAt: Date,
-        frameSourceURL: URL?
+        frameSourceURL: URL?,
+        foregroundOverlaySourceURL: URL? = nil
     ) throws -> SessionWorkspaceDescriptor {
         guard !sessionID.isEmpty, !sessionID.contains("/"), !sessionID.contains("\\") else {
             throw SessionWorkspaceError.invalidSessionID
@@ -90,6 +92,19 @@ struct SessionWorkspace: Sendable {
             frameSnapshotFileName = ".work/frame.png"
         }
 
+        var foregroundOverlaySnapshotFileName: String?
+        if let foregroundOverlaySourceURL {
+            guard fileManager.fileExists(atPath: foregroundOverlaySourceURL.path) else {
+                throw SessionWorkspaceError.missingSource(foregroundOverlaySourceURL)
+            }
+            let destination = workDirectory.appendingPathComponent("foreground.png")
+            let temporary = workDirectory.appendingPathComponent(".foreground-\(UUID().uuidString).tmp")
+            defer { try? fileManager.removeItem(at: temporary) }
+            try fileManager.copyItem(at: foregroundOverlaySourceURL, to: temporary)
+            try fileManager.moveItem(at: temporary, to: destination)
+            foregroundOverlaySnapshotFileName = ".work/foreground.png"
+        }
+
         let rootPath = outputRoot.standardizedFileURL.path
         let sessionPath = sessionDirectory.standardizedFileURL.path
         let relative = sessionPath.hasPrefix(rootPath + "/")
@@ -100,7 +115,8 @@ struct SessionWorkspace: Sendable {
             outputRootPath: rootPath,
             relativeDirectoryPath: relative,
             absoluteDirectoryPath: sessionPath,
-            frameSnapshotFileName: frameSnapshotFileName
+            frameSnapshotFileName: frameSnapshotFileName,
+            foregroundOverlaySnapshotFileName: foregroundOverlaySnapshotFileName
         )
     }
 

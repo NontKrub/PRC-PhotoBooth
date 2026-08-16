@@ -67,6 +67,8 @@ struct SessionManifest: Codable, Sendable, Identifiable, Equatable {
     var absoluteDirectoryPath: String
 
     var frameSnapshotFileName: String?
+    // Optional so manifests written before foreground overlays remain recoverable.
+    var foregroundOverlaySnapshotFileName: String? = nil
     var stripFileName: String?
     var gifFileName: String?
 

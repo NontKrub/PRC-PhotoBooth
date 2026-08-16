@@ -3,10 +3,17 @@ import CoreGraphics
 import ImageIO
 import UniformTypeIdentifiers
 
-// Composites the frame PNG over arranged photo stills to produce the final strip.
+// Keeps preview, strip, and GIF layout rules in one renderer.
 struct Compositor {
     let config: EventConfig
     let framePNG: CGImage?
+    let foregroundOverlayPNG: CGImage?
+
+    init(config: EventConfig, framePNG: CGImage?, foregroundOverlayPNG: CGImage? = nil) {
+        self.config = config
+        self.framePNG = framePNG
+        self.foregroundOverlayPNG = foregroundOverlayPNG
+    }
 
     private enum RenderElement {
         case photo(SharedPhotoSlot)
@@ -27,26 +34,20 @@ struct Compositor {
         }
     }
 
-    // images: [photoIndex → full-res CGImage]
-    func render(images: [Int: CGImage], qrPayload: String? = nil) throws -> CGImage {
-        let w = Int(config.canvasWidth)
-        let h = Int(config.canvasHeight)
-
-        let qrImage: CGImage?
-        if config.qrCodeElements.isEmpty {
-            qrImage = nil
-        } else {
-            guard let qrPayload, !qrPayload.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-                throw CompositorError.missingQRCodePayload
-            }
-            guard let generated = QRCodeGenerator.makeImage(
-                payload: qrPayload,
-                correctionLevel: "M",
-                scale: 8,
-                quietZoneModules: 4
-            ) else { throw CompositorError.renderFailed }
-            qrImage = generated
-        }
+    // images: [photoIndex → source CGImage].  A foreground opts into the new,
+    // safe ordering; no foreground preserves legacy photo/QR z-order exactly.
+    func render(
+        images: [Int: CGImage],
+        qrPayload: String? = nil,
+        qrImage: CGImage? = nil,
+        maxDimension: Int? = nil
+    ) throws -> CGImage {
+        let scale = maxDimension.map {
+            min(CGFloat(1), CGFloat($0) / max(CGFloat(config.canvasWidth), CGFloat(config.canvasHeight)))
+        } ?? 1
+        let w = max(1, Int((config.canvasWidth * Double(scale)).rounded()))
+        let h = max(1, Int((config.canvasHeight * Double(scale)).rounded()))
+        let qrImage = try qrImage ?? makeQRCode(payload: qrPayload)
 
         guard let ctx = CGContext(
             data: nil, width: w, height: h,
@@ -68,8 +69,22 @@ struct Compositor {
             drawImageUpright(ctx: ctx, image: frame, in: CGRect(origin: .zero, size: CGSize(width: w, height: h)))
         }
 
-        let elements = config.slots.map(RenderElement.photo) + config.qrCodeElements.map(RenderElement.qrCode)
-        for element in elements.sorted(by: Self.renderElementSort) {
+        if foregroundOverlayPNG != nil {
+            // Overlay-enabled templates intentionally place all QR codes last.
+            for slot in config.slots.sorted(by: { Self.renderElementSort(.photo($0), .photo($1)) }) {
+                guard let image = images[slot.photoIndex] else { continue }
+                drawAspectFill(ctx: ctx, image: image, in: canvasRect(for: slot.normalizedRect, width: w, height: h), rotation: slot.rotation)
+            }
+            if let foregroundOverlayPNG {
+                drawImageUpright(ctx: ctx, image: foregroundOverlayPNG, in: CGRect(x: 0, y: 0, width: w, height: h))
+            }
+            for qrCode in config.qrCodeElements.sorted(by: { Self.renderElementSort(.qrCode($0), .qrCode($1)) }) {
+                guard let qrImage else { continue }
+                drawQRCode(ctx: ctx, image: qrImage, in: canvasRect(for: qrCode.normalizedRect, width: w, height: h), rotation: qrCode.rotation)
+            }
+        } else {
+            let elements = config.slots.map(RenderElement.photo) + config.qrCodeElements.map(RenderElement.qrCode)
+            for element in elements.sorted(by: Self.renderElementSort) {
             switch element {
             case .photo(let slot):
                 guard let image = images[slot.photoIndex] else { continue }
@@ -78,10 +93,25 @@ struct Compositor {
                 guard let qrImage else { continue }
                 drawQRCode(ctx: ctx, image: qrImage, in: canvasRect(for: qrCode.normalizedRect, width: w, height: h), rotation: qrCode.rotation)
             }
+            }
         }
 
         guard let result = ctx.makeImage() else { throw CompositorError.renderFailed }
         return result
+    }
+
+    func makeQRCode(payload: String?) throws -> CGImage? {
+        guard !config.qrCodeElements.isEmpty else { return nil }
+        guard let payload, !payload.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw CompositorError.missingQRCodePayload
+        }
+        guard let image = QRCodeGenerator.makeImage(
+            payload: payload,
+            correctionLevel: "M",
+            scale: 8,
+            quietZoneModules: 4
+        ) else { throw CompositorError.renderFailed }
+        return image
     }
 
     private static func renderElementSort(_ lhs: RenderElement, _ rhs: RenderElement) -> Bool {

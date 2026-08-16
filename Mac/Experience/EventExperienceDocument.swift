@@ -70,6 +70,11 @@ struct ImportedTemplateFrame: Sendable, Equatable {
     var url: URL
 }
 
+struct ImportedTemplateForegroundOverlay: Sendable, Equatable {
+    var fileName: String
+    var url: URL
+}
+
 struct ImportedPromptImage: Sendable, Equatable {
     var fileName: String
     var url: URL

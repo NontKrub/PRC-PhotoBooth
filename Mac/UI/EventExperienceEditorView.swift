@@ -24,6 +24,7 @@ struct EventExperienceEditorView: View {
     @State private var selectedTemplateID: String?
     @State private var previews: [String: CGImage] = [:]
     @State private var frames: [String: CGImage] = [:]
+    @State private var foregroundOverlays: [String: CGImage] = [:]
     @State private var isLoading = true
     @State private var isLoadingPreviews = false
     @State private var isSaving = false
@@ -132,6 +133,7 @@ struct EventExperienceEditorView: View {
             let templateIDs = Set(newTemplates.map(\.id))
             previews = previews.filter { templateIDs.contains($0.key) }
             frames = frames.filter { templateIDs.contains($0.key) }
+            foregroundOverlays = foregroundOverlays.filter { templateIDs.contains($0.key) }
             for template in newTemplates {
                 if oldTemplates.first(where: { $0.id == template.id }) != template {
                     previews[template.id] = nil
@@ -144,15 +146,29 @@ struct EventExperienceEditorView: View {
         )) { template in
             if let index = document.templates.firstIndex(where: { $0.id == template.id }) {
                 NavigationStack {
-                    TemplateDetailView(template: $document.templates[index], frame: frames[template.id]) { url in
+                    TemplateDetailView(
+                        template: $document.templates[index],
+                        frame: frames[template.id],
+                        foregroundOverlay: foregroundOverlays[template.id]
+                    ) { url in
                         importFrame(url, templateID: template.id)
+                    } onImportForegroundOverlay: { url in
+                        importForegroundOverlay(url, templateID: template.id)
+                    } onRemoveForegroundOverlay: {
+                        document.templates[index].foregroundOverlayFileName = nil
+                        foregroundOverlays[template.id] = nil
+                        previews[template.id] = nil
+                        previewLoadID = UUID()
                     } onImportPromptImage: { photoIndex, url in
                         importPromptImage(url, templateID: template.id, photoIndex: photoIndex)
                     }
                     .navigationTitle(template.name.value(for: operatorLanguage))
                 }
                 .frame(minWidth: 560, minHeight: 620)
-                .task { await loadFrame(templateID: template.id) }
+                .task {
+                    await loadFrame(templateID: template.id)
+                    await loadForegroundOverlay(templateID: template.id)
+                }
             }
         }
         .onDisappear {
@@ -283,6 +299,30 @@ struct EventExperienceEditorView: View {
         }
     }
 
+    private func importForegroundOverlay(_ url: URL, templateID: String) {
+        Task {
+            do {
+                let imported = try await coordinator.experienceStore.importTemplateForegroundOverlay(
+                    eventID: event.id,
+                    templateID: templateID,
+                    sourceURL: url,
+                    editingSession: editingSession
+                )
+                guard let index = document.templates.firstIndex(where: { $0.id == templateID }),
+                      let image = loadCGImage(from: imported.url) else {
+                    throw EventExperienceError.importFailed("Imported foreground overlay could not be decoded.")
+                }
+                document.templates[index].foregroundOverlayFileName = imported.fileName
+                document.templates[index].updatedAt = Date()
+                foregroundOverlays[templateID] = image
+                previews[templateID] = nil
+                previewLoadID = UUID()
+            } catch {
+                errorMessage = error.localizedDescription
+            }
+        }
+    }
+
     private func loadFrame(templateID: String) async {
         do {
             guard frames[templateID] == nil else { return }
@@ -309,6 +349,28 @@ struct EventExperienceEditorView: View {
         } catch {
             frames[templateID] = nil
             errorMessage = "Template frame is missing or corrupt."
+        }
+    }
+
+    private func loadForegroundOverlay(templateID: String) async {
+        do {
+            guard foregroundOverlays[templateID] == nil,
+                  let template = document.templates.first(where: { $0.id == templateID }),
+                  let fileName = template.foregroundOverlayFileName,
+                  let data = try await coordinator.experienceStore.readTemplateForegroundOverlay(
+                    eventID: event.id,
+                    templateID: templateID,
+                    fileName: fileName,
+                    editingSession: editingSession
+                  ),
+                  let source = CGImageSourceCreateWithData(data as CFData, nil),
+                  let image = CGImageSourceCreateImageAtIndex(source, 0, nil) else { return }
+            foregroundOverlays[templateID] = image
+        } catch is CancellationError {
+            return
+        } catch {
+            foregroundOverlays[templateID] = nil
+            errorMessage = "Template foreground overlay is missing or corrupt."
         }
     }
 

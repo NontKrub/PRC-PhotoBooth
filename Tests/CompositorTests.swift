@@ -154,6 +154,20 @@ struct CompositorTests {
             .render(images: [0: red], qrPayload: "https://example.invalid/s/test/")
         try expectPixel(atX: 20, y: 20, in: below, equals: Pixel(255, 0, 0, 255))
     }
+
+    @Test("foreground alpha overlays photos while transparent pixels reveal them")
+    func foregroundOverlayCompositesAbovePhotos() throws {
+        let config = EventConfig(canvasWidth: 2, canvasHeight: 1, slots: [
+            SharedPhotoSlot(normalizedRect: CGRect(x: 0, y: 0, width: 1, height: 1), photoIndex: 0)
+        ])
+        let photo = solidImage(width: 2, height: 1, color: Pixel(255, 0, 0, 255))
+        let overlay = makeImage(width: 2, height: 1) { x, _ in
+            x == 0 ? (0, 0, 255, 255) : (0, 0, 0, 0)
+        }
+        let result = try Compositor(config: config, framePNG: nil, foregroundOverlayPNG: overlay).render(images: [0: photo])
+        try expectPixel(atX: 0, y: 0, in: result, equals: Pixel(0, 0, 255, 255))
+        try expectPixel(atX: 1, y: 0, in: result, equals: Pixel(255, 0, 0, 255))
+    }
 }
 
 private struct Pixel: Equatable, CustomStringConvertible {

@@ -38,9 +38,10 @@ actor LocalWebServer {
     func registerToken(_ token: String, sessionDirectory: URL) {
         guard !token.isEmpty else { return }
         registerToken(token, registration: SessionRouteRegistration(
-            sessionDirectory: sessionDirectory.standardizedFileURL,
-            language: .english,
-            eventGalleryPath: nil
+                sessionDirectory: sessionDirectory.standardizedFileURL,
+                language: .english,
+                eventGalleryPath: nil,
+                gifExpected: false
         ))
     }
 
@@ -59,7 +60,8 @@ actor LocalWebServer {
             result[mapping.key] = SessionRouteRegistration(
                 sessionDirectory: mapping.value.standardizedFileURL,
                 language: .english,
-                eventGalleryPath: nil
+                eventGalleryPath: nil,
+                gifExpected: false
             )
         }
     }

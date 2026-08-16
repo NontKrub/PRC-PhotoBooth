@@ -9,6 +9,17 @@ import UniformTypeIdentifiers
 
 @Suite("EventExperienceStore")
 struct EventExperienceStoreTests {
+    @Test("new events without legacy slots receive usable template slots")
+    func createsDefaultSlotsForNewEvent() async throws {
+        let root = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let document = try await EventExperienceStore(baseDirectory: root).ensureDocument(for: BoothEventSnapshot(
+            id: "event-no-slots", name: "New", photoCount: 3, countdownSeconds: 5,
+            canvasWidth: 400, canvasHeight: 600, framePNGURL: nil, slots: []
+        ))
+        #expect(document.templates[0].slots.map(\.photoIndex) == [0, 1, 2])
+    }
+
     @Test("migrates a legacy event once and preserves template identity")
     func migrationIsIdempotent() async throws {
         let root = try temporaryDirectory()

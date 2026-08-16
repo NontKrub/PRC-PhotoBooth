@@ -92,6 +92,28 @@ struct ExperienceTypesTests {
         #expect(decoded == template)
     }
 
+    @Test("legacy templates decode without a foreground overlay")
+    func legacyTemplateDecodesWithoutForegroundOverlay() throws {
+        let template = EventTemplateDefinition(
+            name: LocalizedText(english: "Legacy"), photoCount: 1, canvasWidth: 400, canvasHeight: 600,
+            slots: [SharedPhotoSlot(normalizedRect: CGRect(x: 0, y: 0, width: 1, height: 1))]
+        )
+        var object = try #require(JSONSerialization.jsonObject(with: JSONEncoder().encode(template)) as? [String: Any])
+        object.removeValue(forKey: "foregroundOverlayFileName")
+        let decoded = try JSONDecoder().decode(EventTemplateDefinition.self, from: JSONSerialization.data(withJSONObject: object))
+        #expect(decoded.foregroundOverlayFileName == nil)
+    }
+
+    @Test("foreground overlay filename round trips")
+    func foregroundOverlayRoundTrips() throws {
+        let template = EventTemplateDefinition(
+            name: LocalizedText(english: "Overlay"), photoCount: 1, canvasWidth: 400, canvasHeight: 600,
+            foregroundOverlayFileName: "foreground.png",
+            slots: [SharedPhotoSlot(normalizedRect: CGRect(x: 0, y: 0, width: 1, height: 1))]
+        )
+        #expect(try JSONDecoder().decode(EventTemplateDefinition.self, from: JSONEncoder().encode(template)).foregroundOverlayFileName == "foreground.png")
+    }
+
     @Test("Experience messages round trip with Thai strings")
     func experienceMessagesRoundTrip() throws {
         let catalog = CustomerExperienceCatalog(

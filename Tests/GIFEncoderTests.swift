@@ -70,6 +70,22 @@ struct GIFEncoderTests {
         #expect(abs(delay - (1.0 / 12.0)) < 0.01)
     }
 
+    @Test("provider encoder streams exact count, dimensions, and loop metadata")
+    func streamsProviderFrames() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("PRC-GIF-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let url = root.appendingPathComponent("stream.gif")
+        try GIFEncoder(frameDelay: 0.1, maxDimension: 480).encode(frameCount: 3, to: url) { _ in self.makeImage(width: 8) }
+        let source = try #require(CGImageSourceCreateWithURL(url as CFURL, nil))
+        #expect(CGImageSourceGetCount(source) == 3)
+        let frameProperties = try #require(CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any])
+        #expect(frameProperties[kCGImagePropertyPixelWidth] as? Int == 8)
+        let properties = try #require(CGImageSourceCopyProperties(source, nil) as? [CFString: Any])
+        let gif = try #require(properties[kCGImagePropertyGIFDictionary] as? [CFString: Any])
+        #expect(gif[kCGImagePropertyGIFLoopCount] as? Int == 0)
+    }
+
     @Test("rejects a non-positive frame delay")
     func rejectsNonPositiveDelay() {
         #expect(throws: GIFError.self) {

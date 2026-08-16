@@ -43,6 +43,18 @@ struct LocalDownloadRouterTests {
         #expect(router.response(for: "/s/token/booth.gif").statusCode == 200)
     }
 
+    @Test("shows GIF preparing only when a GIF is expected")
+    func showsGIFPreparingState() throws {
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let router = LocalDownloadRouter(sessionRoutes: [
+            "token": SessionRouteRegistration(sessionDirectory: directory, language: .english, eventGalleryPath: nil, gifExpected: true)
+        ], galleryRoutes: [:])
+        let page = String(decoding: router.response(for: "/s/token/").body, as: UTF8.self)
+        #expect(page.contains("Animated GIF preparing"))
+        #expect(page.contains("http-equiv=\"refresh\" content=\"2\""))
+    }
+
     @Test("rejects traversal and unknown tokens")
     func rejectsUnsafePaths() throws {
         let directory = try temporaryDirectory()
