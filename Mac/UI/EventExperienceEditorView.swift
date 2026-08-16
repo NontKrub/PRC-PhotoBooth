@@ -78,6 +78,14 @@ struct EventExperienceEditorView: View {
                         }
                     }
 
+                    Section("GIF quality") {
+                        Picker("GIF quality", selection: $document.gifQualityPreset) {
+                            Text("Compact — Smaller file, fastest guest download").tag(GIFQualityPreset.compact)
+                            Text("Balanced — Recommended").tag(GIFQualityPreset.balanced)
+                            Text("High — Best quality, larger file").tag(GIFQualityPreset.high)
+                        }
+                    }
+
                     EventGallerySettingsView(configuration: $document.gallery, serverURL: coordinator.serverURL)
 
                     if let errorMessage {
@@ -419,18 +427,30 @@ struct EventExperienceEditorView: View {
                     for: event,
                     editingSession: editingSession
                 )
-                editingSession = nil
-                for template in document.templates {
+            } catch {
+                errorMessage = error.localizedDescription
+                isSaving = false
+                return
+            }
+
+            editingSession = nil
+            var previewError: Error?
+            for template in document.templates {
+                do {
                     _ = try await coordinator.experienceStore.rebuildPreview(
                         eventID: event.id,
                         templateID: template.id
                     )
+                } catch {
+                    previewError = previewError ?? error
                 }
-                coordinator.refreshActiveExperience()
-                dismiss()
-            } catch {
-                errorMessage = error.localizedDescription
+            }
+            coordinator.refreshActiveExperience()
+            if let previewError {
+                errorMessage = "Event saved. Template previews need rebuilding: \(previewError.localizedDescription)"
                 isSaving = false
+            } else {
+                dismiss()
             }
         }
     }

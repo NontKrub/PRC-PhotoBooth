@@ -298,6 +298,50 @@ struct EventExperienceStoreTests {
         try await store.discardEditing(session)
     }
 
+    @Test("foreground-only staging regenerates the draft preview and cancel preserves live state")
+    func foregroundOnlyDraftPreview() async throws {
+        let root = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        var template = validTemplate()
+        template.frameFileName = "frame.png"
+        template.previewFileName = "preview.jpg"
+        let store = EventExperienceStore(baseDirectory: root)
+        try await store.save(document(for: template))
+
+        let directory = root.appendingPathComponent("EventExperiences/event-1/Templates/template-1")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        try makeImage(color: CGColor(red: 0.8, green: 0.2, blue: 0.1, alpha: 1))
+            .writePNG(to: directory.appendingPathComponent("frame.png"))
+        let livePreview = Data([9])
+        try livePreview.write(to: directory.appendingPathComponent("preview.jpg"))
+
+        let session = try await store.beginEditing(eventID: "event-1")
+        let overlaySource = root.appendingPathComponent("overlay.png")
+        try makeImage(color: CGColor(red: 0.1, green: 0.2, blue: 0.9, alpha: 0.7))
+            .writePNG(to: overlaySource)
+        _ = try await store.importTemplateForegroundOverlay(
+            eventID: "event-1",
+            templateID: template.id,
+            sourceURL: overlaySource,
+            editingSession: session
+        )
+
+        var draft = template
+        draft.foregroundOverlayFileName = "foreground.png"
+        let previews = try await store.readTemplatePreviews(
+            eventID: "event-1",
+            templates: [draft],
+            editingSession: session
+        )
+        let preview = try #require(previews[draft.id])
+        #expect(preview != livePreview)
+        #expect(CGImageSourceCreateWithData(preview as CFData, nil) != nil)
+
+        try await store.discardEditing(session)
+        #expect(try Data(contentsOf: directory.appendingPathComponent("preview.jpg")) == livePreview)
+        #expect((try await store.load(eventID: "event-1")).templates[0].foregroundOverlayFileName == nil)
+    }
+
     @Test("singular preview reads an unsaved duplicated template")
     func readsUnsavedDuplicatedTemplatePreview() async throws {
         let root = try temporaryDirectory()

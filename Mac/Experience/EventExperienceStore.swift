@@ -611,14 +611,15 @@ actor EventExperienceStore {
         fileName: String,
         editingSession: EventExperienceEditingSession?
     ) throws -> Data? {
-        if let frameFileName = template.frameFileName,
-           let stagedFrameURL = try stagedTemplateAssetURL(
-               eventID: eventID,
-               templateID: template.id,
-               fileName: frameFileName,
-               editingSession: editingSession
-           ),
-           let frame = loadCGImage(from: stagedFrameURL) {
+        if editingSession != nil {
+            let frame = template.frameFileName
+                .flatMap { try? resolvedTemplateAssetURL(
+                    eventID: eventID,
+                    templateID: template.id,
+                    fileName: $0,
+                    editingSession: editingSession
+                ) }
+                .flatMap { loadCGImage(from: $0) }
             let foreground = template.foregroundOverlayFileName
                 .flatMap { try? resolvedTemplateAssetURL(
                     eventID: eventID,
@@ -627,11 +628,13 @@ actor EventExperienceStore {
                     editingSession: editingSession
                 ) }
                 .flatMap { loadCGImage(from: $0) }
-            let preview = try TemplatePreviewRenderer().render(template: template, frame: frame, foregroundOverlay: foreground)
-            guard let data = jpegData(from: preview, quality: 0.82) else {
-                throw TemplatePreviewError.encodingFailed
+            if frame != nil || foreground != nil {
+                let preview = try TemplatePreviewRenderer().render(template: template, frame: frame, foregroundOverlay: foreground)
+                guard let data = jpegData(from: preview, quality: 0.82) else {
+                    throw TemplatePreviewError.encodingFailed
+                }
+                return data
             }
-            return data
         }
 
         guard let url = try resolvedTemplateAssetURL(
