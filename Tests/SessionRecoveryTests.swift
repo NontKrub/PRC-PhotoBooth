@@ -102,6 +102,31 @@ struct SessionRecoveryTests {
             return jobs.contains { $0.sessionID == "finalizing" && $0.kind == .renderStrip }
         }
     }
+
+    @Test("startup removes abandoned temporary GIF files")
+    @MainActor
+    func removesAbandonedGIFTemporaries() async throws {
+        let root = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let temporaryGIF = root.appendingPathComponent(".booth-abandoned.gif")
+        try Data([1, 2, 3]).write(to: temporaryGIF)
+        let manifestStore = SessionManifestStore(baseDirectory: root.appendingPathComponent("Runtime"))
+        try await manifestStore.create(makeManifest(
+            id: "finalizing",
+            status: .finalizing,
+            startedAt: Date(),
+            directory: root
+        ))
+        let service = SessionRecoveryService(
+            manifestStore: manifestStore,
+            workspace: SessionWorkspace(),
+            jobQueue: makeQueue(root: root)
+        )
+
+        await service.scanNow()
+
+        #expect(!FileManager.default.fileExists(atPath: temporaryGIF.path))
+    }
 }
 
 @MainActor

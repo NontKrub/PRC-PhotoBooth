@@ -117,6 +117,44 @@ struct GIFEncoderTests {
         }
     }
 
+    @Test("benchmarks old and preset GIF output on one shared rendered fixture")
+    func benchmarksGIFPresets() async throws {
+        let fixture = try makeBenchmarkFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let cases: [(String, Int, Int, Int, GIFEncoder)] = [
+            ("Old baseline", 480, 60, 12, GIFEncoder(frameDelay: 1.0 / 12.0, maxDimension: 480)),
+            ("Compact", GIFQualityPreset.compact.maxDimension, GIFQualityPreset.compact.frameCount, GIFQualityPreset.compact.frameRate, GIFEncoder(preset: .compact)),
+            ("Balanced", GIFQualityPreset.balanced.maxDimension, GIFQualityPreset.balanced.frameCount, GIFQualityPreset.balanced.frameRate, GIFEncoder(preset: .balanced)),
+            ("High", GIFQualityPreset.high.maxDimension, GIFQualityPreset.high.frameCount, GIFQualityPreset.high.frameRate, GIFEncoder(preset: .high))
+        ]
+
+        for (label, maxDimension, frameCount, frameRate, encoder) in cases {
+            let destination = fixture.root.appendingPathComponent("benchmark-\(label.replacingOccurrences(of: " ", with: "-").lowercased()).gif")
+            let started = ContinuousClock.now
+            try await TemplateGIFRenderer(
+                compositor: fixture.compositor,
+                filterPipeline: PhotoFilterPipeline(),
+                sampler: GIFFrameSampler(targetFramesPerShot: frameCount),
+                encoder: encoder
+            ).render(
+                manifest: fixture.manifest,
+                acceptedImages: fixture.acceptedImages,
+                directory: fixture.root,
+                qrPayload: "https://example.test/benchmark",
+                to: destination
+            )
+            let elapsed = started.duration(to: .now)
+            let source = try #require(CGImageSourceCreateWithURL(destination as CFURL, nil))
+            let outputFrames = CGImageSourceGetCount(source)
+            let properties = try #require(CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any])
+            let delay = (properties[kCGImagePropertyGIFDictionary] as? [CFString: Any])?[kCGImagePropertyGIFDelayTime] as? Double ?? 0
+            let fileSize = try #require((try FileManager.default.attributesOfItem(atPath: destination.path)[.size] as? NSNumber)?.int64Value)
+            print("GIF_BENCHMARK label=\(label) dimension=\(maxDimension) fps=\(frameRate) frames=\(outputFrames) duration=\(Double(outputFrames) * delay) size=\(fileSize) renderSeconds=\(elapsed.components.seconds)\(elapsed.components.attoseconds == 0 ? "" : ".\(elapsed.components.attoseconds)")")
+            #expect(outputFrames == frameCount)
+            #expect(fileSize > 0)
+        }
+    }
+
     @Test("production renderer advances all animated slots on one timeline")
     func productionRendererAnimatesSlotsTogether() async throws {
         let fixture = try makeRendererFixture()
@@ -285,6 +323,13 @@ struct GIFEncoderTests {
         let compositor: Compositor
     }
 
+    private struct BenchmarkFixture {
+        let root: URL
+        let manifest: SessionManifest
+        let acceptedImages: [Int: CGImage]
+        let compositor: Compositor
+    }
+
     private func makeRendererFixture(stillPhotoIndex: Int? = nil) throws -> RendererFixture {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("PRC-GIF-render-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
@@ -362,6 +407,81 @@ struct GIFEncoderTests {
         )
     }
 
+    private func makeBenchmarkFixture() throws -> BenchmarkFixture {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("PRC-GIF-benchmark-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        var acceptedImages: [Int: CGImage] = [:]
+        var shots: [RuntimeShotRecord] = []
+        for photoIndex in 0..<3 {
+            var names: [String] = []
+            for frameIndex in 0..<12 {
+                let name = "gif/photo_\(photoIndex)/frame_\(String(format: "%03d", frameIndex)).png"
+                let url = root.appendingPathComponent(name)
+                try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+                let image = benchmarkImage(seed: photoIndex * 100 + frameIndex)
+                if frameIndex == 0 { acceptedImages[photoIndex] = image }
+                try writePNG(image, to: url)
+                names.append(name)
+            }
+            shots.append(RuntimeShotRecord(
+                photoIndex: photoIndex,
+                imageFileName: nil,
+                gifFrameFileNames: names,
+                retakeCount: 0,
+                acceptedAt: Date()
+            ))
+        }
+
+        let config = EventConfig(
+            eventID: "benchmark-event",
+            eventName: "GIF benchmark",
+            photoCount: 3,
+            canvasWidth: 640,
+            canvasHeight: 960,
+            slots: [
+                SharedPhotoSlot(id: "top", normalizedRect: CGRect(x: 0, y: 0, width: 1, height: 1.0 / 3.0), photoIndex: 0),
+                SharedPhotoSlot(id: "middle", normalizedRect: CGRect(x: 0, y: 1.0 / 3.0, width: 1, height: 1.0 / 3.0), photoIndex: 1),
+                SharedPhotoSlot(id: "bottom", normalizedRect: CGRect(x: 0, y: 2.0 / 3.0, width: 1, height: 1.0 / 3.0), photoIndex: 2)
+            ],
+            selectedFilterID: .warm,
+            qrCodeElements: [
+                SharedQRCodeElement(id: "qr", normalizedRect: CGRect(x: 0.78, y: 0.88, width: 0.16, height: 0.1))
+            ]
+        )
+        let manifest = SessionManifest(
+            schemaVersion: SessionManifest.currentSchemaVersion,
+            id: "benchmark-session",
+            eventID: "benchmark-event",
+            eventName: "GIF benchmark",
+            eventConfig: config,
+            startedAt: Date(),
+            completedAt: nil,
+            cancelledAt: nil,
+            status: .finalizing,
+            nextPhotoIndex: 3,
+            outputRootPath: root.path,
+            relativeDirectoryPath: "GIF benchmark/session",
+            absoluteDirectoryPath: root.path,
+            frameSnapshotFileName: nil,
+            stripFileName: nil,
+            gifFileName: nil,
+            downloadToken: "benchmark-token",
+            shots: shots,
+            lastError: nil,
+            updatedAt: Date()
+        )
+        return BenchmarkFixture(
+            root: root,
+            manifest: manifest,
+            acceptedImages: acceptedImages,
+            compositor: Compositor(
+                config: config,
+                framePNG: benchmarkFrameImage(),
+                foregroundOverlayPNG: benchmarkForegroundImage()
+            )
+        )
+    }
+
     private func solidImage(_ color: CGColor) -> CGImage {
         let context = CGContext(
             data: nil,
@@ -390,6 +510,75 @@ struct GIFEncoderTests {
         context.clear(CGRect(x: 0, y: 0, width: 80, height: 80))
         context.setFillColor(CGColor(red: 0.1, green: 0.9, blue: 0.1, alpha: 1))
         context.fill(CGRect(x: 20, y: 20, width: 40, height: 40))
+        return context.makeImage()!
+    }
+
+    private func benchmarkImage(seed: Int) -> CGImage {
+        let width = 320
+        let height = 480
+        var value = UInt32(seed &* 1_664_525 &+ 1_013_904_223)
+        var bytes = [UInt8](repeating: 255, count: width * height * 4)
+        for y in 0..<height {
+            for x in 0..<width {
+                value = value &* 1_664_525 &+ 1_013_904_223
+                let noise = UInt8((value >> 24) & 0x1f)
+                let offset = (y * width + x) * 4
+                let red = x * 180 / width + Int(noise) + seed * 7
+                let green = y * 180 / height + Int(noise) * 2 + seed * 11
+                let blue = (x + y) * 120 / (width + height) + Int(noise) * 3 + seed * 13
+                bytes[offset] = UInt8(red & 0xff)
+                bytes[offset + 1] = UInt8(green & 0xff)
+                bytes[offset + 2] = UInt8(blue & 0xff)
+            }
+        }
+        let provider = CGDataProvider(data: Data(bytes) as CFData)!
+        return CGImage(
+            width: width,
+            height: height,
+            bitsPerComponent: 8,
+            bitsPerPixel: 32,
+            bytesPerRow: width * 4,
+            space: CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedLast.rawValue),
+            provider: provider,
+            decode: nil,
+            shouldInterpolate: true,
+            intent: .defaultIntent
+        )!
+    }
+
+    private func benchmarkFrameImage() -> CGImage {
+        let context = CGContext(
+            data: nil,
+            width: 640,
+            height: 960,
+            bitsPerComponent: 8,
+            bytesPerRow: 0,
+            space: CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        )!
+        context.setFillColor(CGColor(red: 0.12, green: 0.1, blue: 0.08, alpha: 1))
+        context.fill(CGRect(x: 0, y: 0, width: 640, height: 960))
+        context.setStrokeColor(CGColor(red: 0.9, green: 0.75, blue: 0.25, alpha: 1))
+        context.setLineWidth(18)
+        context.stroke(CGRect(x: 9, y: 9, width: 622, height: 942))
+        return context.makeImage()!
+    }
+
+    private func benchmarkForegroundImage() -> CGImage {
+        let context = CGContext(
+            data: nil,
+            width: 640,
+            height: 960,
+            bitsPerComponent: 8,
+            bytesPerRow: 0,
+            space: CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        )!
+        context.clear(CGRect(x: 0, y: 0, width: 640, height: 960))
+        context.setFillColor(CGColor(red: 0.9, green: 0.75, blue: 0.25, alpha: 0.9))
+        context.fill(CGRect(x: 0, y: 0, width: 640, height: 18))
+        context.fill(CGRect(x: 0, y: 942, width: 640, height: 18))
         return context.makeImage()!
     }
 

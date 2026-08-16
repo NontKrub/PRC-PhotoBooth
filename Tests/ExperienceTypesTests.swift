@@ -87,6 +87,19 @@ struct ExperienceTypesTests {
         #expect(decoded.gifQualityPreset == .balanced)
     }
 
+    @Test("experience documents persist a selected GIF quality preset")
+    func experienceDocumentPersistsGIFQuality() throws {
+        var document = makeExperienceDocument()
+        document.gifQualityPreset = .compact
+
+        let decoded = try JSONDecoder().decode(
+            EventExperienceDocument.self,
+            from: JSONEncoder().encode(document)
+        )
+
+        #expect(decoded.gifQualityPreset == .compact)
+    }
+
     @Test("legacy EventTemplateDefinition decodes without QR elements")
     func decodesLegacyTemplate() throws {
         let template = EventTemplateDefinition(
