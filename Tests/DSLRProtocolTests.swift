@@ -4,6 +4,19 @@ import Testing
 
 @Suite("Sony DSLR protocol")
 struct DSLRProtocolTests {
+    @Test("pacing subtracts completed work from target interval")
+    func previewPacingUsesRemainingInterval() {
+        let remaining = DSLRCameraSource.previewSleepInterval(
+            targetFramesPerSecond: 30,
+            elapsed: 0.010
+        )
+        #expect(abs(remaining - (1.0 / 30.0 - 0.010)) < 0.000_001)
+        #expect(DSLRCameraSource.previewSleepInterval(
+            targetFramesPerSecond: 30,
+            elapsed: 0.050
+        ) == 0)
+    }
+
     @Test("builds PTP command packets")
     func buildsPTPCommandPackets() {
         let command = DSLRCameraSource.makePTPCommand(

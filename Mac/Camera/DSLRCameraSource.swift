@@ -78,6 +78,14 @@ final class DSLRCameraSource: NSObject, CameraSource {
             | (UInt32(data[offset + 3]) << 24)
     }
 
+    nonisolated static func previewSleepInterval(
+        targetFramesPerSecond: Int,
+        elapsed: TimeInterval
+    ) -> TimeInterval {
+        guard targetFramesPerSecond > 0 else { return 0 }
+        return max(0, (1.0 / Double(targetFramesPerSecond)) - max(0, elapsed))
+    }
+
     nonisolated static func ptpResponseCode(from response: Data) -> UInt16 {
         ptpUInt16(response, at: 6) ?? 0
     }

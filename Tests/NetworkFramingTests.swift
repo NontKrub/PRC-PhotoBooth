@@ -4,6 +4,21 @@ import Foundation
 
 @Suite("Network framing")
 struct NetworkFramingTests {
+    @Test("preview coalescing keeps only newest pending frame")
+    func latestFrameWins() {
+        var frames = LatestFrameCoalescer()
+        frames.enqueue(Data("A".utf8))
+        #expect(frames.startNext() == Data("A".utf8))
+
+        frames.enqueue(Data("B".utf8))
+        frames.enqueue(Data("C".utf8))
+        frames.enqueue(Data("D".utf8))
+
+        #expect(frames.completeWrite() == Data("D".utf8))
+        #expect(frames.completeWrite() == nil)
+        #expect(frames.coalescedFrameCount == 3)
+    }
+
     @Test("parses a complete frame")
     func completeFrame() throws {
         let encoded = try BoothFrameEncoder.encode(channel: .control, payload: Data("one".utf8))

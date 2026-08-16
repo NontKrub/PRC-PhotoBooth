@@ -29,6 +29,39 @@ public enum BoothTransportChannel: UInt8, Codable, Sendable {
     case heartbeat = 4
 }
 
+struct LatestFrameCoalescer: Sendable {
+    private(set) var writeInFlight = false
+    private var pendingFrame: Data?
+    private(set) var coalescedFrameCount = 0
+
+    mutating func enqueue(_ frame: Data) {
+        if writeInFlight { coalescedFrameCount += 1 }
+        pendingFrame = frame
+    }
+
+    mutating func startNext() -> Data? {
+        guard !writeInFlight, let pendingFrame else { return nil }
+        self.pendingFrame = nil
+        writeInFlight = true
+        return pendingFrame
+    }
+
+    mutating func completeWrite() -> Data? {
+        writeInFlight = false
+        return startNext()
+    }
+
+    mutating func resetWriteState() {
+        writeInFlight = false
+    }
+
+    mutating func reset() {
+        writeInFlight = false
+        pendingFrame = nil
+        coalescedFrameCount = 0
+    }
+}
+
 public struct BoothNetworkFrame: Equatable, Sendable {
     public let channel: BoothTransportChannel
     public let payload: Data
