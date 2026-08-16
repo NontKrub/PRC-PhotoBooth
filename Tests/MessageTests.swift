@@ -143,6 +143,7 @@ struct MessageTests {
         let legacy = Data(#"{"protocolVersion":2,"appVersion":"1.3","role":"iPad","deviceID":"legacy-id","capabilities":["control"]}"#.utf8)
         let legacyHello = try JSONDecoder().decode(BoothTransportHello.self, from: legacy)
         #expect(legacyHello.deviceName == "legacy-id")
+        #expect(legacyHello.networkPreference == nil)
     }
 }
 

@@ -7,7 +7,7 @@ public enum BoothNetworkPreference: String, Codable, CaseIterable, Identifiable,
     public var id: String { rawValue }
 }
 
-public enum BoothNetworkInterfacePolicy: String, Equatable, Sendable {
+public enum BoothNetworkInterfacePolicy: String, Equatable, Hashable, Sendable {
     case wifi
     case wiredEthernet
 }
@@ -46,16 +46,61 @@ public enum BoothNetworkRouteCommand: Equatable, Sendable {
 }
 
 struct BoothRouteDiscoverySelection: Equatable, Sendable {
-    private(set) var selectedInterface: BoothNetworkInterfacePolicy?
+    enum Decision: Equatable, Sendable {
+        case accepted
+        case waitingForPreferredInterface
+        case ignored
+    }
 
-    mutating func select(_ interface: BoothNetworkInterfacePolicy) -> Bool {
-        guard selectedInterface == nil else { return false }
-        selectedInterface = interface
-        return true
+    private(set) var selectedInterface: BoothNetworkInterfacePolicy?
+    private(set) var pendingInterface: BoothNetworkInterfacePolicy?
+
+    mutating func consider(
+        _ interface: BoothNetworkInterfacePolicy,
+        preferredPreference: BoothNetworkPreference,
+        advertisedPreference: BoothNetworkPreference? = nil
+    ) -> Decision {
+        guard selectedInterface == nil else { return .ignored }
+
+        let preference = advertisedPreference ?? preferredPreference
+        let preferredInterface: BoothNetworkInterfacePolicy = preference == .lan ? .wiredEthernet : .wifi
+        guard interface != preferredInterface else {
+            selectedInterface = interface
+            pendingInterface = nil
+            return .accepted
+        }
+
+        pendingInterface = interface
+        return .waitingForPreferredInterface
+    }
+
+    mutating func promotePending() -> BoothNetworkInterfacePolicy? {
+        guard selectedInterface == nil, let pendingInterface else { return nil }
+        selectedInterface = pendingInterface
+        self.pendingInterface = nil
+        return selectedInterface
     }
 
     mutating func reset() {
         selectedInterface = nil
+        pendingInterface = nil
+    }
+}
+
+struct BoothRouteDiscoveryGenerationGate: Equatable, Sendable {
+    private(set) var generation = 0
+
+    mutating func begin() -> Int {
+        generation += 1
+        return generation
+    }
+
+    mutating func invalidate() {
+        generation += 1
+    }
+
+    func accepts(_ callbackGeneration: Int) -> Bool {
+        callbackGeneration == generation
     }
 }
 

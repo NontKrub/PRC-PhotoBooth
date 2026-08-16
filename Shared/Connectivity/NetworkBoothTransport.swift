@@ -10,6 +10,7 @@ public final class NetworkBoothTransport: BoothTransport {
     private static let reconnectDelays: [TimeInterval] = [0.5, 1, 2, 4, 5]
     private static let controlServiceType = "_prc-control._tcp"
     private static let previewServiceType = "_prc-preview._tcp"
+    private static let routeDiscoveryGracePeriod: TimeInterval = 0.75
     private static let previewIdentityCapability = "preview-identity"
     private static let heartbeatInterval: TimeInterval = 2
     private static let heartbeatTimeout: TimeInterval = 8
@@ -59,6 +60,10 @@ public final class NetworkBoothTransport: BoothTransport {
     private var wifiRouteDiscoveryBrowser: NWBrowser?
     private var lanRouteDiscoveryBrowser: NWBrowser?
     private var routeDiscoverySelection = BoothRouteDiscoverySelection()
+    private var pendingWiFiRouteEndpoint: NWEndpoint?
+    private var pendingLANRouteEndpoint: NWEndpoint?
+    private var routeDiscoveryFallbackTask: Task<Void, Never>?
+    private var routeDiscoveryGate = BoothRouteDiscoveryGenerationGate()
     private var callbackGate = BoothTransportCallbackGate()
     private var controlConnection: NWConnection?
     private var previewConnection: NWConnection?
@@ -330,39 +335,64 @@ public final class NetworkBoothTransport: BoothTransport {
         routeMachine = BoothNetworkRouteMachine(preference: requestedPreference)
         connectionState = .connecting
         publishStatus()
-        startRouteDiscoveryBrowser(on: .wifi)
-        startRouteDiscoveryBrowser(on: .wiredEthernet)
+        let generation = routeDiscoveryGate.begin()
+        startRouteDiscoveryBrowser(on: .wifi, generation: generation)
+        startRouteDiscoveryBrowser(on: .wiredEthernet, generation: generation)
     }
 
-    private func startRouteDiscoveryBrowser(on interface: BoothNetworkInterfacePolicy) {
+    private func startRouteDiscoveryBrowser(
+        on interface: BoothNetworkInterfacePolicy,
+        generation: Int
+    ) {
         let browser = NWBrowser(
-            for: .bonjour(type: Self.controlServiceType, domain: nil),
+            for: .bonjourWithTXTRecord(type: Self.controlServiceType, domain: nil),
             using: makeParameters(for: interface)
         )
         browser.browseResultsChangedHandler = { [weak self, weak browser] results, _ in
             Task { @MainActor [weak self, weak browser] in
                 guard let self, let browser,
-                      self.isCurrentRouteDiscoveryBrowser(browser, interface: interface),
-                      let endpoint = results.first?.endpoint,
-                      self.routeDiscoverySelection.select(interface) else { return }
-                if interface == .wiredEthernet {
-                    _ = self.routeMachine.beginLANAttempt()
-                } else {
-                    _ = self.routeMachine.startWiFiAttempt(wifiAvailable: true, fallback: false)
+                      self.routeDiscoveryGate.accepts(generation),
+                      self.isCurrentRouteDiscoveryBrowser(browser, interface: interface) else { return }
+
+                for result in results {
+                    let advertisedPreference = self.advertisedNetworkPreference(from: result)
+                    if let advertisedPreference,
+                       self.requestedPreference != advertisedPreference {
+                        self.requestedPreference = advertisedPreference
+                        self.routeMachine = BoothNetworkRouteMachine(preference: advertisedPreference)
+                        self.publishStatus()
+                    }
+                    let decision = self.routeDiscoverySelection.consider(
+                        interface,
+                        preferredPreference: self.requestedPreference,
+                        advertisedPreference: advertisedPreference
+                    )
+                    switch decision {
+                    case .ignored:
+                        continue
+                    case .waitingForPreferredInterface:
+                        self.storePendingRouteEndpoint(result.endpoint, for: interface)
+                        self.scheduleRouteDiscoveryFallback()
+                        continue
+                    case .accepted:
+                        if let advertisedPreference {
+                            self.requestedPreference = advertisedPreference
+                        }
+                        self.connectDiscoveredRoute(
+                            interface: interface,
+                            endpoint: result.endpoint,
+                            browser: browser
+                        )
+                        return
+                    }
                 }
-                self.startTransport(
-                    using: interface,
-                    fallback: false,
-                    reason: nil,
-                    discoveredControlBrowser: browser
-                )
-                self.connect(to: endpoint, channel: .control)
             }
         }
         browser.stateUpdateHandler = { [weak self, weak browser] state in
             guard case .failed(let error) = state else { return }
             Task { @MainActor [weak self, weak browser] in
                 guard let self, let browser,
+                      self.routeDiscoveryGate.accepts(generation),
                       self.isCurrentRouteDiscoveryBrowser(browser, interface: interface) else { return }
                 print("[NetworkRoute] \(interface.rawValue) discovery failed: \(error.localizedDescription)")
                 if interface == .wifi {
@@ -381,11 +411,88 @@ public final class NetworkBoothTransport: BoothTransport {
         }
     }
 
+    private func advertisedNetworkPreference(from result: NWBrowser.Result) -> BoothNetworkPreference? {
+        guard case .bonjour(let txtRecord) = result.metadata,
+              let rawValue = txtRecord["network"] else { return nil }
+        return BoothNetworkPreference(rawValue: rawValue)
+    }
+
+    private func storePendingRouteEndpoint(_ endpoint: NWEndpoint, for interface: BoothNetworkInterfacePolicy) {
+        switch interface {
+        case .wifi:
+            pendingWiFiRouteEndpoint = endpoint
+        case .wiredEthernet:
+            pendingLANRouteEndpoint = endpoint
+        }
+    }
+
+    private func scheduleRouteDiscoveryFallback() {
+        guard routeDiscoveryFallbackTask == nil else { return }
+        routeDiscoveryFallbackTask = Task { @MainActor [weak self] in
+            do {
+                try await Task.sleep(for: .seconds(Self.routeDiscoveryGracePeriod))
+            } catch {
+                return
+            }
+            guard let self,
+                  self.shouldReconnect,
+                  self.activeInterface == nil,
+                  let pendingInterface = self.routeDiscoverySelection.promotePending() else { return }
+
+            guard self.requestedPreference == .lan else {
+                self.routeDiscoverySelection.reset()
+                self.scheduleReconnect()
+                return
+            }
+            let endpoint = pendingInterface == .wifi
+                ? self.pendingWiFiRouteEndpoint
+                : self.pendingLANRouteEndpoint
+            guard let endpoint else { return }
+            self.routeDiscoveryFallbackTask = nil
+            self.connectDiscoveredRoute(
+                interface: pendingInterface,
+                endpoint: endpoint,
+                browser: pendingInterface == .wifi
+                    ? self.wifiRouteDiscoveryBrowser
+                    : self.lanRouteDiscoveryBrowser
+            )
+        }
+    }
+
+    private func connectDiscoveredRoute(
+        interface: BoothNetworkInterfacePolicy,
+        endpoint: NWEndpoint,
+        browser: NWBrowser?
+    ) {
+        routeDiscoveryFallbackTask?.cancel()
+        routeDiscoveryFallbackTask = nil
+        if interface == .wiredEthernet {
+            _ = routeMachine.beginLANAttempt()
+        } else {
+            _ = routeMachine.startWiFiAttempt(
+                wifiAvailable: true,
+                fallback: requestedPreference == .lan
+            )
+        }
+        startTransport(
+            using: interface,
+            fallback: interface == .wifi && requestedPreference == .lan,
+            reason: interface == .wifi && requestedPreference == .lan ? "LAN unavailable" : nil,
+            discoveredControlBrowser: browser
+        )
+        connect(to: endpoint, channel: .control)
+    }
+
     private func cancelRouteDiscovery(keeping browser: NWBrowser? = nil) {
         if wifiRouteDiscoveryBrowser !== browser { wifiRouteDiscoveryBrowser?.cancel() }
         if lanRouteDiscoveryBrowser !== browser { lanRouteDiscoveryBrowser?.cancel() }
+        routeDiscoveryGate.invalidate()
+        routeDiscoveryFallbackTask?.cancel()
+        routeDiscoveryFallbackTask = nil
         wifiRouteDiscoveryBrowser = nil
         lanRouteDiscoveryBrowser = nil
+        pendingWiFiRouteEndpoint = nil
+        pendingLANRouteEndpoint = nil
         routeDiscoverySelection.reset()
     }
 
@@ -454,7 +561,8 @@ public final class NetworkBoothTransport: BoothTransport {
         let interfaceAtStart = activeInterface
         listener.service = NWListener.Service(
             name: "PRC PhotoBooth \(channel == .control ? "Control" : "Preview") \(deviceID)",
-            type: channel == .control ? Self.controlServiceType : Self.previewServiceType
+            type: channel == .control ? Self.controlServiceType : Self.previewServiceType,
+            txtRecord: NWTXTRecord(["network": requestedPreference.rawValue])
         )
         listener.stateUpdateHandler = { [weak self, weak listener] state in
             guard case .failed(let error) = state else { return }
@@ -686,6 +794,9 @@ public final class NetworkBoothTransport: BoothTransport {
                 return
             }
             didReceiveHello = true
+            if role == .iPad, let peerPreference = hello.networkPreference {
+                requestedPreference = peerPreference
+            }
             lanHandshakeTask?.cancel()
             lanHandshakeTask = nil
             peerDeviceID = hello.deviceID
@@ -723,7 +834,8 @@ public final class NetworkBoothTransport: BoothTransport {
             .helloDetails(hello: BoothTransportHello(
                 role: role,
                 deviceID: deviceID,
-                deviceName: deviceName
+                deviceName: deviceName,
+                networkPreference: requestedPreference
             )),
             on: controlConnection,
             channel: .control
@@ -732,7 +844,12 @@ public final class NetworkBoothTransport: BoothTransport {
 
     private func sendPreviewHello(on connection: NWConnection) {
         guard let payload = try? JSONEncoder().encode(
-            BoothTransportHello(role: role, deviceID: deviceID, deviceName: deviceName)
+            BoothTransportHello(
+                role: role,
+                deviceID: deviceID,
+                deviceName: deviceName,
+                networkPreference: requestedPreference
+            )
         ), let frame = try? BoothFrameEncoder.encode(channel: .heartbeat, payload: payload) else {
             connectionDidClose(connection, channel: .preview, reason: "preview hello encoding failed")
             return
@@ -761,6 +878,9 @@ public final class NetworkBoothTransport: BoothTransport {
               hello.role == expectedRole else {
             connectionDidClose(previewConnection, channel: .preview, reason: "incompatible preview hello")
             return
+        }
+        if role == .iPad, let peerPreference = hello.networkPreference {
+            requestedPreference = peerPreference
         }
         previewPeerID = hello.deviceID
         validatePreviewIdentity()

@@ -106,49 +106,86 @@ struct NetworkRouteTests {
 
 @Suite("iPad route discovery policy")
 struct RouteDiscoveryPolicyTests {
-    @Test("First Wi-Fi candidate wins")
-    func selectsWiFi() {
+    @Test("LAN preference waits for LAN when Wi-Fi is discovered first")
+    func lanPreferenceWaitsForLAN() {
         var selection = BoothRouteDiscoverySelection()
 
-        let accepted = selection.select(.wifi)
+        let waiting = selection.consider(.wifi, preferredPreference: .lan)
+        let accepted = selection.consider(.wiredEthernet, preferredPreference: .lan)
 
-        #expect(accepted)
-        #expect(selection.selectedInterface == .wifi)
-    }
-
-    @Test("First LAN candidate wins")
-    func selectsLAN() {
-        var selection = BoothRouteDiscoverySelection()
-
-        let accepted = selection.select(.wiredEthernet)
-
-        #expect(accepted)
+        #expect(waiting == .waitingForPreferredInterface)
+        #expect(accepted == .accepted)
         #expect(selection.selectedInterface == .wiredEthernet)
     }
 
-    @Test("Later candidate cannot replace first result")
-    func firstCandidateWins() {
+    @Test("LAN preference promotes Wi-Fi only after LAN grace expires")
+    func lanPreferenceFallsBackToPendingWiFi() {
         var selection = BoothRouteDiscoverySelection()
 
-        let acceptedWiFi = selection.select(.wifi)
-        let acceptedLAN = selection.select(.wiredEthernet)
+        let waiting = selection.consider(.wifi, preferredPreference: .lan)
+        let promoted = selection.promotePending()
 
-        #expect(acceptedWiFi)
-        #expect(!acceptedLAN)
+        #expect(waiting == .waitingForPreferredInterface)
+        #expect(promoted == .wifi)
         #expect(selection.selectedInterface == .wifi)
+    }
+
+    @Test("Wi-Fi preference wins when both interfaces are discovered")
+    func wifiPreferenceWins() {
+        var selection = BoothRouteDiscoverySelection()
+
+        let waiting = selection.consider(.wiredEthernet, preferredPreference: .wifi)
+        let accepted = selection.consider(.wifi, preferredPreference: .wifi)
+
+        #expect(waiting == .waitingForPreferredInterface)
+        #expect(accepted == .accepted)
+        #expect(selection.selectedInterface == .wifi)
+    }
+
+    @Test("Advertised Mac preference is authoritative")
+    func advertisedPreferenceWins() {
+        var selection = BoothRouteDiscoverySelection()
+
+        let ignored = selection.consider(
+            .wifi,
+            preferredPreference: .wifi,
+            advertisedPreference: .lan
+        )
+        let accepted = selection.consider(
+            .wiredEthernet,
+            preferredPreference: .wifi,
+            advertisedPreference: .lan
+        )
+
+        #expect(ignored == .waitingForPreferredInterface)
+        #expect(accepted == .accepted)
+        #expect(selection.selectedInterface == .wiredEthernet)
+    }
+
+    @Test("LAN advertisement still permits Wi-Fi fallback after the grace window")
+    func advertisedLANFallsBackToWiFi() {
+        var selection = BoothRouteDiscoverySelection()
+
+        #expect(selection.consider(
+            .wifi,
+            preferredPreference: .wifi,
+            advertisedPreference: .lan
+        ) == .waitingForPreferredInterface)
+        #expect(selection.promotePending() == .wifi)
     }
 
     @Test("Reset permits a new discovery cycle")
     func resetPermitsNewSelection() {
         var selection = BoothRouteDiscoverySelection()
-        _ = selection.select(.wifi)
+        _ = selection.consider(.wifi, preferredPreference: .wifi)
 
         selection.reset()
 
         #expect(selection.selectedInterface == nil)
-        let accepted = selection.select(.wiredEthernet)
+        #expect(selection.pendingInterface == nil)
+        let accepted = selection.consider(.wiredEthernet, preferredPreference: .lan)
 
-        #expect(accepted)
+        #expect(accepted == .accepted)
         #expect(selection.selectedInterface == .wiredEthernet)
     }
 }
@@ -164,5 +201,15 @@ struct TransportCallbackPolicyTests {
 
         #expect(!gate.accepts(connectionAGeneration))
         #expect(gate.accepts(gate.generation))
+    }
+
+    @Test("Discovery callback from a previous generation is ignored")
+    func staleDiscoveryCallbackIsIgnored() {
+        var gate = BoothRouteDiscoveryGenerationGate()
+        let oldGeneration = gate.begin()
+        let currentGeneration = gate.begin()
+
+        #expect(!gate.accepts(oldGeneration))
+        #expect(gate.accepts(currentGeneration))
     }
 }

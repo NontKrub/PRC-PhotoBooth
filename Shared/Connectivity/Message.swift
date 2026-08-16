@@ -101,13 +101,15 @@ public struct BoothTransportHello: Codable, Sendable, Equatable {
     public var deviceID: String
     public var deviceName: String
     public var capabilities: [String]
+    public var networkPreference: BoothNetworkPreference?
 
     public init(
         role: DeviceRole,
         appVersion: String = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "dev",
         deviceID: String = UUID().uuidString,
         deviceName: String? = nil,
-        capabilities: [String] = ["control", "preview", "state-sync", "preview-identity"]
+        capabilities: [String] = ["control", "preview", "state-sync", "preview-identity"],
+        networkPreference: BoothNetworkPreference? = .wifi
     ) {
         self.protocolVersion = Self.currentProtocolVersion
         self.appVersion = appVersion
@@ -115,6 +117,7 @@ public struct BoothTransportHello: Codable, Sendable, Equatable {
         self.deviceID = deviceID
         self.deviceName = deviceName?.isEmpty == false ? deviceName! : deviceID
         self.capabilities = capabilities
+        self.networkPreference = networkPreference
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -124,6 +127,7 @@ public struct BoothTransportHello: Codable, Sendable, Equatable {
         case deviceID
         case deviceName
         case capabilities
+        case networkPreference
     }
 
     public init(from decoder: Decoder) throws {
@@ -134,6 +138,7 @@ public struct BoothTransportHello: Codable, Sendable, Equatable {
         deviceID = try container.decode(String.self, forKey: .deviceID)
         deviceName = try container.decodeIfPresent(String.self, forKey: .deviceName) ?? deviceID
         capabilities = try container.decode([String].self, forKey: .capabilities)
+        networkPreference = try container.decodeIfPresent(BoothNetworkPreference.self, forKey: .networkPreference)
     }
 }
 
