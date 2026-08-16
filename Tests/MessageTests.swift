@@ -38,7 +38,6 @@ struct MessageTests {
             )),
             .boothPaused(isPaused: true),
             .setMirrored(isMirrored: true),
-            .setPreviewTransport(transport: .usb),
             .sessionStart(context: nil),
             .beginCountdown(context: context, descriptor: countdown),
             .shotCaptured(context: context, index: 0, thumbnailData: Data([0x01, 0x02])),
@@ -124,6 +123,8 @@ struct MessageTests {
         #expect(status.state == .disconnected)
         #expect(status.peerID == nil)
         #expect(status.peerDisplayName == nil)
+        #expect(status.effectiveNetwork == .unavailable)
+        #expect(!status.isFallbackActive)
     }
 
     @Test("hello device name decodes with a legacy identity fallback")

@@ -1,12 +1,5 @@
 import Foundation
 
-// Selects the high-bandwidth preview transport. Session controls use the
-// selected BoothTransport; USB remains an optional preview-only path.
-public enum PreviewTransport: String, Codable, Sendable {
-    case wireless
-    case usb
-}
-
 public enum CaptureFailureReason: String, Codable, Sendable, Equatable {
     case transferTimeout
     case cameraBusy
@@ -203,7 +196,6 @@ public enum Message: Codable, Sendable, Equatable {
     case eventExperienceCatalog(catalog: CustomerExperienceCatalog)
     case eventExperienceAsset(packet: ExperienceAssetPacket)
     case setMirrored(isMirrored: Bool)
-    case setPreviewTransport(transport: PreviewTransport)
     case sessionStart(context: SessionMessageContext?)
     case customerSessionRequest(selection: CustomerSessionSelection)
     case sessionRequestRejected(reason: String)

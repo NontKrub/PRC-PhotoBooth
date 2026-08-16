@@ -1,8 +1,13 @@
 import Foundation
 import Network
+#if os(iOS)
+import UIKit
+#endif
 
 @MainActor
 public final class NetworkBoothTransport: BoothTransport {
+    public static let lanHandshakeTimeout: TimeInterval = 5
+    private static let reconnectDelays: [TimeInterval] = [0.5, 1, 2, 4, 5]
     private static let controlServiceType = "_prc-control._tcp"
     private static let previewServiceType = "_prc-preview._tcp"
     private static let previewIdentityCapability = "preview-identity"
@@ -22,13 +27,31 @@ public final class NetworkBoothTransport: BoothTransport {
     public var onPreviewFrame: (@MainActor (Data) -> Void)?
 
     private var requestedPreference: BoothNetworkPreference
+    private var routeMachine: BoothNetworkRouteMachine
+    private var activeInterface: BoothNetworkInterfacePolicy?
+    private var fallbackActive = false
+    private var fallbackReason: String?
 
     public var requestedNetworkPreference: BoothNetworkPreference {
         get { requestedPreference }
-        set { requestedPreference = newValue }
+        set {
+            guard requestedPreference != newValue else { return }
+            let oldValue = requestedPreference
+            requestedPreference = newValue
+            fallbackActive = false
+            fallbackReason = nil
+            print("[NetworkRoute] Preference changed: \(oldValue.rawValue) -> \(newValue.rawValue)")
+            let command = routeMachine.preferenceChanged(
+                to: newValue,
+                lanAvailable: pathAvailable(.wiredEthernet),
+                wifiAvailable: pathAvailable(.wifi)
+            )
+            apply(command, reason: nil)
+        }
     }
 
     private let deviceID = UUID().uuidString
+    private let deviceName: String
     private var controlListener: NWListener?
     private var previewListener: NWListener?
     private var controlBrowser: NWBrowser?
@@ -39,6 +62,7 @@ public final class NetworkBoothTransport: BoothTransport {
     private var previewParser = BoothFrameParser()
     private var previewFrames = LatestFrameCoalescer()
     private var heartbeatTimer: Timer?
+    private var lanHandshakeTask: Task<Void, Never>?
     private var lastControlMessageAt = Date.distantPast
     private var reconnectTask: Task<Void, Never>?
     private var reconnectAttempt = 0
@@ -46,11 +70,18 @@ public final class NetworkBoothTransport: BoothTransport {
     private var controlEndpointDescription: String?
     private var previewEndpointDescription: String?
     private var didReceiveHello = false
+    private var peerDeviceID: String?
     private var expectedPeerDeviceID: String?
     private var previewPeerID: String?
     private var previewPeerSupportsIdentity = false
     private var didSendPreviewHello = false
     private var previewIdentityVerified = false
+    private var lanPathMonitor: NWPathMonitor?
+    private var wifiPathMonitor: NWPathMonitor?
+    private var didReceiveLANPathUpdate = false
+    private var didReceiveWiFiPathUpdate = false
+    private var isLANPathAvailable = false
+    private var isWiFiPathAvailable = false
 #if DEBUG
     private var previewMetricsStartedAt = Date()
     private var previewFramesSubmitted = 0
@@ -65,18 +96,27 @@ public final class NetworkBoothTransport: BoothTransport {
     ) {
         self.role = role
         self.requestedPreference = networkPreference
+        self.routeMachine = BoothNetworkRouteMachine(preference: networkPreference)
         self.connectionStatus = connectionStatus ?? BoothConnectionStatus(requestedNetwork: networkPreference)
+        self.deviceName = Self.localDeviceName(for: role)
     }
 
     public func start() {
         shouldReconnect = true
-        switch role {
-        case .mac:
-            startListener(channel: .control)
-            startListener(channel: .preview)
-        case .iPad:
-            startBrowser(channel: .control)
-            startBrowser(channel: .preview)
+        reconnectAttempt = 0
+        routeMachine = BoothNetworkRouteMachine(preference: requestedPreference)
+        startPathMonitors()
+
+        if role == .iPad {
+            apply(routeMachine.beginLANAttempt(), reason: nil)
+        } else {
+            let lanAvailable = pathAvailable(.wiredEthernet)
+            let wifiAvailable = pathAvailable(.wifi)
+            let command = routeMachine.start(
+                lanAvailable: requestedPreference == .lan ? lanAvailable : false,
+                wifiAvailable: wifiAvailable
+            )
+            apply(command, reason: nil)
         }
     }
 
@@ -84,24 +124,16 @@ public final class NetworkBoothTransport: BoothTransport {
         shouldReconnect = false
         reconnectTask?.cancel()
         reconnectTask = nil
+        lanHandshakeTask?.cancel()
+        lanHandshakeTask = nil
         heartbeatTimer?.invalidate()
         heartbeatTimer = nil
-        controlBrowser?.cancel()
-        previewBrowser?.cancel()
-        controlBrowser = nil
-        previewBrowser = nil
-        controlListener?.cancel()
-        previewListener?.cancel()
-        controlListener = nil
-        previewListener = nil
-        controlConnection?.cancel()
-        previewConnection?.cancel()
-        controlConnection = nil
-        previewConnection = nil
-        previewFrames.reset()
-        didReceiveHello = false
-        expectedPeerDeviceID = nil
-        resetPreviewIdentity()
+        stopPathMonitors()
+        cancelTransportObjects()
+        activeInterface = nil
+        fallbackActive = false
+        fallbackReason = nil
+        routeMachine = BoothNetworkRouteMachine(preference: requestedPreference)
         setDisconnected()
     }
 
@@ -118,16 +150,226 @@ public final class NetworkBoothTransport: BoothTransport {
         logPreviewMetricsIfNeeded()
     }
 
+    private enum PathKind {
+        case wifi
+        case wiredEthernet
+    }
+
+    private func makeParameters(for interface: BoothNetworkInterfacePolicy) -> NWParameters {
+        let parameters = NWParameters.tcp
+        parameters.requiredInterfaceType = switch interface {
+        case .wifi: .wifi
+        case .wiredEthernet: .wiredEthernet
+        }
+        return parameters
+    }
+
+    private func pathAvailable(_ kind: PathKind) -> Bool {
+        switch kind {
+        case .wifi:
+            return didReceiveWiFiPathUpdate ? isWiFiPathAvailable : true
+        case .wiredEthernet:
+            return didReceiveLANPathUpdate ? isLANPathAvailable : true
+        }
+    }
+
+    private func startPathMonitors() {
+        stopPathMonitors()
+        didReceiveLANPathUpdate = false
+        didReceiveWiFiPathUpdate = false
+
+        let lanMonitor = NWPathMonitor(requiredInterfaceType: .wiredEthernet)
+        lanMonitor.pathUpdateHandler = { [weak self] path in
+            Task { @MainActor [weak self] in
+                self?.handleLANPathUpdate(path.status == .satisfied)
+            }
+        }
+        lanMonitor.start(queue: DispatchQueue(label: "PRC-PhotoBooth.WiredEthernetPath"))
+        lanPathMonitor = lanMonitor
+
+        let wifiMonitor = NWPathMonitor(requiredInterfaceType: .wifi)
+        wifiMonitor.pathUpdateHandler = { [weak self] path in
+            Task { @MainActor [weak self] in
+                self?.handleWiFiPathUpdate(path.status == .satisfied)
+            }
+        }
+        wifiMonitor.start(queue: DispatchQueue(label: "PRC-PhotoBooth.WiFiPath"))
+        wifiPathMonitor = wifiMonitor
+    }
+
+    private func stopPathMonitors() {
+        lanPathMonitor?.cancel()
+        wifiPathMonitor?.cancel()
+        lanPathMonitor = nil
+        wifiPathMonitor = nil
+    }
+
+    private func handleLANPathUpdate(_ available: Bool) {
+        didReceiveLANPathUpdate = true
+        isLANPathAvailable = available
+        publishPathAvailability()
+        guard activeInterface == .wiredEthernet else { return }
+        guard !available else {
+            print("[NetworkRoute] Wired Ethernet path available")
+            return
+        }
+        if role == .iPad || requestedPreference == .lan {
+            activateWiFiFallback(reason: "LAN unavailable")
+        }
+    }
+
+    private func handleWiFiPathUpdate(_ available: Bool) {
+        didReceiveWiFiPathUpdate = true
+        isWiFiPathAvailable = available
+        publishPathAvailability()
+        guard activeInterface == .wifi, !available else { return }
+
+        if role == .iPad || requestedPreference == .lan {
+            if isLANPathAvailable {
+                startLANAfterDisconnect()
+            } else {
+                publishDisconnected()
+            }
+        } else {
+            publishDisconnected()
+        }
+    }
+
+    private func apply(_ command: BoothNetworkRouteCommand, reason: String?) {
+        switch command {
+        case .startLAN:
+            fallbackActive = false
+            fallbackReason = reason
+            startTransport(using: .wiredEthernet, fallback: false)
+        case .startWiFi(let fallback):
+            fallbackActive = fallback
+            fallbackReason = fallback ? (reason ?? "LAN unavailable") : nil
+            startTransport(using: .wifi, fallback: fallback)
+        case .unavailable:
+            activeInterface = nil
+            fallbackActive = false
+            fallbackReason = reason
+            cancelTransportObjects()
+            setDisconnected()
+            print("[NetworkRoute] No network connection")
+        case .none:
+            break
+        }
+    }
+
+    private func activateWiFiFallback(reason: String) {
+        guard activeInterface != .wifi else { return }
+        let command = routeMachine.lanPathChanged(
+            isAvailable: false,
+            wifiAvailable: pathAvailable(.wifi)
+        )
+        guard command != .none else { return }
+        print("[NetworkRoute] Falling back to Wi-Fi")
+        apply(command, reason: reason)
+    }
+
+    private func handleLANHandshakeFailure(reason: String) {
+        guard activeInterface == .wiredEthernet else { return }
+        lanHandshakeTask?.cancel()
+        lanHandshakeTask = nil
+        print("[NetworkRoute] LAN handshake timed out after \(Self.lanHandshakeTimeout)s")
+        let command = routeMachine.lanHandshakeTimedOut(wifiAvailable: pathAvailable(.wifi))
+        if command == .unavailable {
+            apply(command, reason: reason)
+        } else {
+            print("[NetworkRoute] Falling back to Wi-Fi")
+            apply(command, reason: reason)
+        }
+    }
+
+    private func startLANAfterDisconnect() {
+        guard activeInterface != .wiredEthernet else { return }
+        let command = role == .iPad
+            ? routeMachine.beginLANAttempt()
+            : routeMachine.transportDisconnected(lanAvailable: true, wifiAvailable: pathAvailable(.wifi))
+        guard command == .startLAN else {
+            apply(command, reason: "LAN reconnect unavailable")
+            return
+        }
+        print("[NetworkRoute] Starting LAN transport")
+        apply(command, reason: nil)
+    }
+
+    private func startTransport(using interface: BoothNetworkInterfacePolicy, fallback: Bool) {
+        guard shouldReconnect else { return }
+        reconnectTask?.cancel()
+        reconnectTask = nil
+        lanHandshakeTask?.cancel()
+        lanHandshakeTask = nil
+        cancelTransportObjects()
+        activeInterface = interface
+        fallbackActive = fallback
+        connectionState = .connecting
+        publishStatus()
+
+        print("[NetworkRoute] Starting \(interface == .wiredEthernet ? "LAN" : "Wi-Fi") transport")
+        switch role {
+        case .mac:
+            startListener(channel: .control)
+            startListener(channel: .preview)
+        case .iPad:
+            startBrowser(channel: .control)
+            startBrowser(channel: .preview)
+        }
+
+        if interface == .wiredEthernet {
+            lanHandshakeTask = Task { @MainActor [weak self] in
+                do {
+                    try await Task.sleep(for: .seconds(Self.lanHandshakeTimeout))
+                } catch {
+                    return
+                }
+                guard let self,
+                      self.activeInterface == .wiredEthernet,
+                      self.shouldReconnect,
+                      !self.didReceiveHello else { return }
+                self.handleLANHandshakeFailure(reason: "No valid iPad hello")
+            }
+        }
+    }
+
+    private func cancelTransportObjects() {
+        controlBrowser?.cancel()
+        previewBrowser?.cancel()
+        controlBrowser = nil
+        previewBrowser = nil
+        controlListener?.cancel()
+        previewListener?.cancel()
+        controlListener = nil
+        previewListener = nil
+        controlConnection?.cancel()
+        previewConnection?.cancel()
+        controlConnection = nil
+        previewConnection = nil
+        controlEndpointDescription = nil
+        previewEndpointDescription = nil
+        controlParser = BoothFrameParser()
+        previewParser = BoothFrameParser()
+        previewFrames.reset()
+        didReceiveHello = false
+        peerDeviceID = nil
+        expectedPeerDeviceID = nil
+        resetPreviewIdentity()
+    }
+
     private func startListener(channel: BoothTransportChannel) {
+        guard let activeInterface else { return }
         if channel == .control, controlListener != nil { return }
         if channel == .preview, previewListener != nil { return }
         let listener: NWListener
         do {
-            listener = try NWListener(using: .tcp)
+            listener = try NWListener(using: makeParameters(for: activeInterface))
         } catch {
             print("[Network] listener creation failed: \(error.localizedDescription)")
+            if activeInterface == .wiredEthernet { handleLANHandshakeFailure(reason: error.localizedDescription) }
             return
         }
+        let interfaceAtStart = activeInterface
         listener.service = NWListener.Service(
             name: "PRC PhotoBooth \(channel == .control ? "Control" : "Preview") \(deviceID)",
             type: channel == .control ? Self.controlServiceType : Self.previewServiceType
@@ -136,13 +378,14 @@ public final class NetworkBoothTransport: BoothTransport {
             guard case .failed(let error) = state else { return }
             let message = error.localizedDescription
             Task { @MainActor [weak self] in
-                guard let self else { return }
+                guard let self, self.activeInterface == interfaceAtStart else { return }
                 print("[Network] listener failed: \(message)")
                 if channel == .control { self.controlListener = nil } else { self.previewListener = nil }
-                // XCTest and devices without local-network permission return
-                // NoAuth. Retrying that state in a tight loop only burns CPU.
-                guard !message.contains("NoAuth") else { return }
-                self.scheduleReconnect()
+                if interfaceAtStart == .wiredEthernet {
+                    self.handleLANHandshakeFailure(reason: message)
+                } else if !message.contains("NoAuth") {
+                    self.scheduleReconnect()
+                }
             }
         }
         listener.newConnectionHandler = { [weak self] connection in
@@ -155,14 +398,20 @@ public final class NetworkBoothTransport: BoothTransport {
     }
 
     private func startBrowser(channel: BoothTransportChannel) {
+        guard let activeInterface else { return }
         if channel == .control, controlBrowser != nil { return }
         if channel == .preview, previewBrowser != nil { return }
         let serviceType = channel == .control ? Self.controlServiceType : Self.previewServiceType
-        let browser = NWBrowser(for: .bonjour(type: serviceType, domain: nil), using: .tcp)
+        let interfaceAtStart = activeInterface
+        let browser = NWBrowser(
+            for: .bonjour(type: serviceType, domain: nil),
+            using: makeParameters(for: activeInterface)
+        )
         browser.browseResultsChangedHandler = { [weak self] results, _ in
             Task { @MainActor [weak self] in
-                guard let self else { return }
-                guard let endpoint = self.endpointToConnect(from: results, channel: channel) else { return }
+                guard let self,
+                      self.activeInterface == interfaceAtStart,
+                      let endpoint = self.endpointToConnect(from: results, channel: channel) else { return }
                 self.connect(to: endpoint, channel: channel)
             }
         }
@@ -170,10 +419,14 @@ public final class NetworkBoothTransport: BoothTransport {
             guard case .failed(let error) = state else { return }
             let message = error.localizedDescription
             Task { @MainActor [weak self] in
-                guard let self else { return }
+                guard let self, self.activeInterface == interfaceAtStart else { return }
                 print("[Network] browser failed: \(message)")
                 if channel == .control { self.controlBrowser = nil } else { self.previewBrowser = nil }
-                if !message.contains("NoAuth") { self.scheduleReconnect() }
+                if interfaceAtStart == .wiredEthernet {
+                    self.handleLANHandshakeFailure(reason: message)
+                } else if !message.contains("NoAuth") {
+                    self.scheduleReconnect()
+                }
             }
         }
         browser.start(queue: .main)
@@ -186,15 +439,10 @@ public final class NetworkBoothTransport: BoothTransport {
     ) -> NWEndpoint? {
         let endpoints = results.map(\.endpoint)
         guard !endpoints.isEmpty else { return nil }
-
         if channel == .preview {
-            guard !peerName.isEmpty else { return nil }
-            if let matching = endpoints.first(where: { serviceName(from: $0)?.contains(peerName) == true }) {
-                return matching
-            }
-            return endpoints.count == 1 ? endpoints[0] : nil
+            guard let expectedPeerDeviceID else { return nil }
+            return endpoints.first { serviceName(from: $0)?.contains(expectedPeerDeviceID) == true }
         }
-
         if let expectedPeerDeviceID,
            let matching = endpoints.first(where: { serviceName(from: $0)?.contains(expectedPeerDeviceID) == true }) {
             return matching
@@ -208,6 +456,10 @@ public final class NetworkBoothTransport: BoothTransport {
     }
 
     private func accept(_ connection: NWConnection, channel: BoothTransportChannel) {
+        guard activeInterface != nil else {
+            connection.cancel()
+            return
+        }
         if channel == .control {
             resetPreviewConnection()
             controlConnection?.cancel()
@@ -227,13 +479,14 @@ public final class NetworkBoothTransport: BoothTransport {
     }
 
     private func connect(to endpoint: NWEndpoint, channel: BoothTransportChannel) {
-        if channel == .preview, peerName.isEmpty { return }
+        guard let activeInterface else { return }
+        if channel == .preview, expectedPeerDeviceID == nil { return }
         let description = endpoint.debugDescription
         if channel == .control {
             guard controlConnection == nil || controlEndpointDescription != description else { return }
             resetPreviewConnection()
             controlConnection?.cancel()
-            controlConnection = NWConnection(to: endpoint, using: .tcp)
+            controlConnection = NWConnection(to: endpoint, using: makeParameters(for: activeInterface))
             controlEndpointDescription = description
             didReceiveHello = false
             controlParser = BoothFrameParser()
@@ -242,7 +495,7 @@ public final class NetworkBoothTransport: BoothTransport {
             guard previewConnection == nil || previewEndpointDescription != description else { return }
             previewFrames.reset()
             previewConnection?.cancel()
-            previewConnection = NWConnection(to: endpoint, using: .tcp)
+            previewConnection = NWConnection(to: endpoint, using: makeParameters(for: activeInterface))
             previewEndpointDescription = description
             previewParser = BoothFrameParser()
             resetPreviewIdentity()
@@ -259,6 +512,7 @@ public final class NetworkBoothTransport: BoothTransport {
                 case .ready:
                     if channel == .control {
                         self.connectionState = .connecting
+                        self.publishStatus()
                         self.receive(on: connection, channel: channel)
                         self.sendTransportHello()
                     } else {
@@ -267,7 +521,8 @@ public final class NetworkBoothTransport: BoothTransport {
                     }
                 case .failed, .cancelled:
                     self.connectionDidClose(connection, channel: channel)
-                default: break
+                default:
+                    break
                 }
             }
         }
@@ -280,9 +535,7 @@ public final class NetworkBoothTransport: BoothTransport {
             let didFail = error != nil
             Task { @MainActor [weak self] in
                 guard let self, self.isCurrent(connection, channel: channel) else { return }
-                if let data, !data.isEmpty {
-                    self.receiveData(data, channel: channel)
-                }
+                if let data, !data.isEmpty { self.receiveData(data, channel: channel) }
                 if isComplete || didFail {
                     self.connectionDidClose(connection, channel: channel, reason: errorMessage)
                 } else {
@@ -294,17 +547,12 @@ public final class NetworkBoothTransport: BoothTransport {
 
     private func receiveData(_ data: Data, channel: BoothTransportChannel) {
         do {
-            let frames: [BoothNetworkFrame]
-            if channel == .control {
-                frames = try controlParser.append(data)
-            } else {
-                frames = try previewParser.append(data)
-            }
+            let frames = try channel == .control
+                ? controlParser.append(data)
+                : previewParser.append(data)
             if channel == .control { lastControlMessageAt = Date() }
             for frame in frames {
-                guard frame.channel == channel || frame.channel == .heartbeat else {
-                    continue
-                }
+                guard frame.channel == channel || frame.channel == .heartbeat else { continue }
                 switch frame.channel {
                 case .control:
                     guard let message = try? Message.decoded(from: frame.payload) else { continue }
@@ -335,19 +583,25 @@ public final class NetworkBoothTransport: BoothTransport {
                 return
             }
             didReceiveHello = true
-            peerName = hello.deviceID
+            lanHandshakeTask?.cancel()
+            lanHandshakeTask = nil
+            peerDeviceID = hello.deviceID
+            peerName = hello.deviceName.isEmpty ? hello.deviceID : hello.deviceName
             expectedPeerDeviceID = hello.deviceID
             previewPeerSupportsIdentity = hello.capabilities.contains(Self.previewIdentityCapability)
-            connectedPeerNames = [hello.deviceID]
-            connectionState = .connected(peerName: hello.deviceID)
+            connectedPeerNames = [peerName]
+            connectionState = .connected(peerName: peerName)
             reconnectAttempt = 0
             lastControlMessageAt = Date()
+            if activeInterface == .wiredEthernet {
+                _ = routeMachine.lanHandshakeSucceeded(peer: peerName)
+            } else {
+                _ = routeMachine.wifiConnected(peer: peerName, fallback: fallbackActive)
+            }
+            publishStatus()
             startHeartbeat()
             validatePreviewIdentity()
             if role == .iPad, previewConnection == nil {
-                // The preview browser may have received its first result before
-                // control identified the Mac. Recreate it so that result is
-                // evaluated against this exact peer ID.
                 previewBrowser?.cancel()
                 previewBrowser = nil
                 startBrowser(channel: .preview)
@@ -363,7 +617,11 @@ public final class NetworkBoothTransport: BoothTransport {
 
     private func sendTransportHello() {
         send(
-            .helloDetails(hello: BoothTransportHello(role: role, deviceID: deviceID)),
+            .helloDetails(hello: BoothTransportHello(
+                role: role,
+                deviceID: deviceID,
+                deviceName: deviceName
+            )),
             on: controlConnection,
             channel: .control
         )
@@ -371,7 +629,7 @@ public final class NetworkBoothTransport: BoothTransport {
 
     private func sendPreviewHello(on connection: NWConnection) {
         guard let payload = try? JSONEncoder().encode(
-            BoothTransportHello(role: role, deviceID: deviceID)
+            BoothTransportHello(role: role, deviceID: deviceID, deviceName: deviceName)
         ), let frame = try? BoothFrameEncoder.encode(channel: .heartbeat, payload: payload) else {
             connectionDidClose(connection, channel: .preview, reason: "preview hello encoding failed")
             return
@@ -413,7 +671,7 @@ public final class NetworkBoothTransport: BoothTransport {
             return
         }
         guard let previewPeerID else { return }
-        guard previewPeerID == peerName else {
+        guard previewPeerID == expectedPeerDeviceID else {
             connectionDidClose(previewConnection, channel: .preview, reason: "preview peer does not match control peer")
             return
         }
@@ -449,8 +707,7 @@ public final class NetworkBoothTransport: BoothTransport {
 #endif
         connection.send(content: frame, completion: .contentProcessed { [weak self] error in
             Task { @MainActor [weak self] in
-                guard let self,
-                      self.isCurrent(connection, channel: .preview) else { return }
+                guard let self, self.isCurrent(connection, channel: .preview) else { return }
                 if let error {
                     print("[Network] preview send failed: \(error.localizedDescription)")
                     self.previewFrames.resetWriteState()
@@ -511,6 +768,7 @@ public final class NetworkBoothTransport: BoothTransport {
         if let reason { print("[Network] \(channel) disconnected: \(reason)") }
         if channel == .control {
             guard connection == nil || connection === controlConnection else { return }
+            let wasLAN = activeInterface == .wiredEthernet
             controlConnection?.cancel()
             controlConnection = nil
             controlEndpointDescription = nil
@@ -519,7 +777,11 @@ public final class NetworkBoothTransport: BoothTransport {
             heartbeatTimer = nil
             resetPreviewConnection()
             setDisconnected()
-            scheduleReconnect()
+            if wasLAN && requestedPreference == .lan && !isLANPathAvailable {
+                activateWiFiFallback(reason: "LAN unavailable")
+            } else {
+                reconnectAfterDisconnect()
+            }
         } else {
             guard connection == nil || connection === previewConnection else { return }
             previewConnection?.cancel()
@@ -535,6 +797,24 @@ public final class NetworkBoothTransport: BoothTransport {
         }
     }
 
+    private func reconnectAfterDisconnect() {
+        let command: BoothNetworkRouteCommand
+        if role == .iPad {
+            command = isLANPathAvailable
+                ? routeMachine.beginLANAttempt()
+                : routeMachine.startWiFiAttempt(
+                    wifiAvailable: isWiFiPathAvailable,
+                    fallback: false
+                )
+        } else {
+            command = routeMachine.transportDisconnected(
+                lanAvailable: isLANPathAvailable,
+                wifiAvailable: isWiFiPathAvailable
+            )
+        }
+        apply(command, reason: command == .startWiFi(fallback: true) ? "LAN reconnect failed" : nil)
+    }
+
     private func isCurrent(_ connection: NWConnection, channel: BoothTransportChannel) -> Bool {
         channel == .control ? connection === controlConnection : connection === previewConnection
     }
@@ -542,7 +822,42 @@ public final class NetworkBoothTransport: BoothTransport {
     private func setDisconnected() {
         peerName = ""
         connectedPeerNames = []
+        peerDeviceID = nil
+        expectedPeerDeviceID = nil
         connectionState = .disconnected
+        publishDisconnected()
+    }
+
+    private func publishStatus() {
+        connectionStatus.publish(
+            requestedNetwork: requestedPreference,
+            state: connectionState,
+            peerID: peerDeviceID,
+            peerDisplayName: peerName.isEmpty ? nil : peerName,
+            routeState: routeMachine.state,
+            effectiveNetwork: routeMachine.effectiveTransport,
+            fallbackReason: fallbackActive ? fallbackReason : nil,
+            isLANPathAvailable: isLANPathAvailable,
+            isWiFiPathAvailable: isWiFiPathAvailable
+        )
+    }
+
+    private func publishDisconnected() {
+        connectionStatus.publish(
+            requestedNetwork: requestedPreference,
+            state: .disconnected,
+            peerID: nil,
+            peerDisplayName: nil,
+            routeState: .disconnected,
+            effectiveNetwork: .unavailable,
+            fallbackReason: nil,
+            isLANPathAvailable: isLANPathAvailable,
+            isWiFiPathAvailable: isWiFiPathAvailable
+        )
+    }
+
+    private func publishPathAvailability() {
+        connectionStatus.publishPathAvailability(lan: isLANPathAvailable, wifi: isWiFiPathAvailable)
     }
 
     private func resetPreviewConnection() {
@@ -566,13 +881,13 @@ public final class NetworkBoothTransport: BoothTransport {
 
     private func scheduleReconnect() {
         guard shouldReconnect, reconnectTask == nil else { return }
-        let delays: [TimeInterval] = [0.5, 1, 2, 4, 5]
-        let delay = delays[min(reconnectAttempt, delays.count - 1)]
+        let delay = Self.reconnectDelays[min(reconnectAttempt, Self.reconnectDelays.count - 1)]
         reconnectAttempt += 1
         reconnectTask = Task { @MainActor [weak self] in
             try? await Task.sleep(for: .seconds(delay))
             guard let self, !Task.isCancelled else { return }
             self.reconnectTask = nil
+            guard self.activeInterface != nil else { return }
             if self.role == .mac {
                 if self.controlListener == nil { self.startListener(channel: .control) }
                 if self.previewListener == nil { self.startListener(channel: .preview) }
@@ -581,5 +896,13 @@ public final class NetworkBoothTransport: BoothTransport {
                 if self.previewBrowser == nil { self.startBrowser(channel: .preview) }
             }
         }
+    }
+
+    private static func localDeviceName(for role: DeviceRole) -> String {
+#if os(iOS)
+        return UIDevice.current.name
+#else
+        return Host.current().localizedName ?? (role == .mac ? "PRC Mac" : "iPad")
+#endif
     }
 }

@@ -64,14 +64,7 @@ public final class MultipeerService: NSObject, BoothTransport {
     public var requestedNetworkPreference: BoothNetworkPreference {
         get { connectionStatus.requestedNetwork }
         set {
-            connectionStatus.publish(
-                requestedNetwork: newValue,
-                state: connectionState,
-                peerID: peerName.isEmpty ? nil : peerName,
-                peerDisplayName: peerName.isEmpty ? nil : peerName,
-                routeState: connectionStatus.routeState,
-                effectiveNetwork: connectionStatus.effectiveNetwork
-            )
+            publishStatus(requestedNetwork: newValue)
         }
     }
 
@@ -204,6 +197,7 @@ public final class MultipeerService: NSObject, BoothTransport {
         peerName = ""
         connectionState = .disconnected
         lastHeartbeatReceived = .distantPast
+        publishStatus()
     }
 
     private func invalidateCurrentSession() {
@@ -329,11 +323,38 @@ public final class MultipeerService: NSObject, BoothTransport {
         guard let activePeerName = peerTracker.activePeer else {
             peerName = ""
             connectionState = .disconnected
+            publishStatus()
             return
         }
 
         peerName = activePeerName
         connectionState = .connected(peerName: activePeerName)
+        publishStatus()
+    }
+
+    private func publishStatus(requestedNetwork: BoothNetworkPreference? = nil) {
+        let preference = requestedNetwork ?? connectionStatus.requestedNetwork
+        let peer = peerName.isEmpty ? nil : peerName
+        let route: BoothNetworkRouteState
+        switch connectionState {
+        case .connected:
+            route = preference == .lan ? .fallbackWiFi(peer: peer) : .connectedWiFi(peer: peer ?? "")
+        case .connecting:
+            route = .connectingWiFi
+        case .disconnected:
+            route = .disconnected
+        }
+        connectionStatus.publish(
+            requestedNetwork: preference,
+            state: connectionState,
+            peerID: peer,
+            peerDisplayName: peer,
+            routeState: route,
+            effectiveNetwork: peer == nil ? .unavailable : .wifi,
+            fallbackReason: preference == .lan && peer != nil ? "Legacy Multipeer transport uses Wi-Fi" : nil,
+            isLANPathAvailable: connectionStatus.isLANPathAvailable,
+            isWiFiPathAvailable: connectionStatus.isWiFiPathAvailable
+        )
     }
 
     private func cancelHandshakeTimeout(for peerName: String) {
@@ -462,6 +483,7 @@ extension MultipeerService: MCSessionDelegate {
                 print("[MPC] transport connected: \(name)")
                 if !peerTracker.hasVerifiedPeer {
                     connectionState = .connecting
+                    publishStatus()
                     startConnectionTimeout()
                 }
                 startHandshakeTimeout(for: name, attemptID: attemptID)
@@ -471,6 +493,7 @@ extension MultipeerService: MCSessionDelegate {
                 // negotiating in the background.
                 if !peerTracker.hasVerifiedPeer {
                     connectionState = .connecting
+                    publishStatus()
                     startConnectionTimeout()
                 }
             case .notConnected:

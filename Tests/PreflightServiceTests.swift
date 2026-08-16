@@ -32,12 +32,17 @@ struct PreflightServiceTests {
         #expect(service.result(for: .customerDisplay)?.status == .passed)
     }
 
-    @Test("cable mode requires USB client")
+    @Test("LAN fallback is reported as a warning")
     @MainActor
-    func cableRequiresUSBClient() async {
+    func lanFallbackWarns() async {
         let service = BoothPreflightService()
-        await service.runSafeChecks(using: context(ipadConnected: true, usesCablePreview: true))
-        #expect(service.result(for: .previewTransport)?.status == .failed)
+        await service.runSafeChecks(using: context(
+            ipadConnected: true,
+            requestedNetwork: .lan,
+            effectiveNetwork: .wifi,
+            networkFallbackActive: true
+        ))
+        #expect(service.result(for: .networkRoute)?.status == .warning)
     }
 
     @Test("disk thresholds are reported")
@@ -152,7 +157,11 @@ private func context(
     event: EventConfig? = EventConfig(photoCount: 1, slots: [SharedPhotoSlot(photoIndex: 0)]),
     customerDisplayReady: Bool = true,
     ipadConnected: Bool = false,
-    usesCablePreview: Bool = false,
+    requestedNetwork: BoothNetworkPreference = .wifi,
+    effectiveNetwork: BoothEffectiveNetworkTransport = .unavailable,
+    wifiPathAvailable: Bool = true,
+    lanPathAvailable: Bool = false,
+    networkFallbackActive: Bool = false,
     availableDiskBytes: Int64? = 12_000_000_000,
     automaticPrintingEnabled: Bool = false,
     requiredJobFailed: Bool = false,
@@ -177,9 +186,11 @@ private func context(
         previewRequired: previewRequired,
         customerDisplayReady: customerDisplayReady,
         ipadConnected: ipadConnected,
-        usesCablePreview: usesCablePreview,
-        usbPreviewSupported: true,
-        usbPreviewClientConnected: false,
+        requestedNetwork: requestedNetwork,
+        effectiveNetwork: effectiveNetwork,
+        wifiPathAvailable: wifiPathAvailable,
+        lanPathAvailable: lanPathAvailable,
+        networkFallbackActive: networkFallbackActive,
         outputFolderURL: output,
         availableDiskBytes: availableDiskBytes,
         localServerStatus: LocalWebServerStatus(state: .ready(port: 8585), registeredTokenCount: 0),

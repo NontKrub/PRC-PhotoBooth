@@ -7,6 +7,11 @@ public enum BoothNetworkPreference: String, Codable, CaseIterable, Identifiable,
     public var id: String { rawValue }
 }
 
+public enum BoothNetworkInterfacePolicy: String, Equatable, Sendable {
+    case wifi
+    case wiredEthernet
+}
+
 public enum BoothEffectiveNetworkTransport: String, Codable, Equatable, Sendable {
     case wifi
     case lan
@@ -50,6 +55,18 @@ public struct BoothNetworkRouteMachine: Equatable, Sendable {
 
     public var effectiveTransport: BoothEffectiveNetworkTransport {
         state.effectiveTransport
+    }
+
+    public mutating func beginLANAttempt() -> BoothNetworkRouteCommand {
+        state = .connectingLAN
+        return .startLAN
+    }
+
+    public mutating func startWiFiAttempt(
+        wifiAvailable: Bool,
+        fallback: Bool
+    ) -> BoothNetworkRouteCommand {
+        startWiFiIfAvailable(wifiAvailable, fallback: fallback)
     }
 
     public mutating func start(lanAvailable: Bool, wifiAvailable: Bool) -> BoothNetworkRouteCommand {

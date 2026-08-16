@@ -199,8 +199,19 @@ struct SettingsView: View {
     private var ipadSection: some View {
         GroupBox {
             VStack(alignment: .leading, spacing: 12) {
-                let peers = coordinator.multipeer.connectedPeerNames
-                if peers.isEmpty {
+                let status = coordinator.connectionStatus
+                let peers = status.connectedPeerNames
+                if case .connected = status.state {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Label("Connected: \(status.peerDisplayName ?? "iPad")", systemImage: "ipad")
+                        Text(connectionRouteDescription(status))
+                            .font(.caption)
+                            .foregroundStyle(status.isFallbackActive ? .orange : .secondary)
+                    }
+                } else if case .connecting = status.state {
+                    Label("No iPads connected", systemImage: "ipad.slash")
+                        .foregroundStyle(.secondary)
+                } else if peers.isEmpty {
                     Label("No iPads connected", systemImage: "ipad.slash")
                         .foregroundStyle(.secondary)
                 } else if peers.count == 1 {
@@ -219,20 +230,35 @@ struct SettingsView: View {
 
                 Divider()
 
-                // Preview connection mode — controls always use Wi-Fi; this only picks
-                // which channel carries the live camera preview stream.
                 VStack(alignment: .leading, spacing: 8) {
-                    Picker("Preview via", selection: Binding(
-                        get: { coordinator.previewConnectionMode },
-                        set: { coordinator.previewConnectionMode = $0 }
+                    Picker("Connection", selection: Binding(
+                        get: { coordinator.requestedNetworkPreference },
+                        set: { coordinator.requestedNetworkPreference = $0 }
                     )) {
-                        ForEach(PreviewConnectionMode.allCases) { mode in
-                            Text(operatorPreviewModeName(mode, locale: locale)).tag(mode)
-                        }
+                        Text("Wi-Fi").tag(BoothNetworkPreference.wifi)
+                        Text("LAN").tag(BoothNetworkPreference.lan)
                     }
                     .pickerStyle(.segmented)
                     .frame(width: 300)
                     .labelsHidden()
+
+                    Text(coordinator.requestedNetworkPreference == .wifi
+                         ? "Use the wireless network for iPad control and live preview."
+                         : "Prefer wired Ethernet for iPad control and live preview. Automatically falls back to Wi-Fi when wired LAN is unavailable.")
+                        .font(.caption2).foregroundStyle(.secondary)
+
+                    HStack(spacing: 8) {
+                        Image(systemName: status.isLANPathAvailable ? "checkmark.circle.fill" : "circle.dashed")
+                            .foregroundStyle(status.isLANPathAvailable ? .green : .secondary)
+                        Text(status.isLANPathAvailable ? "Ethernet available" : "Ethernet unavailable")
+                            .font(.caption)
+                    }
+
+                    if status.isFallbackActive {
+                        Label("LAN is unavailable. Wi-Fi fallback is active.", systemImage: "exclamationmark.triangle.fill")
+                            .font(.caption)
+                            .foregroundStyle(.orange)
+                    }
 
                     Picker("Preview frame rate", selection: Binding(
                         get: { coordinator.previewFrameRate },
@@ -244,18 +270,8 @@ struct SettingsView: View {
                     }
                     .pickerStyle(.segmented)
                     .frame(width: 300)
-
-                    Text("Session controls always use Wi-Fi. 60 FPS uses more bandwidth; choose cable preview for the smoothest result. Sony USB live view may be limited by the camera.")
+                    Text("Preview frame rate is independent of the selected network route. 60 FPS uses more bandwidth.")
                         .font(.caption2).foregroundStyle(.secondary)
-
-                    if coordinator.previewConnectionMode == .cable {
-                        supportRow(ok: coordinator.usbPreview.isSupported,
-                                   okText: "Mac: cable preview ready",
-                                   failText: "Mac: cable preview service unavailable")
-                        supportRow(ok: coordinator.usbPreview.isClientConnected,
-                                   okText: "iPad: connected via cable",
-                                   failText: "iPad: not connected via cable — plug in, trust this Mac, and keep the iPad app open")
-                    }
                 }
             }
             .padding(4)
@@ -265,14 +281,12 @@ struct SettingsView: View {
         }
     }
 
-    private func supportRow(ok: Bool, okText: String, failText: String) -> some View {
-        HStack(spacing: 8) {
-            Image(systemName: ok ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
-                .foregroundStyle(ok ? .green : .orange)
-                .font(.caption)
-            Text(ok ? okText : failText)
-                .font(.caption)
-                .foregroundStyle(ok ? .primary : .secondary)
+    private func connectionRouteDescription(_ status: BoothConnectionStatus) -> String {
+        switch status.effectiveNetwork {
+        case .wifi where status.isFallbackActive: return "Using Wi-Fi fallback"
+        case .wifi: return "Using Wi-Fi"
+        case .lan: return "Connected via Ethernet"
+        case .unavailable: return "Network route unavailable"
         }
     }
 

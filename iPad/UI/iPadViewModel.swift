@@ -1,5 +1,4 @@
 import Foundation
-import Network
 import Observation
 import CoreImage
 import CoreGraphics
@@ -27,16 +26,7 @@ final class iPadViewModel {
     var stripThumbImage: CGImage?
     var isMirrored = false
     var isBoothPaused = false
-    private(set) var previewTransport: PreviewTransport
 
-    // USB preview (over cable)
-    private(set) var usbPreviewConnected = false
-    private var usbBrowser: NWBrowser?
-    private var usbConnection: NWConnection?
-    private var usbEndpoints: [NWEndpoint] = []
-    private var usbEndpointIndex = 0
-    private var usbReconnectTask: Task<Void, Never>?
-    private var recvBuf = Data()
     private var pendingPreviewJPEG: Data?
     private var previewDecodeTask: Task<Void, Never>?
     private var previewStaleTask: Task<Void, Never>?
@@ -55,9 +45,6 @@ final class iPadViewModel {
 #endif
 
     init() {
-        previewTransport = PreviewTransport(
-            rawValue: UserDefaults.standard.string(forKey: "iPadPreviewTransport") ?? ""
-        ) ?? .wireless
 #if DEBUG
         if ProcessInfo.processInfo.arguments.contains("--legacy-multipeer") {
             multipeer = MultipeerService(role: .iPad)
@@ -70,7 +57,6 @@ final class iPadViewModel {
         stateMachine = SessionStateMachine()
         setupHandlers()
         multipeer.start()
-        startUSBPreviewClient()
         startPreviewStaleMonitor()
 #if DEBUG
         if ProcessInfo.processInfo.arguments.contains("--demo-kiosk") {
@@ -87,7 +73,7 @@ final class iPadViewModel {
             self?.handleMessage(msg)
         }
         multipeer.onPreviewFrame = { [weak self] jpegData in
-            guard let self, self.previewTransport == .wireless else { return }
+            guard let self else { return }
             self.updatePreview(jpegData)
         }
     }
@@ -139,7 +125,6 @@ final class iPadViewModel {
         switch msg {
         case .hello(let role) where role == .mac:
             multipeer.sendControl(.hello(role: .iPad))
-            multipeer.sendControl(.setPreviewTransport(transport: previewTransport))
 
         case .sessionSync(let snapshot):
             applySessionSync(snapshot)
@@ -607,12 +592,6 @@ final class iPadViewModel {
         stateMachine.reset()
     }
 
-    func selectPreviewTransport(_ transport: PreviewTransport) {
-        previewTransport = transport
-        UserDefaults.standard.set(transport.rawValue, forKey: "iPadPreviewTransport")
-        multipeer.sendControl(.setPreviewTransport(transport: transport))
-    }
-
 #if DEBUG
     func demoPrepareSession(config: EventConfig, presentation: SessionPresentation) {
         eventConfig = config
@@ -658,92 +637,4 @@ final class iPadViewModel {
     }
 #endif
 
-    // MARK: - USB preview client
-
-    private func startUSBPreviewClient() {
-        let browser = NWBrowser(for: .bonjour(type: "_prc-hq._tcp", domain: nil), using: .tcp)
-        browser.browseResultsChangedHandler = { [weak self] results, _ in
-            guard let endpoint = results.first?.endpoint else { return }
-            Task { @MainActor [weak self] in
-                guard let self else { return }
-                self.usbEndpoints = results.map(\.endpoint)
-                self.usbEndpointIndex = 0
-                guard self.usbConnection == nil else { return }
-                self.connectUSB(to: endpoint)
-            }
-        }
-        browser.start(queue: .main)
-        usbBrowser = browser
-    }
-
-    private func connectUSB(to endpoint: NWEndpoint) {
-        let conn = NWConnection(to: endpoint, using: .tcp)
-        conn.stateUpdateHandler = { [weak self] state in
-            Task { @MainActor [weak self] in
-                guard let self else { return }
-                switch state {
-                case .ready:
-                    self.usbPreviewConnected = true
-                    self.receiveUSBFrame()
-                case .failed, .cancelled:
-                    self.usbPreviewConnected = false
-                    self.usbConnection = nil
-                    self.recvBuf = Data()
-                    self.scheduleUSBReconnect()
-                default: break
-                }
-            }
-        }
-        conn.start(queue: .main)
-        usbConnection = conn
-    }
-
-    private func scheduleUSBReconnect() {
-        guard usbReconnectTask == nil else { return }
-        usbReconnectTask = Task { [weak self] in
-            try? await Task.sleep(for: .seconds(1))
-            guard !Task.isCancelled else { return }
-            self?.usbReconnectTask = nil
-            guard let self, self.usbConnection == nil, let endpoint = self.nextUSBEndpoint() else { return }
-            self.connectUSB(to: endpoint)
-        }
-    }
-
-    private func nextUSBEndpoint() -> NWEndpoint? {
-        guard !usbEndpoints.isEmpty else { return nil }
-        defer { usbEndpointIndex = (usbEndpointIndex + 1) % usbEndpoints.count }
-        return usbEndpoints[usbEndpointIndex]
-    }
-
-    private func receiveUSBFrame() {
-        usbConnection?.receive(minimumIncompleteLength: 1, maximumLength: 131_072) { [weak self] data, _, _, error in
-            Task { @MainActor [weak self] in
-                guard let self, let data, error == nil else { return }
-                // ponytail: O(n) removeFirst; acceptable for ≤30fps preview frames
-                self.recvBuf.append(data)
-                guard self.recvBuf.count <= 4 + BoothFrameParser.maximumPayloadLength else {
-                    self.recvBuf.removeAll(keepingCapacity: false)
-                    self.usbConnection?.cancel()
-                    return
-                }
-                while self.recvBuf.count >= 4 {
-                    let frameLen = self.recvBuf.prefix(4).withUnsafeBytes {
-                        Int(UInt32(bigEndian: $0.load(as: UInt32.self)))
-                    }
-                    guard frameLen > 0, frameLen <= BoothFrameParser.maximumPayloadLength else {
-                        self.recvBuf.removeAll(keepingCapacity: false)
-                        self.usbConnection?.cancel()
-                        return
-                    }
-                    guard self.recvBuf.count >= 4 + frameLen else { break }
-                    let jpeg = self.recvBuf.subdata(in: 4..<(4 + frameLen))
-                    self.recvBuf.removeFirst(4 + frameLen)
-                    if self.previewTransport == .usb {
-                        self.updatePreview(jpeg)
-                    }
-                }
-                self.receiveUSBFrame()
-            }
-        }
-    }
 }

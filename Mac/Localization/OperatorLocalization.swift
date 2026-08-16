@@ -32,10 +32,6 @@ func operatorCameraSourceName(_ source: CameraSourceKind, locale: Locale) -> Str
     operatorString(source.rawValue, locale: locale)
 }
 
-func operatorPreviewModeName(_ mode: PreviewConnectionMode, locale: Locale) -> String {
-    operatorString(mode.rawValue, locale: locale)
-}
-
 func operatorPaperSizeName(_ size: SelphyPaperSize, locale: Locale) -> String {
     operatorString(size.rawValue, locale: locale)
 }
@@ -90,7 +86,10 @@ func operatorPreflightTitle(_ id: PreflightCheckID, locale: Locale) -> String {
     case .cameraConnection: key = "Camera connection"
     case .cameraTestCapture: key = "Camera test capture"
     case .customerDisplay: key = "Customer display"
-    case .previewTransport: key = "Preview transport"
+    case .wifiPath: key = "Wi-Fi path"
+    case .lanPath: key = "LAN path"
+    case .ipadTransport: key = "iPad transport"
+    case .networkRoute: key = "Effective network route"
     case .outputFolder: key = "Output folder"
     case .diskSpace: key = "Disk space"
     case .localDownloadServer: key = "Local download server"

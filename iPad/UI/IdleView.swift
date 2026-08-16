@@ -81,7 +81,7 @@ struct IdleView: View {
             }
         }
         .onTapGesture {
-            if case .connected = vm.multipeer.connectionState {
+            if case .connected = vm.multipeer.connectionStatus.state {
                 vm.customerTappedToBegin()
             }
         }
@@ -104,7 +104,7 @@ struct IdleView: View {
     }
 
     var connectionColor: Color {
-        switch vm.multipeer.connectionState {
+        switch vm.multipeer.connectionStatus.state {
         case .disconnected: return Color(red: 1, green: 0.35, blue: 0.35)
         case .connecting:   return .orange
         case .connected:    return Color(red: 0.25, green: 0.88, blue: 0.5)
@@ -112,7 +112,7 @@ struct IdleView: View {
     }
 
     var badgeLabel: String {
-        switch vm.multipeer.connectionState {
+        switch vm.multipeer.connectionStatus.state {
         case .connected:    return vm.selectedLanguage == .thai ? "เชื่อมต่อกับผู้ควบคุมแล้ว" : "Connected to operator"
         case .connecting:   return vm.selectedLanguage == .thai ? "กำลังเชื่อมต่อกับผู้ควบคุม…" : "Connecting to operator…"
         case .disconnected: return vm.selectedLanguage == .thai ? "กำลังรอผู้ควบคุม" : "Waiting for operator"

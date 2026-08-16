@@ -351,6 +351,13 @@ struct OperationsView: View {
                 }
                 HStack(spacing: 18) {
                     healthValue("Control", boothHealth.controlConnection)
+                    let route = switch coordinator.connectionStatus.effectiveNetwork {
+                    case .lan: "LAN"
+                    case .wifi where coordinator.connectionStatus.isFallbackActive: "Wi-Fi fallback"
+                    case .wifi: "Wi-Fi"
+                    case .unavailable: "Unavailable"
+                    }
+                    healthValue("Route", route)
                     healthValue("Preview", camera.livePreviewActive ? "Active" : "Inactive")
                     healthValue("PTP", camera.ptpHealthy.map { $0 ? "Healthy" : "Degraded" } ?? "n/a")
                     healthValue("Failures", "\(camera.captureFailureCount)")

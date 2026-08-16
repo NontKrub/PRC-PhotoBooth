@@ -14,15 +14,8 @@ enum CameraSourceKind: String, CaseIterable, Identifiable {
     var id: String { rawValue }
 }
 
-// Which channel carries the live preview stream to the iPad.
-// Control messages remain on the reliable BoothTransport control channel;
-// USB is an optional preview-only path.
-enum PreviewConnectionMode: String, CaseIterable, Identifiable {
-    case wireless = "Wireless (Wi-Fi)"
-    case cable    = "Cable (USB)"
-    var id: String { rawValue }
-}
-
+// Preview frames use the reliable BoothTransport preview channel.
+// Control messages remain on the separate BoothTransport control channel.
 enum PreviewFrameRate: Int, CaseIterable, Identifiable {
     case standard = 30
     case maximum = 60
@@ -53,6 +46,7 @@ enum SelphyPaperSize: String, CaseIterable {
 @Observable
 final class BoothCoordinator {
     static let eventFolderPathKey = "eventFolderPath"
+    static let networkPreferenceKey = "boothNetworkPreference"
 
     nonisolated static func downloadURL(
         publicBaseURL: String?,
@@ -69,6 +63,7 @@ final class BoothCoordinator {
     }
 
     let multipeer: BoothTransport
+    let connectionStatus: BoothConnectionStatus
     let capture: CaptureService
     let stateMachine: SessionStateMachine
     let server: LocalWebServer
@@ -83,7 +78,6 @@ final class BoothCoordinator {
     let operationsEvents: OperationsEventStore
     let printer: PrinterService
     let cloudUpload: CloudUploadService
-    let usbPreview = USBPreviewServer()
     let experienceStore: EventExperienceStore
     let filterPipeline: PhotoFilterPipeline
     let galleryStore: EventGalleryStore
@@ -113,9 +107,12 @@ final class BoothCoordinator {
     }
     var cameraPermissionGranted: Bool = false
     private(set) var isBoothPaused = false
-    var previewConnectionMode: PreviewConnectionMode {
-        get { PreviewConnectionMode(rawValue: UserDefaults.standard.string(forKey: "previewConnectionMode") ?? "") ?? .wireless }
-        set { UserDefaults.standard.set(newValue.rawValue, forKey: "previewConnectionMode") }
+    var requestedNetworkPreference: BoothNetworkPreference {
+        get { multipeer.requestedNetworkPreference }
+        set {
+            UserDefaults.standard.set(newValue.rawValue, forKey: Self.networkPreferenceKey)
+            multipeer.requestedNetworkPreference = newValue
+        }
     }
     var previewFrameRate: PreviewFrameRate {
         get { PreviewFrameRate(rawValue: UserDefaults.standard.integer(forKey: "previewFrameRate")) ?? .standard }
@@ -154,15 +151,18 @@ final class BoothCoordinator {
     var isExternalViewerActive: Bool { externalDisplayWindow != nil }
 
     init() {
+        let networkPreference = Self.loadNetworkPreference()
+        let status = BoothConnectionStatus(requestedNetwork: networkPreference)
 #if DEBUG
         if ProcessInfo.processInfo.arguments.contains("--legacy-multipeer") {
-            multipeer = MultipeerService(role: .mac)
+            multipeer = MultipeerService(role: .mac, connectionStatus: status)
         } else {
-            multipeer = NetworkBoothTransport(role: .mac)
+            multipeer = NetworkBoothTransport(role: .mac, networkPreference: networkPreference, connectionStatus: status)
         }
 #else
-        multipeer = NetworkBoothTransport(role: .mac)
+        multipeer = NetworkBoothTransport(role: .mac, networkPreference: networkPreference, connectionStatus: status)
 #endif
+        connectionStatus = status
         capture = CaptureService()
         stateMachine = SessionStateMachine()
         server = LocalWebServer(port: 8585)
@@ -246,7 +246,6 @@ final class BoothCoordinator {
         }
 
         Task { @MainActor [self] in
-            usbPreview.start()
 #if DEBUG
             if ProcessInfo.processInfo.arguments.contains("--demo-mode") {
                 do {
@@ -732,7 +731,7 @@ final class BoothCoordinator {
 
     var isCustomerDisplayReady: Bool {
         if isExternalViewerActive { return true }
-        if case .connected = multipeer.connectionState { return true }
+        if case .connected = connectionStatus.state { return true }
         return false
     }
 
@@ -770,7 +769,6 @@ final class BoothCoordinator {
         cancelCountdown()
         multipeer.disconnect()
         capture.stop()
-        usbPreview.stop()
         jobQueue.stop()
         Task { await server.stop() }
     }
@@ -818,10 +816,7 @@ final class BoothCoordinator {
             try capture.start()
             capture.onPreviewJPEG = { [weak self] jpeg in
                 guard let self else { return }
-                switch previewConnectionMode {
-                case .wireless: multipeer.sendPreviewFrame(jpeg)
-                case .cable:    usbPreview.send(jpeg)
-                }
+                multipeer.sendPreviewFrame(jpeg)
             }
         } catch {
             errorMessage = "Camera error: \(error.localizedDescription)"
@@ -900,7 +895,7 @@ final class BoothCoordinator {
         let serverStatus = await server.statusSnapshot()
         let serverHealthy = await localServerHealthCheck(status: serverStatus)
         let ipadConnected: Bool = {
-            if case .connected = multipeer.connectionState { return true }
+            if case .connected = connectionStatus.state { return true }
             return false
         }()
         let output = picturesOutputDir()
@@ -1004,9 +999,11 @@ final class BoothCoordinator {
             previewRequired: false,
             customerDisplayReady: isCustomerDisplayReady,
             ipadConnected: ipadConnected,
-            usesCablePreview: previewConnectionMode == .cable,
-            usbPreviewSupported: usbPreview.isSupported,
-            usbPreviewClientConnected: usbPreview.isClientConnected,
+            requestedNetwork: connectionStatus.requestedNetwork,
+            effectiveNetwork: connectionStatus.effectiveNetwork,
+            wifiPathAvailable: connectionStatus.isWiFiPathAvailable,
+            lanPathAvailable: connectionStatus.isLANPathAvailable,
+            networkFallbackActive: connectionStatus.isFallbackActive,
             outputFolderURL: output,
             availableDiskBytes: capacity,
             localServerStatus: serverStatus,
@@ -2341,8 +2338,6 @@ final class BoothCoordinator {
             }
             sendExperienceCatalog()
             resynciPad()
-        case .setPreviewTransport(let transport):
-            previewConnectionMode = transport == .usb ? .cable : .wireless
         case .sessionStart(let context):
             guard context == nil else { break }
             if stateMachine.phase == .idle, activeEvent != nil {
@@ -2423,6 +2418,19 @@ final class BoothCoordinator {
 
     // MARK: - Directories
 
+    private static func loadNetworkPreference() -> BoothNetworkPreference {
+        let defaults = UserDefaults.standard
+        if let raw = defaults.string(forKey: networkPreferenceKey),
+           let preference = BoothNetworkPreference(rawValue: raw) {
+            return preference
+        }
+
+        // The removed preview setting maps to Wi-Fi during migration.
+        defaults.set(BoothNetworkPreference.wifi.rawValue, forKey: networkPreferenceKey)
+        defaults.removeObject(forKey: "previewConnectionMode")
+        return .wifi
+    }
+
     static func appSupportRootURL() -> URL {
         let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
             ?? FileManager.default.temporaryDirectory
@@ -2469,10 +2477,7 @@ final class BoothCoordinator {
     func healthSnapshot() async -> BoothHealthSnapshot {
         let serverStatus = await server.statusSnapshot()
         let queue = jobQueue.jobs
-        let connectedPeer: String? = {
-            guard case .connected = multipeer.connectionState else { return nil }
-            return multipeer.peerName.isEmpty ? nil : multipeer.peerName
-        }()
+        let connectedPeer: String? = connectionStatus.peerDisplayName
         let serverHealth: BoothHealthStatus = switch serverStatus.state {
         case .ready: .healthy
         case .starting: .unknown
@@ -2495,8 +2500,8 @@ final class BoothCoordinator {
             camera: camera,
             customerDisplayConnected: connectedPeer != nil || isExternalViewerActive,
             customerDisplayPeer: connectedPeer,
-            controlConnection: connectionLabel(multipeer.connectionState),
-            previewConnection: previewConnectionMode.rawValue,
+            controlConnection: connectionLabel(connectionStatus.state),
+            previewConnection: effectiveNetworkLabel,
             localServer: serverHealth,
             diskAvailableBytes: disk,
             queuePending: queue.filter { $0.status == .pending }.count,
@@ -2535,6 +2540,15 @@ final class BoothCoordinator {
         case .connected(let peer): return "connected: \(peer)"
         case .connecting: return "connecting"
         case .disconnected: return "disconnected"
+        }
+    }
+
+    private var effectiveNetworkLabel: String {
+        switch connectionStatus.effectiveNetwork {
+        case .wifi:
+            return connectionStatus.isFallbackActive ? "Wi-Fi fallback" : "Wi-Fi"
+        case .lan: return "LAN (Ethernet)"
+        case .unavailable: return "unavailable"
         }
     }
 

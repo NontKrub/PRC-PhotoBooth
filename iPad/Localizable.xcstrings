@@ -118,16 +118,6 @@
         }
       }
     },
-    "Controls remain connected over Wi-Fi. USB carries the live preview." : {
-      "localizations" : {
-        "th" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "การควบคุมยังเชื่อมต่อผ่าน Wi-Fi สาย USB ใช้สำหรับภาพตัวอย่างสด"
-          }
-        }
-      }
-    },
     "Cool" : {
       "extractionState" : "stale",
       "localizations" : {
@@ -387,28 +377,6 @@
         }
       }
     },
-    "USB cable" : {
-      "extractionState" : "stale",
-      "localizations" : {
-        "th" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "สาย USB"
-          }
-        }
-      }
-    },
-    "USB cable (not connected)" : {
-      "extractionState" : "stale",
-      "localizations" : {
-        "th" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "สาย USB (ยังไม่เชื่อมต่อ)"
-          }
-        }
-      }
-    },
     "Vintage" : {
       "extractionState" : "stale",
       "localizations" : {
@@ -459,17 +427,6 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "โทนอุ่น"
-          }
-        }
-      }
-    },
-    "Wireless" : {
-      "extractionState" : "stale",
-      "localizations" : {
-        "th" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "ไร้สาย"
           }
         }
       }

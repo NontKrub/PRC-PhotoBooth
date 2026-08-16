@@ -21,6 +21,11 @@ public final class BoothConnectionStatus {
     public private(set) var isLANPathAvailable = false
     public private(set) var isWiFiPathAvailable = false
 
+    public var isFallbackActive: Bool {
+        if case .fallbackWiFi = routeState { return true }
+        return false
+    }
+
     public init(requestedNetwork: BoothNetworkPreference = .wifi) {
         self.requestedNetwork = requestedNetwork
     }

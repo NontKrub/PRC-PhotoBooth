@@ -48,7 +48,10 @@ enum PreflightCheckID: String, Sendable, CaseIterable, Identifiable {
     case cameraConnection
     case cameraTestCapture
     case customerDisplay
-    case previewTransport
+    case wifiPath
+    case lanPath
+    case ipadTransport
+    case networkRoute
     case outputFolder
     case diskSpace
     case localDownloadServer
@@ -98,9 +101,11 @@ struct BoothPreflightContext: Sendable {
     var previewRequired: Bool
     var customerDisplayReady: Bool
     var ipadConnected: Bool
-    var usesCablePreview: Bool
-    var usbPreviewSupported: Bool
-    var usbPreviewClientConnected: Bool
+    var requestedNetwork: BoothNetworkPreference
+    var effectiveNetwork: BoothEffectiveNetworkTransport
+    var wifiPathAvailable: Bool
+    var lanPathAvailable: Bool
+    var networkFallbackActive: Bool
     var outputFolderURL: URL?
     var availableDiskBytes: Int64?
     var localServerStatus: LocalWebServerStatus
@@ -138,9 +143,11 @@ struct BoothPreflightContext: Sendable {
         previewRequired: Bool = false,
         customerDisplayReady: Bool = false,
         ipadConnected: Bool = false,
-        usesCablePreview: Bool = false,
-        usbPreviewSupported: Bool = true,
-        usbPreviewClientConnected: Bool = false,
+        requestedNetwork: BoothNetworkPreference = .wifi,
+        effectiveNetwork: BoothEffectiveNetworkTransport = .unavailable,
+        wifiPathAvailable: Bool = false,
+        lanPathAvailable: Bool = false,
+        networkFallbackActive: Bool = false,
         outputFolderURL: URL? = nil,
         availableDiskBytes: Int64? = nil,
         localServerStatus: LocalWebServerStatus = LocalWebServerStatus(state: .stopped, registeredTokenCount: 0),
@@ -177,9 +184,11 @@ struct BoothPreflightContext: Sendable {
         self.previewRequired = previewRequired
         self.customerDisplayReady = customerDisplayReady
         self.ipadConnected = ipadConnected
-        self.usesCablePreview = usesCablePreview
-        self.usbPreviewSupported = usbPreviewSupported
-        self.usbPreviewClientConnected = usbPreviewClientConnected
+        self.requestedNetwork = requestedNetwork
+        self.effectiveNetwork = effectiveNetwork
+        self.wifiPathAvailable = wifiPathAvailable
+        self.lanPathAvailable = lanPathAvailable
+        self.networkFallbackActive = networkFallbackActive
         self.outputFolderURL = outputFolderURL
         self.availableDiskBytes = availableDiskBytes
         self.localServerStatus = localServerStatus

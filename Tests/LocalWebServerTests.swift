@@ -25,6 +25,9 @@ struct LocalWebServerTests {
                     break
                 }
             }
+            holder.newConnectionHandler = { connection in
+                connection.cancel()
+            }
             holder.start(queue: .global(qos: .utility))
         }
         defer { holder.cancel() }

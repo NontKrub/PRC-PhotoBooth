@@ -32,7 +32,10 @@ final class BoothPreflightService {
         ))
         checked.append(result(.cameraTestCapture, "Camera test capture", "Run Full Preflight to test the shutter.", .notRun, .recommended, now))
         checked.append(result(.customerDisplay, "Customer display", context.customerDisplayReady ? "A customer display is ready." : "Connect an iPad or activate the external viewer.", context.customerDisplayReady ? .passed : .failed, .required, now))
-        checked.append(previewResult(context, now: now))
+        checked.append(networkPathResult(.wifiPath, title: "Wi-Fi path", available: context.wifiPathAvailable, now: now))
+        checked.append(networkPathResult(.lanPath, title: "LAN path", available: context.lanPathAvailable, now: now))
+        checked.append(ipadTransportResult(context, now: now))
+        checked.append(networkRouteResult(context, now: now))
 
         let output = outputFolderResult(context.outputFolderURL, now: now)
         checked.append(output)
@@ -127,15 +130,52 @@ final class BoothPreflightService {
         return result(.eventLayout, "Event layout", "Photo slots and canvas are valid.", .passed, .required, now)
     }
 
-    private func previewResult(_ context: BoothPreflightContext, now: Date) -> PreflightCheckResult {
+    private func networkPathResult(
+        _ id: PreflightCheckID,
+        title: String,
+        available: Bool,
+        now: Date
+    ) -> PreflightCheckResult {
+        result(
+            id,
+            title,
+            available ? "Network.framework reports this interface is available." : "This interface is unavailable.",
+            available ? .passed : .warning,
+            .recommended,
+            now
+        )
+    }
+
+    private func ipadTransportResult(_ context: BoothPreflightContext, now: Date) -> PreflightCheckResult {
         guard context.ipadConnected else {
-            return result(.previewTransport, "Preview transport", "Skipped because no iPad is connected.", .skipped, .recommended, now)
+            return result(.ipadTransport, "iPad transport", "Skipped because no iPad is connected.", .skipped, .recommended, now)
         }
-        if context.usesCablePreview {
-            let ok = context.usbPreviewSupported && context.usbPreviewClientConnected
-            return result(.previewTransport, "Preview transport", ok ? "USB preview client is connected." : "Cable mode requires a supported USB listener and connected client.", ok ? .passed : .failed, .required, now)
+        let connected = context.effectiveNetwork != .unavailable
+        return result(
+            .ipadTransport,
+            "iPad transport",
+            connected ? "Validated BoothTransport connection is active." : "No validated BoothTransport connection is active.",
+            connected ? .passed : .failed,
+            .required,
+            now
+        )
+    }
+
+    private func networkRouteResult(_ context: BoothPreflightContext, now: Date) -> PreflightCheckResult {
+        guard context.ipadConnected else {
+            return result(.networkRoute, "Effective network route", "Skipped because no iPad is connected.", .skipped, .recommended, now)
         }
-        return result(.previewTransport, "Preview transport", "Wireless preview transport is active.", .passed, .required, now)
+        switch context.effectiveNetwork {
+        case .lan:
+            return result(.networkRoute, "Effective network route", "LAN selected; connected via Ethernet.", .passed, .required, now)
+        case .wifi:
+            if context.requestedNetwork == .lan && context.networkFallbackActive {
+                return result(.networkRoute, "Effective network route", "LAN unavailable; booth is operating on Wi-Fi fallback.", .warning, .required, now)
+            }
+            return result(.networkRoute, "Effective network route", "Wi-Fi selected; Wi-Fi transport is active.", .passed, .required, now)
+        case .unavailable:
+            return result(.networkRoute, "Effective network route", "No network connection is active.", .failed, .required, now)
+        }
     }
 
     private func capturePermissionResult(_ context: BoothPreflightContext, now: Date) -> PreflightCheckResult {

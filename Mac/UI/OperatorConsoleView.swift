@@ -133,8 +133,9 @@ struct OperatorConsoleView: View {
             Circle().fill(connectionColor).frame(width: 8, height: 8)
             Text(connectionLabel).font(.caption)
             Spacer()
-            if case .connected = coordinator.multipeer.connectionState {
-                Image(systemName: "wifi").font(.caption).foregroundStyle(.green)
+            if case .connected = coordinator.connectionStatus.state {
+                Image(systemName: coordinator.connectionStatus.effectiveNetwork == .lan ? "cable.connector" : "wifi")
+                    .font(.caption).foregroundStyle(.green)
             }
         }
         .padding(.horizontal, 12)
@@ -176,7 +177,7 @@ struct OperatorConsoleView: View {
     }
 
     var connectionColor: Color {
-        switch coordinator.multipeer.connectionState {
+        switch coordinator.connectionStatus.state {
         case .connected:    return .green
         case .connecting:   return .yellow
         case .disconnected: return .red
@@ -184,9 +185,17 @@ struct OperatorConsoleView: View {
     }
 
     var connectionLabel: String {
-        switch coordinator.multipeer.connectionState {
-        case .connected(let name): return operatorFormat("iPad connected: %@", locale: locale, name)
-        case .connecting:          return operatorString("Connecting to iPad…", locale: locale)
+        switch coordinator.connectionStatus.state {
+        case .connected:
+            let name = coordinator.connectionStatus.peerDisplayName ?? "iPad"
+            let route = switch coordinator.connectionStatus.effectiveNetwork {
+            case .lan: "Connected via Ethernet"
+            case .wifi where coordinator.connectionStatus.isFallbackActive: "Using Wi-Fi fallback"
+            case .wifi: "Using Wi-Fi"
+            case .unavailable: "Connected"
+            }
+            return "iPad connected: \(name) · \(route)"
+        case .connecting:          return operatorString("iPad not connected", locale: locale)
         case .disconnected:        return operatorString("iPad not connected", locale: locale)
         }
     }
@@ -673,7 +682,7 @@ struct OperatorConsoleView: View {
         .tint(tint)
     }
 
-    var iPadConnected: Bool { if case .connected = coordinator.multipeer.connectionState { return true }; return false }
+    var iPadConnected: Bool { if case .connected = coordinator.connectionStatus.state { return true }; return false }
     var canRetake: Bool { if case .review = sm.phase { return true }; return false }
     var canSkip: Bool   { if case .review = sm.phase { return true }; return false }
 

@@ -841,28 +841,6 @@
         }
       }
     },
-    "Cable (USB)" : {
-      "extractionState" : "manual",
-      "localizations" : {
-        "th" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "สาย (USB)"
-          }
-        }
-      }
-    },
-    "Cable mode requires a supported USB listener and connected client." : {
-      "extractionState" : "manual",
-      "localizations" : {
-        "th" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "โหมดสายต้องมีตัวรับ USB ที่รองรับและไคลเอนต์ที่เชื่อมต่ออยู่"
-          }
-        }
-      }
-    },
     "Camera" : {
       "extractionState" : "manual",
       "localizations" : {
@@ -3139,28 +3117,6 @@
         }
       }
     },
-    "Mac: cable preview ready" : {
-      "extractionState" : "manual",
-      "localizations" : {
-        "th" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Mac: ภาพตัวอย่างผ่านสายพร้อมแล้ว"
-          }
-        }
-      }
-    },
-    "Mac: cable preview service unavailable" : {
-      "extractionState" : "manual",
-      "localizations" : {
-        "th" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Mac: บริการภาพตัวอย่างผ่านสายไม่พร้อมใช้งาน"
-          }
-        }
-      }
-    },
     "Managed by Cloud SSH Setup in ~/.ssh/config, using Cloudflare Access." : {
       "localizations" : {
         "th" : {
@@ -4118,39 +4074,6 @@
         }
       }
     },
-    "Preview transport" : {
-      "extractionState" : "manual",
-      "localizations" : {
-        "th" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "ช่องทางส่งภาพตัวอย่าง"
-          }
-        }
-      }
-    },
-    "Preview via" : {
-      "extractionState" : "manual",
-      "localizations" : {
-        "th" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "ภาพตัวอย่างผ่าน"
-          }
-        }
-      }
-    },
-    "previewConnectionMode" : {
-      "extractionState" : "manual",
-      "localizations" : {
-        "th" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "previewConnectionMode"
-          }
-        }
-      }
-    },
     "previewFrameRate" : {
       "extractionState" : "manual",
       "localizations" : {
@@ -5083,16 +5006,6 @@
         }
       }
     },
-    "Session controls always use Wi-Fi. 60 FPS uses more bandwidth; choose cable preview for the smoothest result. Sony USB live view may be limited by the camera." : {
-      "localizations" : {
-        "th" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "คำสั่งควบคุมเซสชันใช้ Wi-Fi เสมอ 60 FPS ใช้แบนด์วิดท์มากขึ้น เลือกภาพตัวอย่างผ่านสายเพื่อความลื่นไหลสูงสุด ภาพสดผ่าน USB ของ Sony อาจถูกจำกัดโดยกล้อง"
-          }
-        }
-      }
-    },
     "Session download link" : {
       "localizations" : {
         "th" : {
@@ -5930,17 +5843,6 @@
         }
       }
     },
-    "USB preview client is connected." : {
-      "extractionState" : "manual",
-      "localizations" : {
-        "th" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "ไคลเอนต์ภาพตัวอย่าง USB เชื่อมต่ออยู่"
-          }
-        }
-      }
-    },
     "Use ‘prc-%@’ Instead" : {
       "extractionState" : "manual",
       "localizations" : {
@@ -6067,17 +5969,6 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "ความกว้าง"
-          }
-        }
-      }
-    },
-    "Wireless (Wi-Fi)" : {
-      "extractionState" : "manual",
-      "localizations" : {
-        "th" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "ไร้สาย (Wi-Fi)"
           }
         }
       }
