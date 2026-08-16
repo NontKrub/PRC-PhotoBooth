@@ -28,6 +28,7 @@ actor LocalWebServer {
     private var sessionRoutes: [String: SessionRouteRegistration] = [:]
     private var galleryRoutes: [String: EventGalleryRouteRegistration] = [:]
     private var operatorHandlers: OperatorWebHandlers?
+    private var activePort: UInt16?
 
     private var state: LocalWebServerState = .stopped
 
@@ -41,7 +42,7 @@ actor LocalWebServer {
                 sessionDirectory: sessionDirectory.standardizedFileURL,
                 language: .english,
                 eventGalleryPath: nil,
-                gifExpected: false
+                gifState: .none
         ))
     }
 
@@ -61,7 +62,7 @@ actor LocalWebServer {
                 sessionDirectory: mapping.value.standardizedFileURL,
                 language: .english,
                 eventGalleryPath: nil,
-                gifExpected: false
+                gifState: .none
             )
         }
     }
@@ -137,16 +138,19 @@ actor LocalWebServer {
     func stop() {
         listener?.cancel()
         listener = nil
+        activePort = nil
         state = .stopped
     }
 
     private func handleListenerState(_ update: NWListener.State) {
         switch update {
         case .ready:
-            state = .ready(port: port)
+            activePort = listener?.port?.rawValue ?? port
+            state = .ready(port: activePort ?? port)
         case .failed(let error), .waiting(let error):
             state = .failed(message: error.localizedDescription)
         case .cancelled:
+            activePort = nil
             state = .stopped
         case .setup:
             state = .starting
@@ -156,6 +160,7 @@ actor LocalWebServer {
     }
 
     private func handle(_ connection: NWConnection) async {
+        defer { connection.cancel() }
         connection.start(queue: .global(qos: .utility))
         var parser = HTTPServerRequestParser()
         var request: HTTPServerRequest?
@@ -164,15 +169,19 @@ actor LocalWebServer {
                 request = try parser.append(data)
             }
         } catch {
-            await send(connection, response: errorResponse(for: error).httpData)
+            _ = await send(connection, data: errorResponse(for: error).httpData)
             return
         }
         guard let request else {
-            await send(connection, response: errorResponse(for: HTTPServerRequestError.malformed).httpData)
+            _ = await send(connection, data: errorResponse(for: HTTPServerRequestError.malformed).httpData)
             return
         }
-        let response = await response(for: request)
-        await send(connection, response: response.httpData)
+        switch await route(for: request) {
+        case .response(let response):
+            _ = await send(connection, data: response.httpData)
+        case .file(let response):
+            await send(connection, file: response)
+        }
     }
 
     private func receive(from connection: NWConnection) async -> Data? {
@@ -187,22 +196,41 @@ actor LocalWebServer {
         }
     }
 
-    private func send(_ connection: NWConnection, response: Data) async {
-        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
-            connection.send(content: response, completion: .contentProcessed { _ in
-                connection.cancel()
-                continuation.resume()
+    private func send(_ connection: NWConnection, data: Data) async -> Bool {
+        await withCheckedContinuation { (continuation: CheckedContinuation<Bool, Never>) in
+            connection.send(content: data, completion: .contentProcessed { error in
+                continuation.resume(returning: error == nil)
             })
         }
     }
 
-    private func response(for request: HTTPServerRequest) async -> LocalDownloadResponse {
+    private func send(_ connection: NWConnection, file response: LocalDownloadFileResponse) async {
+        guard await send(connection, data: response.httpHeaderData) else { return }
+        let chunkSize = 128 * 1024
+        var bytesSent: Int64 = 0
+        do {
+            let handle = try FileHandle(forReadingFrom: response.fileURL)
+            defer { try? handle.close() }
+            while bytesSent < response.contentLength, !Task.isCancelled {
+                let remaining = response.contentLength - bytesSent
+                guard let chunk = try handle.read(upToCount: min(chunkSize, Int(remaining))), !chunk.isEmpty else {
+                    return
+                }
+                guard await send(connection, data: chunk) else { return }
+                bytesSent += Int64(chunk.count)
+            }
+        } catch {
+            return
+        }
+    }
+
+    private func route(for request: HTTPServerRequest) async -> LocalDownloadRoute {
         if request.path.split(separator: "?", maxSplits: 1, omittingEmptySubsequences: false).first == "/operator"
             || request.path.hasPrefix("/operator/") {
-            return await operatorResponse(for: request)
+            return .response(await operatorResponse(for: request))
         }
-        guard request.method == "GET" else { return methodNotAllowed() }
-        return LocalDownloadRouter(sessionRoutes: sessionRoutes, galleryRoutes: galleryRoutes).response(for: request.path)
+        guard request.method == "GET" else { return .response(methodNotAllowed()) }
+        return LocalDownloadRouter(sessionRoutes: sessionRoutes, galleryRoutes: galleryRoutes).route(for: request.path)
     }
 
     private func operatorResponse(for request: HTTPServerRequest) async -> LocalDownloadResponse {

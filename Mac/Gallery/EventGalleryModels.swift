@@ -44,7 +44,7 @@ struct SessionRouteRegistration: Sendable, Equatable {
     var sessionDirectory: URL
     var language: CustomerLanguage
     var eventGalleryPath: String?
-    var gifExpected: Bool = false
+    var gifState: GIFAvailabilityState = .none
 }
 
 struct EventGalleryRouteRegistration: Sendable, Equatable {

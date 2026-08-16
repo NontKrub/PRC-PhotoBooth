@@ -157,7 +157,7 @@ final class SessionJobExecutor: SessionJobExecuting {
                 sessionDirectory: directory,
                 language: manifest.eventConfig.customerLanguage,
                 eventGalleryPath: manifest.eventConfig.eventGalleryPath,
-                gifExpected: manifest.shots.contains(where: { !$0.gifFrameFileNames.isEmpty })
+                gifState: manifest.shots.contains(where: { !$0.gifFrameFileNames.isEmpty }) ? .preparing : .none
             )
         )
     }

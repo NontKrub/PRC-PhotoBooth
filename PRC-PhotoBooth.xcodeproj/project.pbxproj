@@ -175,6 +175,8 @@
 		F8D781D84527D63B940E0B66 /* QRCodeGenerator.swift in Sources */ = {isa = PBXBuildFile; fileRef = FC4655DC257D70C9ABB30347 /* QRCodeGenerator.swift */; };
 		F98E430CB67E8376857BBF40 /* CanvasElementGeometryTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4346C88E68A8DD1C20ECE9EC /* CanvasElementGeometryTests.swift */; };
 		F9D6E32BF49556326B9C5515 /* PreflightStatusRow.swift in Sources */ = {isa = PBXBuildFile; fileRef = FD4D041EE3E81E34CEAAF993 /* PreflightStatusRow.swift */; };
+		FAA6794BF13B9E9E6C567363 /* GIFQualityPreset.swift in Sources */ = {isa = PBXBuildFile; fileRef = 516C0CF5C578879A6AD81249 /* GIFQualityPreset.swift */; };
+		FB1589E3BCCDC078E69F3B88 /* GIFQualityPreset.swift in Sources */ = {isa = PBXBuildFile; fileRef = 516C0CF5C578879A6AD81249 /* GIFQualityPreset.swift */; };
 		FB4DCCC3BF0F9934C97C1B6F /* NetworkBoothTransport.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9EBB25A83BF1BA49D031BF82 /* NetworkBoothTransport.swift */; };
 		FBF1D4A725065B19C6493A5A /* PINGateView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 82D1ACB7B1239F03487E9DB6 /* PINGateView.swift */; };
 		FEC9349B98E65A0693973747 /* SessionQRCodePayloadResolverTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0CCEE0EBC1DDE9E8D89D4D20 /* SessionQRCodePayloadResolverTests.swift */; };
@@ -236,6 +238,7 @@
 		4AA33DBA424BED93245726E5 /* ReviewView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReviewView.swift; sourceTree = "<group>"; };
 		4B481D3472D7B213743B5302 /* TemplateFrameSlotEditor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TemplateFrameSlotEditor.swift; sourceTree = "<group>"; };
 		4CBAA07693E04A4F4981AF0A /* CustomerDisplayWorkflowTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CustomerDisplayWorkflowTests.swift; sourceTree = "<group>"; };
+		516C0CF5C578879A6AD81249 /* GIFQualityPreset.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GIFQualityPreset.swift; sourceTree = "<group>"; };
 		5383E866A38FD3F694ABCF5E /* SessionRecoveryTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionRecoveryTests.swift; sourceTree = "<group>"; };
 		553249FDB48038050181108D /* SwiftData.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = SwiftData.framework; path = System/Library/Frameworks/SwiftData.framework; sourceTree = SDKROOT; };
 		57645A87342654910C1246F9 /* ExperienceTypes.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ExperienceTypes.swift; sourceTree = "<group>"; };
@@ -400,13 +403,6 @@
 			path = Localization;
 			sourceTree = "<group>";
 		};
-		0A950ACC5ED0FFC8AA581FEC /* Utilities */ = {
-			isa = PBXGroup;
-			children = (
-			);
-			path = Utilities;
-			sourceTree = "<group>";
-		};
 		0FE5F2198FEC452F52F5D817 /* Models */ = {
 			isa = PBXGroup;
 			children = (
@@ -500,7 +496,6 @@
 				E5AECCB6A37C90D701EEFD2F /* Imaging */,
 				0FE5F2198FEC452F52F5D817 /* Models */,
 				9D99CED6CFA8C31CEE1F1E73 /* State */,
-				0A950ACC5ED0FFC8AA581FEC /* Utilities */,
 			);
 			path = Shared;
 			sourceTree = "<group>";
@@ -774,6 +769,7 @@
 			isa = PBXGroup;
 			children = (
 				76C0A7EF425EA6BDF05F506C /* FilterSampleRenderer.swift */,
+				516C0CF5C578879A6AD81249 /* GIFQualityPreset.swift */,
 				E2EAE2872ECB6A8C088587F1 /* PhotoFilter.swift */,
 				C0718A8C72332866A8E4BC30 /* PhotoFilterPipeline.swift */,
 				FC4655DC257D70C9ABB30347 /* QRCodeGenerator.swift */,
@@ -953,6 +949,7 @@
 				9246252EE7DD1320232404B1 /* ExternalExperienceSelectionView.swift in Sources */,
 				5D28033A806DA3183DCDC797 /* FilterSampleRenderer.swift in Sources */,
 				9C02C28A6207000654FFBA2D /* GIFEncoder.swift in Sources */,
+				FAA6794BF13B9E9E6C567363 /* GIFQualityPreset.swift in Sources */,
 				C69A60E8B6A676BD414F31A5 /* GalleryModerationView.swift in Sources */,
 				B91FDF04694A9CBE5A6E09EC /* GalleryThumbnailGenerator.swift in Sources */,
 				C0AB711F69AE72B0187EDECC /* HTTPServerRequest.swift in Sources */,
@@ -1063,6 +1060,7 @@
 				58E1BA7F017689C532543C3E /* FilterOptionCard.swift in Sources */,
 				5AA60BA4612C6066E1DB9C80 /* FilterSampleRenderer.swift in Sources */,
 				AE871C3F6AF90DEAF1E062D3 /* FinishView.swift in Sources */,
+				FB1589E3BCCDC078E69F3B88 /* GIFQualityPreset.swift in Sources */,
 				CECE8F6D5B5C9584E1C7768E /* IdleView.swift in Sources */,
 				E23A0EC7DD4066FF10BFA0A8 /* LocalizedText.swift in Sources */,
 				C6094A872CAD1F2892FD9E0B /* Message.swift in Sources */,

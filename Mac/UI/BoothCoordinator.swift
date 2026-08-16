@@ -2222,11 +2222,33 @@ final class BoothCoordinator {
                 sessionDirectory: directory,
                 language: manifest.eventConfig.customerLanguage,
                 eventGalleryPath: galleryPath,
-                gifExpected: manifest.shots.contains(where: { !$0.gifFrameFileNames.isEmpty })
+                gifState: gifAvailability(for: manifest, directory: directory)
             )
         }
         await server.replaceSessionRoutes(sessionMappings)
         await server.replaceGalleryRoutes(galleryMappings)
+    }
+
+    private func gifAvailability(
+        for manifest: SessionManifest,
+        directory: URL
+    ) -> GIFAvailabilityState {
+        guard manifest.shots.contains(where: { !$0.gifFrameFileNames.isEmpty }) else { return .none }
+        let gifURL = directory.appendingPathComponent("booth.gif")
+        let fileExists = FileManager.default.fileExists(atPath: gifURL.path)
+        guard let job = jobQueue.jobs.first(where: {
+            $0.sessionID == manifest.id && $0.kind == .renderGIF
+        }) else {
+            return manifest.gifFileName != nil && fileExists ? .ready : .preparing
+        }
+        switch job.status {
+        case .succeeded:
+            return fileExists ? .ready : .failed
+        case .failed, .cancelled:
+            return .failed
+        case .pending, .running, .waitingRetry:
+            return .preparing
+        }
     }
 
     // MARK: - Session cleanup (M10)
