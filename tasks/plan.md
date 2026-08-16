@@ -1,6 +1,16 @@
-# PRC PhotoBooth — v1.3 Reliability + Operations
+# PRC PhotoBooth — v1.3 Reliability Hardening
 
-> The PR #7 stabilization plan below is historical context. The current release work is on `feature/v1.3-reliability-operations`.
+> The PR #7 stabilization plan below is historical context. Current work is on `feature/v1.3-reliability-hardening`.
+
+## Current reliability-hardening status
+
+- Startup health now records runtime, SwiftData, queue, recovery, experience, and local-server failures; required persistence/server failures block readiness without crashing the UI.
+- DSLR capture readiness is independent from AVFoundation permission; AVFoundation is reported as optional preview health when DSLR capture is selected.
+- Session-sensitive control messages carry the session UUID and a Mac-issued sequence; iPad reconnect sync is authoritative and stale packets are rejected.
+- Normal state-machine events are guarded; recovery and remote sync use explicit authoritative-restore APIs.
+- Countdown capture and rendering use one transmitted absolute deadline.
+- Automated validation: Mac/iPad Debug and Release builds pass; 213 tests run, 212 pass, with one pre-existing Thai localization failure.
+- Computer Use launch was attempted, but the environment returned `cgWindowNotFound` for app windows; visual interaction remains pending.
 
 ## v1.3 implementation status
 

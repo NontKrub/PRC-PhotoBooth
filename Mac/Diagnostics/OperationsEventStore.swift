@@ -24,6 +24,7 @@ actor OperationsEventStore {
     private let fileURL: URL
     private var events: [OperationsEvent] = []
     private var loaded = false
+    private(set) var lastError: String?
     private let retention: TimeInterval = 30 * 24 * 60 * 60
 
     init(fileURL: URL) {
@@ -61,16 +62,24 @@ actor OperationsEventStore {
     func jsonData(since: Date? = nil) -> Data {
         let encoder = JSONEncoder()
         encoder.dateEncodingStrategy = .iso8601
-        return (try? encoder.encode(load(since: since))) ?? Data("[]".utf8)
+        do { return try encoder.encode(load(since: since)) }
+        catch {
+            recordError(error)
+            return Data("[]".utf8)
+        }
     }
 
     private func loadIfNeeded() {
         guard !loaded else { return }
         loaded = true
-        guard let data = try? Data(contentsOf: fileURL) else { return }
+        let data: Data
+        do { data = try Data(contentsOf: fileURL) }
+        catch where (error as NSError).code == NSFileReadNoSuchFileError { return }
+        catch { recordError(error); return }
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
-        events = (try? decoder.decode([OperationsEvent].self, from: data)) ?? []
+        do { events = try decoder.decode([OperationsEvent].self, from: data) }
+        catch { recordError(error); events = [] }
         trim(now: Date())
     }
 
@@ -82,8 +91,16 @@ actor OperationsEventStore {
     private func save() {
         let encoder = JSONEncoder()
         encoder.dateEncodingStrategy = .iso8601
-        guard let data = try? encoder.encode(events) else { return }
-        try? FileManager.default.createDirectory(at: fileURL.deletingLastPathComponent(), withIntermediateDirectories: true)
-        try? data.write(to: fileURL, options: [.atomic])
+        do {
+            let data = try encoder.encode(events)
+            try FileManager.default.createDirectory(at: fileURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try data.write(to: fileURL, options: [.atomic])
+            lastError = nil
+        } catch { recordError(error) }
+    }
+
+    private func recordError(_ error: Error) {
+        lastError = error.localizedDescription
+        NSLog("[Operations] Event storage failed: %@", error.localizedDescription)
     }
 }

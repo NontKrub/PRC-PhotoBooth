@@ -67,7 +67,7 @@ struct EventSetupView: View {
             NewEventSheet { name, count, seconds in
                 let event = BoothEvent(name: name, photoCount: count, countdownSeconds: seconds)
                 modelContext.insert(event)
-                try? modelContext.save()
+                saveChanges()
                 selectedEventID = event.id
             }
         }
@@ -76,7 +76,7 @@ struct EventSetupView: View {
     private func setActive(_ event: BoothEvent) {
         events.forEach { $0.isActive = false }
         event.isActive = true
-        try? modelContext.save()
+        saveChanges()
         coordinator.activeEvent = event
     }
 
@@ -84,7 +84,14 @@ struct EventSetupView: View {
         if selectedEventID == event.id { selectedEventID = nil }
         if coordinator.activeEvent?.id == event.id { coordinator.activeEvent = nil }
         modelContext.delete(event)
-        try? modelContext.save()
+        saveChanges()
+    }
+
+    private func saveChanges() {
+        guard coordinator.store.saveChanges() else {
+            coordinator.errorMessage = "Event changes could not be saved: \(coordinator.store.lastPersistenceError ?? "unknown error")"
+            return
+        }
     }
 }
 
@@ -102,15 +109,15 @@ struct EventDetailView: View {
         Form {
             Section("Event Info") {
                 TextField("Name", text: $event.name)
-                    .onSubmit { try? modelContext.save() }
+                    .onSubmit { saveChanges() }
                 Stepper("Countdown: \(event.countdownSeconds)s", value: $event.countdownSeconds, in: 3...15)
-                    .onChange(of: event.countdownSeconds) { _, _ in try? modelContext.save() }
+                    .onChange(of: event.countdownSeconds) { _, _ in saveChanges() }
             }
 
             Section("Status") {
                 LabeledContent("Active") {
                     Toggle("", isOn: $event.isActive)
-                        .onChange(of: event.isActive) { _, _ in try? modelContext.save() }
+                        .onChange(of: event.isActive) { _, _ in saveChanges() }
                 }
             }
 
@@ -147,7 +154,7 @@ struct EventDetailView: View {
                     Text("180°").tag(180)
                     Text("270° CW").tag(270)
                 }
-                .onChange(of: event.cameraRotationDegrees) { _, _ in try? modelContext.save() }
+                .onChange(of: event.cameraRotationDegrees) { _, _ in saveChanges() }
             }
 
         }
@@ -166,6 +173,13 @@ struct EventDetailView: View {
     private var defaultTemplate: EventTemplateDefinition? {
         guard let experienceDocument else { return nil }
         return experienceDocument.templates.first { $0.id == experienceDocument.defaultTemplateID }
+    }
+
+    private func saveChanges() {
+        guard coordinator.store.saveChanges() else {
+            experienceError = "Event changes could not be saved: \(coordinator.store.lastPersistenceError ?? "unknown error")"
+            return
+        }
     }
 }
 

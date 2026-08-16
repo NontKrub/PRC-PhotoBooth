@@ -340,7 +340,7 @@ actor EventExperienceStore {
         }
         let template = document.templates[index]
         let directory = try templateURL(eventID: eventID, templateID: templateID)
-        let frame = try template.frameFileName
+        let frame = template.frameFileName
             .flatMap { try? templateAssetURL($0, in: directory) }
             .flatMap { loadCGImage(from: $0) }
         let previewURL = directory.appendingPathComponent("preview.jpg")

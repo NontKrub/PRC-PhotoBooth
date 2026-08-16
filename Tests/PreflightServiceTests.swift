@@ -85,6 +85,67 @@ struct PreflightServiceTests {
         #expect(service.result(for: .unfinishedSession)?.status == .failed)
         #expect(service.readiness == .notReady)
     }
+
+    @Test("AVFoundation permission denial blocks AVFoundation capture")
+    @MainActor
+    func avFoundationPermissionDenialBlocksCapture() async {
+        let service = BoothPreflightService()
+        await service.runSafeChecks(using: context(cameraPermissionGranted: false))
+        #expect(service.result(for: .cameraPermission)?.status == .failed)
+        #expect(service.readiness == .notReady)
+    }
+
+    @Test("DSLR capture is independent from AVFoundation permission")
+    @MainActor
+    func dslrCaptureIgnoresAVFoundationPermission() async {
+        let service = BoothPreflightService()
+        await service.runSafeChecks(using: context(
+            cameraSourceKind: .dslr,
+            cameraPermissionGranted: false,
+            cameraConnected: true,
+            previewPermissionGranted: false,
+            previewConnected: false
+        ))
+        #expect(service.result(for: .cameraConnection)?.status == .passed)
+        #expect(service.result(for: .cameraPermission)?.status == .warning)
+        #expect(service.readiness == .readyWithWarnings)
+    }
+
+    @Test("disconnected DSLR blocks capture")
+    @MainActor
+    func disconnectedDSLRBlocksCapture() async {
+        let service = BoothPreflightService()
+        await service.runSafeChecks(using: context(cameraSourceKind: .dslr, cameraConnected: false))
+        #expect(service.result(for: .cameraConnection)?.status == .failed)
+        #expect(service.readiness == .notReady)
+    }
+
+    @Test("optional DSLR preview failure is a warning")
+    @MainActor
+    func optionalPreviewFailureWarns() async {
+        let service = BoothPreflightService()
+        await service.runSafeChecks(using: context(
+            cameraSourceKind: .dslr,
+            cameraPermissionGranted: false,
+            cameraConnected: true,
+            previewPermissionGranted: false,
+            previewConnected: false,
+            previewRequired: false
+        ))
+        #expect(service.result(for: .cameraConnection)?.status == .passed)
+        #expect(service.readiness == .readyWithWarnings)
+    }
+
+    @Test("unavailable runtime storage blocks readiness")
+    @MainActor
+    func unavailableRuntimeStorageBlocksReadiness() async {
+        let service = BoothPreflightService()
+        await service.runSafeChecks(using: context(startupComponents: [
+            .runtimeDirectory: StartupComponentHealth(status: .unavailable, detail: "Runtime directory is unavailable.")
+        ]))
+        #expect(service.result(for: .runtimePersistence)?.status == .failed)
+        #expect(service.readiness == .notReady)
+    }
 }
 
 private func context(
@@ -96,13 +157,24 @@ private func context(
     automaticPrintingEnabled: Bool = false,
     requiredJobFailed: Bool = false,
     optionalJobPendingOrFailed: Bool = false,
-    unfinishedCaptureSession: Bool = false
+    unfinishedCaptureSession: Bool = false,
+    cameraSourceKind: CameraSourceKind = .avFoundation,
+    cameraPermissionGranted: Bool = true,
+    cameraConnected: Bool = true,
+    previewPermissionGranted: Bool = true,
+    previewConnected: Bool = true,
+    previewRequired: Bool = false,
+    startupComponents: [StartupComponent: StartupComponentHealth] = [:]
 ) -> BoothPreflightContext {
     let output = FileManager.default.temporaryDirectory.appendingPathComponent("PRC-Preflight-\(UUID().uuidString)")
     return BoothPreflightContext(
         event: event,
-        cameraPermissionGranted: true,
-        cameraConnected: true,
+        cameraPermissionGranted: cameraPermissionGranted,
+        cameraConnected: cameraConnected,
+        cameraSourceKind: cameraSourceKind,
+        previewPermissionGranted: previewPermissionGranted,
+        previewConnected: previewConnected,
+        previewRequired: previewRequired,
         customerDisplayReady: customerDisplayReady,
         ipadConnected: ipadConnected,
         usesCablePreview: usesCablePreview,
@@ -124,6 +196,7 @@ private func context(
         cloudConnectivityPassed: false,
         automaticPrintingEnabled: automaticPrintingEnabled,
         printerConfigured: false,
-        printerTestResult: nil
+        printerTestResult: nil,
+        startupComponents: startupComponents
     )
 }

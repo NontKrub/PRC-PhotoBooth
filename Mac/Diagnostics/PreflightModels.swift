@@ -14,6 +14,29 @@ enum PreflightRequirement: Sendable {
     case recommended
 }
 
+enum StartupComponent: String, CaseIterable, Sendable {
+    case runtimeDirectory
+    case dataStore
+    case jobQueue
+    case recoveryStore
+    case localServer
+    case eventExperienceStore
+    case galleryStore
+}
+
+enum StartupComponentStatus: String, Sendable, Equatable {
+    case ready
+    case unavailable
+    case degraded
+}
+
+struct StartupComponentHealth: Sendable, Equatable {
+    var status: StartupComponentStatus
+    var detail: String
+
+    static let ready = StartupComponentHealth(status: .ready, detail: "Ready.")
+}
+
 enum PreflightCheckID: String, Sendable, CaseIterable, Identifiable {
     case activeEvent
     case eventLayout
@@ -31,6 +54,7 @@ enum PreflightCheckID: String, Sendable, CaseIterable, Identifiable {
     case localDownloadServer
     case localIPAddress
     case runtimePersistence
+    case recoveryStorage
     case unfinishedSession
     case queueHealth
     case cloudUpload
@@ -68,6 +92,10 @@ struct BoothPreflightContext: Sendable {
     var galleryStorageDetail: String
     var cameraPermissionGranted: Bool
     var cameraConnected: Bool
+    var cameraSourceKind: CameraSourceKind
+    var previewPermissionGranted: Bool
+    var previewConnected: Bool
+    var previewRequired: Bool
     var customerDisplayReady: Bool
     var ipadConnected: Bool
     var usesCablePreview: Bool
@@ -90,6 +118,7 @@ struct BoothPreflightContext: Sendable {
     var automaticPrintingEnabled: Bool
     var printerConfigured: Bool
     var printerTestResult: PrinterTestResult?
+    var startupComponents: [StartupComponent: StartupComponentHealth]
 
     init(
         event: EventConfig? = nil,
@@ -103,6 +132,10 @@ struct BoothPreflightContext: Sendable {
         galleryStorageDetail: String = "Gallery is disabled.",
         cameraPermissionGranted: Bool = false,
         cameraConnected: Bool = false,
+        cameraSourceKind: CameraSourceKind = .avFoundation,
+        previewPermissionGranted: Bool = true,
+        previewConnected: Bool = true,
+        previewRequired: Bool = false,
         customerDisplayReady: Bool = false,
         ipadConnected: Bool = false,
         usesCablePreview: Bool = false,
@@ -124,7 +157,8 @@ struct BoothPreflightContext: Sendable {
         cloudConnectivityPassed: Bool = false,
         automaticPrintingEnabled: Bool = false,
         printerConfigured: Bool = false,
-        printerTestResult: PrinterTestResult? = nil
+        printerTestResult: PrinterTestResult? = nil,
+        startupComponents: [StartupComponent: StartupComponentHealth] = [:]
     ) {
         self.event = event
         self.eventExperienceStatus = eventExperienceStatus
@@ -137,6 +171,10 @@ struct BoothPreflightContext: Sendable {
         self.galleryStorageDetail = galleryStorageDetail
         self.cameraPermissionGranted = cameraPermissionGranted
         self.cameraConnected = cameraConnected
+        self.cameraSourceKind = cameraSourceKind
+        self.previewPermissionGranted = previewPermissionGranted
+        self.previewConnected = previewConnected
+        self.previewRequired = previewRequired
         self.customerDisplayReady = customerDisplayReady
         self.ipadConnected = ipadConnected
         self.usesCablePreview = usesCablePreview
@@ -159,5 +197,6 @@ struct BoothPreflightContext: Sendable {
         self.automaticPrintingEnabled = automaticPrintingEnabled
         self.printerConfigured = printerConfigured
         self.printerTestResult = printerTestResult
+        self.startupComponents = startupComponents
     }
 }

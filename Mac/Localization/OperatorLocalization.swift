@@ -1,7 +1,7 @@
 import Foundation
 
 func operatorString(_ key: String, locale: Locale) -> String {
-    let language = locale.languageCode ?? locale.identifier.split(separator: "_").first.map(String.init) ?? "en"
+    let language = locale.language.languageCode?.identifier ?? locale.identifier.split(separator: "_").first.map(String.init) ?? "en"
     let bundle = Bundle.main.path(forResource: language, ofType: "lproj")
         .flatMap(Bundle.init(path:)) ?? .main
     return bundle.localizedString(forKey: key, value: key, table: "Localizable")
@@ -96,6 +96,7 @@ func operatorPreflightTitle(_ id: PreflightCheckID, locale: Locale) -> String {
     case .localDownloadServer: key = "Local download server"
     case .localIPAddress: key = "Local IP address"
     case .runtimePersistence: key = "Runtime persistence"
+    case .recoveryStorage: key = "Recovery storage"
     case .unfinishedSession: key = "Unfinished session"
     case .queueHealth: key = "Queue health"
     case .cloudUpload: key = "Cloud upload"

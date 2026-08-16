@@ -149,8 +149,13 @@ final class SessionJobExecutor: SessionJobExecuting {
     }
 
     private func updateGallery(_ manifest: SessionManifest) async throws {
-        guard let document = try? await experienceStore.load(eventID: manifest.eventID),
-              document.gallery.mode != .disabled else { return }
+        let document: EventExperienceDocument
+        do {
+            document = try await experienceStore.load(eventID: manifest.eventID)
+        } catch {
+            throw JobExecutionError.permanent("Gallery configuration could not load: \(error.localizedDescription)")
+        }
+        guard document.gallery.mode != .disabled else { return }
         _ = try galleryThumbnailGenerator.generate(manifest: manifest)
         try await galleryStore.upsertSession(manifest: manifest, configuration: document.gallery)
     }
@@ -181,7 +186,7 @@ final class SessionJobExecutor: SessionJobExecuting {
         let frames = sampledShots.flatMap { $0 }
 
         guard !frames.isEmpty else {
-            var updated = (try? await manifestStore.load(sessionID: manifest.id)) ?? manifest
+            var updated = try await manifestStore.load(sessionID: manifest.id)
             updated.gifFileName = nil
             try await manifestStore.save(updated)
             return
@@ -193,7 +198,7 @@ final class SessionJobExecutor: SessionJobExecuting {
             let filteredFrames = try await filterPipeline.apply(manifest.eventConfig.selectedFilterID, to: frames)
             try GIFEncoder().encode(frames: filteredFrames, to: temporary)
             try replaceFile(at: destination, with: temporary)
-            var updated = (try? await manifestStore.load(sessionID: manifest.id)) ?? manifest
+            var updated = try await manifestStore.load(sessionID: manifest.id)
             updated.gifFileName = "booth.gif"
             try await manifestStore.save(updated)
             if store.fetchSession(id: manifest.id) == nil {

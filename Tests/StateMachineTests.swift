@@ -39,6 +39,7 @@ struct StateMachineTests {
     func retake() async {
         let sm = SessionStateMachine()
         sm.startSession(config: EventConfig(photoCount: 1, countdownSeconds: 3))
+        sm.beginCountdown(photoIndex: 0)
         sm.enterReview(photoIndex: 0, thumbnailData: Data([0x01]))
         sm.retakeShot(photoIndex: 0)
         if case .countdown(let idx, _) = sm.phase { #expect(idx == 0) }
@@ -86,5 +87,72 @@ struct StateMachineTests {
         sm.startSession(config: EventConfig(photoCount: 2, countdownSeconds: 3))
         sm.operatorOverride(.cancelSession)
         #expect(sm.phase == .idle)
+    }
+
+    @Test("illegal runtime events do not mutate the phase")
+    func rejectsIllegalEvents() {
+        let sm = SessionStateMachine()
+        sm.enterReview(photoIndex: 0, thumbnailData: Data([1]))
+        #expect(sm.phase == .idle)
+
+        sm.startSession(config: EventConfig(photoCount: 1, countdownSeconds: 5))
+        sm.beginCountdown(photoIndex: 0)
+        sm.enterReview(photoIndex: 0, thumbnailData: Data([1]))
+        sm.keepShot(photoIndex: 2)
+        #expect(sm.phase == .review(photoIndex: 0))
+        sm.keepShot(photoIndex: 0)
+        #expect(sm.phase == .processing)
+        sm.beginCountdown(photoIndex: 0)
+        #expect(sm.phase == .processing)
+    }
+
+    @Test("authoritative restore can reconstruct a remote phase")
+    func authoritativeRestore() {
+        let sm = SessionStateMachine()
+        let config = EventConfig(photoCount: 2, countdownSeconds: 5)
+        let deadline = Date(timeIntervalSince1970: 1_700_000_005)
+        sm.applyAuthoritativeSnapshot(
+            sessionID: "remote-session",
+            config: config,
+            phase: .countdown(photoIndex: 1, secondsRemaining: 3),
+            keptShots: [0: Data([1])],
+            nextPhotoIndex: 1,
+            countdownDeadline: deadline
+        )
+        #expect(sm.currentSessionID == "remote-session")
+        #expect(sm.keptShots[0] == Data([1]))
+        #expect(sm.phase == .countdown(photoIndex: 1, secondsRemaining: 3))
+        #expect(sm.countdownDeadline == deadline)
+    }
+
+    @Test("countdown remaining is derived from an absolute deadline")
+    func countdownDeadline() {
+        let sm = SessionStateMachine()
+        let config = EventConfig(photoCount: 1, countdownSeconds: 5)
+        sm.startSession(config: config)
+        let deadline = Date(timeIntervalSince1970: 1_700_000_005)
+        sm.beginCountdown(photoIndex: 0, captureAt: deadline)
+        sm.updateCountdown(at: Date(timeIntervalSince1970: 1_700_000_002.2))
+        #expect(sm.phase == .countdown(photoIndex: 0, secondsRemaining: 3))
+        sm.updateCountdown(at: Date(timeIntervalSince1970: 1_700_000_005.1))
+        #expect(sm.phase == .countdown(photoIndex: 0, secondsRemaining: 0))
+    }
+
+    @Test("every photo in a three-photo session gets the configured countdown")
+    func repeatedCountdownsUseSameDuration() {
+        let sm = SessionStateMachine()
+        let config = EventConfig(photoCount: 3, countdownSeconds: 5)
+        let start = Date(timeIntervalSince1970: 1_700_000_000)
+        sm.startSession(config: config)
+
+        for index in 0..<config.photoCount {
+            let deadline = start.addingTimeInterval(5)
+            sm.beginCountdown(photoIndex: index, captureAt: deadline)
+            #expect(sm.countdownDeadline == deadline)
+            sm.enterReview(photoIndex: index, thumbnailData: Data([UInt8(index)]))
+            sm.keepShot(photoIndex: index)
+        }
+
+        #expect(sm.phase == .processing)
     }
 }

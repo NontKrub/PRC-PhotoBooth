@@ -7,6 +7,8 @@ final class DataStore {
 
     let container: ModelContainer
     var context: ModelContext { container.mainContext }
+    private(set) var lastPersistenceError: String?
+    private(set) var persistentStorageAvailable = true
 
     private init() {
         let schema = Schema([BoothEvent.self, BoothSlot.self, BoothSession.self, CapturedShot.self])
@@ -14,15 +16,37 @@ final class DataStore {
         do {
             container = try ModelContainer(for: schema, configurations: config)
         } catch {
-            // Schema changed — wipe the SQLite files and start fresh
+            // Schema changed — preserve the old store before starting fresh.
             let base = config.url.deletingPathExtension()
+            let backup = base.deletingLastPathComponent()
+                .appendingPathComponent("SwiftData-corrupt-\(UUID().uuidString)", isDirectory: true)
+            do {
+                try FileManager.default.createDirectory(at: backup, withIntermediateDirectories: true)
+            } catch {
+                NSLog("[Persistence] Could not create corruption backup directory: %@", error.localizedDescription)
+            }
             for ext in ["store", "store-shm", "store-wal"] {
-                try? FileManager.default.removeItem(at: base.appendingPathExtension(ext))
+                let source = base.appendingPathExtension(ext)
+                guard FileManager.default.fileExists(atPath: source.path) else { continue }
+                do {
+                    try FileManager.default.moveItem(at: source, to: backup.appendingPathComponent(source.lastPathComponent))
+                } catch {
+                    NSLog("[Persistence] Could not preserve %@: %@", source.path, error.localizedDescription)
+                }
             }
             do {
                 container = try ModelContainer(for: schema, configurations: config)
             } catch {
-                fatalError("SwiftData init failed after store reset: \(error)")
+                let persistenceError = error.localizedDescription
+                persistentStorageAvailable = false
+                lastPersistenceError = "Persistent SwiftData storage is unavailable: \(persistenceError)"
+                NSLog("[Persistence] Falling back to in-memory SwiftData: %@", persistenceError)
+                let memoryConfig = ModelConfiguration(schema: schema, isStoredInMemoryOnly: true)
+                do {
+                    container = try ModelContainer(for: schema, configurations: memoryConfig)
+                } catch {
+                    fatalError("SwiftData in-memory fallback failed: \(error)")
+                }
             }
         }
     }
@@ -32,19 +56,21 @@ final class DataStore {
     func createEvent(name: String, photoCount: Int = 3, countdownSeconds: Int = 5) -> BoothEvent {
         let event = BoothEvent(name: name, photoCount: photoCount, countdownSeconds: countdownSeconds)
         context.insert(event)
-        try? context.save()
+        save()
         return event
     }
 
     func fetchEvents() -> [BoothEvent] {
         let desc = FetchDescriptor<BoothEvent>(sortBy: [SortDescriptor(\.createdAt, order: .reverse)])
-        return (try? context.fetch(desc)) ?? []
+        do { return try context.fetch(desc) }
+        catch { record(error); return [] }
     }
 
     func fetchActiveEvent() -> BoothEvent? {
         var desc = FetchDescriptor<BoothEvent>(predicate: #Predicate { $0.isActive })
         desc.fetchLimit = 1
-        return try? context.fetch(desc).first
+        do { return try context.fetch(desc).first }
+        catch { record(error); return nil }
     }
 
     func setActiveEvent(_ event: BoothEvent) {
@@ -52,7 +78,7 @@ final class DataStore {
         let all = fetchEvents()
         all.forEach { $0.isActive = false }
         event.isActive = true
-        try? context.save()
+        save()
     }
 
     // MARK: - Sessions
@@ -61,7 +87,7 @@ final class DataStore {
         let session = BoothSession(eventID: event.id, photoCount: event.photoCount)
         event.sessions.append(session)
         context.insert(session)
-        try? context.save()
+        save()
         return session
     }
 
@@ -72,12 +98,13 @@ final class DataStore {
     func fetchSession(id: String) -> BoothSession? {
         var descriptor = FetchDescriptor<BoothSession>(predicate: #Predicate { $0.id == id })
         descriptor.fetchLimit = 1
-        return try? context.fetch(descriptor).first
+        do { return try context.fetch(descriptor).first }
+        catch { record(error); return nil }
     }
 
     func deleteSession(_ session: BoothSession) {
         context.delete(session)
-        try? context.save()
+        save()
     }
 
     @discardableResult
@@ -100,7 +127,7 @@ final class DataStore {
         }
         shot.imagePath = imagePath
         shot.retakeCount = max(0, retakeCount)
-        try? context.save()
+        save()
         return shot
     }
 
@@ -124,7 +151,7 @@ final class DataStore {
         guard let session = fetchSession(id: sessionID) else { return }
         session.stripPath = stripPath ?? session.stripPath
         session.gifPath = gifPath ?? session.gifPath
-        try? context.save()
+        save()
     }
 
     func finishSession(sessionID: String, stripPath: String?, gifPath: String?) {
@@ -132,7 +159,7 @@ final class DataStore {
         session.finishedAt = Date()
         session.stripPath = stripPath
         session.gifPath = gifPath
-        try? context.save()
+        save()
     }
 
     func restoreSessionRecord(from manifest: SessionManifest) -> BoothSession {
@@ -161,13 +188,37 @@ final class DataStore {
                 retakeCount: shot.retakeCount
             )
         }
-        try? context.save()
+        save()
         return session
     }
 
     func fetchSessions(finishedBefore date: Date) -> [BoothSession] {
         let pred = #Predicate<BoothSession> { s in s.finishedAt != nil && s.finishedAt! < date }
-        return (try? context.fetch(FetchDescriptor<BoothSession>(predicate: pred))) ?? []
+        do { return try context.fetch(FetchDescriptor<BoothSession>(predicate: pred)) }
+        catch { record(error); return [] }
+    }
+
+    private func save() {
+        _ = saveChanges()
+    }
+
+    @discardableResult
+    func saveChanges() -> Bool {
+        do {
+            try context.save()
+            if persistentStorageAvailable {
+                lastPersistenceError = nil
+            }
+            return true
+        } catch {
+            record(error)
+            return false
+        }
+    }
+
+    private func record(_ error: Error) {
+        lastPersistenceError = error.localizedDescription
+        NSLog("[Persistence] SwiftData operation failed: %@", error.localizedDescription)
     }
 
 }

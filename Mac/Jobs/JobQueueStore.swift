@@ -20,6 +20,7 @@ actor JobQueueStore {
     private let fileURL: URL
     private var jobs: [SessionJob] = []
     private var hasLoaded = false
+    private(set) var lastPersistenceError: String?
 
     init(fileURL: URL) {
         self.fileURL = fileURL
@@ -53,10 +54,24 @@ actor JobQueueStore {
             if changed { try persist() }
             return jobs
         } catch {
-            let backup = try? preserveCorruptFile()
+            let decodingError = error.localizedDescription
+            let backup: URL?
+            do {
+                backup = try preserveCorruptFile()
+            } catch {
+                backup = nil
+            }
             jobs = []
-            try persist()
-            throw JobQueueStoreError.corrupt(fileURL, error.localizedDescription, backup)
+            do {
+                try persist()
+            } catch {
+                throw JobQueueStoreError.corrupt(
+                    fileURL,
+                    "\(decodingError); recovered queue could not be persisted: \(error.localizedDescription)",
+                    backup
+                )
+            }
+            throw JobQueueStoreError.corrupt(fileURL, decodingError, backup)
         }
     }
 
@@ -254,10 +269,16 @@ actor JobQueueStore {
     }
 
     private func persist() throws {
-        var encoder = JSONEncoder()
+        let encoder = JSONEncoder()
         encoder.dateEncodingStrategy = .iso8601
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-        try encoder.encode(jobs).write(to: fileURL, options: [.atomic])
+        do {
+            try encoder.encode(jobs).write(to: fileURL, options: [.atomic])
+            lastPersistenceError = nil
+        } catch {
+            lastPersistenceError = error.localizedDescription
+            throw error
+        }
     }
 
     private func preserveCorruptFile() throws -> URL {

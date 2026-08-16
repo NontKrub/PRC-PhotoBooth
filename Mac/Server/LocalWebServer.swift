@@ -96,6 +96,9 @@ actor LocalWebServer {
                 try? await Task.sleep(for: .milliseconds(50))
             }
         }
+        if case .starting = state {
+            state = .failed(message: "Local download server did not become ready before the startup timeout.")
+        }
         return statusSnapshot()
     }
 
@@ -105,7 +108,16 @@ actor LocalWebServer {
         do {
             let parameters = NWParameters.tcp
             parameters.allowLocalEndpointReuse = true
-            let listener = try NWListener(using: parameters, on: NWEndpoint.Port(rawValue: port)!)
+            guard let endpointPort = NWEndpoint.Port(rawValue: port) else {
+                let error = NSError(
+                    domain: "PRCPhotoBooth.LocalWebServer",
+                    code: 1,
+                    userInfo: [NSLocalizedDescriptionKey: "Invalid local download server port \(port)."]
+                )
+                state = .failed(message: error.localizedDescription)
+                throw error
+            }
+            let listener = try NWListener(using: parameters, on: endpointPort)
             listener.stateUpdateHandler = { [weak self] update in
                 Task { await self?.handleListenerState(update) }
             }

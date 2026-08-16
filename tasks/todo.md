@@ -1,5 +1,18 @@
 # PRC PhotoBooth v1.3 TODO
 
+## Reliability-hardening completion ledger
+
+- [x] Record startup component health and surface required persistence/server failures in Preflight
+- [x] Decouple DSLR still-capture readiness from AVFoundation permission
+- [x] Add session identity, Mac-issued sequence numbers, reconnect sync, and stale-message rejection
+- [x] Guard normal `SessionStateMachine` events and isolate authoritative restore/sync
+- [x] Synchronize Mac/iPad countdowns with absolute capture deadlines
+- [x] Add reliability, preflight, message-gate, state-machine, countdown, and occupied-port tests
+- [x] Build Mac/iPad Debug and Release configurations; preserve macOS 15/iOS 18 and universal Mac architectures
+- [ ] Resolve pre-existing Thai localization test failure
+- [ ] Repeat Computer Use UI matrix when app-window access is available
+- [ ] Run physical Sony ZV-E10 and real-iPad reconnect matrix
+
 ## v1.3 release gate
 
 - [x] Add recoverable capture phase and guest/External Display recovery actions

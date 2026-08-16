@@ -61,7 +61,7 @@ struct OperatorConsoleView: View {
     var cameraPanel: some View {
         ZStack {
             Color.black
-            if !coordinator.cameraPermissionGranted {
+            if !coordinator.selectedCaptureSourceReady {
                 permissionDeniedOverlay
             } else {
                 ActiveCameraPreviewView(
@@ -106,16 +106,22 @@ struct OperatorConsoleView: View {
         VStack(spacing: 16) {
             Image(systemName: "camera.fill.badge.ellipsis")
                 .font(.system(size: 44)).foregroundStyle(.orange)
-            Text("Camera Access Required")
+            Text(coordinator.cameraSourceKind == .dslr ? "DSLR Not Connected" : "Camera Access Required")
                 .font(.headline).foregroundStyle(.white)
-            Text("Grant camera access in System Settings → Privacy & Security → Camera.")
+            Text(coordinator.cameraSourceKind == .dslr
+                 ? "Connect the selected DSLR or choose AVFoundation capture."
+                 : "Grant camera access in System Settings → Privacy & Security → Camera.")
                 .font(.caption).foregroundStyle(.white.opacity(0.7))
                 .multilineTextAlignment(.center)
                 .frame(maxWidth: 260)
-            Button("Open System Settings") {
-                NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Camera")!)
+            if coordinator.cameraSourceKind == .avFoundation {
+                Button("Open System Settings") {
+                    if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Camera") {
+                        NSWorkspace.shared.open(url)
+                    }
+                }
+                .buttonStyle(.borderedProminent)
             }
-            .buttonStyle(.borderedProminent)
         }
         .padding(32)
     }
@@ -624,15 +630,12 @@ struct OperatorConsoleView: View {
             .buttonStyle(.borderedProminent)
             .disabled(coordinator.activeEvent == nil
                       || (sm.phase != .idle && sm.phase != .readyToStart)
-                      || !coordinator.cameraPermissionGranted
-                      || !coordinator.capture.isRunning
-                      || (coordinator.cameraSourceKind == .dslr && !coordinator.capture.dslr.isRunning)
+                      || !coordinator.selectedCaptureSourceReady
                       || !coordinator.isCustomerDisplayReady
                       || coordinator.recoveryService.recoverableCaptureSession != nil)
             .help(coordinator.activeEvent == nil ? "Select an active event first" :
-                  !coordinator.cameraPermissionGranted ? "Camera permission required" :
-                  !coordinator.capture.isRunning ? "Start the selected camera first" :
-                  (coordinator.cameraSourceKind == .dslr && !coordinator.capture.dslr.isRunning) ? "Connect DSLR camera first" :
+                  !coordinator.selectedCaptureSourceReady && coordinator.cameraSourceKind == .avFoundation ? "Camera permission or AVFoundation camera required" :
+                  !coordinator.selectedCaptureSourceReady ? "Connect the selected DSLR camera first" :
                   !coordinator.isCustomerDisplayReady ? "Connect an iPad or activate the external viewer" :
                   coordinator.recoveryService.recoverableCaptureSession != nil ? "Resume or discard the unfinished session in Operations." : "")
 

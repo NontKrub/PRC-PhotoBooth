@@ -41,6 +41,7 @@ final class iPadViewModel {
     private var previewDecodeTask: Task<Void, Never>?
     private var sessionRequestTimeoutTask: Task<Void, Never>?
     private var countdownTask: Task<Void, Never>?
+    private var sessionMessageGate = SessionMessageGate()
 #if DEBUG
     private(set) var demoKioskMode = false
 #endif
@@ -79,6 +80,49 @@ final class iPadViewModel {
         multipeer.onPreviewFrame = { [weak self] jpegData in
             self?.updatePreview(jpegData)
         }
+    }
+
+    private var currentSessionMessageContext: SessionMessageContext? {
+        guard let sessionID = sessionMessageGate.currentSessionID else { return nil }
+        return SessionMessageContext(
+            sessionID: sessionID,
+            sequence: sessionMessageGate.latestAcceptedSequence
+        )
+    }
+
+    private func accept(_ context: SessionMessageContext, message: String) -> Bool {
+        guard sessionMessageGate.accept(context) else {
+#if DEBUG
+            NSLog(
+                "[Session] Ignored stale %@: session=%@ current=%@ sequence=%llu latest=%llu",
+                message,
+                context.sessionID,
+                sessionMessageGate.currentSessionID ?? "none",
+                context.sequence,
+                sessionMessageGate.latestAcceptedSequence
+            )
+#endif
+            return false
+        }
+        return true
+    }
+
+    private func acceptSessionChange(_ context: SessionMessageContext, message: String) -> Bool {
+        guard sessionMessageGate.currentSessionID == nil || context.sequence > sessionMessageGate.latestAcceptedSequence else {
+#if DEBUG
+            NSLog(
+                "[Session] Ignored stale %@: session=%@ current=%@ sequence=%llu latest=%llu",
+                message,
+                context.sessionID,
+                sessionMessageGate.currentSessionID ?? "none",
+                context.sequence,
+                sessionMessageGate.latestAcceptedSequence
+            )
+#endif
+            return false
+        }
+        sessionMessageGate.synchronize(sessionID: context.sessionID, sequence: context.sequence)
+        return true
     }
 
     private func handleMessage(_ msg: Message) {
@@ -122,7 +166,9 @@ final class iPadViewModel {
         case .setMirrored(let mirrored):
             isMirrored = mirrored
 
-        case .sessionStart:
+        case .sessionStart(let context):
+            guard let context,
+                  acceptSessionChange(context, message: "sessionStart") else { break }
             cancelCountdown()
             isSessionRequestPending = false
             reviewDecisionPending = false
@@ -137,9 +183,10 @@ final class iPadViewModel {
             recoveryActionPending = false
             sessionRequestTimeoutTask?.cancel()
             sessionRequestError = reason
-            stateMachine.transition(to: .selectingExperience)
+            stateMachine.beginSelectingExperience()
 
-        case .sessionPrepared(let config, let presentation):
+        case .sessionPrepared(let config, let presentation, let context):
+            guard acceptSessionChange(context, message: "sessionPrepared") else { break }
             cancelCountdown()
             isSessionRequestPending = false
             reviewDecisionPending = false
@@ -155,25 +202,33 @@ final class iPadViewModel {
                 }
             }
 
-        case .beginCountdown(let index, let seconds):
+        case .beginCountdown(let context, let descriptor):
+            guard accept(context, message: "beginCountdown") else { break }
             recoveryActionPending = false
             reviewDecisionPending = false
-            stateMachine.transition(to: .countdown(photoIndex: index, secondsRemaining: seconds))
-            runCountdown(photoIndex: index, totalSeconds: seconds)
+            stateMachine.applyAuthoritativePhase(
+                .countdown(photoIndex: descriptor.photoIndex, secondsRemaining: max(0, Int(ceil(descriptor.captureAt.timeIntervalSinceNow)))),
+                countdownDeadline: descriptor.captureAt
+            )
+            runCountdown(descriptor)
 
-        case .shotCaptured(let index, let thumbData):
+        case .shotCaptured(let context, let index, let thumbData):
+            guard accept(context, message: "shotCaptured") else { break }
             cancelCountdown()
             recoveryActionPending = false
             reviewDecisionPending = false
+            stateMachine.applyAuthoritativePhase(.captured(photoIndex: index))
             stateMachine.enterReview(photoIndex: index, thumbnailData: thumbData)
 
-        case .captureRecovery(let index, let failure):
+        case .captureRecovery(let context, let index, let failure):
+            guard accept(context, message: "captureRecovery") else { break }
             cancelCountdown()
             recoveryActionPending = false
             reviewDecisionPending = false
-            stateMachine.transition(to: .captureRecovery(photoIndex: index, failure: failure))
+            stateMachine.applyAuthoritativePhase(.captureRecovery(photoIndex: index, failure: failure))
 
-        case .reviewDecision(let action):
+        case .reviewDecision(let context, let action):
+            guard accept(context, message: "reviewDecision") else { break }
             guard case .review(let idx) = stateMachine.phase else { break }
             let customerAction: CustomerDisplayAction = action == .keep
                 ? .keep(photoIndex: idx)
@@ -185,14 +240,20 @@ final class iPadViewModel {
             case .retake: stateMachine.retakeShot(photoIndex: idx)
             }
 
-        case .sessionFinished(let qr, let stripData, _):
+        case .sessionFinished(let context, let qr, let stripData, _):
+            guard accept(context, message: "sessionFinished") else { break }
             cancelCountdown()
             recoveryActionPending = false
             reviewDecisionPending = false
             if let data = stripData { stripThumbImage = Self.cgImage(from: data) }
-            stateMachine.finishSession(qrPayload: qr)
+            stateMachine.applyAuthoritativePhase(.finished(qrPayload: qr))
 
-        case .operatorOverride(let action):
+        case .operatorOverride(let context, let action):
+            if let context {
+                guard accept(context, message: "operatorOverride") else { break }
+            } else if !stateMachine.currentSessionID.isEmpty {
+                break
+            }
             if case .cancelSession = action { cancelCountdown() }
             stateMachine.operatorOverride(action)
 
@@ -202,6 +263,7 @@ final class iPadViewModel {
 
     private func applySessionSync(_ snapshot: SessionSyncSnapshot) {
         cancelCountdown()
+        sessionMessageGate.synchronize(sessionID: snapshot.sessionID, sequence: snapshot.sequence)
         eventConfig = snapshot.config
         stateMachine.config = snapshot.config
         selectedLanguage = snapshot.presentation?.language ?? snapshot.config.customerLanguage
@@ -219,36 +281,42 @@ final class iPadViewModel {
             stateMachine.reset()
             return
         }
-        stateMachine.startSession(config: snapshot.config, sessionID: sessionID)
-        switch snapshot.phase {
-        case .review(let index):
-            if let data = snapshot.reviewThumbnailData {
-                stateMachine.enterReview(photoIndex: index, thumbnailData: data)
-            } else {
-                stateMachine.transition(to: snapshot.phase)
-            }
-        case .finished:
-            if let data = snapshot.stripThumbnailData { stripThumbImage = Self.cgImage(from: data) }
-            stateMachine.transition(to: snapshot.phase)
-        case .countdown(let index, let seconds):
-            stateMachine.transition(to: snapshot.phase)
-            runCountdown(photoIndex: index, totalSeconds: seconds)
-        default:
-            stateMachine.transition(to: snapshot.phase)
+        var keptShots = snapshot.keptShots
+        if case .review(let index) = snapshot.phase,
+           let data = snapshot.reviewThumbnailData {
+            keptShots[index] = data
+        }
+        stateMachine.applyAuthoritativeSnapshot(
+            sessionID: sessionID,
+            config: snapshot.config,
+            phase: snapshot.phase,
+            keptShots: keptShots,
+            nextPhotoIndex: snapshot.nextPhotoIndex,
+            countdownDeadline: snapshot.countdown?.captureAt,
+            acceptedPhotoIndices: Set(snapshot.acceptedPhotoIndices),
+            deferredPhotoIndices: Set(snapshot.deferredPhotoIndices)
+        )
+        if case .finished = snapshot.phase,
+           let data = snapshot.stripThumbnailData {
+            stripThumbImage = Self.cgImage(from: data)
+        }
+        if let countdown = snapshot.countdown {
+            runCountdown(countdown)
         }
     }
 
-    private func runCountdown(photoIndex: Int, totalSeconds: Int) {
+    private func runCountdown(_ descriptor: CountdownDescriptor) {
         countdownTask?.cancel()
         countdownTask = Task { @MainActor [weak self] in
             guard let self else { return }
-            for remaining in stride(from: totalSeconds, through: 1, by: -1) {
-                guard !Task.isCancelled else { return }
-                stateMachine.transition(to: .countdown(photoIndex: photoIndex, secondsRemaining: remaining))
-                try? await Task.sleep(for: .seconds(1))
+            while !Task.isCancelled {
+                stateMachine.updateCountdown(at: Date())
+                guard descriptor.captureAt > Date() else {
+                    countdownTask = nil
+                    return
+                }
+                try? await Task.sleep(for: .milliseconds(100))
             }
-            guard !Task.isCancelled else { return }
-            self.countdownTask = nil
         }
     }
 
@@ -304,7 +372,7 @@ final class iPadViewModel {
 #endif
         guard let catalog = experienceCatalog else {
             isSessionRequestPending = true
-            multipeer.sendControl(.sessionStart)
+            multipeer.sendControl(.sessionStart(context: nil))
             return
         }
         guard let templateID = selectedTemplateID,
@@ -344,7 +412,7 @@ final class iPadViewModel {
     func beginExperienceSelection() {
         guard experienceCatalog != nil else { return }
         applyCatalogDefaults(preserveLanguage: true)
-        stateMachine.transition(to: .selectingExperience)
+        stateMachine.beginSelectingExperience()
     }
 
     func selectTemplate(_ id: String) {
@@ -419,9 +487,10 @@ final class iPadViewModel {
             return
         }
 #endif
+        guard let context = currentSessionMessageContext else { return }
         reviewDecisionPending = true
         cancelCountdown()
-        multipeer.sendControl(.reviewDecision(action: .keep))
+        multipeer.sendControl(.reviewDecision(context: context, action: .keep))
         stateMachine.keepShot(photoIndex: photoIndex)
     }
 
@@ -435,9 +504,10 @@ final class iPadViewModel {
             return
         }
 #endif
+        guard let context = currentSessionMessageContext else { return }
         reviewDecisionPending = true
         cancelCountdown()
-        multipeer.sendControl(.reviewDecision(action: .retake))
+        multipeer.sendControl(.reviewDecision(context: context, action: .retake))
         stateMachine.retakeShot(photoIndex: photoIndex)
     }
 
@@ -467,8 +537,9 @@ final class iPadViewModel {
         case .usePrevious(let index): customerAction = .usePreviousCapture(photoIndex: index)
         }
         guard CustomerDisplayWorkflow.canApply(customerAction, in: stateMachine.phase) else { return }
+        guard let context = currentSessionMessageContext else { return }
         recoveryActionPending = true
-        multipeer.sendControl(.captureRecoveryAction(action: action))
+        multipeer.sendControl(.captureRecoveryAction(context: context, action: action))
     }
 
     func customerDone() {
@@ -496,17 +567,24 @@ final class iPadViewModel {
     }
 
     private func scheduleDemoShot(photoIndex: Int) {
+        let descriptor = CountdownDescriptor(
+            photoIndex: photoIndex,
+            captureAt: Date().addingTimeInterval(TimeInterval(eventConfig.countdownSeconds))
+        )
+        stateMachine.beginCountdown(photoIndex: photoIndex, captureAt: descriptor.captureAt)
+        runCountdown(descriptor)
         Task { @MainActor [weak self] in
-            try? await Task.sleep(for: .seconds(2))
-            guard let self, self.stateMachine.phase == .countdown(photoIndex: photoIndex, secondsRemaining: self.eventConfig.countdownSeconds)
-                || self.stateMachine.phase == .readyToStart else { return }
+            let nanos = UInt64(max(0, descriptor.captureAt.timeIntervalSinceNow) * 1_000_000_000)
+            try? await Task.sleep(nanoseconds: nanos)
+            guard let self,
+                  case .countdown(let currentIndex, _) = self.stateMachine.phase,
+                  currentIndex == photoIndex else { return }
             guard let sample = FilterSampleRenderer.makeSampleImage(),
                   let filtered = try? await PhotoFilterPipeline().apply(self.eventConfig.selectedFilterID, to: sample),
                   let data = jpegDataForDemo(filtered) else { return }
             self.reviewDecisionPending = false
             self.stateMachine.enterReview(photoIndex: photoIndex, thumbnailData: data)
         }
-        stateMachine.beginCountdown(photoIndex: photoIndex)
     }
 
     private func demoAdvance(afterKeeping photoIndex: Int) {

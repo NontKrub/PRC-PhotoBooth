@@ -1263,7 +1263,7 @@ extension DSLRCameraSource: @preconcurrency ICDeviceBrowserDelegate {
         guard let cam = device as? ICCameraDevice else { return }
         let id = cam.uuidString ?? cam.name ?? UUID().uuidString
         let name = cam.name ?? "Unknown Camera"
-        NSLog("[DSLR] deviceBrowser didAdd: %@ caps=%@", name, (cam.capabilities ?? []).description)
+        NSLog("[DSLR] deviceBrowser didAdd: %@ caps=%@", name, cam.capabilities.description)
         camerasByID[id] = cam
         if !availableDevices.contains(where: { $0.id == id }) {
             availableDevices.append(CameraDeviceInfo(id: id, name: name, kind: .dslr))

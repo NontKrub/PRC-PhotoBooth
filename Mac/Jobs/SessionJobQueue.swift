@@ -209,7 +209,14 @@ final class SessionJobQueue {
         } catch {
             persistentQueueError = error.localizedDescription
             lastQueueError = persistentQueueError
-            await reloadFromSnapshot()
+            // Do not run workers against an in-memory snapshot after durable
+            // queue recovery failed. Required results must remain visible as
+            // unavailable until persistence is repaired.
+            jobs = []
+            onJobsChanged?()
+            isRunning = false
+            startupTask = nil
+            return
         }
 
         guard !Task.isCancelled else {
