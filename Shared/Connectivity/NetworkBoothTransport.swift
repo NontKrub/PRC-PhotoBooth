@@ -10,6 +10,7 @@ public final class NetworkBoothTransport: BoothTransport {
     private static let heartbeatTimeout: TimeInterval = 8
 
     public let role: DeviceRole
+    public let connectionStatus: BoothConnectionStatus
     public private(set) var connectionState: BoothConnectionState = .disconnected
     public private(set) var peerName = ""
     public private(set) var connectedPeerNames: [String] = []
@@ -19,6 +20,13 @@ public final class NetworkBoothTransport: BoothTransport {
     }
     public var onControlMessage: (@MainActor (Message) -> Void)?
     public var onPreviewFrame: (@MainActor (Data) -> Void)?
+
+    private var requestedPreference: BoothNetworkPreference
+
+    public var requestedNetworkPreference: BoothNetworkPreference {
+        get { requestedPreference }
+        set { requestedPreference = newValue }
+    }
 
     private let deviceID = UUID().uuidString
     private var controlListener: NWListener?
@@ -50,8 +58,14 @@ public final class NetworkBoothTransport: BoothTransport {
     private var previewCoalescedAtLastMetrics = 0
 #endif
 
-    public init(role: DeviceRole) {
+    public init(
+        role: DeviceRole,
+        networkPreference: BoothNetworkPreference = .wifi,
+        connectionStatus: BoothConnectionStatus? = nil
+    ) {
         self.role = role
+        self.requestedPreference = networkPreference
+        self.connectionStatus = connectionStatus ?? BoothConnectionStatus(requestedNetwork: networkPreference)
     }
 
     public func start() {

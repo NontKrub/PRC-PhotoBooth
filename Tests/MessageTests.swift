@@ -100,6 +100,49 @@ struct MessageTests {
         let accepted = gate.accept(SessionMessageContext(sessionID: "B", sequence: 5))
         #expect(accepted)
     }
+
+    @Test("connection status clears identity and peer list together")
+    @MainActor
+    func connectionStatusIsAuthoritative() {
+        let status = BoothConnectionStatus()
+        status.publish(
+            requestedNetwork: .wifi,
+            state: .connected(peerName: "Nont's iPad"),
+            peerID: "ipad-id",
+            peerDisplayName: "Nont's iPad",
+            routeState: .connectedWiFi(peer: "Nont's iPad"),
+            effectiveNetwork: .wifi
+        )
+
+        #expect(status.connectedPeerNames == ["Nont's iPad"])
+        #expect(status.state == .connected(peerName: "Nont's iPad"))
+        #expect(status.peerID == "ipad-id")
+
+        status.publishDisconnected()
+
+        #expect(status.connectedPeerNames.isEmpty)
+        #expect(status.state == .disconnected)
+        #expect(status.peerID == nil)
+        #expect(status.peerDisplayName == nil)
+    }
+
+    @Test("hello device name decodes with a legacy identity fallback")
+    func helloDeviceNameIsCompatible() throws {
+        let hello = BoothTransportHello(
+            role: .iPad,
+            deviceID: "ipad-id",
+            deviceName: "Nont's iPad"
+        )
+        let decoded = try JSONDecoder().decode(
+            BoothTransportHello.self,
+            from: JSONEncoder().encode(hello)
+        )
+        #expect(decoded.deviceName == "Nont's iPad")
+
+        let legacy = Data(#"{"protocolVersion":2,"appVersion":"1.3","role":"iPad","deviceID":"legacy-id","capabilities":["control"]}"#.utf8)
+        let legacyHello = try JSONDecoder().decode(BoothTransportHello.self, from: legacy)
+        #expect(legacyHello.deviceName == "legacy-id")
+    }
 }
 
 private func canonicalJSON(_ data: Data) throws -> Data {

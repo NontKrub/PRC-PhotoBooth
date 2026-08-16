@@ -41,6 +41,7 @@ private final class SessionReference: @unchecked Sendable {
 public final class MultipeerService: NSObject, BoothTransport {
     public typealias ConnectionState = BoothConnectionState
 
+    public let connectionStatus: BoothConnectionStatus
     public private(set) var connectionState: ConnectionState = .disconnected
     public private(set) var peerName: String = ""
     public private(set) var connectedPeerNames: [String] = []
@@ -59,6 +60,20 @@ public final class MultipeerService: NSObject, BoothTransport {
     // packets are disposable and coalesced so they cannot starve controls.
     public var onControlMessage: (@MainActor (Message) -> Void)?
     public var onPreviewFrame:   (@MainActor (Data) -> Void)?
+
+    public var requestedNetworkPreference: BoothNetworkPreference {
+        get { connectionStatus.requestedNetwork }
+        set {
+            connectionStatus.publish(
+                requestedNetwork: newValue,
+                state: connectionState,
+                peerID: peerName.isEmpty ? nil : peerName,
+                peerDisplayName: peerName.isEmpty ? nil : peerName,
+                routeState: connectionStatus.routeState,
+                effectiveNetwork: connectionStatus.effectiveNetwork
+            )
+        }
+    }
 
     public let role: DeviceRole
 
@@ -81,8 +96,12 @@ public final class MultipeerService: NSObject, BoothTransport {
     private var latestPreviewFrame: (peer: String, data: Data)?
     private var previewDeliveryTask: Task<Void, Never>?
 
-    public init(role: DeviceRole) {
+    public init(
+        role: DeviceRole,
+        connectionStatus: BoothConnectionStatus? = nil
+    ) {
         self.role = role
+        self.connectionStatus = connectionStatus ?? BoothConnectionStatus()
         self.peerTracker = PeerConnectionTracker(localRole: role)
         #if os(macOS)
         let name = Host.current().localizedName ?? "PRC-Mac"

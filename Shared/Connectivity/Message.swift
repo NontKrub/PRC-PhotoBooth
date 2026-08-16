@@ -106,19 +106,41 @@ public struct BoothTransportHello: Codable, Sendable, Equatable {
     public var appVersion: String
     public var role: DeviceRole
     public var deviceID: String
+    public var deviceName: String
     public var capabilities: [String]
 
     public init(
         role: DeviceRole,
         appVersion: String = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "dev",
         deviceID: String = UUID().uuidString,
+        deviceName: String? = nil,
         capabilities: [String] = ["control", "preview", "state-sync", "preview-identity"]
     ) {
         self.protocolVersion = Self.currentProtocolVersion
         self.appVersion = appVersion
         self.role = role
         self.deviceID = deviceID
+        self.deviceName = deviceName?.isEmpty == false ? deviceName! : deviceID
         self.capabilities = capabilities
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case protocolVersion
+        case appVersion
+        case role
+        case deviceID
+        case deviceName
+        case capabilities
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        protocolVersion = try container.decode(Int.self, forKey: .protocolVersion)
+        appVersion = try container.decode(String.self, forKey: .appVersion)
+        role = try container.decode(DeviceRole.self, forKey: .role)
+        deviceID = try container.decode(String.self, forKey: .deviceID)
+        deviceName = try container.decodeIfPresent(String.self, forKey: .deviceName) ?? deviceID
+        capabilities = try container.decode([String].self, forKey: .capabilities)
     }
 }
 
