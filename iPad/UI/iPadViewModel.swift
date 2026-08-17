@@ -213,7 +213,12 @@ final class iPadViewModel {
             recoveryActionPending = false
             reviewDecisionPending = false
             stateMachine.applyAuthoritativePhase(.captured(photoIndex: index))
-            stateMachine.enterReview(photoIndex: index, thumbnailData: thumbData)
+            let historyThumbnail = ReviewImageEncoder.thumbnailData(from: thumbData) ?? thumbData
+            stateMachine.enterReview(
+                photoIndex: index,
+                thumbnailData: historyThumbnail,
+                reviewImageData: thumbData
+            )
 
         case .captureRecovery(let context, let index, let failure):
             guard accept(context, message: "captureRecovery") else { break }
@@ -277,15 +282,18 @@ final class iPadViewModel {
             return
         }
         var keptShots = snapshot.keptShots
+        var reviewImageData: Data?
         if case .review(let index) = snapshot.phase,
            let data = snapshot.reviewThumbnailData {
-            keptShots[index] = data
+            reviewImageData = data
+            keptShots[index] = ReviewImageEncoder.thumbnailData(from: data) ?? data
         }
         stateMachine.applyAuthoritativeSnapshot(
             sessionID: sessionID,
             config: snapshot.config,
             phase: snapshot.phase,
             keptShots: keptShots,
+            reviewImageData: reviewImageData,
             nextPhotoIndex: snapshot.nextPhotoIndex,
             countdownDeadline: snapshot.countdown?.captureAt,
             acceptedPhotoIndices: Set(snapshot.acceptedPhotoIndices),

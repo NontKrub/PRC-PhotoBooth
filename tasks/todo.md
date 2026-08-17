@@ -176,3 +176,22 @@
 - [x] Update PR #7
 - [x] Confirm CI green for final ledger commit `f5daeb1` — PR App Builds run 15 passed
 - [x] Do not merge before real ZV-E10 and 3-shot GIF tests pass
+
+## v1.4 implementation checklist
+
+- [ ] Work only on `feature/v1.4-operator-experience-connectivity`; preserve unrelated worktree changes.
+- [ ] LAN: initial `.unsatisfied` does not abort a wired attempt; timeout/loss still falls back correctly.
+- [ ] LAN: expose route, handshake, control/preview, and bounded preview counters/throughput diagnostics.
+- [ ] Review: dedicated larger current-review JPEG; small kept-shot thumbnails remain in snapshots.
+- [ ] Review: responsive iPad layout and payload/reconnect tests.
+- [ ] Preview: Auto/Standard/High policy with route hysteresis; preserve Sony original JPEG path.
+- [ ] Guest Experience: top navigation, 24 pt outer padding, staged Save/Back behavior.
+- [ ] Printing: remove app paper/copies/printer/skip-dialog controls; use system print panel for test/manual jobs.
+- [ ] Settings: top navigation; Security owns PIN reset and re-locks after reset.
+- [ ] Operations: collapsible sections with readiness open and failure badges visible.
+- [ ] Event Setup: `Set` selection, range/command selection, safe batch deletion and confirmation.
+- [ ] Frame editor: multi-selection, delete/duplicate/group move/nudge, focused shortcuts, undo/redo.
+- [ ] Version 1.4 in `project.yml`; regenerate Xcode project.
+- [ ] Mac Debug/Release, iPad Debug/Release, and full Swift Testing suite pass.
+- [ ] Computer Use Mac UI test attempted; physical iPad/device test attempted and blockers recorded.
+- [ ] Delete only recorded temporary test events; restore PIN to `1324`; final diff/security/artifact review.

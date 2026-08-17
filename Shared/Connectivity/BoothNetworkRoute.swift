@@ -158,7 +158,11 @@ public struct BoothNetworkRouteMachine: Equatable, Sendable {
     public mutating func lanPathChanged(isAvailable: Bool, wifiAvailable: Bool) -> BoothNetworkRouteCommand {
         guard !isAvailable else { return .none }
         switch state {
-        case .connectingLAN, .connectedLAN:
+        case .connectingLAN:
+            // A first monitor sample can arrive before a direct Ethernet route is ready.
+            // The connection/hello result is authoritative while this attempt is probing.
+            return .none
+        case .connectedLAN:
             return startWiFiIfAvailable(wifiAvailable, fallback: true)
         case .disconnected, .connectingWiFi, .connectedWiFi, .fallbackWiFi:
             return .none

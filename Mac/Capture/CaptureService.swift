@@ -93,6 +93,13 @@ final class CaptureService {
         dslr.setPreviewFrameRate(framesPerSecond)
     }
 
+    func setPreviewQuality(_ profile: PreviewQualityProfile) {
+        camera.setPreviewQuality(profile)
+        // Sony live-view JPEGs stay at the camera's native dimensions; only its
+        // polling rate follows the selected transport profile.
+        dslr.setPreviewFrameRate(profile.defaultFramesPerSecond)
+    }
+
     func captureStill(for photoIndex: Int) async throws -> CGImage {
         let startedAt = Date()
         do {

@@ -7,6 +7,7 @@ public final class SessionStateMachine {
     public private(set) var phase: BoothPhase = .idle
     public var config: EventConfig = EventConfig()
     public private(set) var keptShots: [Int: Data] = [:]   // photoIndex → JPEG thumbnail
+    public private(set) var reviewImageData: Data? = nil
     public private(set) var acceptedPhotoIndices: Set<Int> = []
     public private(set) var deferredPhotoIndices: Set<Int> = []
     public private(set) var currentSessionID: String = ""
@@ -18,6 +19,7 @@ public final class SessionStateMachine {
     public func startSession(config: EventConfig, sessionID: String? = nil) {
         self.config = config
         self.keptShots = [:]
+        self.reviewImageData = nil
         self.acceptedPhotoIndices = []
         self.deferredPhotoIndices = []
         self.currentSessionID = sessionID ?? UUID().uuidString
@@ -35,6 +37,7 @@ public final class SessionStateMachine {
         self.config = config
         self.currentSessionID = sessionID
         self.keptShots = keptShots
+        self.reviewImageData = nil
         self.acceptedPhotoIndices = Set(keptShots.keys)
         self.deferredPhotoIndices = Set((0..<config.photoCount).filter {
             $0 < nextPhotoIndex && !self.acceptedPhotoIndices.contains($0)
@@ -91,9 +94,10 @@ public final class SessionStateMachine {
         phase = .countdown(photoIndex: idx, secondsRemaining: remaining)
     }
 
-    public func enterReview(photoIndex: Int, thumbnailData: Data) {
+    public func enterReview(photoIndex: Int, thumbnailData: Data, reviewImageData: Data? = nil) {
         guard isCurrentPhoto(photoIndex), canEnterReview else { return }
         keptShots[photoIndex] = thumbnailData
+        self.reviewImageData = reviewImageData ?? thumbnailData
         countdownDeadline = nil
         phase = .review(photoIndex: photoIndex)
     }
@@ -114,6 +118,7 @@ public final class SessionStateMachine {
     public func retakeShot(photoIndex: Int) {
         guard isCurrentPhoto(photoIndex), canRetake else { return }
         keptShots.removeValue(forKey: photoIndex)
+        reviewImageData = nil
         acceptedPhotoIndices.remove(photoIndex)
         deferredPhotoIndices.remove(photoIndex)
         nextPhotoIndex = photoIndex
@@ -136,9 +141,10 @@ public final class SessionStateMachine {
         return next
     }
 
-    public func usePreviousCapture(photoIndex: Int, thumbnailData: Data) {
+    public func usePreviousCapture(photoIndex: Int, thumbnailData: Data, reviewImageData: Data? = nil) {
         guard case .captureRecovery(let current, _) = phase, current == photoIndex else { return }
         keptShots[photoIndex] = thumbnailData
+        self.reviewImageData = reviewImageData ?? thumbnailData
         acceptedPhotoIndices.insert(photoIndex)
         deferredPhotoIndices.remove(photoIndex)
         advanceAfterAcceptance()
@@ -153,6 +159,7 @@ public final class SessionStateMachine {
     public func reset() {
         phase = .idle
         keptShots = [:]
+        reviewImageData = nil
         acceptedPhotoIndices = []
         deferredPhotoIndices = []
         currentSessionID = ""
@@ -167,6 +174,7 @@ public final class SessionStateMachine {
         config: EventConfig,
         phase: BoothPhase,
         keptShots: [Int: Data] = [:],
+        reviewImageData: Data? = nil,
         nextPhotoIndex: Int = 0,
         countdownDeadline: Date? = nil,
         acceptedPhotoIndices: Set<Int>? = nil,
@@ -175,6 +183,7 @@ public final class SessionStateMachine {
         self.config = config
         self.currentSessionID = sessionID
         self.keptShots = keptShots
+        self.reviewImageData = reviewImageData
         self.acceptedPhotoIndices = acceptedPhotoIndices ?? Set(keptShots.keys)
         self.deferredPhotoIndices = deferredPhotoIndices ?? []
         self.nextPhotoIndex = nextPhotoIndex
@@ -188,6 +197,7 @@ public final class SessionStateMachine {
     }
 
     private func advanceAfterAcceptance() {
+        reviewImageData = nil
         guard let next = nextPendingPhoto() else {
             nextPhotoIndex = config.photoCount
             phase = .processing

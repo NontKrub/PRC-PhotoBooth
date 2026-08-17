@@ -6,8 +6,8 @@ struct ReviewView: View {
 
     private var isThai: Bool { vm.selectedLanguage == .thai }
 
-    var thumbnail: CGImage? {
-        guard let data = vm.stateMachine.keptShots[photoIndex],
+    var reviewImage: CGImage? {
+        guard let data = vm.stateMachine.reviewImageData ?? vm.stateMachine.keptShots[photoIndex],
               let src = CGImageSourceCreateWithData(data as CFData, nil)
         else { return nil }
         return CGImageSourceCreateImageAtIndex(src, 0, nil)
@@ -35,10 +35,10 @@ struct ReviewView: View {
                 ZStack {
                     RoundedRectangle(cornerRadius: 18)
                         .fill(Color(white: 0.1))
-                    if let img = thumbnail {
+                    if let img = reviewImage {
                         Image(img, scale: 1, label: Text("Shot"))
                             .resizable()
-                            .scaledToFill()
+                            .scaledToFit()
                             .clipShape(RoundedRectangle(cornerRadius: 18))
                     } else {
                         Image(systemName: "photo")
@@ -46,7 +46,10 @@ struct ReviewView: View {
                             .foregroundStyle(.white.opacity(0.2))
                     }
                 }
-                .frame(width: 380, height: 300)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .aspectRatio(contentMode: .fit)
+                .padding(.horizontal, 36)
+                .containerRelativeFrame(.vertical) { height, _ in height * 0.68 }
                 .shadow(color: .black.opacity(0.5), radius: 24, y: 8)
 
                 Spacer()

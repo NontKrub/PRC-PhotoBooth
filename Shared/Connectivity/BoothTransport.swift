@@ -7,6 +7,30 @@ public enum BoothConnectionState: Codable, Equatable, Sendable {
     case connected(peerName: String)
 }
 
+public enum BoothPathObservation: Equatable, Sendable {
+    case unknown
+    case unavailable
+    case available
+}
+
+public enum BoothLANHandshakeState: Equatable, Sendable {
+    case unknown
+    case waiting
+    case ready
+    case timeout
+    case failed
+}
+
+public struct BoothPreviewDiagnostics: Equatable, Sendable {
+    public var fps: Double = 0
+    public var bytesPerSecond: Double = 0
+    public var framesSubmitted = 0
+    public var framesSent = 0
+    public var framesCoalesced = 0
+
+    public init() {}
+}
+
 @MainActor
 @Observable
 public final class BoothConnectionStatus {
@@ -20,6 +44,12 @@ public final class BoothConnectionStatus {
     public private(set) var fallbackReason: String?
     public private(set) var isLANPathAvailable = false
     public private(set) var isWiFiPathAvailable = false
+    public private(set) var lanPathObservation: BoothPathObservation = .unknown
+    public private(set) var wifiPathObservation: BoothPathObservation = .unknown
+    public private(set) var lanHandshake: BoothLANHandshakeState = .unknown
+    public private(set) var lastNetworkError: String?
+    public private(set) var isPreviewChannelConnected = false
+    public private(set) var previewDiagnostics = BoothPreviewDiagnostics()
 
     public var isFallbackActive: Bool {
         if case .fallbackWiFi = routeState { return true }
@@ -39,7 +69,12 @@ public final class BoothConnectionStatus {
         effectiveNetwork: BoothEffectiveNetworkTransport,
         fallbackReason: String? = nil,
         isLANPathAvailable: Bool = false,
-        isWiFiPathAvailable: Bool = false
+        isWiFiPathAvailable: Bool = false,
+        lanPathObservation: BoothPathObservation? = nil,
+        wifiPathObservation: BoothPathObservation? = nil,
+        lanHandshake: BoothLANHandshakeState? = nil,
+        lastNetworkError: String? = nil,
+        isPreviewChannelConnected: Bool? = nil
     ) {
         self.requestedNetwork = requestedNetwork
         self.state = state
@@ -51,11 +86,39 @@ public final class BoothConnectionStatus {
         self.fallbackReason = fallbackReason
         self.isLANPathAvailable = isLANPathAvailable
         self.isWiFiPathAvailable = isWiFiPathAvailable
+        if let lanPathObservation { self.lanPathObservation = lanPathObservation }
+        if let wifiPathObservation { self.wifiPathObservation = wifiPathObservation }
+        if let lanHandshake { self.lanHandshake = lanHandshake }
+        self.lastNetworkError = lastNetworkError
+        if let isPreviewChannelConnected { self.isPreviewChannelConnected = isPreviewChannelConnected }
     }
 
-    public func publishPathAvailability(lan: Bool, wifi: Bool) {
+    public func publishPathAvailability(
+        lan: Bool,
+        wifi: Bool,
+        lanObserved: Bool = true,
+        wifiObserved: Bool = true
+    ) {
         isLANPathAvailable = lan
         isWiFiPathAvailable = wifi
+        lanPathObservation = lanObserved ? (lan ? .available : .unavailable) : .unknown
+        wifiPathObservation = wifiObserved ? (wifi ? .available : .unavailable) : .unknown
+    }
+
+    public func publishHandshake(_ state: BoothLANHandshakeState) {
+        lanHandshake = state
+    }
+
+    public func publishNetworkError(_ message: String?) {
+        lastNetworkError = message
+    }
+
+    public func publishPreviewChannel(connected: Bool) {
+        isPreviewChannelConnected = connected
+    }
+
+    public func publishPreviewDiagnostics(_ diagnostics: BoothPreviewDiagnostics) {
+        previewDiagnostics = diagnostics
     }
 
     public func publishDisconnected() {

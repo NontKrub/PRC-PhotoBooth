@@ -122,6 +122,15 @@ final class BoothCoordinator {
         }
     }
 
+    var previewQualityPreset: PreviewQualityPreset {
+        get { PreviewQualityPreset(rawValue: UserDefaults.standard.string(forKey: "previewQuality") ?? "auto") ?? .auto }
+        set {
+            UserDefaults.standard.set(newValue.rawValue, forKey: "previewQuality")
+            previewQualityPolicy.setPreset(newValue)
+            applyPreviewQuality()
+        }
+    }
+
     private var currentSession: BoothSession?
     private var currentManifest: SessionManifest?
     private var currentManifestID: String?
@@ -136,6 +145,8 @@ final class BoothCoordinator {
     private let networkMonitor = NWPathMonitor()
     private var lastNetworkSatisfied: Bool?
     private var automaticCloudRetryTask: Task<Void, Never>?
+    private var previewQualityTask: Task<Void, Never>?
+    private var previewQualityPolicy = PreviewQualityPolicy()
     private var lastAutomaticCloudRetryAt: Date?
     private var wasDSLRConnected = false
     private(set) var cameraReconnectCount = 0
@@ -823,14 +834,35 @@ final class BoothCoordinator {
 
     func startCamera() {
         do {
-            capture.setPreviewFrameRate(previewFrameRate.rawValue)
+            previewQualityPolicy.setPreset(previewQualityPreset)
+            applyPreviewQuality()
             try capture.start()
+            startPreviewQualityMonitor()
             capture.onPreviewJPEG = { [weak self] jpeg in
                 guard let self else { return }
                 multipeer.sendPreviewFrame(jpeg)
             }
         } catch {
             errorMessage = "Camera error: \(error.localizedDescription)"
+        }
+    }
+
+    private func applyPreviewQuality() {
+        let profile = previewQualityPolicy.update(
+            effectiveNetwork: connectionStatus.effectiveNetwork
+        )
+        capture.setPreviewQuality(profile)
+        let requestedRate = previewFrameRate.rawValue
+        capture.setPreviewFrameRate(profile.allows60FPS ? requestedRate : min(requestedRate, 30))
+    }
+
+    private func startPreviewQualityMonitor() {
+        previewQualityTask?.cancel()
+        previewQualityTask = Task { @MainActor [weak self] in
+            while !Task.isCancelled {
+                self?.applyPreviewQuality()
+                try? await Task.sleep(for: .seconds(1))
+            }
         }
     }
 
@@ -1326,7 +1358,14 @@ final class BoothCoordinator {
             guard let thumbData = capture.thumbnail(for: filtered) else {
                 throw PhotoFilterError.failedToCreateOutput(stateMachine.config.selectedFilterID)
             }
-            stateMachine.enterReview(photoIndex: photoIndex, thumbnailData: thumbData)
+            let context = nextSessionMessageContext()
+            let reviewData: Data
+            if let context {
+                reviewData = try ReviewImageEncoder.encode(image: filtered, context: context, index: photoIndex)
+            } else {
+                reviewData = thumbData
+            }
+            stateMachine.enterReview(photoIndex: photoIndex, thumbnailData: thumbData, reviewImageData: reviewData)
             reviewDecisionPending = false
             await recordCaptureAttempt(
                 attempt,
@@ -1338,8 +1377,8 @@ final class BoothCoordinator {
             )
             recordOperation(.captureSucceeded, sessionID: currentManifest?.id, photoIndex: photoIndex, duration: Date().timeIntervalSince(attempt.startedAt))
             currentCaptureAttempt = nil
-            if let context = nextSessionMessageContext() {
-                multipeer.sendControl(.shotCaptured(context: context, index: photoIndex, thumbnailData: thumbData))
+            if let context {
+                multipeer.sendControl(.shotCaptured(context: context, index: photoIndex, thumbnailData: reviewData))
             }
             updateStripPreview()
         } catch {
@@ -1555,9 +1594,16 @@ final class BoothCoordinator {
             guard let thumbData = capture.thumbnail(for: filtered) else {
                 throw PhotoFilterError.failedToCreateOutput(stateMachine.config.selectedFilterID)
             }
+            let context = nextSessionMessageContext()
+            let reviewData: Data
+            if let context {
+                reviewData = try ReviewImageEncoder.encode(image: filtered, context: context, index: photoIndex)
+            } else {
+                reviewData = thumbData
+            }
             capture.storeStill(image, for: photoIndex)
             currentFilteredReviewImages[photoIndex] = filtered
-            stateMachine.enterReview(photoIndex: photoIndex, thumbnailData: thumbData)
+            stateMachine.enterReview(photoIndex: photoIndex, thumbnailData: thumbData, reviewImageData: reviewData)
             await recordCaptureAttempt(
                 attempt,
                 photoIndex: photoIndex,
@@ -1568,8 +1614,8 @@ final class BoothCoordinator {
             )
             recordOperation(.captureRecovered, sessionID: currentManifest?.id, photoIndex: photoIndex, duration: Date().timeIntervalSince(attempt.startedAt))
             currentCaptureAttempt = nil
-            if let context = nextSessionMessageContext() {
-                multipeer.sendControl(.shotCaptured(context: context, index: photoIndex, thumbnailData: thumbData))
+            if let context {
+                multipeer.sendControl(.shotCaptured(context: context, index: photoIndex, thumbnailData: reviewData))
             }
             updateStripPreview()
         } catch {
@@ -1680,6 +1726,11 @@ final class BoothCoordinator {
             guard let thumbData = capture.thumbnail(for: filtered) else {
                 throw PhotoFilterError.failedToCreateOutput(stateMachine.config.selectedFilterID)
             }
+            let reviewData = try? ReviewImageEncoder.encode(
+                image: filtered,
+                context: SessionMessageContext(sessionID: stateMachine.currentSessionID, sequence: 0),
+                index: photoIndex
+            )
             let gifs = previous.previousGifFrameFileNames ?? []
             upsertManifestShot(
                 &manifest,
@@ -1699,7 +1750,7 @@ final class BoothCoordinator {
             currentManifest = manifest
             capture.storeStill(image, for: photoIndex)
             currentFilteredReviewImages[photoIndex] = filtered
-            stateMachine.usePreviousCapture(photoIndex: photoIndex, thumbnailData: thumbData)
+            stateMachine.usePreviousCapture(photoIndex: photoIndex, thumbnailData: thumbData, reviewImageData: reviewData)
             await recordCaptureAttempt(
                 CaptureAttempt(),
                 photoIndex: photoIndex,
@@ -2427,7 +2478,7 @@ final class BoothCoordinator {
         }
         let reviewThumbnail: Data? = {
             guard case .review(let index) = phase else { return nil }
-            return stateMachine.keptShots[index]
+            return stateMachine.reviewImageData ?? stateMachine.keptShots[index]
         }()
         let stripThumbnail: Data? = {
             guard case .finished = phase else { return nil }

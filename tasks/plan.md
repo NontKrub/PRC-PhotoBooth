@@ -576,3 +576,18 @@ Keep sizing rules in a pure helper and test:
 - Synthetic square and wide images.
 
 The full image must be visible, significantly larger than 460×360, and clear enough to inspect face/clothing detail.
+
+## v1.4 Operator Experience & Connectivity
+
+Starting point: `feature/v1.3-reliability-hardening` at `ef8a9556bced1920615042a27590e9811be50a69`.
+
+Implementation slices:
+
+1. Fix wired LAN attempt state; add bounded production network/preview diagnostics and route tests.
+2. Add a bounded dedicated review-image encoder; keep historical thumbnails small; make iPad Review responsive; add preview-quality policy tests.
+3. Use macOS system printing only; reorganize Settings with top navigation and move PIN reset to Security.
+4. Make Operations collapsible.
+5. Add native Event Setup and frame-editor multi-selection, batch deletion, group operations, keyboard actions, and undo/redo.
+6. Bump both targets to 1.4 through `project.yml`, regenerate, run all builds/tests, manually test with Computer Use and physical iPad when possible, clean temporary test events, and review the final diff.
+
+Acceptance gates: no initial Ethernet fallback, framed review messages stay below the 2 MiB payload limit, historical sync remains small, Mac/iPad/tests build separately, `git diff --check` is clean, and all hardware-only limits are reported honestly.

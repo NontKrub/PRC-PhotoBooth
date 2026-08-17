@@ -4,15 +4,19 @@ import CoreGraphics
 import CoreImage
 import CoreImage.CIFilterBuiltins
 
-private enum PreviewStreamFormat {
-    // 640 px is noticeably soft when it fills a Retina iPad. Keep this below
-    // the camera's full frame while preserving enough detail for a large kiosk.
-    static let maxDimension: CGFloat = 1_280
-    static let jpegQuality: CGFloat = 0.7
-}
-
 private final class ThreadSafeCIContext: @unchecked Sendable {
     let value = CIContext(options: [.useSoftwareRenderer: false])
+}
+
+private final class PreviewFormatBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var profile = PreviewQualityProfile.standard
+
+    func get() -> PreviewQualityProfile { lock.withLock { profile } }
+
+    func set(_ profile: PreviewQualityProfile) {
+        lock.withLock { self.profile = profile }
+    }
 }
 
 private final class PreviewFrameThrottle: @unchecked Sendable {
@@ -73,6 +77,7 @@ final class AVFoundationCameraSource: NSObject, CameraSource {
     // Keep preview updates at the selected rate, independent of the camera's
     // native frame rate (which can be 30 or 60 FPS).
     nonisolated private let previewFrameThrottle = PreviewFrameThrottle(maxFPS: 30)
+    nonisolated private let previewFormat = PreviewFormatBox()
 
     private let sampleQueue = DispatchQueue(label: "com.nont.camera.sample", qos: .userInitiated)
 
@@ -93,13 +98,22 @@ final class AVFoundationCameraSource: NSObject, CameraSource {
 
     func setPreviewFrameRate(_ framesPerSecond: Int) {
         requestedPreviewFramesPerSecond = max(1, framesPerSecond)
-        previewFrameThrottle.setMaxFPS(Double(requestedPreviewFramesPerSecond))
+        let maxFPS = previewFormat.get().allows60FPS ? 60 : 30
+        previewFrameThrottle.setMaxFPS(Double(min(requestedPreviewFramesPerSecond, maxFPS)))
+        configurePreviewFrameRate()
+    }
+
+    func setPreviewQuality(_ profile: PreviewQualityProfile) {
+        previewFormat.set(profile)
+        previewFrameThrottle.setMaxFPS(Double(min(requestedPreviewFramesPerSecond, profile.allows60FPS ? 60 : 30)))
         configurePreviewFrameRate()
     }
 
     private func configurePreviewFrameRate() {
         guard let device = activeDevice else { return }
-        let requestedRate = Double(requestedPreviewFramesPerSecond)
+        let maxFPS = previewFormat.get().allows60FPS ? 60 : 30
+        let effectiveRequestedFramesPerSecond = min(requestedPreviewFramesPerSecond, maxFPS)
+        let requestedRate = Double(effectiveRequestedFramesPerSecond)
         let preferredFormat = device.formats
             .filter { format in
                 format.videoSupportedFrameRateRanges.contains {
@@ -108,7 +122,7 @@ final class AVFoundationCameraSource: NSObject, CameraSource {
             }
             .filter { format in
                 let dimensions = CMVideoFormatDescriptionGetDimensions(format.formatDescription)
-                return max(dimensions.width, dimensions.height) >= Int32(PreviewStreamFormat.maxDimension)
+                return max(dimensions.width, dimensions.height) >= Int32(self.previewFormat.get().maxDimension)
             }
             .min { lhs, rhs in
                 let l = CMVideoFormatDescriptionGetDimensions(lhs.formatDescription)
@@ -118,14 +132,14 @@ final class AVFoundationCameraSource: NSObject, CameraSource {
 
         guard let format = preferredFormat else {
             NSLog("[Camera] No %@ FPS format at %@ px or higher; keeping the active format.",
-                  String(requestedPreviewFramesPerSecond), String(Int(PreviewStreamFormat.maxDimension)))
+                  String(effectiveRequestedFramesPerSecond), String(previewFormat.get().maxDimension))
             return
         }
 
         do {
             try device.lockForConfiguration()
             device.activeFormat = format
-            let duration = CMTime(value: 1, timescale: CMTimeScale(requestedPreviewFramesPerSecond))
+            let duration = CMTime(value: 1, timescale: CMTimeScale(effectiveRequestedFramesPerSecond))
             device.activeVideoMinFrameDuration = duration
             device.activeVideoMaxFrameDuration = duration
             device.unlockForConfiguration()
@@ -256,10 +270,11 @@ extension AVFoundationCameraSource: AVCaptureVideoDataOutputSampleBufferDelegate
         guard previewFrameThrottle.shouldPublishPreview() else { return }
 
         let ciImage = CIImage(cvPixelBuffer: pixelBuffer)
-        let scale = min(1.0, PreviewStreamFormat.maxDimension / max(ciImage.extent.width, ciImage.extent.height))
+        let profile = previewFormat.get()
+        let scale = min(1.0, CGFloat(profile.maxDimension) / max(ciImage.extent.width, ciImage.extent.height))
         let scaled = ciImage.transformed(by: CGAffineTransform(scaleX: scale, y: scale))
         guard let cgImage = ciContext.value.createCGImage(scaled, from: scaled.extent),
-              let jpeg = jpegData(from: cgImage, quality: PreviewStreamFormat.jpegQuality)
+              let jpeg = jpegData(from: cgImage, quality: CGFloat(profile.jpegQuality))
         else { return }
 
         Task { @MainActor [weak self] in self?.onPreviewJPEG?(jpeg) }

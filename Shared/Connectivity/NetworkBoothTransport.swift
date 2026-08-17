@@ -91,12 +91,12 @@ public final class NetworkBoothTransport: BoothTransport {
     private var didReceiveWiFiPathUpdate = false
     private var isLANPathAvailable = false
     private var isWiFiPathAvailable = false
-#if DEBUG
     private var previewMetricsStartedAt = Date()
     private var previewFramesSubmitted = 0
     private var previewFramesSent = 0
-    private var previewCoalescedAtLastMetrics = 0
-#endif
+    private var previewBytesSent = 0
+    private var lanHandshakeState: BoothLANHandshakeState = .unknown
+    private var lastNetworkError: String?
 
     public init(
         role: DeviceRole,
@@ -146,11 +146,9 @@ public final class NetworkBoothTransport: BoothTransport {
 
     public func sendPreviewFrame(_ jpegData: Data) {
         previewFrames.enqueue(jpegData)
-#if DEBUG
         previewFramesSubmitted += 1
-#endif
         flushPreviewFrame()
-        logPreviewMetricsIfNeeded()
+        publishPreviewMetricsIfNeeded()
     }
 
     private enum PathKind {
@@ -216,6 +214,10 @@ public final class NetworkBoothTransport: BoothTransport {
             print("[NetworkRoute] Wired Ethernet path available")
             return
         }
+        if case .connectingLAN = routeMachine.state {
+            // Initial monitor samples can race route establishment.
+            return
+        }
         if role == .iPad || requestedPreference == .lan {
             activateWiFiFallback(reason: "LAN unavailable")
         }
@@ -272,6 +274,8 @@ public final class NetworkBoothTransport: BoothTransport {
         guard activeInterface == .wiredEthernet else { return }
         lanHandshakeTask?.cancel()
         lanHandshakeTask = nil
+        lanHandshakeState = .timeout
+        lastNetworkError = reason
         print("[NetworkRoute] LAN handshake timed out after \(Self.lanHandshakeTimeout)s")
         let command = routeMachine.lanHandshakeTimedOut(wifiAvailable: pathAvailable(.wifi))
         if command == .unavailable {
@@ -294,6 +298,8 @@ public final class NetworkBoothTransport: BoothTransport {
         activeInterface = interface
         fallbackActive = fallback
         fallbackReason = fallback ? (reason ?? "LAN unavailable") : nil
+        lanHandshakeState = interface == .wiredEthernet ? .waiting : .unknown
+        lastNetworkError = nil
         connectionState = role == .mac ? .disconnected : .connecting
         publishStatus()
 
@@ -722,15 +728,22 @@ public final class NetworkBoothTransport: BoothTransport {
                 switch state {
                 case .ready:
                     if channel == .control {
+                        if self.activeInterface == .wiredEthernet {
+                            self.lanHandshakeState = .waiting
+                        }
                         self.connectionState = .connecting
                         self.publishStatus()
                         self.receive(on: connection, channel: channel)
                         self.sendTransportHello()
                     } else {
+                        self.connectionStatus.publishPreviewChannel(connected: true)
                         self.receive(on: connection, channel: channel)
                         self.sendPreviewHello(on: connection)
                     }
                 case .failed, .cancelled:
+                    if channel == .preview {
+                        self.connectionStatus.publishPreviewChannel(connected: false)
+                    }
                     self.connectionDidClose(connection, channel: channel)
                 default:
                     break
@@ -808,6 +821,8 @@ public final class NetworkBoothTransport: BoothTransport {
             reconnectAttempt = 0
             lastControlMessageAt = Date()
             if activeInterface == .wiredEthernet {
+                lanHandshakeState = .ready
+                lastNetworkError = nil
                 _ = routeMachine.lanHandshakeSucceeded(peer: peerName)
             } else {
                 _ = routeMachine.wifiConnected(peer: peerName, fallback: fallbackActive)
@@ -925,9 +940,8 @@ public final class NetworkBoothTransport: BoothTransport {
             if let next { sendPreviewFrame(next, on: connection) }
             return
         }
-#if DEBUG
         previewFramesSent += 1
-#endif
+        previewBytesSent += jpeg.count
         connection.send(content: frame, completion: .contentProcessed { [weak self] error in
             Task { @MainActor [weak self] in
                 guard let self, self.isCurrent(connection, channel: .preview) else { return }
@@ -940,29 +954,37 @@ public final class NetworkBoothTransport: BoothTransport {
                 if let next = self.previewFrames.completeWrite() {
                     self.sendPreviewFrame(next, on: connection)
                 }
-                self.logPreviewMetricsIfNeeded()
+                self.publishPreviewMetricsIfNeeded()
             }
         })
     }
 
-    private func logPreviewMetricsIfNeeded() {
-#if DEBUG
+    private func publishPreviewMetricsIfNeeded() {
         let now = Date()
-        guard now.timeIntervalSince(previewMetricsStartedAt) >= 2 else { return }
+        let elapsed = now.timeIntervalSince(previewMetricsStartedAt)
+        guard elapsed >= 1 else { return }
+        var diagnostics = BoothPreviewDiagnostics()
+        diagnostics.fps = Double(previewFramesSent) / elapsed
+        diagnostics.bytesPerSecond = Double(previewBytesSent) / elapsed
+        diagnostics.framesSubmitted = previewFramesSubmitted
+        diagnostics.framesSent = previewFramesSent
+        diagnostics.framesCoalesced = previewFrames.coalescedFrameCount
+        connectionStatus.publishPreviewDiagnostics(diagnostics)
+#if DEBUG
         let state = previewIdentityVerified ? "ready" : "waiting"
         NSLog(
             "[Network] Preview state=%@ submitted=%d sent=%d coalesced=%d control=%@",
             state,
             previewFramesSubmitted,
             previewFramesSent,
-            max(0, previewFrames.coalescedFrameCount - previewCoalescedAtLastMetrics),
+            previewFrames.coalescedFrameCount,
             connectionStateLabel
         )
+#endif
         previewMetricsStartedAt = now
         previewFramesSubmitted = 0
         previewFramesSent = 0
-        previewCoalescedAtLastMetrics = previewFrames.coalescedFrameCount
-#endif
+        previewBytesSent = 0
     }
 
     private var connectionStateLabel: String {
@@ -989,6 +1011,7 @@ public final class NetworkBoothTransport: BoothTransport {
 
     private func connectionDidClose(_ connection: NWConnection?, channel: BoothTransportChannel, reason: String? = nil) {
         if let reason { print("[Network] \(channel) disconnected: \(reason)") }
+        if let reason { lastNetworkError = reason }
         if channel == .control {
             guard let connection, connection === controlConnection else { return }
             if role == .iPad {
@@ -1007,6 +1030,7 @@ public final class NetworkBoothTransport: BoothTransport {
             previewEndpointDescription = nil
             previewFrames.reset()
             resetPreviewIdentity()
+            connectionStatus.publishPreviewChannel(connected: false)
             if role == .iPad {
                 previewBrowser?.cancel()
                 previewBrowser = nil
@@ -1037,12 +1061,24 @@ public final class NetworkBoothTransport: BoothTransport {
             effectiveNetwork: routeMachine.effectiveTransport,
             fallbackReason: fallbackActive ? fallbackReason : nil,
             isLANPathAvailable: isLANPathAvailable,
-            isWiFiPathAvailable: isWiFiPathAvailable
+            isWiFiPathAvailable: isWiFiPathAvailable,
+            lanPathObservation: didReceiveLANPathUpdate
+                ? (isLANPathAvailable ? .available : .unavailable) : .unknown,
+            wifiPathObservation: didReceiveWiFiPathUpdate
+                ? (isWiFiPathAvailable ? .available : .unavailable) : .unknown,
+            lanHandshake: lanHandshakeState,
+            lastNetworkError: lastNetworkError,
+            isPreviewChannelConnected: previewConnection != nil
         )
     }
 
     private func publishPathAvailability() {
-        connectionStatus.publishPathAvailability(lan: isLANPathAvailable, wifi: isWiFiPathAvailable)
+        connectionStatus.publishPathAvailability(
+            lan: isLANPathAvailable,
+            wifi: isWiFiPathAvailable,
+            lanObserved: didReceiveLANPathUpdate,
+            wifiObserved: didReceiveWiFiPathUpdate
+        )
     }
 
     private func resetPreviewConnection() {

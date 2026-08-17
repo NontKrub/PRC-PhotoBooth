@@ -45,6 +45,37 @@ struct NetworkRouteTests {
         #expect(route.state == .connectingWiFi)
     }
 
+    @Test("Initial Ethernet path false does not abort a probing LAN attempt")
+    func initialEthernetFalseKeepsLANProbeAlive() {
+        var route = BoothNetworkRouteMachine(preference: .lan)
+        _ = route.start(lanAvailable: true, wifiAvailable: true)
+
+        #expect(route.lanPathChanged(isAvailable: false, wifiAvailable: true) == .none)
+        #expect(route.state == .connectingLAN)
+    }
+
+    @Test("Delayed Ethernet availability can complete the LAN handshake")
+    func delayedEthernetAvailabilityCompletesHandshake() {
+        var route = BoothNetworkRouteMachine(preference: .lan)
+        _ = route.start(lanAvailable: true, wifiAvailable: true)
+
+        #expect(route.lanPathChanged(isAvailable: false, wifiAvailable: true) == .none)
+        #expect(route.lanPathChanged(isAvailable: true, wifiAvailable: true) == .none)
+        _ = route.lanHandshakeSucceeded(peer: "iPad")
+
+        #expect(route.state == .connectedLAN(peer: "iPad"))
+    }
+
+    @Test("Established Ethernet loss falls back to Wi-Fi")
+    func establishedEthernetLossFallsBack() {
+        var route = BoothNetworkRouteMachine(preference: .lan)
+        _ = route.start(lanAvailable: true, wifiAvailable: true)
+        _ = route.lanHandshakeSucceeded(peer: "iPad")
+
+        #expect(route.lanPathChanged(isAvailable: false, wifiAvailable: true) == .startWiFi(fallback: true))
+        #expect(route.state == .connectingWiFi)
+    }
+
     @Test("No LAN and no Wi-Fi becomes unavailable")
     func noNetworkIsUnavailable() {
         var route = BoothNetworkRouteMachine(preference: .lan)
