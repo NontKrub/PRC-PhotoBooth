@@ -44,6 +44,7 @@ public struct EventConfig: Codable, Sendable, Equatable {
     public var experienceRevision: String
     public var eventGalleryPath: String?
     public var qrCodeElements: [SharedQRCodeElement]
+    public var gifQualityPreset: GIFQualityPreset
 
     public init(
         eventID: String = UUID().uuidString,
@@ -60,7 +61,8 @@ public struct EventConfig: Codable, Sendable, Equatable {
         posePrompts: [ResolvedPosePrompt] = [],
         experienceRevision: String = "",
         eventGalleryPath: String? = nil,
-        qrCodeElements: [SharedQRCodeElement] = []
+        qrCodeElements: [SharedQRCodeElement] = [],
+        gifQualityPreset: GIFQualityPreset = .balanced
     ) {
         self.eventID = eventID
         self.eventName = eventName
@@ -77,11 +79,12 @@ public struct EventConfig: Codable, Sendable, Equatable {
         self.experienceRevision = experienceRevision
         self.eventGalleryPath = eventGalleryPath
         self.qrCodeElements = qrCodeElements
+        self.gifQualityPreset = gifQualityPreset
     }
 
     private enum CodingKeys: String, CodingKey {
         case eventID, eventName, photoCount, countdownSeconds, canvasWidth, canvasHeight, slots
-        case templateID, templateName, selectedFilterID, customerLanguage, posePrompts, experienceRevision, eventGalleryPath, qrCodeElements
+        case templateID, templateName, selectedFilterID, customerLanguage, posePrompts, experienceRevision, eventGalleryPath, qrCodeElements, gifQualityPreset
     }
 
     public init(from decoder: Decoder) throws {
@@ -101,6 +104,7 @@ public struct EventConfig: Codable, Sendable, Equatable {
         experienceRevision = try container.decodeIfPresent(String.self, forKey: .experienceRevision) ?? ""
         eventGalleryPath = try container.decodeIfPresent(String.self, forKey: .eventGalleryPath)
         qrCodeElements = try container.decodeIfPresent([SharedQRCodeElement].self, forKey: .qrCodeElements) ?? []
+        gifQualityPreset = try container.decodeIfPresent(GIFQualityPreset.self, forKey: .gifQualityPreset) ?? .balanced
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -120,6 +124,7 @@ public struct EventConfig: Codable, Sendable, Equatable {
         try container.encode(experienceRevision, forKey: .experienceRevision)
         try container.encodeIfPresent(eventGalleryPath, forKey: .eventGalleryPath)
         try container.encode(qrCodeElements, forKey: .qrCodeElements)
+        try container.encode(gifQualityPreset, forKey: .gifQualityPreset)
     }
 }
 

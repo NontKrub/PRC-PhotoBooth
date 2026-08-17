@@ -1,5 +1,4 @@
 import Foundation
-import Network
 import Observation
 import CoreImage
 import CoreGraphics
@@ -27,28 +26,25 @@ final class iPadViewModel {
     var stripThumbImage: CGImage?
     var isMirrored = false
     var isBoothPaused = false
-    private(set) var previewTransport: PreviewTransport
 
-    // USB preview (over cable)
-    private(set) var usbPreviewConnected = false
-    private var usbBrowser: NWBrowser?
-    private var usbConnection: NWConnection?
-    private var usbEndpoints: [NWEndpoint] = []
-    private var usbEndpointIndex = 0
-    private var usbReconnectTask: Task<Void, Never>?
-    private var recvBuf = Data()
     private var pendingPreviewJPEG: Data?
     private var previewDecodeTask: Task<Void, Never>?
+    private var previewStaleTask: Task<Void, Never>?
+    private var lastPreviewFrameAt: Date?
+#if DEBUG
+    private var previewMetricsStartedAt = Date()
+    private var previewFramesReceived = 0
+    private var previewFramesCoalesced = 0
+    private var previewFramesDisplayed = 0
+#endif
     private var sessionRequestTimeoutTask: Task<Void, Never>?
     private var countdownTask: Task<Void, Never>?
+    private var sessionMessageGate = SessionMessageGate()
 #if DEBUG
     private(set) var demoKioskMode = false
 #endif
 
     init() {
-        previewTransport = PreviewTransport(
-            rawValue: UserDefaults.standard.string(forKey: "iPadPreviewTransport") ?? ""
-        ) ?? .wireless
 #if DEBUG
         if ProcessInfo.processInfo.arguments.contains("--legacy-multipeer") {
             multipeer = MultipeerService(role: .iPad)
@@ -61,7 +57,7 @@ final class iPadViewModel {
         stateMachine = SessionStateMachine()
         setupHandlers()
         multipeer.start()
-        startUSBPreviewClient()
+        startPreviewStaleMonitor()
 #if DEBUG
         if ProcessInfo.processInfo.arguments.contains("--demo-kiosk") {
             demoKioskMode = true
@@ -77,15 +73,58 @@ final class iPadViewModel {
             self?.handleMessage(msg)
         }
         multipeer.onPreviewFrame = { [weak self] jpegData in
-            self?.updatePreview(jpegData)
+            guard let self else { return }
+            self.updatePreview(jpegData)
         }
+    }
+
+    private var currentSessionMessageContext: SessionMessageContext? {
+        guard let sessionID = sessionMessageGate.currentSessionID else { return nil }
+        return SessionMessageContext(
+            sessionID: sessionID,
+            sequence: sessionMessageGate.latestAcceptedSequence
+        )
+    }
+
+    private func accept(_ context: SessionMessageContext, message: String) -> Bool {
+        guard sessionMessageGate.accept(context) else {
+#if DEBUG
+            NSLog(
+                "[Session] Ignored stale %@: session=%@ current=%@ sequence=%llu latest=%llu",
+                message,
+                context.sessionID,
+                sessionMessageGate.currentSessionID ?? "none",
+                context.sequence,
+                sessionMessageGate.latestAcceptedSequence
+            )
+#endif
+            return false
+        }
+        return true
+    }
+
+    private func acceptSessionChange(_ context: SessionMessageContext, message: String) -> Bool {
+        guard sessionMessageGate.currentSessionID == nil || context.sequence > sessionMessageGate.latestAcceptedSequence else {
+#if DEBUG
+            NSLog(
+                "[Session] Ignored stale %@: session=%@ current=%@ sequence=%llu latest=%llu",
+                message,
+                context.sessionID,
+                sessionMessageGate.currentSessionID ?? "none",
+                context.sequence,
+                sessionMessageGate.latestAcceptedSequence
+            )
+#endif
+            return false
+        }
+        sessionMessageGate.synchronize(sessionID: context.sessionID, sequence: context.sequence)
+        return true
     }
 
     private func handleMessage(_ msg: Message) {
         switch msg {
         case .hello(let role) where role == .mac:
             multipeer.sendControl(.hello(role: .iPad))
-            multipeer.sendControl(.setPreviewTransport(transport: previewTransport))
 
         case .sessionSync(let snapshot):
             applySessionSync(snapshot)
@@ -122,7 +161,9 @@ final class iPadViewModel {
         case .setMirrored(let mirrored):
             isMirrored = mirrored
 
-        case .sessionStart:
+        case .sessionStart(let context):
+            guard let context,
+                  acceptSessionChange(context, message: "sessionStart") else { break }
             cancelCountdown()
             isSessionRequestPending = false
             reviewDecisionPending = false
@@ -137,9 +178,10 @@ final class iPadViewModel {
             recoveryActionPending = false
             sessionRequestTimeoutTask?.cancel()
             sessionRequestError = reason
-            stateMachine.transition(to: .selectingExperience)
+            stateMachine.beginSelectingExperience()
 
-        case .sessionPrepared(let config, let presentation):
+        case .sessionPrepared(let config, let presentation, let context):
+            guard acceptSessionChange(context, message: "sessionPrepared") else { break }
             cancelCountdown()
             isSessionRequestPending = false
             reviewDecisionPending = false
@@ -155,25 +197,33 @@ final class iPadViewModel {
                 }
             }
 
-        case .beginCountdown(let index, let seconds):
+        case .beginCountdown(let context, let descriptor):
+            guard accept(context, message: "beginCountdown") else { break }
             recoveryActionPending = false
             reviewDecisionPending = false
-            stateMachine.transition(to: .countdown(photoIndex: index, secondsRemaining: seconds))
-            runCountdown(photoIndex: index, totalSeconds: seconds)
+            stateMachine.applyAuthoritativePhase(
+                .countdown(photoIndex: descriptor.photoIndex, secondsRemaining: max(0, Int(ceil(descriptor.captureAt.timeIntervalSinceNow)))),
+                countdownDeadline: descriptor.captureAt
+            )
+            runCountdown(descriptor)
 
-        case .shotCaptured(let index, let thumbData):
+        case .shotCaptured(let context, let index, let thumbData):
+            guard accept(context, message: "shotCaptured") else { break }
             cancelCountdown()
             recoveryActionPending = false
             reviewDecisionPending = false
+            stateMachine.applyAuthoritativePhase(.captured(photoIndex: index))
             stateMachine.enterReview(photoIndex: index, thumbnailData: thumbData)
 
-        case .captureRecovery(let index, let failure):
+        case .captureRecovery(let context, let index, let failure):
+            guard accept(context, message: "captureRecovery") else { break }
             cancelCountdown()
             recoveryActionPending = false
             reviewDecisionPending = false
-            stateMachine.transition(to: .captureRecovery(photoIndex: index, failure: failure))
+            stateMachine.applyAuthoritativePhase(.captureRecovery(photoIndex: index, failure: failure))
 
-        case .reviewDecision(let action):
+        case .reviewDecision(let context, let action):
+            guard accept(context, message: "reviewDecision") else { break }
             guard case .review(let idx) = stateMachine.phase else { break }
             let customerAction: CustomerDisplayAction = action == .keep
                 ? .keep(photoIndex: idx)
@@ -185,14 +235,20 @@ final class iPadViewModel {
             case .retake: stateMachine.retakeShot(photoIndex: idx)
             }
 
-        case .sessionFinished(let qr, let stripData, _):
+        case .sessionFinished(let context, let qr, let stripData, _):
+            guard accept(context, message: "sessionFinished") else { break }
             cancelCountdown()
             recoveryActionPending = false
             reviewDecisionPending = false
             if let data = stripData { stripThumbImage = Self.cgImage(from: data) }
-            stateMachine.finishSession(qrPayload: qr)
+            stateMachine.applyAuthoritativePhase(.finished(qrPayload: qr))
 
-        case .operatorOverride(let action):
+        case .operatorOverride(let context, let action):
+            if let context {
+                guard accept(context, message: "operatorOverride") else { break }
+            } else if !stateMachine.currentSessionID.isEmpty {
+                break
+            }
             if case .cancelSession = action { cancelCountdown() }
             stateMachine.operatorOverride(action)
 
@@ -202,6 +258,7 @@ final class iPadViewModel {
 
     private func applySessionSync(_ snapshot: SessionSyncSnapshot) {
         cancelCountdown()
+        sessionMessageGate.synchronize(sessionID: snapshot.sessionID, sequence: snapshot.sequence)
         eventConfig = snapshot.config
         stateMachine.config = snapshot.config
         selectedLanguage = snapshot.presentation?.language ?? snapshot.config.customerLanguage
@@ -219,36 +276,42 @@ final class iPadViewModel {
             stateMachine.reset()
             return
         }
-        stateMachine.startSession(config: snapshot.config, sessionID: sessionID)
-        switch snapshot.phase {
-        case .review(let index):
-            if let data = snapshot.reviewThumbnailData {
-                stateMachine.enterReview(photoIndex: index, thumbnailData: data)
-            } else {
-                stateMachine.transition(to: snapshot.phase)
-            }
-        case .finished:
-            if let data = snapshot.stripThumbnailData { stripThumbImage = Self.cgImage(from: data) }
-            stateMachine.transition(to: snapshot.phase)
-        case .countdown(let index, let seconds):
-            stateMachine.transition(to: snapshot.phase)
-            runCountdown(photoIndex: index, totalSeconds: seconds)
-        default:
-            stateMachine.transition(to: snapshot.phase)
+        var keptShots = snapshot.keptShots
+        if case .review(let index) = snapshot.phase,
+           let data = snapshot.reviewThumbnailData {
+            keptShots[index] = data
+        }
+        stateMachine.applyAuthoritativeSnapshot(
+            sessionID: sessionID,
+            config: snapshot.config,
+            phase: snapshot.phase,
+            keptShots: keptShots,
+            nextPhotoIndex: snapshot.nextPhotoIndex,
+            countdownDeadline: snapshot.countdown?.captureAt,
+            acceptedPhotoIndices: Set(snapshot.acceptedPhotoIndices),
+            deferredPhotoIndices: Set(snapshot.deferredPhotoIndices)
+        )
+        if case .finished = snapshot.phase,
+           let data = snapshot.stripThumbnailData {
+            stripThumbImage = Self.cgImage(from: data)
+        }
+        if let countdown = snapshot.countdown {
+            runCountdown(countdown)
         }
     }
 
-    private func runCountdown(photoIndex: Int, totalSeconds: Int) {
+    private func runCountdown(_ descriptor: CountdownDescriptor) {
         countdownTask?.cancel()
         countdownTask = Task { @MainActor [weak self] in
             guard let self else { return }
-            for remaining in stride(from: totalSeconds, through: 1, by: -1) {
-                guard !Task.isCancelled else { return }
-                stateMachine.transition(to: .countdown(photoIndex: photoIndex, secondsRemaining: remaining))
-                try? await Task.sleep(for: .seconds(1))
+            while !Task.isCancelled {
+                stateMachine.updateCountdown(at: Date())
+                guard descriptor.captureAt > Date() else {
+                    countdownTask = nil
+                    return
+                }
+                try? await Task.sleep(for: .milliseconds(100))
             }
-            guard !Task.isCancelled else { return }
-            self.countdownTask = nil
         }
     }
 
@@ -258,21 +321,68 @@ final class iPadViewModel {
     }
 
     private func updatePreview(_ jpegData: Data) {
+        if pendingPreviewJPEG != nil, previewDecodeTask != nil {
+#if DEBUG
+            previewFramesCoalesced += 1
+#endif
+        }
         pendingPreviewJPEG = jpegData
+        lastPreviewFrameAt = Date()
+#if DEBUG
+        previewFramesReceived += 1
+#endif
         guard previewDecodeTask == nil else { return }
 
         previewDecodeTask = Task { @MainActor [weak self] in
             guard let self else { return }
+            defer { self.previewDecodeTask = nil }
             while let jpeg = self.pendingPreviewJPEG {
                 self.pendingPreviewJPEG = nil
                 let image = await Task.detached(priority: .userInitiated) {
                     Self.cgImage(from: jpeg)
                 }.value
                 guard !Task.isCancelled else { return }
-                self.latestPreviewImage = image
+                if let image {
+                    self.latestPreviewImage = image
+#if DEBUG
+                    self.previewFramesDisplayed += 1
+#endif
+                }
             }
-            self.previewDecodeTask = nil
+            self.logPreviewMetricsIfNeeded()
         }
+    }
+
+    private func startPreviewStaleMonitor() {
+        previewStaleTask?.cancel()
+        previewStaleTask = Task { @MainActor [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .milliseconds(500))
+                guard let self, !Task.isCancelled else { return }
+                guard let lastPreviewFrameAt = self.lastPreviewFrameAt,
+                      Date().timeIntervalSince(lastPreviewFrameAt) > 3 else { continue }
+                self.lastPreviewFrameAt = nil
+                self.latestPreviewImage = nil
+            }
+        }
+    }
+
+    private func logPreviewMetricsIfNeeded() {
+#if DEBUG
+        let now = Date()
+        guard now.timeIntervalSince(previewMetricsStartedAt) >= 2 else { return }
+        NSLog(
+            "[iPad] Preview state=%@ received=%d coalesced=%d displayed=%d",
+            String(describing: multipeer.connectionState),
+            previewFramesReceived,
+            previewFramesCoalesced,
+            previewFramesDisplayed
+        )
+        previewMetricsStartedAt = now
+        previewFramesReceived = 0
+        previewFramesCoalesced = 0
+        previewFramesDisplayed = 0
+#endif
     }
 
     private nonisolated static func cgImage(from data: Data) -> CGImage? {
@@ -304,7 +414,7 @@ final class iPadViewModel {
 #endif
         guard let catalog = experienceCatalog else {
             isSessionRequestPending = true
-            multipeer.sendControl(.sessionStart)
+            multipeer.sendControl(.sessionStart(context: nil))
             return
         }
         guard let templateID = selectedTemplateID,
@@ -344,7 +454,7 @@ final class iPadViewModel {
     func beginExperienceSelection() {
         guard experienceCatalog != nil else { return }
         applyCatalogDefaults(preserveLanguage: true)
-        stateMachine.transition(to: .selectingExperience)
+        stateMachine.beginSelectingExperience()
     }
 
     func selectTemplate(_ id: String) {
@@ -381,7 +491,8 @@ final class iPadViewModel {
             templateID: templateID,
             templateName: option?.name ?? LocalizedText(),
             selectedFilterID: filterID,
-            customerLanguage: selectedLanguage
+            customerLanguage: selectedLanguage,
+            gifQualityPreset: eventConfig.gifQualityPreset
         )
         stateMachine.startSession(config: eventConfig)
     }
@@ -419,9 +530,10 @@ final class iPadViewModel {
             return
         }
 #endif
+        guard let context = currentSessionMessageContext else { return }
         reviewDecisionPending = true
         cancelCountdown()
-        multipeer.sendControl(.reviewDecision(action: .keep))
+        multipeer.sendControl(.reviewDecision(context: context, action: .keep))
         stateMachine.keepShot(photoIndex: photoIndex)
     }
 
@@ -435,9 +547,10 @@ final class iPadViewModel {
             return
         }
 #endif
+        guard let context = currentSessionMessageContext else { return }
         reviewDecisionPending = true
         cancelCountdown()
-        multipeer.sendControl(.reviewDecision(action: .retake))
+        multipeer.sendControl(.reviewDecision(context: context, action: .retake))
         stateMachine.retakeShot(photoIndex: photoIndex)
     }
 
@@ -467,8 +580,9 @@ final class iPadViewModel {
         case .usePrevious(let index): customerAction = .usePreviousCapture(photoIndex: index)
         }
         guard CustomerDisplayWorkflow.canApply(customerAction, in: stateMachine.phase) else { return }
+        guard let context = currentSessionMessageContext else { return }
         recoveryActionPending = true
-        multipeer.sendControl(.captureRecoveryAction(action: action))
+        multipeer.sendControl(.captureRecoveryAction(context: context, action: action))
     }
 
     func customerDone() {
@@ -477,12 +591,6 @@ final class iPadViewModel {
         recoveryActionPending = false
         reviewDecisionPending = false
         stateMachine.reset()
-    }
-
-    func selectPreviewTransport(_ transport: PreviewTransport) {
-        previewTransport = transport
-        UserDefaults.standard.set(transport.rawValue, forKey: "iPadPreviewTransport")
-        multipeer.sendControl(.setPreviewTransport(transport: transport))
     }
 
 #if DEBUG
@@ -496,17 +604,24 @@ final class iPadViewModel {
     }
 
     private func scheduleDemoShot(photoIndex: Int) {
+        let descriptor = CountdownDescriptor(
+            photoIndex: photoIndex,
+            captureAt: Date().addingTimeInterval(TimeInterval(eventConfig.countdownSeconds))
+        )
+        stateMachine.beginCountdown(photoIndex: photoIndex, captureAt: descriptor.captureAt)
+        runCountdown(descriptor)
         Task { @MainActor [weak self] in
-            try? await Task.sleep(for: .seconds(2))
-            guard let self, self.stateMachine.phase == .countdown(photoIndex: photoIndex, secondsRemaining: self.eventConfig.countdownSeconds)
-                || self.stateMachine.phase == .readyToStart else { return }
+            let nanos = UInt64(max(0, descriptor.captureAt.timeIntervalSinceNow) * 1_000_000_000)
+            try? await Task.sleep(nanoseconds: nanos)
+            guard let self,
+                  case .countdown(let currentIndex, _) = self.stateMachine.phase,
+                  currentIndex == photoIndex else { return }
             guard let sample = FilterSampleRenderer.makeSampleImage(),
                   let filtered = try? await PhotoFilterPipeline().apply(self.eventConfig.selectedFilterID, to: sample),
                   let data = jpegDataForDemo(filtered) else { return }
             self.reviewDecisionPending = false
             self.stateMachine.enterReview(photoIndex: photoIndex, thumbnailData: data)
         }
-        stateMachine.beginCountdown(photoIndex: photoIndex)
     }
 
     private func demoAdvance(afterKeeping photoIndex: Int) {
@@ -523,80 +638,4 @@ final class iPadViewModel {
     }
 #endif
 
-    // MARK: - USB preview client
-
-    private func startUSBPreviewClient() {
-        let browser = NWBrowser(for: .bonjour(type: "_prc-hq._tcp", domain: nil), using: .tcp)
-        browser.browseResultsChangedHandler = { [weak self] results, _ in
-            guard let endpoint = results.first?.endpoint else { return }
-            Task { @MainActor [weak self] in
-                guard let self else { return }
-                self.usbEndpoints = results.map(\.endpoint)
-                self.usbEndpointIndex = 0
-                guard self.usbConnection == nil else { return }
-                self.connectUSB(to: endpoint)
-            }
-        }
-        browser.start(queue: .main)
-        usbBrowser = browser
-    }
-
-    private func connectUSB(to endpoint: NWEndpoint) {
-        let conn = NWConnection(to: endpoint, using: .tcp)
-        conn.stateUpdateHandler = { [weak self] state in
-            Task { @MainActor [weak self] in
-                guard let self else { return }
-                switch state {
-                case .ready:
-                    self.usbPreviewConnected = true
-                    self.receiveUSBFrame()
-                case .failed, .cancelled:
-                    self.usbPreviewConnected = false
-                    self.usbConnection = nil
-                    self.recvBuf = Data()
-                    self.scheduleUSBReconnect()
-                default: break
-                }
-            }
-        }
-        conn.start(queue: .main)
-        usbConnection = conn
-    }
-
-    private func scheduleUSBReconnect() {
-        guard usbReconnectTask == nil else { return }
-        usbReconnectTask = Task { [weak self] in
-            try? await Task.sleep(for: .seconds(1))
-            guard !Task.isCancelled else { return }
-            self?.usbReconnectTask = nil
-            guard let self, self.usbConnection == nil, let endpoint = self.nextUSBEndpoint() else { return }
-            self.connectUSB(to: endpoint)
-        }
-    }
-
-    private func nextUSBEndpoint() -> NWEndpoint? {
-        guard !usbEndpoints.isEmpty else { return nil }
-        defer { usbEndpointIndex = (usbEndpointIndex + 1) % usbEndpoints.count }
-        return usbEndpoints[usbEndpointIndex]
-    }
-
-    private func receiveUSBFrame() {
-        usbConnection?.receive(minimumIncompleteLength: 1, maximumLength: 131_072) { [weak self] data, _, _, error in
-            Task { @MainActor [weak self] in
-                guard let self, let data, error == nil else { return }
-                // ponytail: O(n) removeFirst; acceptable for ≤30fps preview frames
-                self.recvBuf.append(data)
-                while self.recvBuf.count >= 4 {
-                    let frameLen = self.recvBuf.prefix(4).withUnsafeBytes {
-                        Int(UInt32(bigEndian: $0.load(as: UInt32.self)))
-                    }
-                    guard self.recvBuf.count >= 4 + frameLen else { break }
-                    let jpeg = self.recvBuf.subdata(in: 4..<(4 + frameLen))
-                    self.recvBuf.removeFirst(4 + frameLen)
-                    self.updatePreview(jpeg)
-                }
-                self.receiveUSBFrame()
-            }
-        }
-    }
 }

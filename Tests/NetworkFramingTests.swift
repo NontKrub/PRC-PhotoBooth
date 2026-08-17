@@ -4,6 +4,21 @@ import Foundation
 
 @Suite("Network framing")
 struct NetworkFramingTests {
+    @Test("preview coalescing keeps only newest pending frame")
+    func latestFrameWins() {
+        var frames = LatestFrameCoalescer()
+        frames.enqueue(Data("A".utf8))
+        #expect(frames.startNext() == Data("A".utf8))
+
+        frames.enqueue(Data("B".utf8))
+        frames.enqueue(Data("C".utf8))
+        frames.enqueue(Data("D".utf8))
+
+        #expect(frames.completeWrite() == Data("D".utf8))
+        #expect(frames.completeWrite() == nil)
+        #expect(frames.coalescedFrameCount == 3)
+    }
+
     @Test("parses a complete frame")
     func completeFrame() throws {
         let encoded = try BoothFrameEncoder.encode(channel: .control, payload: Data("one".utf8))
@@ -43,6 +58,18 @@ struct NetworkFramingTests {
         let second = try BoothFrameEncoder.encode(channel: .heartbeat, payload: Data("b".utf8))
         var parser = BoothFrameParser()
         #expect(try parser.append(first + second).map(\.payload) == [Data("a".utf8), Data("b".utf8)])
+    }
+
+    @Test("a reconnect starts with a fresh parser")
+    func parserResetAfterReconnect() throws {
+        let encoded = try BoothFrameEncoder.encode(channel: .control, payload: Data("fresh".utf8))
+        var parser = BoothFrameParser()
+        #expect(try parser.append(Data(encoded.prefix(4))).isEmpty)
+
+        parser = BoothFrameParser()
+        #expect(try parser.append(encoded) == [
+            BoothNetworkFrame(channel: .control, payload: Data("fresh".utf8))
+        ])
     }
 
     @Test("rejects invalid header values")

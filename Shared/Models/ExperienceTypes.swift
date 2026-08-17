@@ -74,6 +74,7 @@ public struct EventTemplateDefinition: Codable, Sendable, Equatable, Identifiabl
     public var canvasWidth: Double
     public var canvasHeight: Double
     public var frameFileName: String?
+    public var foregroundOverlayFileName: String?
     public var previewFileName: String?
     public var slots: [SharedPhotoSlot]
     public var qrCodeElements: [SharedQRCodeElement]
@@ -90,6 +91,7 @@ public struct EventTemplateDefinition: Codable, Sendable, Equatable, Identifiabl
         canvasWidth: Double,
         canvasHeight: Double,
         frameFileName: String? = nil,
+        foregroundOverlayFileName: String? = nil,
         previewFileName: String? = nil,
         slots: [SharedPhotoSlot],
         qrCodeElements: [SharedQRCodeElement] = [],
@@ -105,6 +107,7 @@ public struct EventTemplateDefinition: Codable, Sendable, Equatable, Identifiabl
         self.canvasWidth = canvasWidth
         self.canvasHeight = canvasHeight
         self.frameFileName = frameFileName
+        self.foregroundOverlayFileName = foregroundOverlayFileName
         self.previewFileName = previewFileName
         self.slots = slots
         self.qrCodeElements = qrCodeElements
@@ -115,7 +118,7 @@ public struct EventTemplateDefinition: Codable, Sendable, Equatable, Identifiabl
 
     private enum CodingKeys: String, CodingKey {
         case id, name, isEnabled, sortOrder, photoCount, canvasWidth, canvasHeight
-        case frameFileName, previewFileName, slots, qrCodeElements, posePrompts, createdAt, updatedAt
+        case frameFileName, foregroundOverlayFileName, previewFileName, slots, qrCodeElements, posePrompts, createdAt, updatedAt
     }
 
     public init(from decoder: Decoder) throws {
@@ -128,6 +131,7 @@ public struct EventTemplateDefinition: Codable, Sendable, Equatable, Identifiabl
         canvasWidth = try container.decode(Double.self, forKey: .canvasWidth)
         canvasHeight = try container.decode(Double.self, forKey: .canvasHeight)
         frameFileName = try container.decodeIfPresent(String.self, forKey: .frameFileName)
+        foregroundOverlayFileName = try container.decodeIfPresent(String.self, forKey: .foregroundOverlayFileName)
         previewFileName = try container.decodeIfPresent(String.self, forKey: .previewFileName)
         slots = try container.decode([SharedPhotoSlot].self, forKey: .slots)
         qrCodeElements = try container.decodeIfPresent([SharedQRCodeElement].self, forKey: .qrCodeElements) ?? []
@@ -146,6 +150,7 @@ public struct EventTemplateDefinition: Codable, Sendable, Equatable, Identifiabl
         try container.encode(canvasWidth, forKey: .canvasWidth)
         try container.encode(canvasHeight, forKey: .canvasHeight)
         try container.encodeIfPresent(frameFileName, forKey: .frameFileName)
+        try container.encodeIfPresent(foregroundOverlayFileName, forKey: .foregroundOverlayFileName)
         try container.encodeIfPresent(previewFileName, forKey: .previewFileName)
         try container.encode(slots, forKey: .slots)
         try container.encode(qrCodeElements, forKey: .qrCodeElements)

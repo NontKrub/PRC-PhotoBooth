@@ -21,6 +21,31 @@ struct LocalDownloadResponse: Sendable, Equatable {
     }
 }
 
+struct LocalDownloadFileResponse: Sendable, Equatable {
+    var statusCode: Int
+    var reason: String
+    var contentType: String
+    var headers: [String: String]
+    var fileURL: URL
+    var contentLength: Int64
+
+    var httpHeaderData: Data {
+        var header = "HTTP/1.1 \(statusCode) \(reason)\r\n"
+        header += "Content-Type: \(contentType)\r\n"
+        header += "Content-Length: \(contentLength)\r\n"
+        for (name, value) in headers {
+            header += "\(name): \(value)\r\n"
+        }
+        header += "Connection: close\r\n\r\n"
+        return Data(header.utf8)
+    }
+}
+
+enum LocalDownloadRoute: Sendable, Equatable {
+    case response(LocalDownloadResponse)
+    case file(LocalDownloadFileResponse)
+}
+
 struct LocalDownloadRouter: Sendable {
     private let sessionRoutes: [String: SessionRouteRegistration]
     private let galleryRoutes: [String: EventGalleryRouteRegistration]
@@ -42,7 +67,8 @@ struct LocalDownloadRouter: Sendable {
             SessionRouteRegistration(
                 sessionDirectory: $0.sessionDirectory.standardizedFileURL,
                 language: $0.language,
-                eventGalleryPath: $0.eventGalleryPath
+                eventGalleryPath: $0.eventGalleryPath,
+                gifState: $0.gifState
             )
         }
         self.galleryRoutes = galleryRoutes
@@ -73,6 +99,19 @@ struct LocalDownloadRouter: Sendable {
         return sessionResponse(for: path)
     }
 
+    func route(for requestPath: String) -> LocalDownloadRoute {
+        let path = decodePath(requestPath)
+        guard !path.contains("\0"),
+              !path.split(separator: "/").contains(".."),
+              path.hasPrefix("/") else {
+            return .response(notFound())
+        }
+        if let file = sessionFileResponse(for: path) {
+            return .file(file)
+        }
+        return .response(response(for: path))
+    }
+
     private func sessionResponse(for path: String) -> LocalDownloadResponse {
         let components = path.dropFirst().split(separator: "/", omittingEmptySubsequences: true).map(String.init)
         guard (components.count == 2 || components.count == 3),
@@ -90,6 +129,7 @@ struct LocalDownloadRouter: Sendable {
             .resolvingSymlinksInPath()
             .standardizedFileURL
         guard fileURL.path.hasPrefix(directory.path + "/"),
+              components[2] != "booth.gif" || registration.gifState == .ready,
               let body = try? Data(contentsOf: fileURL) else {
             return notFound()
         }
@@ -99,6 +139,35 @@ struct LocalDownloadRouter: Sendable {
             contentType: components[2] == "strip.png" ? "image/png" : "image/gif",
             headers: ["Cache-Control": "no-store"],
             body: body
+        )
+    }
+
+    private func sessionFileResponse(for path: String) -> LocalDownloadFileResponse? {
+        let components = path.dropFirst().split(separator: "/", omittingEmptySubsequences: true).map(String.init)
+        guard components.count == 3,
+              components[0] == "s",
+              components[2] == "strip.png" || components[2] == "booth.gif",
+              let registration = sessionRoutes[components[1]] else {
+            return nil
+        }
+        guard components[2] != "booth.gif" || registration.gifState == .ready else { return nil }
+        let directory = registration.sessionDirectory.resolvingSymlinksInPath().standardizedFileURL
+        let fileURL = registration.sessionDirectory.appendingPathComponent(components[2])
+            .resolvingSymlinksInPath()
+            .standardizedFileURL
+        guard fileURL.path.hasPrefix(directory.path + "/"),
+              let attributes = try? FileManager.default.attributesOfItem(atPath: fileURL.path),
+              let size = attributes[.size] as? NSNumber,
+              (try? fileURL.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile) == true else {
+            return nil
+        }
+        return LocalDownloadFileResponse(
+            statusCode: 200,
+            reason: "OK",
+            contentType: components[2] == "strip.png" ? "image/png" : "image/gif",
+            headers: ["Cache-Control": "no-store"],
+            fileURL: fileURL,
+            contentLength: size.int64Value
         )
     }
 
@@ -132,9 +201,27 @@ struct LocalDownloadRouter: Sendable {
         let gifURL = directory.appendingPathComponent("booth.gif")
         let isThai = registration.language == .thai
         let gifLabel = isThai ? "ดาวน์โหลด GIF" : "Download GIF"
-        let gifButton = FileManager.default.fileExists(atPath: gifURL.path)
-            ? #"<a class="btn secondary" href="/s/\#(token)/booth.gif" download="photobooth.gif">⬇ \#(gifLabel)</a>"#
+        let gifByteCount = (try? FileManager.default.attributesOfItem(atPath: gifURL.path)[.size] as? NSNumber)?.int64Value
+        let gifReady = registration.gifState == .ready && gifByteCount != nil
+        let gifSize = gifByteCount.map {
+            ByteCountFormatter.string(fromByteCount: $0, countStyle: .file)
+        }
+        let gifWarning = gifReady && (gifByteCount ?? 0) > 10 * 1024 * 1024
+            ? "<p id=\"gif-warning\">\(isThai ? "GIF มีขนาดใหญ่ — อาจใช้เวลาดาวน์โหลดนานขึ้น" : "Large GIF — download may take longer.")</p>"
             : ""
+        let gifButton: String
+        switch registration.gifState {
+        case .none:
+            gifButton = ""
+        case .preparing:
+            gifButton = "<p id=\"gif-status\">\(isThai ? "กำลังเตรียม GIF…" : "Preparing GIF…")</p><meta http-equiv=\"refresh\" content=\"2\">"
+        case .ready:
+            gifButton = gifReady
+                ? #"<a class="btn secondary" href="/s/\#(token)/booth.gif" download="photobooth.gif">⬇ \#(gifLabel) · \#(gifSize ?? "")</a>\#(gifWarning)"#
+                : "<p id=\"gif-status\">\(isThai ? "GIF ไม่พร้อมใช้งาน รูปภาพของคุณยังดาวน์โหลดได้" : "GIF unavailable. Your photo strip is still ready.")</p>"
+        case .failed:
+            gifButton = "<p id=\"gif-status\">\(isThai ? "GIF ไม่พร้อมใช้งาน รูปภาพของคุณยังดาวน์โหลดได้" : "GIF unavailable. Your photo strip is still ready.")</p>"
+        }
         let galleryButton: String = {
             guard let path = registration.eventGalleryPath else { return "" }
             let label = isThai ? "ดูแกลเลอรีของงาน" : "View event gallery"

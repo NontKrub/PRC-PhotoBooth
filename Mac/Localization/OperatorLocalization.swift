@@ -1,7 +1,7 @@
 import Foundation
 
 func operatorString(_ key: String, locale: Locale) -> String {
-    let language = locale.languageCode ?? locale.identifier.split(separator: "_").first.map(String.init) ?? "en"
+    let language = locale.language.languageCode?.identifier ?? locale.identifier.split(separator: "_").first.map(String.init) ?? "en"
     let bundle = Bundle.main.path(forResource: language, ofType: "lproj")
         .flatMap(Bundle.init(path:)) ?? .main
     return bundle.localizedString(forKey: key, value: key, table: "Localizable")
@@ -32,8 +32,18 @@ func operatorCameraSourceName(_ source: CameraSourceKind, locale: Locale) -> Str
     operatorString(source.rawValue, locale: locale)
 }
 
-func operatorPreviewModeName(_ mode: PreviewConnectionMode, locale: Locale) -> String {
-    operatorString(mode.rawValue, locale: locale)
+@MainActor
+func operatorConnectingRoute(_ status: BoothConnectionStatus, locale: Locale) -> String {
+    switch status.routeState {
+    case .connectingLAN:
+        return operatorString("Connecting via LAN…", locale: locale)
+    case .connectingWiFi where status.requestedNetwork == .lan:
+        return operatorString("Switching to Wi-Fi fallback…", locale: locale)
+    case .connectingWiFi:
+        return operatorString("Connecting via Wi-Fi…", locale: locale)
+    case .disconnected, .connectedLAN, .connectedWiFi, .fallbackWiFi:
+        return operatorString("Connecting…", locale: locale)
+    }
 }
 
 func operatorPaperSizeName(_ size: SelphyPaperSize, locale: Locale) -> String {
@@ -90,12 +100,16 @@ func operatorPreflightTitle(_ id: PreflightCheckID, locale: Locale) -> String {
     case .cameraConnection: key = "Camera connection"
     case .cameraTestCapture: key = "Camera test capture"
     case .customerDisplay: key = "Customer display"
-    case .previewTransport: key = "Preview transport"
+    case .wifiPath: key = "Wi-Fi path"
+    case .lanPath: key = "LAN path"
+    case .ipadTransport: key = "iPad transport"
+    case .networkRoute: key = "Effective network route"
     case .outputFolder: key = "Output folder"
     case .diskSpace: key = "Disk space"
     case .localDownloadServer: key = "Local download server"
     case .localIPAddress: key = "Local IP address"
     case .runtimePersistence: key = "Runtime persistence"
+    case .recoveryStorage: key = "Recovery storage"
     case .unfinishedSession: key = "Unfinished session"
     case .queueHealth: key = "Queue health"
     case .cloudUpload: key = "Cloud upload"

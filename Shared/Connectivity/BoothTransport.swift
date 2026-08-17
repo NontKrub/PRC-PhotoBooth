@@ -1,4 +1,5 @@
 import Foundation
+import Observation
 
 public enum BoothConnectionState: Codable, Equatable, Sendable {
     case disconnected
@@ -7,10 +8,78 @@ public enum BoothConnectionState: Codable, Equatable, Sendable {
 }
 
 @MainActor
+@Observable
+public final class BoothConnectionStatus {
+    public private(set) var state: BoothConnectionState = .disconnected
+    public private(set) var peerID: String?
+    public private(set) var peerDisplayName: String?
+    public private(set) var connectedPeerNames: [String] = []
+    public private(set) var requestedNetwork: BoothNetworkPreference
+    public private(set) var effectiveNetwork: BoothEffectiveNetworkTransport = .unavailable
+    public private(set) var routeState: BoothNetworkRouteState = .disconnected
+    public private(set) var fallbackReason: String?
+    public private(set) var isLANPathAvailable = false
+    public private(set) var isWiFiPathAvailable = false
+
+    public var isFallbackActive: Bool {
+        if case .fallbackWiFi = routeState { return true }
+        return false
+    }
+
+    public init(requestedNetwork: BoothNetworkPreference = .wifi) {
+        self.requestedNetwork = requestedNetwork
+    }
+
+    public func publish(
+        requestedNetwork: BoothNetworkPreference,
+        state: BoothConnectionState,
+        peerID: String?,
+        peerDisplayName: String?,
+        routeState: BoothNetworkRouteState,
+        effectiveNetwork: BoothEffectiveNetworkTransport,
+        fallbackReason: String? = nil,
+        isLANPathAvailable: Bool = false,
+        isWiFiPathAvailable: Bool = false
+    ) {
+        self.requestedNetwork = requestedNetwork
+        self.state = state
+        self.peerID = peerID
+        self.peerDisplayName = peerDisplayName
+        self.connectedPeerNames = peerDisplayName.map { [$0] } ?? []
+        self.routeState = routeState
+        self.effectiveNetwork = effectiveNetwork
+        self.fallbackReason = fallbackReason
+        self.isLANPathAvailable = isLANPathAvailable
+        self.isWiFiPathAvailable = isWiFiPathAvailable
+    }
+
+    public func publishPathAvailability(lan: Bool, wifi: Bool) {
+        isLANPathAvailable = lan
+        isWiFiPathAvailable = wifi
+    }
+
+    public func publishDisconnected() {
+        publish(
+            requestedNetwork: requestedNetwork,
+            state: .disconnected,
+            peerID: nil,
+            peerDisplayName: nil,
+            routeState: .disconnected,
+            effectiveNetwork: .unavailable,
+            fallbackReason: nil,
+            isLANPathAvailable: isLANPathAvailable,
+            isWiFiPathAvailable: isWiFiPathAvailable
+        )
+    }
+}
+
+@MainActor
 public protocol BoothTransport: AnyObject {
     var connectionState: BoothConnectionState { get }
     var peerName: String { get }
     var connectedPeerNames: [String] { get }
+    var connectionStatus: BoothConnectionStatus { get }
+    var requestedNetworkPreference: BoothNetworkPreference { get set }
     var activePeerName: String? { get set }
     var role: DeviceRole { get }
     var onControlMessage: (@MainActor (Message) -> Void)? { get set }
@@ -27,6 +96,51 @@ public enum BoothTransportChannel: UInt8, Codable, Sendable {
     case preview = 2
     case asset = 3
     case heartbeat = 4
+}
+
+struct LatestFrameCoalescer: Sendable {
+    private(set) var writeInFlight = false
+    private var pendingFrame: Data?
+    private(set) var coalescedFrameCount = 0
+
+    mutating func enqueue(_ frame: Data) {
+        if writeInFlight { coalescedFrameCount += 1 }
+        pendingFrame = frame
+    }
+
+    mutating func startNext() -> Data? {
+        guard !writeInFlight, let pendingFrame else { return nil }
+        self.pendingFrame = nil
+        writeInFlight = true
+        return pendingFrame
+    }
+
+    mutating func completeWrite() -> Data? {
+        writeInFlight = false
+        return startNext()
+    }
+
+    mutating func resetWriteState() {
+        writeInFlight = false
+    }
+
+    mutating func reset() {
+        writeInFlight = false
+        pendingFrame = nil
+        coalescedFrameCount = 0
+    }
+}
+
+struct BoothTransportCallbackGate: Sendable {
+    private(set) var generation = 0
+
+    mutating func invalidate() {
+        generation &+= 1
+    }
+
+    func accepts(_ generation: Int) -> Bool {
+        generation == self.generation
+    }
 }
 
 public struct BoothNetworkFrame: Equatable, Sendable {

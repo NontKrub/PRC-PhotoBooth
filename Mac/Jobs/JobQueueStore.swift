@@ -20,6 +20,7 @@ actor JobQueueStore {
     private let fileURL: URL
     private var jobs: [SessionJob] = []
     private var hasLoaded = false
+    private(set) var lastPersistenceError: String?
 
     init(fileURL: URL) {
         self.fileURL = fileURL
@@ -53,10 +54,24 @@ actor JobQueueStore {
             if changed { try persist() }
             return jobs
         } catch {
-            let backup = try? preserveCorruptFile()
+            let decodingError = error.localizedDescription
+            let backup: URL?
+            do {
+                backup = try preserveCorruptFile()
+            } catch {
+                backup = nil
+            }
             jobs = []
-            try persist()
-            throw JobQueueStoreError.corrupt(fileURL, error.localizedDescription, backup)
+            do {
+                try persist()
+            } catch {
+                throw JobQueueStoreError.corrupt(
+                    fileURL,
+                    "\(decodingError); recovered queue could not be persisted: \(error.localizedDescription)",
+                    backup
+                )
+            }
+            throw JobQueueStoreError.corrupt(fileURL, decodingError, backup)
         }
     }
 
@@ -80,7 +95,8 @@ actor JobQueueStore {
             lastAttemptAt: nil,
             nextAttemptAt: now,
             attemptCount: 0,
-            lastError: nil
+            lastError: nil,
+            lastFailureDisposition: nil
         )
         jobs.append(job)
         try persist()
@@ -96,6 +112,26 @@ actor JobQueueStore {
         try persist()
     }
 
+    func claim(jobID: String, now: Date = Date()) throws -> SessionJob? {
+        try ensureLoaded()
+        guard let index = jobs.firstIndex(where: { $0.id == jobID }) else {
+            throw JobQueueStoreError.missingJob(jobID)
+        }
+        guard jobs[index].status == .pending
+                || (jobs[index].status == .waitingRetry
+                    && (jobs[index].nextAttemptAt.map { $0 <= now } ?? true)) else {
+            return nil
+        }
+
+        jobs[index].status = .running
+        jobs[index].attemptCount += 1
+        jobs[index].lastAttemptAt = now
+        jobs[index].nextAttemptAt = nil
+        jobs[index].updatedAt = now
+        try persist()
+        return jobs[index]
+    }
+
     func retry(jobID: String) throws {
         try ensureLoaded()
         guard let index = jobs.firstIndex(where: { $0.id == jobID }) else {
@@ -107,8 +143,55 @@ actor JobQueueStore {
         jobs[index].lastAttemptAt = nil
         jobs[index].nextAttemptAt = Date()
         jobs[index].lastError = nil
+        jobs[index].lastFailureDisposition = nil
         jobs[index].updatedAt = Date()
         try persist()
+    }
+
+    func forceRequeueCloudUpload(sessionID: String) throws -> CloudUploadRequeueResult {
+        try ensureLoaded()
+        guard let index = jobs.firstIndex(where: {
+            $0.sessionID == sessionID && $0.kind == .cloudUpload
+        }) else {
+            return .notFound
+        }
+
+        switch jobs[index].status {
+        case .pending, .waitingRetry:
+            return .alreadyQueued
+        case .running:
+            return .alreadyRunning
+        case .failed, .cancelled, .succeeded:
+            jobs[index].status = .pending
+            jobs[index].attemptCount = 0
+            jobs[index].lastAttemptAt = nil
+            jobs[index].nextAttemptAt = Date()
+            jobs[index].lastError = nil
+            jobs[index].lastFailureDisposition = nil
+            jobs[index].updatedAt = Date()
+            try persist()
+            return .queued
+        }
+    }
+
+    func requeueFailedCloudUploads() throws -> Int {
+        try ensureLoaded()
+        let now = Date()
+        var count = 0
+        for index in jobs.indices where jobs[index].kind == .cloudUpload
+            && jobs[index].status == .failed
+            && jobs[index].lastFailureDisposition == .retryable {
+            jobs[index].status = .pending
+            jobs[index].attemptCount = 0
+            jobs[index].lastAttemptAt = nil
+            jobs[index].nextAttemptAt = now
+            jobs[index].lastError = nil
+            jobs[index].lastFailureDisposition = nil
+            jobs[index].updatedAt = now
+            count += 1
+        }
+        if count > 0 { try persist() }
+        return count
     }
 
     func cancel(jobID: String) throws {
@@ -186,10 +269,16 @@ actor JobQueueStore {
     }
 
     private func persist() throws {
-        var encoder = JSONEncoder()
+        let encoder = JSONEncoder()
         encoder.dateEncodingStrategy = .iso8601
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-        try encoder.encode(jobs).write(to: fileURL, options: [.atomic])
+        do {
+            try encoder.encode(jobs).write(to: fileURL, options: [.atomic])
+            lastPersistenceError = nil
+        } catch {
+            lastPersistenceError = error.localizedDescription
+            throw error
+        }
     }
 
     private func preserveCorruptFile() throws -> URL {

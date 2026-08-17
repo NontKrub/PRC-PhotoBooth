@@ -31,7 +31,7 @@ actor EventGalleryStore {
         guard !index.eventID.isEmpty else { throw EventGalleryStoreError.invalidEventID }
         try fileManager.createDirectory(at: root, withIntermediateDirectories: true)
         let url = try indexURL(eventID: index.eventID)
-        var encoder = JSONEncoder()
+        let encoder = JSONEncoder()
         encoder.dateEncodingStrategy = .iso8601
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         let data = try encoder.encode(index)

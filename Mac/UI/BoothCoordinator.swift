@@ -6,6 +6,7 @@ import ImageIO
 import SwiftData
 import Observation
 import AVFoundation
+import Network
 
 enum CameraSourceKind: String, CaseIterable, Identifiable {
     case avFoundation = "Built-in / USB / Continuity"
@@ -13,21 +14,18 @@ enum CameraSourceKind: String, CaseIterable, Identifiable {
     var id: String { rawValue }
 }
 
-// Which channel carries the live preview stream to the iPad.
-// Control messages remain on the reliable BoothTransport control channel;
-// USB is an optional preview-only path.
-enum PreviewConnectionMode: String, CaseIterable, Identifiable {
-    case wireless = "Wireless (Wi-Fi)"
-    case cable    = "Cable (USB)"
-    var id: String { rawValue }
-}
-
+// Preview frames use the reliable BoothTransport preview channel.
+// Control messages remain on the separate BoothTransport control channel.
 enum PreviewFrameRate: Int, CaseIterable, Identifiable {
     case standard = 30
     case maximum = 60
 
     var id: Int { rawValue }
     var label: String { "\(rawValue) FPS" }
+}
+
+func shouldScheduleAutomaticCloudRetry(previous: Bool?, isSatisfied: Bool) -> Bool {
+    isSatisfied && previous != true
 }
 
 enum SelphyPaperSize: String, CaseIterable {
@@ -48,6 +46,7 @@ enum SelphyPaperSize: String, CaseIterable {
 @Observable
 final class BoothCoordinator {
     static let eventFolderPathKey = "eventFolderPath"
+    static let networkPreferenceKey = "boothNetworkPreference"
 
     nonisolated static func downloadURL(
         publicBaseURL: String?,
@@ -64,6 +63,7 @@ final class BoothCoordinator {
     }
 
     let multipeer: BoothTransport
+    let connectionStatus: BoothConnectionStatus
     let capture: CaptureService
     let stateMachine: SessionStateMachine
     let server: LocalWebServer
@@ -78,7 +78,6 @@ final class BoothCoordinator {
     let operationsEvents: OperationsEventStore
     let printer: PrinterService
     let cloudUpload: CloudUploadService
-    let usbPreview = USBPreviewServer()
     let experienceStore: EventExperienceStore
     let filterPipeline: PhotoFilterPipeline
     let galleryStore: EventGalleryStore
@@ -97,6 +96,7 @@ final class BoothCoordinator {
     private(set) var experienceCatalog: CustomerExperienceCatalog?
     var errorMessage: String?
     private(set) var reviewDecisionPending = false
+    private(set) var startupComponents: [StartupComponent: StartupComponentHealth] = [:]
     var serverURL: String = ""
     var cameraSourceKind: CameraSourceKind = .avFoundation {
         didSet {
@@ -107,9 +107,12 @@ final class BoothCoordinator {
     }
     var cameraPermissionGranted: Bool = false
     private(set) var isBoothPaused = false
-    var previewConnectionMode: PreviewConnectionMode {
-        get { PreviewConnectionMode(rawValue: UserDefaults.standard.string(forKey: "previewConnectionMode") ?? "") ?? .wireless }
-        set { UserDefaults.standard.set(newValue.rawValue, forKey: "previewConnectionMode") }
+    var requestedNetworkPreference: BoothNetworkPreference {
+        get { multipeer.requestedNetworkPreference }
+        set {
+            UserDefaults.standard.set(newValue.rawValue, forKey: Self.networkPreferenceKey)
+            multipeer.requestedNetworkPreference = newValue
+        }
     }
     var previewFrameRate: PreviewFrameRate {
         get { PreviewFrameRate(rawValue: UserDefaults.standard.integer(forKey: "previewFrameRate")) ?? .standard }
@@ -126,8 +129,14 @@ final class BoothCoordinator {
     private var retakeCounts: [Int: Int] = [:]
     private var gifFrames: [Int: [CGImage]] = [:]
     private var countdownTask: Task<Void, Never>?
+    private var currentCountdown: CountdownDescriptor?
+    private var sessionMessageSequence: UInt64 = 0
     private var currentCaptureAttempt: CaptureAttempt?
     private var hasSeenDSLRConnection = false
+    private let networkMonitor = NWPathMonitor()
+    private var lastNetworkSatisfied: Bool?
+    private var automaticCloudRetryTask: Task<Void, Never>?
+    private var lastAutomaticCloudRetryAt: Date?
     private var wasDSLRConnected = false
     private(set) var cameraReconnectCount = 0
     var currentStripPreview: CGImage?
@@ -142,15 +151,18 @@ final class BoothCoordinator {
     var isExternalViewerActive: Bool { externalDisplayWindow != nil }
 
     init() {
+        let networkPreference = Self.loadNetworkPreference()
+        let status = BoothConnectionStatus(requestedNetwork: networkPreference)
 #if DEBUG
         if ProcessInfo.processInfo.arguments.contains("--legacy-multipeer") {
-            multipeer = MultipeerService(role: .mac)
+            multipeer = MultipeerService(role: .mac, connectionStatus: status)
         } else {
-            multipeer = NetworkBoothTransport(role: .mac)
+            multipeer = NetworkBoothTransport(role: .mac, networkPreference: networkPreference, connectionStatus: status)
         }
 #else
-        multipeer = NetworkBoothTransport(role: .mac)
+        multipeer = NetworkBoothTransport(role: .mac, networkPreference: networkPreference, connectionStatus: status)
 #endif
+        connectionStatus = status
         capture = CaptureService()
         stateMachine = SessionStateMachine()
         server = LocalWebServer(port: 8585)
@@ -158,7 +170,16 @@ final class BoothCoordinator {
         store = DataStore.shared
         cloudSSHSetup = CloudSSHSetupService()
         let runtimeDirectory = Self.runtimeDirectoryURL()
-        try? FileManager.default.createDirectory(at: runtimeDirectory, withIntermediateDirectories: true)
+        var initialStartupComponents: [StartupComponent: StartupComponentHealth] = [:]
+        do {
+            try FileManager.default.createDirectory(at: runtimeDirectory, withIntermediateDirectories: true)
+            initialStartupComponents[.runtimeDirectory] = .ready
+        } catch {
+            initialStartupComponents[.runtimeDirectory] = StartupComponentHealth(
+                status: .unavailable,
+                detail: "Runtime storage could not be created: \(error.localizedDescription)"
+            )
+        }
         experienceStore = EventExperienceStore(baseDirectory: Self.appSupportRootURL())
         filterPipeline = PhotoFilterPipeline()
         galleryStore = EventGalleryStore(baseDirectory: Self.appSupportRootURL())
@@ -189,11 +210,27 @@ final class BoothCoordinator {
             jobQueue: jobQueue
         )
         preflight = BoothPreflightService()
+        initialStartupComponents[.dataStore] = store.lastPersistenceError.map {
+            StartupComponentHealth(
+                status: .unavailable,
+                detail: "Persistent event data is unavailable: \($0)"
+            )
+        } ?? StartupComponentHealth(
+            status: .ready,
+            detail: "SwiftData store is available."
+        )
+        self.startupComponents = initialStartupComponents
         jobQueue.onJobsChanged = { [weak self] in
             self?.reconcileCurrentSessionJobs()
             self?.reconcileRecoveredSessions()
             self?.cleanupCompletedWorkingFiles()
-            Task { @MainActor [weak self] in await self?.refreshServerRoutes() }
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                await refreshServerRoutes()
+                if jobQueue.lastQueueError != nil {
+                    await runSafePreflight()
+                }
+            }
         }
         recoveryService.onResume = { [weak self] manifest, images in
             self?.resumeRecoveredSession(manifest: manifest, images: images)
@@ -209,7 +246,6 @@ final class BoothCoordinator {
         }
 
         Task { @MainActor [self] in
-            usbPreview.start()
 #if DEBUG
             if ProcessInfo.processInfo.arguments.contains("--demo-mode") {
                 do {
@@ -237,18 +273,61 @@ final class BoothCoordinator {
                 action: { [weak self] action in await self?.performRemoteOperatorAction(action) ?? false },
                 events: { [weak self] in await self?.operationsEvents.jsonData() ?? Data("[]".utf8) }
             ))
-            try? await server.start()
-            _ = await server.waitUntilReady()
-            jobQueue.start()
+            do {
+                try await server.start()
+            } catch {
+                startupComponents[.localServer] = StartupComponentHealth(
+                    status: .unavailable,
+                    detail: "Local download server could not start: \(error.localizedDescription)"
+                )
+                errorMessage = startupComponents[.localServer]?.detail
+            }
+            let serverStatus = await server.waitUntilReady()
+            if case .failed(let message) = serverStatus.state {
+                startupComponents[.localServer] = StartupComponentHealth(
+                    status: .unavailable,
+                    detail: "Local download server failed: \(message)"
+                )
+                errorMessage = startupComponents[.localServer]?.detail
+            } else if case .ready = serverStatus.state {
+                startupComponents[.localServer] = .ready
+            }
+
+            let runtimeReady = startupComponents[.runtimeDirectory]?.status == .ready
+            if runtimeReady {
+                jobQueue.start()
+                startupComponents[.jobQueue] = .ready
+            } else {
+                startupComponents[.jobQueue] = StartupComponentHealth(
+                    status: .unavailable,
+                    detail: "Job queue disabled because runtime storage is unavailable."
+                )
+                startupComponents[.recoveryStore] = StartupComponentHealth(
+                    status: .unavailable,
+                    detail: "Recovery scanning disabled because runtime storage is unavailable."
+                )
+            }
             activeEvent = store.fetchActiveEvent()
-            await restoreDownloadTokens()
-            await recoveryService.scanNow()
-            await cleanupOldSessions(keepDays: 60)
+            if runtimeReady {
+                await restoreDownloadTokens()
+                await recoveryService.scanNow()
+                startupComponents[.recoveryStore] = StartupComponentHealth(
+                    status: recoveryService.recoveryErrors.isEmpty ? .ready : .degraded,
+                    detail: recoveryService.recoveryErrors.first ?? "Recovery storage scanned."
+                )
+                await cleanupOldSessions(keepDays: 60)
+            }
             await runSafePreflight()
         }
 
         setupMultipeerHandlers()
         multipeer.start()
+        networkMonitor.pathUpdateHandler = { [weak self] path in
+            Task { @MainActor [weak self] in
+                self?.handleNetworkPathChange(isSatisfied: path.status == .satisfied)
+            }
+        }
+        networkMonitor.start(queue: DispatchQueue(label: "PRC-PhotoBooth.NetworkMonitor"))
 
         refreshExternalScreens()
         NotificationCenter.default.addObserver(forName: NSApplication.didChangeScreenParametersNotification, object: nil, queue: .main) { [weak self] _ in
@@ -324,11 +403,16 @@ final class BoothCoordinator {
             if let event = activeEvent, event.id == snapshot.id {
                 try LegacyEventMirrorService().updateLegacyEvent(event, using: document, modelContext: store.context)
             }
+            startupComponents[.eventExperienceStore] = .ready
             sendExperienceCatalog()
             await runSafePreflight()
         } catch {
             activeExperienceDocument = nil
             experienceCatalog = nil
+            startupComponents[.eventExperienceStore] = StartupComponentHealth(
+                status: .unavailable,
+                detail: "Event experience storage is unavailable: \(error.localizedDescription)"
+            )
             errorMessage = "Event experience could not load: \(error.localizedDescription)"
         }
     }
@@ -348,7 +432,8 @@ final class BoothCoordinator {
 
     func saveExperienceDocument(
         _ document: EventExperienceDocument,
-        for event: BoothEvent
+        for event: BoothEvent,
+        editingSession: EventExperienceEditingSession? = nil
     ) async throws {
         var normalized = document
         normalized.templates.sort {
@@ -360,7 +445,11 @@ final class BoothCoordinator {
         }
         normalized.revision = UUID().uuidString
         normalized.updatedAt = Date()
-        try await experienceStore.save(normalized)
+        if let editingSession {
+            try await experienceStore.commitEditing(editingSession, document: normalized)
+        } else {
+            try await experienceStore.save(normalized)
+        }
         try LegacyEventMirrorService().updateLegacyEvent(event, using: normalized, modelContext: store.context)
         if activeEvent?.id == event.id {
             activeExperienceDocument = normalized
@@ -368,6 +457,89 @@ final class BoothCoordinator {
             experienceCatalog = CustomerExperienceCatalogBuilder().build(event: snapshot, document: normalized)
             sendExperienceCatalog()
             await refreshServerRoutes()
+        }
+    }
+
+    func retryCloudUpload(sessionID: String) {
+        guard jobQueue.jobs.contains(where: {
+            $0.sessionID == sessionID && $0.kind == .cloudUpload
+        }) else {
+            errorMessage = "No cloud upload job exists for this session."
+            return
+        }
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            let manifest: SessionManifest?
+            do {
+                manifest = try await manifestStore.load(sessionID: sessionID)
+            } catch {
+                errorMessage = "Cloud upload could not load the session: \(error.localizedDescription)"
+                return
+            }
+            let snapshot = manifest?.cloudDelivery
+            if snapshot == nil && !UserDefaults.standard.bool(forKey: "cloudUploadEnabled") {
+                errorMessage = "Cloud upload is disabled."
+                return
+            }
+
+            let sshHost = (snapshot?.sshHost ?? UserDefaults.standard.string(forKey: "cloudSSHHost") ?? "")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !sshHost.isEmpty else {
+                errorMessage = "Cloud upload is not configured: SSH host is missing."
+                return
+            }
+            let publicBase = (snapshot?.publicBaseURL ?? UserDefaults.standard.string(forKey: "publicBaseURL") ?? "")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            guard let url = URL(string: publicBase),
+                  ["http", "https"].contains(url.scheme?.lowercased() ?? ""),
+                  url.host != nil else {
+                errorMessage = "Cloud upload is not configured: public URL is missing or invalid."
+                return
+            }
+
+            jobQueue.forceRequeueCloudUpload(sessionID: sessionID) { [weak self] result in
+                self?.errorMessage = switch result {
+                case .queued: "Web upload queued."
+                case .alreadyQueued: "Web upload is already waiting."
+                case .alreadyRunning: "Web upload is already running."
+                case .notFound: "No web upload job exists for this session."
+                }
+            }
+        }
+    }
+
+    private func currentCloudDeliverySnapshot() -> SessionCloudDeliverySnapshot? {
+        guard UserDefaults.standard.bool(forKey: "cloudUploadEnabled") else { return nil }
+        return SessionCloudDeliverySnapshot(
+            publicBaseURL: UserDefaults.standard.string(forKey: "publicBaseURL") ?? "",
+            remoteBasePath: UserDefaults.standard.string(forKey: "cloudRemotePath")
+                ?? CloudUploadConfiguration.defaultRemoteBasePath,
+            sshHost: UserDefaults.standard.string(forKey: "cloudSSHHost") ?? ""
+        )
+    }
+
+    private func handleNetworkPathChange(isSatisfied: Bool) {
+        let previous = lastNetworkSatisfied
+        lastNetworkSatisfied = isSatisfied
+        if !isSatisfied {
+            automaticCloudRetryTask?.cancel()
+            return
+        }
+        guard shouldScheduleAutomaticCloudRetry(previous: previous, isSatisfied: isSatisfied) else { return }
+
+        let now = Date()
+        guard lastAutomaticCloudRetryAt.map({ now.timeIntervalSince($0) >= 60 }) ?? true else { return }
+        automaticCloudRetryTask?.cancel()
+        automaticCloudRetryTask = Task { @MainActor [weak self] in
+            do {
+                try await Task.sleep(for: .seconds(3))
+            } catch {
+                return
+            }
+            guard let self, !Task.isCancelled, self.lastNetworkSatisfied == true else { return }
+            self.lastAutomaticCloudRetryAt = Date()
+            self.automaticCloudRetryTask = nil
+            self.jobQueue.retryFailedCloudUploads()
         }
     }
 
@@ -379,12 +551,22 @@ final class BoothCoordinator {
             .sorted { $0.sortOrder < $1.sortOrder }
         Task { @MainActor [weak self] in
             guard let self else { return }
-            let previewData = try? await self.experienceStore.readTemplatePreviews(
-                eventID: document.eventID,
-                templates: templates
-            )
+            let previewData: [String: Data]
+            do {
+                previewData = try await self.experienceStore.readTemplatePreviews(
+                    eventID: document.eventID,
+                    templates: templates
+                )
+            } catch {
+                self.startupComponents[.eventExperienceStore] = StartupComponentHealth(
+                    status: .degraded,
+                    detail: "Template previews are unavailable: \(error.localizedDescription)"
+                )
+                self.errorMessage = "Template previews could not load: \(error.localizedDescription)"
+                return
+            }
             for template in templates {
-                guard let data = previewData?[template.id] else {
+                guard let data = previewData[template.id] else {
                     self.errorMessage = "Template preview unavailable: \(template.id)"
                     continue
                 }
@@ -453,7 +635,7 @@ final class BoothCoordinator {
             filterID: selection.filterID,
             language: selection.language
         )
-        stateMachine.transition(to: .selectingExperience)
+        stateMachine.beginSelectingExperience()
     }
 
     func confirmExternalExperienceSelection() {
@@ -469,13 +651,24 @@ final class BoothCoordinator {
             templateName: template.name,
             selectedFilterID: externalSelection.filterID,
             customerLanguage: externalSelection.language,
-            experienceRevision: catalog.revision
+            experienceRevision: catalog.revision,
+            gifQualityPreset: activeExperienceDocument?.gifQualityPreset ?? .balanced
         )
-        stateMachine.transition(to: .readyToStart)
+        stateMachine.setReadyToStart()
     }
 
     private func selectedTemplateFrameURL(_ template: EventTemplateDefinition, eventID: String) -> URL? {
         guard let fileName = template.frameFileName else { return nil }
+        return appSupportDir()?
+            .appendingPathComponent("EventExperiences", isDirectory: true)
+            .appendingPathComponent(eventID, isDirectory: true)
+            .appendingPathComponent("Templates", isDirectory: true)
+            .appendingPathComponent(template.id, isDirectory: true)
+            .appendingPathComponent(fileName)
+    }
+
+    private func selectedTemplateForegroundOverlayURL(_ template: EventTemplateDefinition, eventID: String) -> URL? {
+        guard let fileName = template.foregroundOverlayFileName else { return nil }
         return appSupportDir()?
             .appendingPathComponent("EventExperiences", isDirectory: true)
             .appendingPathComponent(eventID, isDirectory: true)
@@ -549,7 +742,7 @@ final class BoothCoordinator {
 
     var isCustomerDisplayReady: Bool {
         if isExternalViewerActive { return true }
-        if case .connected = multipeer.connectionState { return true }
+        if case .connected = connectionStatus.state { return true }
         return false
     }
 
@@ -584,10 +777,9 @@ final class BoothCoordinator {
     }
 
     func shutdown() {
-        countdownTask?.cancel()
+        cancelCountdown()
         multipeer.disconnect()
         capture.stop()
-        usbPreview.stop()
         jobQueue.stop()
         Task { await server.stop() }
     }
@@ -612,6 +804,12 @@ final class BoothCoordinator {
             return
         }
 #endif
+        if cameraSourceKind == .dslr {
+            // ImageCaptureCore owns DSLR access. Do not gate tethered still
+            // capture on AVFoundation's unrelated camera permission.
+            cameraPermissionGranted = AVCaptureDevice.authorizationStatus(for: .video) == .authorized
+            return
+        }
         switch AVCaptureDevice.authorizationStatus(for: .video) {
         case .authorized:
             cameraPermissionGranted = true
@@ -629,10 +827,7 @@ final class BoothCoordinator {
             try capture.start()
             capture.onPreviewJPEG = { [weak self] jpeg in
                 guard let self else { return }
-                switch previewConnectionMode {
-                case .wireless: multipeer.sendPreviewFrame(jpeg)
-                case .cable:    usbPreview.send(jpeg)
-                }
+                multipeer.sendPreviewFrame(jpeg)
             }
         } catch {
             errorMessage = "Camera error: \(error.localizedDescription)"
@@ -666,14 +861,12 @@ final class BoothCoordinator {
         } catch {
             errorMessage = "DSLR connect failed: \(error.localizedDescription)"
             capture.usesDSLR = false
-            cameraSourceKind = .avFoundation
         }
     }
 
     func disconnectDSLR() {
         capture.stopDSLR()
         capture.usesDSLR = false
-        cameraSourceKind = .avFoundation
     }
 
     func testCameraCapture() {
@@ -713,7 +906,7 @@ final class BoothCoordinator {
         let serverStatus = await server.statusSnapshot()
         let serverHealthy = await localServerHealthCheck(status: serverStatus)
         let ipadConnected: Bool = {
-            if case .connected = multipeer.connectionState { return true }
+            if case .connected = connectionStatus.state { return true }
             return false
         }()
         let output = picturesOutputDir()
@@ -786,6 +979,19 @@ final class BoothCoordinator {
                 return NSPrinter.printerNames.contains(NSPrintInfo.shared.printer.name)
             }
         }()
+        var startupHealth = startupComponents
+        if let persistenceError = store.lastPersistenceError {
+            startupHealth[.dataStore] = StartupComponentHealth(
+                status: .unavailable,
+                detail: "Persistent event data is unavailable: \(persistenceError)"
+            )
+        }
+        if let queueError = jobQueue.lastQueueError {
+            startupHealth[.jobQueue] = StartupComponentHealth(
+                status: .unavailable,
+                detail: "Persistent job queue is unavailable: \(queueError)"
+            )
+        }
         return BoothPreflightContext(
             event: activeEvent?.toEventConfig(),
             eventExperienceStatus: experienceStatus,
@@ -797,19 +1003,25 @@ final class BoothCoordinator {
             galleryStorageStatus: galleryStatus.0,
             galleryStorageDetail: galleryStatus.1,
             cameraPermissionGranted: cameraPermissionGranted,
-            cameraConnected: capture.isRunning && (cameraSourceKind != .dslr || capture.dslr.isRunning),
+            cameraConnected: selectedCaptureSourceReady,
+            cameraSourceKind: cameraSourceKind,
+            previewPermissionGranted: cameraPermissionGranted,
+            previewConnected: capture.isRunning,
+            previewRequired: false,
             customerDisplayReady: isCustomerDisplayReady,
             ipadConnected: ipadConnected,
-            usesCablePreview: previewConnectionMode == .cable,
-            usbPreviewSupported: usbPreview.isSupported,
-            usbPreviewClientConnected: usbPreview.isClientConnected,
+            requestedNetwork: connectionStatus.requestedNetwork,
+            effectiveNetwork: connectionStatus.effectiveNetwork,
+            wifiPathAvailable: connectionStatus.isWiFiPathAvailable,
+            lanPathAvailable: connectionStatus.isLANPathAvailable,
+            networkFallbackActive: connectionStatus.isFallbackActive,
             outputFolderURL: output,
             availableDiskBytes: capacity,
             localServerStatus: serverStatus,
             localServerHealthPassed: serverHealthy,
             localIPAddress: LocalWebServer.lanIPAddress(),
             runtimeDirectoryURL: Self.runtimeDirectoryURL(),
-            runtimePersistenceAvailable: FileManager.default.fileExists(atPath: Self.runtimeDirectoryURL().path),
+            runtimePersistenceAvailable: startupComponents[.runtimeDirectory]?.status == .ready,
             queuePersistenceAvailable: jobQueue.lastQueueError == nil,
             unfinishedCaptureSession: recoveryService.recoverableCaptureSession != nil,
             requiredJobFailed: requiredFailed || jobs.contains(where: { !$0.kind.isOptional && $0.status == .cancelled }),
@@ -819,8 +1031,18 @@ final class BoothCoordinator {
             cloudConnectivityPassed: cloudConnectivityPassed,
             automaticPrintingEnabled: UserDefaults.standard.bool(forKey: "selphyAutoPrintAfterSession"),
             printerConfigured: printerConfigured,
-            printerTestResult: printer.lastTestResult
+            printerTestResult: printer.lastTestResult,
+            startupComponents: startupHealth
         )
+    }
+
+    var selectedCaptureSourceReady: Bool {
+        switch cameraSourceKind {
+        case .avFoundation:
+            return cameraPermissionGranted && capture.isRunning
+        case .dslr:
+            return capture.dslr.isRunning && capture.dslr.isPTPHealthy
+        }
     }
 
     private func localServerHealthCheck(status: LocalWebServerStatus) async -> Bool {
@@ -851,9 +1073,6 @@ final class BoothCoordinator {
             return
         }
         capture.usesDSLR = false
-        if cameraSourceKind == .dslr && !capture.dslr.isConnecting {
-            cameraSourceKind = .avFoundation
-        }
     }
 
     private func choosePreviewDeviceForDSLR() {
@@ -925,9 +1144,17 @@ final class BoothCoordinator {
             errorMessage = "Connect an iPad or activate the external viewer before starting a session."
             return
         }
-        guard cameraPermissionGranted,
-              capture.isRunning,
-              (cameraSourceKind != .dslr || capture.dslr.isRunning) else {
+        if let health = startupComponents[.localServer], health.status == .unavailable {
+            errorMessage = health.detail
+            return
+        }
+        guard startupComponents[.runtimeDirectory]?.status == .ready,
+              startupComponents[.dataStore]?.status == .ready,
+              jobQueue.lastQueueError == nil else {
+            errorMessage = "Required runtime persistence is unavailable. Resolve Preflight errors before starting."
+            return
+        }
+        guard selectedCaptureSourceReady else {
             errorMessage = "The selected camera is not ready."
             return
         }
@@ -942,8 +1169,14 @@ final class BoothCoordinator {
         }
         let session = store.startSession(for: event)
         session.photoCount = config.photoCount
-        try? store.context.save()
+        guard store.saveChanges() else {
+            store.deleteSession(session)
+            let detail = store.lastPersistenceError ?? "unknown error"
+            errorMessage = "Session persistence is unavailable: \(detail)"
+            return
+        }
         let frameURL = selectedTemplateFrameURL(validated.template, eventID: event.id)
+        let foregroundURL = selectedTemplateForegroundOverlayURL(validated.template, eventID: event.id)
 
         Task { @MainActor [weak self] in
             guard let self else { return }
@@ -954,7 +1187,8 @@ final class BoothCoordinator {
                     eventName: config.eventName,
                     outputRoot: outputRoot,
                     startedAt: session.startedAt,
-                    frameSourceURL: frameURL
+                    frameSourceURL: frameURL,
+                    foregroundOverlaySourceURL: foregroundURL
                 )
                 createdDirectory = URL(fileURLWithPath: descriptor.absoluteDirectoryPath, isDirectory: true)
                 let manifest = SessionManifest(
@@ -972,6 +1206,7 @@ final class BoothCoordinator {
                     relativeDirectoryPath: descriptor.relativeDirectoryPath,
                     absoluteDirectoryPath: descriptor.absoluteDirectoryPath,
                     frameSnapshotFileName: descriptor.frameSnapshotFileName,
+                    foregroundOverlaySnapshotFileName: descriptor.foregroundOverlaySnapshotFileName,
                     stripFileName: nil,
                     gifFileName: nil,
                     downloadToken: session.downloadToken,
@@ -984,6 +1219,7 @@ final class BoothCoordinator {
                             acceptedAt: nil
                         )
                     },
+                    cloudDelivery: currentCloudDeliverySnapshot(),
                     lastError: nil,
                     updatedAt: Date()
                 )
@@ -1010,9 +1246,17 @@ final class BoothCoordinator {
                 currentSessionPresentation = presentation
                 lastSessionPresentation = presentation
                 recordOperation(.sessionStarted, sessionID: session.id)
-                multipeer.sendControl(.sessionStart)
+                guard let startContext = nextSessionMessageContext(),
+                      let preparedContext = nextSessionMessageContext() else {
+                    throw NSError(domain: "PRCPhotoBooth.Session", code: 1, userInfo: [NSLocalizedDescriptionKey: "Session identity could not be issued."])
+                }
+                multipeer.sendControl(.sessionStart(context: startContext))
                 multipeer.sendControl(.eventConfig(config: config))
-                multipeer.sendControl(.sessionPrepared(config: config, presentation: presentation))
+                multipeer.sendControl(.sessionPrepared(
+                    config: config,
+                    presentation: presentation,
+                    context: preparedContext
+                ))
                 beginCountdown(photoIndex: 0)
             } catch {
                 if let createdDirectory { try? FileManager.default.removeItem(at: createdDirectory) }
@@ -1023,24 +1267,46 @@ final class BoothCoordinator {
     }
 
     func beginCountdown(photoIndex: Int) {
-        stateMachine.beginCountdown(photoIndex: photoIndex)
-        multipeer.sendControl(.beginCountdown(photoIndex: photoIndex, seconds: stateMachine.config.countdownSeconds))
-        runCountdown(photoIndex: photoIndex, seconds: stateMachine.config.countdownSeconds)
+        let descriptor = CountdownDescriptor(
+            photoIndex: photoIndex,
+            captureAt: Date().addingTimeInterval(TimeInterval(stateMachine.config.countdownSeconds))
+        )
+        stateMachine.beginCountdown(photoIndex: photoIndex, captureAt: descriptor.captureAt)
+        guard case .countdown(let index, _) = stateMachine.phase, index == photoIndex else { return }
+        currentCountdown = descriptor
+        if let context = nextSessionMessageContext() {
+            multipeer.sendControl(.beginCountdown(context: context, descriptor: descriptor))
+        }
+        runCountdown(descriptor)
     }
 
-    private func runCountdown(photoIndex: Int, seconds: Int) {
+    private func runCountdown(_ descriptor: CountdownDescriptor) {
         countdownTask?.cancel()
-        countdownTask = Task {
-            for remaining in stride(from: seconds, through: 1, by: -1) {
-                if Task.isCancelled { return }
-                stateMachine.transition(to: .countdown(photoIndex: photoIndex, secondsRemaining: remaining))
-                try? await Task.sleep(for: .seconds(1))
+        countdownTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            while !Task.isCancelled {
+                stateMachine.updateCountdown(at: Date())
+                guard descriptor.captureAt > Date() else {
+                    currentCountdown = nil
+                    countdownTask = nil
+                    await captureShot(photoIndex: descriptor.photoIndex)
+                    return
+                }
+                try? await Task.sleep(for: .milliseconds(100))
             }
-            if !Task.isCancelled { await captureShot(photoIndex: photoIndex) }
         }
     }
 
+    private func cancelCountdown() {
+        countdownTask?.cancel()
+        countdownTask = nil
+        currentCountdown = nil
+    }
+
     private func captureShot(photoIndex: Int) async {
+        guard !Task.isCancelled,
+              case .countdown(let currentIndex, _) = stateMachine.phase,
+              currentIndex == photoIndex else { return }
         let attempt = CaptureAttempt()
         currentCaptureAttempt = attempt
         recordOperation(.captureStarted, sessionID: currentManifest?.id, photoIndex: photoIndex)
@@ -1072,7 +1338,9 @@ final class BoothCoordinator {
             )
             recordOperation(.captureSucceeded, sessionID: currentManifest?.id, photoIndex: photoIndex, duration: Date().timeIntervalSince(attempt.startedAt))
             currentCaptureAttempt = nil
-            multipeer.sendControl(.shotCaptured(index: photoIndex, thumbnailData: thumbData))
+            if let context = nextSessionMessageContext() {
+                multipeer.sendControl(.shotCaptured(context: context, index: photoIndex, thumbnailData: thumbData))
+            }
             updateStripPreview()
         } catch {
             let summary = captureFailureSummary(photoIndex: photoIndex, error: error)
@@ -1089,7 +1357,9 @@ final class BoothCoordinator {
             currentCaptureAttempt = nil
             stateMachine.enterCaptureRecovery(photoIndex: photoIndex, failure: summary)
             reviewDecisionPending = false
-            multipeer.sendControl(.captureRecovery(photoIndex: photoIndex, failure: summary))
+            if let context = nextSessionMessageContext() {
+                multipeer.sendControl(.captureRecovery(context: context, photoIndex: photoIndex, failure: summary))
+            }
         }
     }
 
@@ -1120,8 +1390,13 @@ final class BoothCoordinator {
         }
         manifest.captureAttempts = records
         manifest.updatedAt = Date()
-        try? await manifestStore.save(manifest)
-        currentManifest = manifest
+        do {
+            try await manifestStore.save(manifest)
+            currentManifest = manifest
+        } catch {
+            recoveryService.recordError("Capture attempt could not be persisted: \(error.localizedDescription)")
+            errorMessage = "Capture diagnostics could not be persisted: \(error.localizedDescription)"
+        }
     }
 
     private func persistCaptureFailure(photoIndex: Int, error: Error) async {
@@ -1130,8 +1405,12 @@ final class BoothCoordinator {
         manifest.lastError = error.localizedDescription
         manifest.nextPhotoIndex = photoIndex
         manifest.updatedAt = Date()
-        try? await manifestStore.save(manifest)
-        currentManifest = manifest
+        do {
+            try await manifestStore.save(manifest)
+            currentManifest = manifest
+        } catch {
+            recoveryService.recordError("Capture failure could not be persisted: \(error.localizedDescription)")
+        }
         errorMessage = error.localizedDescription
     }
 
@@ -1197,8 +1476,10 @@ final class BoothCoordinator {
         let qrPayload = config.qrCodeElements.isEmpty ? nil : try? SessionQRCodePayloadResolver.resolve(
             token: manifest.downloadToken,
             localBaseURL: "http://\(LocalWebServer.lanIPAddress() ?? "localhost"):8585",
-            publicBaseURL: UserDefaults.standard.string(forKey: "publicBaseURL"),
-            cloudUploadEnabled: UserDefaults.standard.bool(forKey: "cloudUploadEnabled")
+            publicBaseURL: manifest.cloudDelivery?.publicBaseURL
+                ?? UserDefaults.standard.string(forKey: "publicBaseURL"),
+            cloudUploadEnabled: manifest.cloudDelivery != nil
+                || UserDefaults.standard.bool(forKey: "cloudUploadEnabled")
         )
         Task.detached(priority: .utility) { [compositor, images, qrPayload] in
             let img = try? compositor.render(images: images, qrPayload: qrPayload)
@@ -1213,7 +1494,9 @@ final class BoothCoordinator {
         guard !reviewDecisionPending,
               CustomerDisplayWorkflow.canApply(customerAction, in: stateMachine.phase) else { return }
         reviewDecisionPending = true
-        multipeer.sendControl(.reviewDecision(action: action))
+        if let context = nextSessionMessageContext() {
+            multipeer.sendControl(.reviewDecision(context: context, action: action))
+        }
         switch action {
         case .keep:
             Task { @MainActor [weak self] in
@@ -1285,7 +1568,9 @@ final class BoothCoordinator {
             )
             recordOperation(.captureRecovered, sessionID: currentManifest?.id, photoIndex: photoIndex, duration: Date().timeIntervalSince(attempt.startedAt))
             currentCaptureAttempt = nil
-            multipeer.sendControl(.shotCaptured(index: photoIndex, thumbnailData: thumbData))
+            if let context = nextSessionMessageContext() {
+                multipeer.sendControl(.shotCaptured(context: context, index: photoIndex, thumbnailData: thumbData))
+            }
             updateStripPreview()
         } catch {
             let summary = captureFailureSummary(photoIndex: photoIndex, error: error)
@@ -1300,7 +1585,9 @@ final class BoothCoordinator {
             await persistCaptureFailure(photoIndex: photoIndex, error: error)
             stateMachine.enterCaptureRecovery(photoIndex: photoIndex, failure: summary)
             currentCaptureAttempt = nil
-            multipeer.sendControl(.captureRecovery(photoIndex: photoIndex, failure: summary))
+            if let context = nextSessionMessageContext() {
+                multipeer.sendControl(.captureRecovery(context: context, photoIndex: photoIndex, failure: summary))
+            }
         }
     }
 
@@ -1434,7 +1721,7 @@ final class BoothCoordinator {
     }
 
     func operatorOverride(_ action: OperatorAction) {
-        multipeer.sendControl(.operatorOverride(action: action))
+        multipeer.sendControl(.operatorOverride(context: nextSessionMessageContext(), action: action))
         switch action {
         case .forceStart:
             if stateMachine.phase == .idle || stateMachine.phase == .readyToStart { startSession() }
@@ -1557,7 +1844,7 @@ final class BoothCoordinator {
     }
 
     private func cancelCurrentSession() async {
-        countdownTask?.cancel()
+        cancelCountdown()
         guard currentSession != nil, var manifest = currentManifest else {
             reviewDecisionPending = false
             stateMachine.reset()
@@ -1566,9 +1853,18 @@ final class BoothCoordinator {
         manifest.status = .cancelled
         manifest.cancelledAt = Date()
         recordOperation(.sessionCancelled, sessionID: manifest.id)
-        try? await manifestStore.save(manifest)
+        do {
+            try await manifestStore.save(manifest)
+        } catch {
+            recoveryService.recordError("Cancelled session could not be persisted: \(error.localizedDescription)")
+            errorMessage = "Session cancellation could not be persisted: \(error.localizedDescription)"
+        }
         jobQueue.cancelJobs(sessionID: manifest.id)
-        try? workspace.removeEntireSession(manifest: manifest)
+        do {
+            try workspace.removeEntireSession(manifest: manifest)
+        } catch {
+            recoveryService.recordError("Cancelled session files could not be removed: \(error.localizedDescription)")
+        }
         if let session = currentSession { store.deleteSession(session) }
         currentManifest = nil
         currentManifestID = nil
@@ -1614,11 +1910,18 @@ final class BoothCoordinator {
             keptShots: thumbnails,
             nextPhotoIndex: manifest.nextPhotoIndex
         )
-        multipeer.sendControl(.sessionStart)
+        guard let presentation = currentSessionPresentation,
+              let startContext = nextSessionMessageContext(),
+              let preparedContext = nextSessionMessageContext() else {
+            errorMessage = "Recovered session identity could not be synchronized."
+            return
+        }
+        multipeer.sendControl(.sessionStart(context: startContext))
         multipeer.sendControl(.eventConfig(config: manifest.eventConfig))
         multipeer.sendControl(.sessionPrepared(
             config: manifest.eventConfig,
-            presentation: currentSessionPresentation!
+            presentation: presentation,
+            context: preparedContext
         ))
         beginCountdown(photoIndex: manifest.nextPhotoIndex)
     }
@@ -1658,7 +1961,7 @@ final class BoothCoordinator {
         }
         currentManifest = manifest
         jobQueue.enqueueFinalizationJobs(for: manifest)
-        if UserDefaults.standard.bool(forKey: "cloudUploadEnabled") {
+        if manifest.cloudDelivery != nil || UserDefaults.standard.bool(forKey: "cloudUploadEnabled") {
             jobQueue.enqueueCloudUpload(for: manifest)
         }
         if UserDefaults.standard.bool(forKey: "selphyAutoPrintAfterSession") &&
@@ -1696,7 +1999,11 @@ final class BoothCoordinator {
                       jobs.filter({ $0.kind == .renderGIF }).allSatisfy({
                           $0.status == .succeeded || $0.status == .cancelled
                       }) else { continue }
-                try? workspace.removeWorkingFiles(manifest: manifest)
+                do {
+                    try workspace.removeWorkingFiles(manifest: manifest)
+                } catch {
+                    recoveryService.recordError("Completed working files could not be removed: \(error.localizedDescription)")
+                }
             }
         }
     }
@@ -1716,7 +2023,11 @@ final class BoothCoordinator {
                     failedManifest.status = .failed
                     failedManifest.lastError = failed.lastError ?? "Required job failed."
                     failedManifest.updatedAt = Date()
-                    try? await manifestStore.save(failedManifest)
+                    do {
+                        try await manifestStore.save(failedManifest)
+                    } catch {
+                        recoveryService.recordError("Failed recovery manifest update: \(error.localizedDescription)")
+                    }
                     continue
                 }
                 guard jobs.first(where: { $0.kind == .renderStrip })?.status == .succeeded,
@@ -1727,7 +2038,12 @@ final class BoothCoordinator {
                 completed.status = .completed
                 completed.completedAt = Date()
                 completed.lastError = nil
-                try? await manifestStore.save(completed)
+                do {
+                    try await manifestStore.save(completed)
+                } catch {
+                    recoveryService.recordError("Failed recovered-session completion update: \(error.localizedDescription)")
+                    continue
+                }
                 _ = store.restoreSessionRecord(from: completed)
                 store.finishSession(
                     sessionID: completed.id,
@@ -1737,7 +2053,11 @@ final class BoothCoordinator {
                 if jobs.filter({ $0.kind == .renderGIF }).allSatisfy({
                     $0.status == .succeeded || $0.status == .cancelled
                 }) {
-                    try? workspace.removeWorkingFiles(manifest: completed)
+                    do {
+                        try workspace.removeWorkingFiles(manifest: completed)
+                    } catch {
+                        recoveryService.recordError("Recovered working files could not be removed: \(error.localizedDescription)")
+                    }
                 }
             }
         }
@@ -1745,11 +2065,23 @@ final class BoothCoordinator {
 
     private func markCurrentSessionFailed(message: String) async {
         guard let current = currentManifest, current.status != .failed else { return }
-        var manifest = (try? await manifestStore.load(sessionID: current.id)) ?? current
-        manifest.status = .failed
-        manifest.lastError = message
-        try? await manifestStore.save(manifest)
-        currentManifest = manifest
+        let manifest: SessionManifest
+        do {
+            manifest = try await manifestStore.load(sessionID: current.id)
+        } catch {
+            recoveryService.recordError("Failed to reload session after queue failure: \(error.localizedDescription)")
+            manifest = current
+        }
+        var updated = manifest
+        updated.status = .failed
+        updated.lastError = message
+        do {
+            try await manifestStore.save(updated)
+            currentManifest = updated
+        } catch {
+            recoveryService.recordError("Failed to persist session failure: \(error.localizedDescription)")
+            currentManifest = updated
+        }
     }
 
     private func completeCurrentSessionIfReady() async {
@@ -1761,7 +2093,18 @@ final class BoothCoordinator {
               jobs.first(where: { $0.kind == .registerDownload })?.status == .succeeded else {
             return
         }
-        let latest = (try? await manifestStore.load(sessionID: original.id)) ?? original
+        let serverStatus = await server.statusSnapshot()
+        guard case .ready = serverStatus.state else {
+            errorMessage = "Session finished, but the local download server is unavailable. QR/download links were not published."
+            return
+        }
+        let latest: SessionManifest
+        do {
+            latest = try await manifestStore.load(sessionID: original.id)
+        } catch {
+            recoveryService.recordError("Failed to reload session before completion: \(error.localizedDescription)")
+            latest = original
+        }
         var manifest = latest
         guard manifest.status != .completed else { return }
         manifest.status = .completed
@@ -1770,6 +2113,8 @@ final class BoothCoordinator {
         do {
             try await manifestStore.save(manifest)
         } catch {
+            recoveryService.recordError("Completed session could not be persisted: \(error.localizedDescription)")
+            errorMessage = "Completed session could not be persisted: \(error.localizedDescription)"
             return
         }
         currentManifest = manifest
@@ -1780,27 +2125,44 @@ final class BoothCoordinator {
             stripPath: manifest.stripFileName.map { "\(manifest.relativeDirectoryPath)/\($0)" },
             gifPath: manifest.gifFileName.map { "\(manifest.relativeDirectoryPath)/\($0)" }
         )
+        if let persistenceError = store.lastPersistenceError {
+            recoveryService.recordError("Completed event record could not be persisted: \(persistenceError)")
+            errorMessage = "Completed event record could not be persisted: \(persistenceError)"
+        }
 
         let directory = URL(fileURLWithPath: manifest.absoluteDirectoryPath, isDirectory: true)
         let token = manifest.downloadToken
-        let publicBase = UserDefaults.standard.string(forKey: "publicBaseURL")?
+        let publicBase = (manifest.cloudDelivery?.publicBaseURL
+            ?? UserDefaults.standard.string(forKey: "publicBaseURL"))?
             .trimmingCharacters(in: CharacterSet(charactersIn: "/ "))
         let ip = LocalWebServer.lanIPAddress() ?? "localhost"
         let qr = Self.downloadURL(
             publicBaseURL: publicBase,
             localBaseURL: "http://\(ip):8585",
             token: token,
-            cloudUploadEnabled: UserDefaults.standard.bool(forKey: "cloudUploadEnabled")
+            cloudUploadEnabled: manifest.cloudDelivery != nil
+                || UserDefaults.standard.bool(forKey: "cloudUploadEnabled")
         )
         let stripThumb = loadCGImage(from: directory.appendingPathComponent("strip.png"))
             .flatMap { jpegData(from: $0, quality: 0.4) }
         currentStripPreview = loadCGImage(from: directory.appendingPathComponent("strip.png"))
         stateMachine.finishSession(qrPayload: qr)
-        multipeer.sendControl(.sessionFinished(qrPayload: qr, stripThumbData: stripThumb, gifThumbData: nil))
+        if let context = nextSessionMessageContext() {
+            multipeer.sendControl(.sessionFinished(
+                context: context,
+                qrPayload: qr,
+                stripThumbData: stripThumb,
+                gifThumbData: nil
+            ))
+        }
         if jobs.filter({ $0.kind == .renderGIF }).allSatisfy({
             $0.status == .succeeded || $0.status == .cancelled
         }) {
-            try? workspace.removeWorkingFiles(manifest: manifest)
+            do {
+                try workspace.removeWorkingFiles(manifest: manifest)
+            } catch {
+                recoveryService.recordError("Working files could not be removed: \(error.localizedDescription)")
+            }
         }
         currentSession = nil
         lastSessionPresentation = currentSessionPresentation
@@ -1860,11 +2222,34 @@ final class BoothCoordinator {
             sessionMappings[manifest.downloadToken] = SessionRouteRegistration(
                 sessionDirectory: directory,
                 language: manifest.eventConfig.customerLanguage,
-                eventGalleryPath: galleryPath
+                eventGalleryPath: galleryPath,
+                gifState: gifAvailability(for: manifest, directory: directory)
             )
         }
         await server.replaceSessionRoutes(sessionMappings)
         await server.replaceGalleryRoutes(galleryMappings)
+    }
+
+    private func gifAvailability(
+        for manifest: SessionManifest,
+        directory: URL
+    ) -> GIFAvailabilityState {
+        guard manifest.shots.contains(where: { !$0.gifFrameFileNames.isEmpty }) else { return .none }
+        let gifURL = directory.appendingPathComponent("booth.gif")
+        let fileExists = FileManager.default.fileExists(atPath: gifURL.path)
+        guard let job = jobQueue.jobs.first(where: {
+            $0.sessionID == manifest.id && $0.kind == .renderGIF
+        }) else {
+            return manifest.gifFileName != nil && fileExists ? .ready : .preparing
+        }
+        switch job.status {
+        case .succeeded:
+            return fileExists ? .ready : .failed
+        case .failed, .cancelled:
+            return .failed
+        case .pending, .running, .waitingRetry:
+            return .preparing
+        }
     }
 
     // MARK: - Session cleanup (M10)
@@ -1876,15 +2261,27 @@ final class BoothCoordinator {
             if manifest.status == .completed,
                let completedAt = manifest.completedAt,
                completedAt < cutoff {
-                try? workspace.removeEntireSession(manifest: manifest)
-                try? await manifestStore.delete(sessionID: manifest.id)
+                do {
+                    try workspace.removeEntireSession(manifest: manifest)
+                } catch {
+                    recoveryService.recordError("Old session files could not be removed: \(error.localizedDescription)")
+                }
+                do {
+                    try await manifestStore.delete(sessionID: manifest.id)
+                } catch {
+                    recoveryService.recordError("Old session manifest could not be removed: \(error.localizedDescription)")
+                }
                 jobQueue.deleteJobs(sessionID: manifest.id)
                 await server.unregisterToken(manifest.downloadToken)
                 if let session = store.fetchSession(id: manifest.id) { store.deleteSession(session) }
             } else if manifest.status == .cancelled,
                       let cancelledAt = manifest.cancelledAt,
                       cancelledAt < Calendar.current.date(byAdding: .day, value: -7, to: Date())! {
-                try? await manifestStore.delete(sessionID: manifest.id)
+                do {
+                    try await manifestStore.delete(sessionID: manifest.id)
+                } catch {
+                    recoveryService.recordError("Cancelled session manifest could not be removed: \(error.localizedDescription)")
+                }
                 jobQueue.deleteJobs(sessionID: manifest.id)
             }
         }
@@ -1894,7 +2291,13 @@ final class BoothCoordinator {
         for session in store.fetchSessions(finishedBefore: cutoff) {
             if let stripPath = session.stripPath {
                 let strip = picturesOutputDir()?.appendingPathComponent(stripPath)
-                try? strip.map { try FileManager.default.removeItem(at: $0.deletingLastPathComponent()) }
+                if let strip {
+                    do {
+                        try FileManager.default.removeItem(at: strip.deletingLastPathComponent())
+                    } catch {
+                        recoveryService.recordError("Legacy session files could not be removed: \(error.localizedDescription)")
+                    }
+                }
             }
             store.deleteSession(session)
         }
@@ -1905,8 +2308,14 @@ final class BoothCoordinator {
     func printCurrentStrip() {
         guard let sessionID = lastCompletedSessionID else { return }
         Task { @MainActor [weak self] in
-            guard let self,
-                  let manifest = try? await manifestStore.load(sessionID: sessionID) else { return }
+            guard let self else { return }
+            let manifest: SessionManifest
+            do {
+                manifest = try await manifestStore.load(sessionID: sessionID)
+            } catch {
+                errorMessage = "Print could not load the completed session: \(error.localizedDescription)"
+                return
+            }
             let skipDialog = UserDefaults.standard.bool(forKey: "selphySkipPrintDialog")
             if skipDialog {
                 if let existing = jobQueue.jobs.first(where: { $0.sessionID == sessionID && $0.kind == .autoPrint }),
@@ -1929,8 +2338,14 @@ final class BoothCoordinator {
     func printAgainCurrentStrip() {
         guard let sessionID = lastCompletedSessionID else { return }
         Task { @MainActor [weak self] in
-            guard let self,
-                  let manifest = try? await manifestStore.load(sessionID: sessionID) else { return }
+            guard let self else { return }
+            let manifest: SessionManifest
+            do {
+                manifest = try await manifestStore.load(sessionID: sessionID)
+            } catch {
+                errorMessage = "Print could not load the completed session: \(error.localizedDescription)"
+                return
+            }
             let url = URL(fileURLWithPath: manifest.absoluteDirectoryPath)
                 .appendingPathComponent(manifest.stripFileName ?? "strip.png")
             do {
@@ -1960,9 +2375,8 @@ final class BoothCoordinator {
             }
             sendExperienceCatalog()
             resynciPad()
-        case .setPreviewTransport(let transport):
-            previewConnectionMode = transport == .usb ? .cable : .wireless
-        case .sessionStart:
+        case .sessionStart(let context):
+            guard context == nil else { break }
             if stateMachine.phase == .idle, activeEvent != nil {
                 startSession()
             }
@@ -1975,21 +2389,40 @@ final class BoothCoordinator {
                 return
             }
             startSession(selection: selection)
-        case .reviewDecision(let action):
-            if case .review(let idx) = stateMachine.phase {
+        case .reviewDecision(let context, let action):
+            if acceptsClientSessionMessage(context), case .review(let idx) = stateMachine.phase {
                 handleReviewDecision(photoIndex: idx, action: action)
             }
-        case .captureRecoveryAction(let action):
-            handleCaptureRecoveryAction(action)
+        case .captureRecoveryAction(let context, let action):
+            if acceptsClientSessionMessage(context) { handleCaptureRecoveryAction(action) }
         default: break
         }
+    }
+
+    private func nextSessionMessageContext() -> SessionMessageContext? {
+        let sessionID = currentSession?.id ?? (stateMachine.currentSessionID.isEmpty ? nil : stateMachine.currentSessionID)
+        guard let sessionID else { return nil }
+        sessionMessageSequence &+= 1
+        return SessionMessageContext(sessionID: sessionID, sequence: sessionMessageSequence)
+    }
+
+    private func acceptsClientSessionMessage(_ context: SessionMessageContext) -> Bool {
+        let current = currentSession?.id ?? stateMachine.currentSessionID
+        guard !current.isEmpty, context.sessionID == current else {
+            #if DEBUG
+            NSLog("[Session] Ignored client message for session %@; current is %@.", context.sessionID, current.isEmpty ? "none" : current)
+            #endif
+            return false
+        }
+        return true
     }
 
     // Push current Mac state to iPad after (re)connect so it's never stuck at idle mid-session.
     private func resynciPad() {
         let phase = stateMachine.phase
         let sessionID: String? = switch phase {
-        case .idle, .selectingExperience, .readyToStart: nil
+        case .idle, .selectingExperience: nil
+        case .readyToStart: currentSession?.id
         default: currentSession?.id ?? lastCompletedSessionID
         }
         let reviewThumbnail: Data? = {
@@ -2000,6 +2433,7 @@ final class BoothCoordinator {
             guard case .finished = phase else { return nil }
             return currentStripPreview.flatMap { jpegData(from: $0, quality: 0.4) }
         }()
+        let sequence = sessionID == nil ? 0 : (nextSessionMessageContext()?.sequence ?? 0)
         multipeer.sendControl(.sessionSync(snapshot: SessionSyncSnapshot(
             config: stateMachine.config,
             sessionID: sessionID,
@@ -2008,12 +2442,31 @@ final class BoothCoordinator {
             reviewThumbnailData: reviewThumbnail,
             stripThumbnailData: stripThumbnail,
             isMirrored: capture.camera.isMirrored,
-            isBoothPaused: isBoothPaused
+            isBoothPaused: isBoothPaused,
+            sequence: sequence,
+            countdown: currentCountdown,
+            keptShots: stateMachine.keptShots,
+            acceptedPhotoIndices: stateMachine.acceptedPhotoIndices.sorted(),
+            deferredPhotoIndices: stateMachine.deferredPhotoIndices.sorted(),
+            nextPhotoIndex: stateMachine.nextPhotoIndex
         )))
         multipeer.sendControl(.setMirrored(isMirrored: capture.camera.isMirrored))
     }
 
     // MARK: - Directories
+
+    private static func loadNetworkPreference() -> BoothNetworkPreference {
+        let defaults = UserDefaults.standard
+        if let raw = defaults.string(forKey: networkPreferenceKey),
+           let preference = BoothNetworkPreference(rawValue: raw) {
+            return preference
+        }
+
+        // The removed preview setting maps to Wi-Fi during migration.
+        defaults.set(BoothNetworkPreference.wifi.rawValue, forKey: networkPreferenceKey)
+        defaults.removeObject(forKey: "previewConnectionMode")
+        return .wifi
+    }
 
     static func appSupportRootURL() -> URL {
         let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
@@ -2034,7 +2487,7 @@ final class BoothCoordinator {
 
     var cameraHealthSnapshot: CameraHealthSnapshot {
         let dslr = cameraSourceKind == .dslr
-        let connected = capture.isRunning && (!dslr || capture.dslr.isRunning)
+        let connected = selectedCaptureSourceReady
         let selectedName = dslr
             ? capture.dslr.selectedDeviceName
             : capture.camera.availableDevices.first(where: { $0.id == capture.camera.selectedDeviceID })?.name
@@ -2061,10 +2514,7 @@ final class BoothCoordinator {
     func healthSnapshot() async -> BoothHealthSnapshot {
         let serverStatus = await server.statusSnapshot()
         let queue = jobQueue.jobs
-        let connectedPeer: String? = {
-            guard case .connected = multipeer.connectionState else { return nil }
-            return multipeer.peerName.isEmpty ? nil : multipeer.peerName
-        }()
+        let connectedPeer: String? = connectionStatus.peerDisplayName
         let serverHealth: BoothHealthStatus = switch serverStatus.state {
         case .ready: .healthy
         case .starting: .unknown
@@ -2087,8 +2537,8 @@ final class BoothCoordinator {
             camera: camera,
             customerDisplayConnected: connectedPeer != nil || isExternalViewerActive,
             customerDisplayPeer: connectedPeer,
-            controlConnection: connectionLabel(multipeer.connectionState),
-            previewConnection: previewConnectionMode.rawValue,
+            controlConnection: connectionLabel(connectionStatus.state),
+            previewConnection: effectiveNetworkLabel,
             localServer: serverHealth,
             diskAvailableBytes: disk,
             queuePending: queue.filter { $0.status == .pending }.count,
@@ -2130,6 +2580,15 @@ final class BoothCoordinator {
         }
     }
 
+    private var effectiveNetworkLabel: String {
+        switch connectionStatus.effectiveNetwork {
+        case .wifi:
+            return connectionStatus.isFallbackActive ? "Wi-Fi fallback" : "Wi-Fi"
+        case .lan: return "LAN (Ethernet)"
+        case .unavailable: return "unavailable"
+        }
+    }
+
     private func recordOperation(
         _ kind: OperationsEventKind,
         sessionID: String? = nil,
@@ -2153,7 +2612,17 @@ final class BoothCoordinator {
     func appSupportDir() -> URL? {
         let d = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)
             .first?.appendingPathComponent("PRC-PhotoBooth")
-        if let d { try? FileManager.default.createDirectory(at: d, withIntermediateDirectories: true) }
+        guard let d else { return nil }
+        do {
+            try FileManager.default.createDirectory(at: d, withIntermediateDirectories: true)
+        } catch {
+            startupComponents[.runtimeDirectory] = StartupComponentHealth(
+                status: .unavailable,
+                detail: "Application Support storage is unavailable: \(error.localizedDescription)"
+            )
+            errorMessage = startupComponents[.runtimeDirectory]?.detail
+            return nil
+        }
         return d
     }
 
@@ -2182,7 +2651,8 @@ final class BoothCoordinator {
             outputRootPath: manifest.outputRootPath,
             relativeDirectoryPath: manifest.relativeDirectoryPath,
             absoluteDirectoryPath: manifest.absoluteDirectoryPath,
-            frameSnapshotFileName: manifest.frameSnapshotFileName
+            frameSnapshotFileName: manifest.frameSnapshotFileName,
+            foregroundOverlaySnapshotFileName: manifest.foregroundOverlaySnapshotFileName
         )
     }
 

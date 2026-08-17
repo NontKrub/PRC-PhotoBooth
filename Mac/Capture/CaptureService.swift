@@ -46,10 +46,8 @@ final class CaptureService {
             }
         }
         dslr.onPreviewJPEG = { [weak self] jpeg in
-            Task { @MainActor [weak self] in
-                guard let self, self.usesDSLR else { return }
-                self.onPreviewJPEG?(jpeg)
-            }
+            guard let self, self.usesDSLR else { return }
+            self.onPreviewJPEG?(jpeg)
         }
     }
 

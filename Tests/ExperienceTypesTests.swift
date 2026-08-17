@@ -34,6 +34,7 @@ struct ExperienceTypesTests {
         #expect(config.experienceRevision.isEmpty)
         #expect(config.eventGalleryPath == nil)
         #expect(config.qrCodeElements.isEmpty)
+        #expect(config.gifQualityPreset == .balanced)
     }
 
     @Test("V1.2 EventConfig fields round trip")
@@ -50,11 +51,53 @@ struct ExperienceTypesTests {
             qrCodeElements: [
                 SharedQRCodeElement(id: "qr-1", normalizedRect: CGRect(x: 0.1, y: 0.2, width: 0.2, height: 0.2), rotation: 5, zOrder: 3),
                 SharedQRCodeElement(id: "qr-2", normalizedRect: CGRect(x: 0.6, y: 0.7, width: 0.15, height: 0.15), zOrder: 4)
-            ]
+            ],
+            gifQualityPreset: .high
         )
         let data = try JSONEncoder().encode(config)
         let decoded = try JSONDecoder().decode(EventConfig.self, from: data)
         #expect(decoded == config)
+    }
+
+    @Test("GIF quality presets provide the intended defaults")
+    func gifQualityPresetValues() {
+        #expect(GIFQualityPreset.compact.maxDimension == 320)
+        #expect(GIFQualityPreset.compact.frameRate == 8)
+        #expect(GIFQualityPreset.compact.frameCount == 40)
+        #expect(GIFQualityPreset.balanced.maxDimension == 360)
+        #expect(GIFQualityPreset.balanced.frameRate == 8)
+        #expect(GIFQualityPreset.balanced.frameCount == 40)
+        #expect(abs(GIFQualityPreset.balanced.duration - 5) < 0.001)
+        #expect(GIFQualityPreset.high.maxDimension == 480)
+        #expect(GIFQualityPreset.high.frameRate == 12)
+        #expect(GIFQualityPreset.high.frameCount == 60)
+    }
+
+    @Test("legacy experience documents default GIF quality to Balanced")
+    func legacyExperienceDocumentDefaultsGIFQuality() throws {
+        let document = makeExperienceDocument()
+        var object = try #require(JSONSerialization.jsonObject(with: JSONEncoder().encode(document)) as? [String: Any])
+        object.removeValue(forKey: "gifQualityPreset")
+
+        let decoded = try JSONDecoder().decode(
+            EventExperienceDocument.self,
+            from: JSONSerialization.data(withJSONObject: object)
+        )
+
+        #expect(decoded.gifQualityPreset == .balanced)
+    }
+
+    @Test("experience documents persist a selected GIF quality preset")
+    func experienceDocumentPersistsGIFQuality() throws {
+        var document = makeExperienceDocument()
+        document.gifQualityPreset = .compact
+
+        let decoded = try JSONDecoder().decode(
+            EventExperienceDocument.self,
+            from: JSONEncoder().encode(document)
+        )
+
+        #expect(decoded.gifQualityPreset == .compact)
     }
 
     @Test("legacy EventTemplateDefinition decodes without QR elements")
@@ -92,6 +135,28 @@ struct ExperienceTypesTests {
         #expect(decoded == template)
     }
 
+    @Test("legacy templates decode without a foreground overlay")
+    func legacyTemplateDecodesWithoutForegroundOverlay() throws {
+        let template = EventTemplateDefinition(
+            name: LocalizedText(english: "Legacy"), photoCount: 1, canvasWidth: 400, canvasHeight: 600,
+            slots: [SharedPhotoSlot(normalizedRect: CGRect(x: 0, y: 0, width: 1, height: 1))]
+        )
+        var object = try #require(JSONSerialization.jsonObject(with: JSONEncoder().encode(template)) as? [String: Any])
+        object.removeValue(forKey: "foregroundOverlayFileName")
+        let decoded = try JSONDecoder().decode(EventTemplateDefinition.self, from: JSONSerialization.data(withJSONObject: object))
+        #expect(decoded.foregroundOverlayFileName == nil)
+    }
+
+    @Test("foreground overlay filename round trips")
+    func foregroundOverlayRoundTrips() throws {
+        let template = EventTemplateDefinition(
+            name: LocalizedText(english: "Overlay"), photoCount: 1, canvasWidth: 400, canvasHeight: 600,
+            foregroundOverlayFileName: "foreground.png",
+            slots: [SharedPhotoSlot(normalizedRect: CGRect(x: 0, y: 0, width: 1, height: 1))]
+        )
+        #expect(try JSONDecoder().decode(EventTemplateDefinition.self, from: JSONEncoder().encode(template)).foregroundOverlayFileName == "foreground.png")
+    }
+
     @Test("Experience messages round trip with Thai strings")
     func experienceMessagesRoundTrip() throws {
         let catalog = CustomerExperienceCatalog(
@@ -117,7 +182,8 @@ struct ExperienceTypesTests {
                     customerLanguage: .thai,
                     qrCodeElements: [SharedQRCodeElement(id: "qr-1", normalizedRect: CGRect(x: 0.1, y: 0.1, width: 0.2, height: 0.2))]
                 ),
-                presentation: SessionPresentation(sessionID: "session-1", language: .thai, templateDisplayName: "คลาสสิก", filterID: .warm, prompts: [])
+                presentation: SessionPresentation(sessionID: "session-1", language: .thai, templateDisplayName: "คลาสสิก", filterID: .warm, prompts: []),
+                context: SessionMessageContext(sessionID: "session-1", sequence: 1)
             )
         ]
 
@@ -216,6 +282,7 @@ struct ExperienceTypesTests {
         )
 
         #expect(config.qrCodeElements == qrElements)
+        #expect(config.gifQualityPreset == .balanced)
     }
 
     private func makeExperienceDocument() -> EventExperienceDocument {

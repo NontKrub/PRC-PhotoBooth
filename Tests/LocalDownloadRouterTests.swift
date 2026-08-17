@@ -12,7 +12,14 @@ struct LocalDownloadRouterTests {
         let strip = directory.appendingPathComponent("strip.png")
         try Data([1, 2, 3]).write(to: strip)
 
-        let router = LocalDownloadRouter(tokenMap: ["token": directory])
+        let router = LocalDownloadRouter(sessionRoutes: [
+            "token": SessionRouteRegistration(
+                sessionDirectory: directory,
+                language: .english,
+                eventGalleryPath: nil,
+                gifState: .none
+            )
+        ], galleryRoutes: [:])
         let health = router.response(for: "/health")
         let page = router.response(for: "/s/token/")
         let image = router.response(for: "/s/token/strip.png")
@@ -31,7 +38,14 @@ struct LocalDownloadRouterTests {
     func handlesOptionalGIF() throws {
         let directory = try temporaryDirectory()
         defer { try? FileManager.default.removeItem(at: directory) }
-        let router = LocalDownloadRouter(tokenMap: ["token": directory])
+        let router = LocalDownloadRouter(sessionRoutes: [
+            "token": SessionRouteRegistration(
+                sessionDirectory: directory,
+                language: .english,
+                eventGalleryPath: nil,
+                gifState: .ready
+            )
+        ], galleryRoutes: [:])
 
         let withoutGIF = router.response(for: "/s/token/")
         #expect(!String(decoding: withoutGIF.body, as: UTF8.self).contains("booth.gif"))
@@ -41,6 +55,77 @@ struct LocalDownloadRouterTests {
         let withGIF = router.response(for: "/s/token/")
         #expect(String(decoding: withGIF.body, as: UTF8.self).contains("booth.gif"))
         #expect(router.response(for: "/s/token/booth.gif").statusCode == 200)
+    }
+
+    @Test("routes media as bounded file responses with size headers")
+    func routesMediaFiles() throws {
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let bytes = Data(repeating: 7, count: 200_000)
+        try bytes.write(to: directory.appendingPathComponent("booth.gif"))
+        let router = LocalDownloadRouter(sessionRoutes: [
+            "token": SessionRouteRegistration(
+                sessionDirectory: directory,
+                language: .english,
+                eventGalleryPath: nil,
+                gifState: .ready
+            )
+        ], galleryRoutes: [:])
+
+        guard case .file(let response) = router.route(for: "/s/token/booth.gif") else {
+            Issue.record("Expected a streaming file route")
+            return
+        }
+        #expect(response.contentLength == Int64(bytes.count))
+        #expect(response.contentType == "image/gif")
+        #expect(response.headers["Cache-Control"] == "no-store")
+        #expect(String(decoding: response.httpHeaderData, as: UTF8.self).contains("Content-Length: 200000"))
+    }
+
+    @Test("shows the ready GIF size and large-file warning")
+    func showsGIFSize() throws {
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try Data(repeating: 1, count: 11 * 1024 * 1024).write(to: directory.appendingPathComponent("booth.gif"))
+        let router = LocalDownloadRouter(sessionRoutes: [
+            "token": SessionRouteRegistration(sessionDirectory: directory, language: .english, eventGalleryPath: nil, gifState: .ready)
+        ], galleryRoutes: [:])
+
+        let page = String(decoding: router.response(for: "/s/token/").body, as: UTF8.self)
+        #expect(page.contains("Download GIF ·"))
+        #expect(page.contains("Large GIF — download may take longer."))
+    }
+
+    @Test("shows GIF preparing without making the strip wait")
+    func showsGIFPreparingState() throws {
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let router = LocalDownloadRouter(sessionRoutes: [
+            "token": SessionRouteRegistration(sessionDirectory: directory, language: .english, eventGalleryPath: nil, gifState: .preparing)
+        ], galleryRoutes: [:])
+        let page = String(decoding: router.response(for: "/s/token/").body, as: UTF8.self)
+        #expect(page.contains("Preparing GIF"))
+        #expect(page.contains("strip.png"))
+        #expect(page.contains("http-equiv=\"refresh\" content=\"2\""))
+    }
+
+    @Test("failed GIF stops polling and keeps the strip available")
+    func showsGIFFailureState() throws {
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let router = LocalDownloadRouter(sessionRoutes: [
+            "token": SessionRouteRegistration(
+                sessionDirectory: directory,
+                language: .english,
+                eventGalleryPath: nil,
+                gifState: .failed
+            )
+        ], galleryRoutes: [:])
+
+        let page = String(decoding: router.response(for: "/s/token/").body, as: UTF8.self)
+        #expect(page.contains("GIF unavailable"))
+        #expect(!page.contains("http-equiv=\"refresh\""))
+        #expect(page.contains("strip.png"))
     }
 
     @Test("rejects traversal and unknown tokens")

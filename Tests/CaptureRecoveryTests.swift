@@ -12,6 +12,7 @@ struct CaptureRecoveryTests {
         let config = EventConfig(photoCount: 4, countdownSeconds: 3)
         sm.startSession(config: config)
 
+        sm.beginCountdown(photoIndex: 0)
         sm.enterReview(photoIndex: 0, thumbnailData: Data([0]))
         sm.keepShot(photoIndex: 0)
         let failure = CaptureFailureSummary(
@@ -44,8 +45,8 @@ struct CaptureRecoveryTests {
     func previousCaptureCanBeRestored() {
         let sm = SessionStateMachine()
         sm.startSession(config: EventConfig(photoCount: 2, countdownSeconds: 3))
+        sm.beginCountdown(photoIndex: 0)
         sm.enterReview(photoIndex: 0, thumbnailData: Data([1]))
-        sm.keepShot(photoIndex: 0)
         sm.retakeShot(photoIndex: 0)
         let failure = CaptureFailureSummary(
             photoIndex: 0,

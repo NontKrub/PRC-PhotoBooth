@@ -1,6 +1,52 @@
-# PRC PhotoBooth — v1.3 Reliability + Operations
+# PRC PhotoBooth — v1.3 Reliability Hardening
 
-> The PR #7 stabilization plan below is historical context. The current release work is on `feature/v1.3-reliability-operations`.
+> The PR #7 stabilization plan below is historical context. Current work is on `feature/v1.3-reliability-hardening`.
+
+## Current task: network, GIF delivery, downloads, and staged previews
+
+Starting SHA: `b6bcbd72e9803123bc20615bcd41b5a18a9a8ce6`
+
+### Dependency graph
+
+```text
+route policy ────────────────> NetworkBoothTransport ──> network tests
+GIF state + quality model ───> queue/routes/guest UI ──> delivery tests
+quality model + compositor ──> TemplateGIFRenderer ───> render/benchmark tests
+route validation ────────────> LocalDownloadRouter ───> streaming server tests
+staging resolver ────────────> editor preview/save ───> editor tests
+```
+
+### Ordered slices
+
+1. Preference-aware route discovery and stale-generation coverage.
+2. Explicit GIF availability state and queue/guest progressive behavior.
+3. Compact/Balanced/High quality persistence and operator selector.
+4. Production renderer integration coverage and bounded render memory.
+5. Streaming media responses, file-size UI, atomic publication checks.
+6. Staged foreground preview and save/preview transaction handling.
+7. Full tests, four build configurations, Computer UI flow, benchmarks, and final review.
+
+### Checkpoints
+
+- After slices 1–3: focused network/GIF tests and Mac/iPad builds.
+- After slices 4–6: renderer/server/editor tests and Mac build.
+- Final: complete suite, Mac/iPad Debug + Release, UI/manual checks, integrity and failure tests.
+
+### Known baseline constraints
+
+- Existing dirty signing, localization, and Xcode-user files are preserved and are not part of this task.
+- The baseline suite has one known failure for a missing Thai localization entry in the pre-existing dirty `Mac/Localizable.xcstrings` change.
+- Physical Sony/iPad LAN validation is hardware-dependent; no result will be claimed without hardware.
+
+## Current reliability-hardening status
+
+- Startup health now records runtime, SwiftData, queue, recovery, experience, and local-server failures; required persistence/server failures block readiness without crashing the UI.
+- DSLR capture readiness is independent from AVFoundation permission; AVFoundation is reported as optional preview health when DSLR capture is selected.
+- Session-sensitive control messages carry the session UUID and a Mac-issued sequence; iPad reconnect sync is authoritative and stale packets are rejected.
+- Normal state-machine events are guarded; recovery and remote sync use explicit authoritative-restore APIs.
+- Countdown capture and rendering use one transmitted absolute deadline.
+- Automated validation: Mac/iPad Debug and Release builds pass; 213 tests run, 212 pass, with one pre-existing Thai localization failure.
+- Computer Use launch was attempted, but the environment returned `cgWindowNotFound` for app windows; visual interaction remains pending.
 
 ## v1.3 implementation status
 

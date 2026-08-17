@@ -39,6 +39,13 @@ struct RuntimeShotRecord: Codable, Sendable, Equatable {
     var previousAcceptedAt: Date?
 }
 
+struct SessionCloudDeliverySnapshot: Codable, Sendable, Equatable {
+    // Retry uses the original host and path so a Settings change cannot redirect an old QR upload.
+    var publicBaseURL: String
+    var remoteBasePath: String
+    var sshHost: String
+}
+
 struct SessionManifest: Codable, Sendable, Identifiable, Equatable {
     static let currentSchemaVersion = 1
 
@@ -60,11 +67,15 @@ struct SessionManifest: Codable, Sendable, Identifiable, Equatable {
     var absoluteDirectoryPath: String
 
     var frameSnapshotFileName: String?
+    // Optional so manifests written before foreground overlays remain recoverable.
+    var foregroundOverlaySnapshotFileName: String? = nil
     var stripFileName: String?
     var gifFileName: String?
 
     var downloadToken: String
     var shots: [RuntimeShotRecord]
+    // Optional keeps older manifests recoverable with current Settings as a fallback.
+    var cloudDelivery: SessionCloudDeliverySnapshot?
     // Optional keeps v1.1/v1.2 manifests readable without a migration.
     var captureAttempts: [CaptureAttemptRecord]?
 

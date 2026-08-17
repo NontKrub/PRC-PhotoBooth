@@ -28,15 +28,6 @@ struct iPadContentView: View {
                 }
             }
 
-            VStack {
-                HStack {
-                    Spacer()
-                    previewTransportMenu
-                }
-                Spacer()
-            }
-            .padding(24)
-
             if vm.isBoothPaused && vm.stateMachine.phase == .idle {
                 Color.black.opacity(0.94).ignoresSafeArea()
                 VStack(spacing: 16) {
@@ -67,34 +58,4 @@ struct iPadContentView: View {
         }
     }
 
-    private var previewTransportMenu: some View {
-        Menu {
-            Section("Preview connection") {
-                Button {
-                    vm.selectPreviewTransport(.wireless)
-                } label: {
-                    Label("Wireless", systemImage: vm.previewTransport == .wireless ? "checkmark" : "wifi")
-                }
-
-                Button {
-                    vm.selectPreviewTransport(.usb)
-                } label: {
-                    Label(vm.usbPreviewConnected ? "USB cable" : "USB cable (not connected)",
-                          systemImage: vm.previewTransport == .usb ? "checkmark" : "cable.connector")
-                }
-            }
-
-            Section {
-                Text("Controls remain connected over Wi-Fi. USB carries the live preview.")
-            }
-        } label: {
-            Image(systemName: vm.previewTransport == .usb ? "cable.connector" : "wifi")
-                .font(.system(size: 16, weight: .semibold))
-                .foregroundStyle(.white)
-                .frame(width: 44, height: 44)
-                .background(.black.opacity(0.4), in: Circle())
-                .overlay(Circle().strokeBorder(.white.opacity(0.2), lineWidth: 1))
-        }
-        .accessibilityLabel("Preview connection")
-    }
 }

@@ -1,5 +1,42 @@
 # PRC PhotoBooth v1.3 TODO
 
+## Current reliability/network/GIF task
+
+- [x] Record branch, starting SHA, dirty worktree, architecture, and baseline failures
+- [ ] Make iPad route selection honor the Mac's advertised network preference
+- [ ] Add LAN grace/fallback and stale discovery-generation tests
+- [ ] Replace `gifExpected` with explicit none/preparing/ready/failed state
+- [ ] Add queue-driven GIF state and terminal-failure guest behavior
+- [ ] Add Compact/Balanced/High GIF presets with legacy Balanced decoding
+- [ ] Add quality selector and persistence coverage
+- [ ] Add production `TemplateGIFRenderer` frame/layer/fallback/failure tests
+- [ ] Reduce renderer peak image retention without excessive re-decoding
+- [ ] Stream large local media files with bounded chunks and integrity tests
+- [ ] Show GIF metadata size and large-file warning on the guest page
+- [ ] Validate atomic GIF publication and abandoned temporary-file recovery
+- [ ] Refresh foreground-only staged template previews
+- [ ] Separate committed event configuration from derived preview rebuild errors
+- [ ] Run full tests, all four builds, Computer UI flow, benchmarks, and final integrated regression
+
+### Current task checkpoint
+
+- [ ] Network/GIF state/preset slices focused tests and builds pass
+- [ ] Renderer/server/editor slices focused tests and builds pass
+- [ ] Final suite/build/UI/benchmark/integrity report complete
+
+## Reliability-hardening completion ledger
+
+- [x] Record startup component health and surface required persistence/server failures in Preflight
+- [x] Decouple DSLR still-capture readiness from AVFoundation permission
+- [x] Add session identity, Mac-issued sequence numbers, reconnect sync, and stale-message rejection
+- [x] Guard normal `SessionStateMachine` events and isolate authoritative restore/sync
+- [x] Synchronize Mac/iPad countdowns with absolute capture deadlines
+- [x] Add reliability, preflight, message-gate, state-machine, countdown, and occupied-port tests
+- [x] Build Mac/iPad Debug and Release configurations; preserve macOS 15/iOS 18 and universal Mac architectures
+- [ ] Resolve pre-existing Thai localization test failure
+- [ ] Repeat Computer Use UI matrix when app-window access is available
+- [ ] Run physical Sony ZV-E10 and real-iPad reconnect matrix
+
 ## v1.3 release gate
 
 - [x] Add recoverable capture phase and guest/External Display recovery actions

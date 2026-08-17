@@ -11,8 +11,20 @@ protocol SessionJobExecuting: AnyObject {
 final class SessionJobQueue {
     private let store: JobQueueStore
     private let executor: any SessionJobExecuting
-    private var workerTask: Task<Void, Never>?
+    private var startupTask: Task<Void, Never>?
+    private var finalizationWorkerTask: Task<Void, Never>?
+    private var cloudWorkerTask: Task<Void, Never>?
+    private var activeCloudJobID: String?
+    private var activeCloudExecutionTask: Task<Void, Error>?
     private var persistentQueueError: String?
+
+    private let finalizationKinds: [SessionJobKind] = [
+        .renderStrip,
+        .registerDownload,
+        .updateGallery,
+        .renderGIF,
+        .autoPrint
+    ]
 
     private(set) var jobs: [SessionJob] = []
     private(set) var isRunning = false
@@ -25,17 +37,24 @@ final class SessionJobQueue {
     }
 
     func start() {
-        guard workerTask == nil else { return }
+        guard startupTask == nil, finalizationWorkerTask == nil, cloudWorkerTask == nil else { return }
         isRunning = true
-        workerTask = Task { [weak self] in
-            await self?.runWorker()
+        startupTask = Task { [weak self] in
+            await self?.prepareWorkers()
         }
     }
 
     func stop() {
         isRunning = false
-        workerTask?.cancel()
-        workerTask = nil
+        startupTask?.cancel()
+        finalizationWorkerTask?.cancel()
+        cloudWorkerTask?.cancel()
+        activeCloudExecutionTask?.cancel()
+        startupTask = nil
+        finalizationWorkerTask = nil
+        cloudWorkerTask = nil
+        activeCloudJobID = nil
+        activeCloudExecutionTask = nil
     }
 
     func refresh() {
@@ -72,11 +91,42 @@ final class SessionJobQueue {
         }
     }
 
+    func forceRequeueCloudUpload(
+        sessionID: String,
+        completion: ((CloudUploadRequeueResult) -> Void)? = nil
+    ) {
+        Task { [weak self] in
+            guard let self else { return }
+            do {
+                let result = try await store.forceRequeueCloudUpload(sessionID: sessionID)
+                await reload()
+                completion?(result)
+            } catch {
+                lastQueueError = error.localizedDescription
+            }
+        }
+    }
+
+    func retryFailedCloudUploads() {
+        Task { [weak self] in
+            guard let self else { return }
+            do {
+                _ = try await store.requeueFailedCloudUploads()
+                await reload()
+            } catch {
+                lastQueueError = error.localizedDescription
+            }
+        }
+    }
+
     func cancel(jobID: String) {
         Task { [weak self] in
             guard let self else { return }
             do {
                 try await store.cancel(jobID: jobID)
+                if activeCloudJobID == jobID {
+                    activeCloudExecutionTask?.cancel()
+                }
                 await reload()
             } catch {
                 lastQueueError = error.localizedDescription
@@ -89,6 +139,10 @@ final class SessionJobQueue {
             guard let self else { return }
             do {
                 try await store.cancelJobs(sessionID: sessionID)
+                if let activeCloudJobID,
+                   await store.snapshot().contains(where: { $0.id == activeCloudJobID && $0.sessionID == sessionID }) {
+                    activeCloudExecutionTask?.cancel()
+                }
                 await reload()
             } catch {
                 lastQueueError = error.localizedDescription
@@ -147,7 +201,7 @@ final class SessionJobQueue {
         }
     }
 
-    private func runWorker() async {
+    private func prepareWorkers() async {
         do {
             _ = try await store.load()
             try await store.resetInterruptedJobs()
@@ -155,11 +209,34 @@ final class SessionJobQueue {
         } catch {
             persistentQueueError = error.localizedDescription
             lastQueueError = persistentQueueError
-            await reloadFromSnapshot()
+            // Do not run workers against an in-memory snapshot after durable
+            // queue recovery failed. Required results must remain visible as
+            // unavailable until persistence is repaired.
+            jobs = []
+            onJobsChanged?()
+            isRunning = false
+            startupTask = nil
+            return
         }
 
+        guard !Task.isCancelled else {
+            startupTask = nil
+            return
+        }
+
+        let workerKinds = finalizationKinds
+        finalizationWorkerTask = Task { [weak self] in
+            await self?.runWorker(kinds: workerKinds)
+        }
+        cloudWorkerTask = Task { [weak self] in
+            await self?.runWorker(kinds: [.cloudUpload])
+        }
+        startupTask = nil
+    }
+
+    private func runWorker(kinds: [SessionJobKind]) async {
         while !Task.isCancelled {
-            if await runNextJob() {
+            if await runNextJob(kinds: kinds) {
                 continue
             }
             guard !Task.isCancelled else { break }
@@ -172,40 +249,77 @@ final class SessionJobQueue {
         try? await Task.sleep(for: .milliseconds(100))
     }
 
-    private func runNextJob() async -> Bool {
-        guard let selected = nextRunnableJob() else { return false }
-        var running = selected
-        running.status = .running
-        running.attemptCount += 1
-        running.lastAttemptAt = Date()
-        running.nextAttemptAt = nil
-        running.updatedAt = Date()
+    private func runNextJob(kinds: [SessionJobKind]) async -> Bool {
+        guard let selected = nextRunnableJob(in: kinds) else { return false }
+        let running: SessionJob
         do {
-            try await store.update(running)
-            await reload()
-            if await store.snapshot().first(where: { $0.id == running.id })?.status == .cancelled {
+            guard let claimed = try await store.claim(jobID: selected.id) else {
+                await reload()
                 return true
             }
-            try await executor.execute(running)
-            running.status = .succeeded
-            running.lastError = nil
-            running.nextAttemptAt = nil
-            running.updatedAt = Date()
-        } catch let error as JobExecutionError {
-            apply(error, to: &running)
+            running = claimed
         } catch {
-            apply(.retryable(error.localizedDescription), to: &running)
+            lastQueueError = error.localizedDescription
+            await reload()
+            return true
         }
+        await reload()
         do {
-            let persisted = await store.snapshot().first { $0.id == running.id }
+            try await execute(running)
+        } catch is CancellationError {
+            await reload()
+            return true
+        } catch let error as JobExecutionError {
+            var updated = running
+            apply(error, to: &updated)
+            await finish(updated)
+            return true
+        } catch {
+            var updated = running
+            apply(.retryable(error.localizedDescription), to: &updated)
+            await finish(updated)
+            return true
+        }
+        var succeeded = running
+        succeeded.status = .succeeded
+        succeeded.lastError = nil
+        succeeded.lastFailureDisposition = nil
+        succeeded.nextAttemptAt = nil
+        succeeded.updatedAt = Date()
+        await finish(succeeded)
+        return true
+    }
+
+    private func execute(_ job: SessionJob) async throws {
+        guard job.kind == .cloudUpload else {
+            try await executor.execute(job)
+            return
+        }
+
+        let task: Task<Void, Error> = Task { @MainActor in
+            try await executor.execute(job)
+        }
+        activeCloudJobID = job.id
+        activeCloudExecutionTask = task
+        defer {
+            if activeCloudJobID == job.id {
+                activeCloudJobID = nil
+                activeCloudExecutionTask = nil
+            }
+        }
+        try await task.value
+    }
+
+    private func finish(_ job: SessionJob) async {
+        do {
+            let persisted = await store.snapshot().first { $0.id == job.id }
             if persisted?.status != .cancelled {
-                try await store.update(running)
+                try await store.update(job)
             }
             await reload()
         } catch {
             lastQueueError = error.localizedDescription
         }
-        return true
     }
 
     private func apply(_ error: JobExecutionError, to job: inout SessionJob) {
@@ -214,11 +328,13 @@ final class SessionJobQueue {
         job.updatedAt = Date()
         switch error {
         case .permanent:
+            job.lastFailureDisposition = .permanent
             job.status = message == "Cloud upload disabled in Settings" && job.kind == .cloudUpload
                 ? .cancelled
                 : .failed
             job.nextAttemptAt = nil
         case .retryable:
+            job.lastFailureDisposition = .retryable
             if job.attemptCount >= SessionJobRetryPolicy.maximumAutomaticAttempts(for: job.kind) {
                 job.status = .failed
                 job.nextAttemptAt = nil
@@ -231,16 +347,9 @@ final class SessionJobQueue {
         }
     }
 
-    private func nextRunnableJob() -> SessionJob? {
+    private func nextRunnableJob(in kinds: [SessionJobKind]) -> SessionJob? {
         let now = Date()
-        for kind in [
-            SessionJobKind.renderStrip,
-            .registerDownload,
-            .updateGallery,
-            .renderGIF,
-            .autoPrint,
-            .cloudUpload
-        ] {
+        for kind in kinds {
             let candidates = jobs
                 .filter { $0.kind == kind && isRunnable($0, now: now) }
                 .sorted { $0.createdAt < $1.createdAt }

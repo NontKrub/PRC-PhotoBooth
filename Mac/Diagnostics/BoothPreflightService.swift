@@ -21,22 +21,42 @@ final class BoothPreflightService {
         checked.append(result(.templateAssets, "Template assets", context.templateAssetsDetail, context.templateAssetsStatus, .recommended, now))
         checked.append(result(.filterPipeline, "Filter pipeline", context.filterPipelineDetail, context.filterPipelineStatus, .required, now))
         checked.append(result(.galleryStorage, "Gallery storage", context.galleryStorageDetail, context.galleryStorageStatus, .recommended, now))
-        checked.append(result(.cameraPermission, "Camera permission", context.cameraPermissionGranted ? "Camera permission is granted." : "Camera permission is denied or restricted.", context.cameraPermissionGranted ? .passed : .failed, .required, now))
-        checked.append(result(.cameraConnection, "Camera connection", context.cameraConnected ? "Selected camera is ready." : "Selected camera is unavailable.", context.cameraConnected ? .passed : .failed, .required, now))
+        checked.append(capturePermissionResult(context, now: now))
+        checked.append(result(
+            .cameraConnection,
+            context.cameraSourceKind == .dslr ? "DSLR capture" : "AVFoundation camera",
+            context.cameraConnected ? "Selected capture source is ready." : "Selected capture source is unavailable.",
+            context.cameraConnected ? .passed : .failed,
+            .required,
+            now
+        ))
         checked.append(result(.cameraTestCapture, "Camera test capture", "Run Full Preflight to test the shutter.", .notRun, .recommended, now))
         checked.append(result(.customerDisplay, "Customer display", context.customerDisplayReady ? "A customer display is ready." : "Connect an iPad or activate the external viewer.", context.customerDisplayReady ? .passed : .failed, .required, now))
-        checked.append(previewResult(context, now: now))
+        checked.append(networkPathResult(.wifiPath, title: "Wi-Fi path", available: context.wifiPathAvailable, now: now))
+        checked.append(networkPathResult(.lanPath, title: "LAN path", available: context.lanPathAvailable, now: now))
+        checked.append(ipadTransportResult(context, now: now))
+        checked.append(networkRouteResult(context, now: now))
 
         let output = outputFolderResult(context.outputFolderURL, now: now)
         checked.append(output)
         checked.append(diskResult(context.availableDiskBytes, now: now))
-        checked.append(result(.localDownloadServer, "Local download server", context.localServerHealthPassed ? "Health check returned HTTP 200." : "The local download server is not healthy.", context.localServerHealthPassed ? .passed : .failed, .required, now))
+        let serverDetail: String
+        if context.localServerHealthPassed {
+            serverDetail = "Health check returned HTTP 200."
+        } else if case .failed(let message) = context.localServerStatus.state {
+            serverDetail = "Local download server failed: \(message)"
+        } else {
+            serverDetail = "The local download server is not healthy."
+        }
+        checked.append(result(.localDownloadServer, "Local download server", serverDetail, context.localServerHealthPassed ? .passed : .failed, .required, now))
         checked.append(result(.localIPAddress, "Local IP address", context.localIPAddress == nil ? "No LAN address was found." : context.localIPAddress!, context.localIPAddress == nil ? .warning : .passed, .recommended, now))
         checked.append(runtimeResult(context, now: now))
+        checked.append(startupResult(.recoveryStorage, component: .recoveryStore, title: "Recovery storage", context: context, now: now))
         checked.append(result(.unfinishedSession, "Unfinished session", context.unfinishedCaptureSession ? "An unfinished capture session awaits Resume or Discard." : "No unfinished capture session is waiting.", context.unfinishedCaptureSession ? .failed : .passed, .required, now))
 
-        let queueStatus: PreflightCheckStatus = !context.queuePersistenceAvailable || context.requiredJobFailed ? .failed : (context.optionalJobPendingOrFailed ? .warning : .passed)
-        let queueDetail = !context.queuePersistenceAvailable ? "The persistent job queue is unavailable." : context.requiredJobFailed ? "A required queue job has permanently failed." : context.optionalJobPendingOrFailed ? "Optional cloud or print work is waiting or failed." : "Queue persistence and required jobs are healthy."
+        let queueUnavailable = context.startupComponents[.jobQueue]?.status == .unavailable
+        let queueStatus: PreflightCheckStatus = queueUnavailable || !context.queuePersistenceAvailable || context.requiredJobFailed ? .failed : (context.optionalJobPendingOrFailed ? .warning : .passed)
+        let queueDetail = queueUnavailable ? (context.startupComponents[.jobQueue]?.detail ?? "The persistent job queue is unavailable.") : !context.queuePersistenceAvailable ? "The persistent job queue is unavailable." : context.requiredJobFailed ? "A required queue job has permanently failed." : context.optionalJobPendingOrFailed ? "Optional cloud or print work is waiting or failed." : "Queue persistence and required jobs are healthy."
         checked.append(result(.queueHealth, "Queue health", queueDetail, queueStatus, .required, now))
         checked.append(cloudResult(context, now: now))
         checked.append(printerConfigurationResult(context, now: now))
@@ -55,7 +75,7 @@ final class BoothPreflightService {
         printerTest: @escaping @MainActor () async throws -> Void
     ) async {
         await runSafeChecks(using: context)
-        if context.cameraPermissionGranted && context.cameraConnected {
+        if context.cameraConnected {
             update(.cameraTestCapture, status: .running, detail: "Running diagnostic camera capture…")
             do {
                 try await cameraTest()
@@ -110,15 +130,87 @@ final class BoothPreflightService {
         return result(.eventLayout, "Event layout", "Photo slots and canvas are valid.", .passed, .required, now)
     }
 
-    private func previewResult(_ context: BoothPreflightContext, now: Date) -> PreflightCheckResult {
+    private func networkPathResult(
+        _ id: PreflightCheckID,
+        title: String,
+        available: Bool,
+        now: Date
+    ) -> PreflightCheckResult {
+        result(
+            id,
+            title,
+            available ? "Network.framework reports this interface is available." : "This interface is unavailable.",
+            available ? .passed : .warning,
+            .recommended,
+            now
+        )
+    }
+
+    private func ipadTransportResult(_ context: BoothPreflightContext, now: Date) -> PreflightCheckResult {
         guard context.ipadConnected else {
-            return result(.previewTransport, "Preview transport", "Skipped because no iPad is connected.", .skipped, .recommended, now)
+            return result(.ipadTransport, "iPad transport", "Skipped because no iPad is connected.", .skipped, .recommended, now)
         }
-        if context.usesCablePreview {
-            let ok = context.usbPreviewSupported && context.usbPreviewClientConnected
-            return result(.previewTransport, "Preview transport", ok ? "USB preview client is connected." : "Cable mode requires a supported USB listener and connected client.", ok ? .passed : .failed, .required, now)
+        let connected = context.effectiveNetwork != .unavailable
+        return result(
+            .ipadTransport,
+            "iPad transport",
+            connected ? "Validated BoothTransport connection is active." : "No validated BoothTransport connection is active.",
+            connected ? .passed : .failed,
+            .required,
+            now
+        )
+    }
+
+    private func networkRouteResult(_ context: BoothPreflightContext, now: Date) -> PreflightCheckResult {
+        guard context.ipadConnected else {
+            return result(.networkRoute, "Effective network route", "Skipped because no iPad is connected.", .skipped, .recommended, now)
         }
-        return result(.previewTransport, "Preview transport", "Wireless preview transport is active.", .passed, .required, now)
+        switch context.effectiveNetwork {
+        case .lan:
+            return result(.networkRoute, "Effective network route", "LAN selected; connected via Ethernet.", .passed, .required, now)
+        case .wifi:
+            if context.requestedNetwork == .lan && context.networkFallbackActive {
+                return result(.networkRoute, "Effective network route", "LAN unavailable; booth is operating on Wi-Fi fallback.", .warning, .required, now)
+            }
+            return result(.networkRoute, "Effective network route", "Wi-Fi selected; Wi-Fi transport is active.", .passed, .required, now)
+        case .unavailable:
+            return result(.networkRoute, "Effective network route", "No network connection is active.", .failed, .required, now)
+        }
+    }
+
+    private func capturePermissionResult(_ context: BoothPreflightContext, now: Date) -> PreflightCheckResult {
+        if context.cameraSourceKind == .avFoundation {
+            return result(
+                .cameraPermission,
+                "AVFoundation camera permission",
+                context.cameraPermissionGranted ? "macOS camera permission is granted." : "macOS camera permission is denied or restricted.",
+                context.cameraPermissionGranted ? .passed : .failed,
+                .required,
+                now
+            )
+        }
+
+        guard context.previewPermissionGranted else {
+            return result(
+                .cameraPermission,
+                "AVFoundation preview",
+                "AVFoundation preview permission is denied; DSLR capture remains available.",
+                context.previewRequired ? .failed : .warning,
+                context.previewRequired ? .required : .recommended,
+                now
+            )
+        }
+        guard context.previewConnected else {
+            return result(
+                .cameraPermission,
+                "AVFoundation preview",
+                "Optional AVFoundation preview is unavailable; DSLR capture remains available.",
+                context.previewRequired ? .failed : .warning,
+                context.previewRequired ? .required : .recommended,
+                now
+            )
+        }
+        return result(.cameraPermission, "AVFoundation preview", "Not required for DSLR still capture.", .skipped, .recommended, now)
     }
 
     private func outputFolderResult(_ url: URL?, now: Date) -> PreflightCheckResult {
@@ -142,6 +234,12 @@ final class BoothPreflightService {
     }
 
     private func runtimeResult(_ context: BoothPreflightContext, now: Date) -> PreflightCheckResult {
+        if let health = context.startupComponents[.runtimeDirectory], health.status == .unavailable {
+            return result(.runtimePersistence, "Runtime persistence", health.detail, .failed, .required, now)
+        }
+        if let health = context.startupComponents[.dataStore], health.status == .unavailable {
+            return result(.runtimePersistence, "Runtime persistence", health.detail, .failed, .required, now)
+        }
         guard context.runtimePersistenceAvailable else { return result(.runtimePersistence, "Runtime persistence", "Runtime persistence is unavailable.", .failed, .required, now) }
         do {
             try FileManager.default.createDirectory(at: context.runtimeDirectoryURL, withIntermediateDirectories: true)
@@ -152,6 +250,24 @@ final class BoothPreflightService {
         } catch {
             return result(.runtimePersistence, "Runtime persistence", error.localizedDescription, .failed, .required, now)
         }
+    }
+
+    private func startupResult(
+        _ id: PreflightCheckID,
+        component: StartupComponent,
+        title: String,
+        context: BoothPreflightContext,
+        now: Date
+    ) -> PreflightCheckResult {
+        guard let health = context.startupComponents[component] else {
+            return result(id, title, "No startup error recorded.", .passed, .required, now)
+        }
+        let status: PreflightCheckStatus = switch health.status {
+        case .ready: .passed
+        case .degraded: .warning
+        case .unavailable: .failed
+        }
+        return result(id, title, health.detail, status, .required, now)
     }
 
     private func cloudResult(_ context: BoothPreflightContext, now: Date) -> PreflightCheckResult {

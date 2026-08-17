@@ -841,28 +841,6 @@
         }
       }
     },
-    "Cable (USB)" : {
-      "extractionState" : "manual",
-      "localizations" : {
-        "th" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "สาย (USB)"
-          }
-        }
-      }
-    },
-    "Cable mode requires a supported USB listener and connected client." : {
-      "extractionState" : "manual",
-      "localizations" : {
-        "th" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "โหมดสายต้องมีตัวรับ USB ที่รองรับและไคลเอนต์ที่เชื่อมต่ออยู่"
-          }
-        }
-      }
-    },
     "Camera" : {
       "extractionState" : "manual",
       "localizations" : {
@@ -2081,6 +2059,16 @@
         }
       }
     },
+    "Error: %@" : {
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ข้อผิดพลาด: %1$@"
+          }
+        }
+      }
+    },
     "EV" : {
       "localizations" : {
         "th" : {
@@ -2969,6 +2957,16 @@
         }
       }
     },
+    "Last successful upload: %@" : {
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "อัปโหลดสำเร็จล่าสุด: %1$@"
+          }
+        }
+      }
+    },
     "Layout" : {
       "extractionState" : "manual",
       "localizations" : {
@@ -3115,28 +3113,6 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "ใช้ได้เฉพาะเครือข่ายท้องถิ่น การสร้างโทเค็นใหม่จะทำให้ลิงก์แกลเลอรีเดิมใช้ไม่ได้"
-          }
-        }
-      }
-    },
-    "Mac: cable preview ready" : {
-      "extractionState" : "manual",
-      "localizations" : {
-        "th" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Mac: ภาพตัวอย่างผ่านสายพร้อมแล้ว"
-          }
-        }
-      }
-    },
-    "Mac: cable preview service unavailable" : {
-      "extractionState" : "manual",
-      "localizations" : {
-        "th" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Mac: บริการภาพตัวอย่างผ่านสายไม่พร้อมใช้งาน"
           }
         }
       }
@@ -4098,39 +4074,6 @@
         }
       }
     },
-    "Preview transport" : {
-      "extractionState" : "manual",
-      "localizations" : {
-        "th" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "ช่องทางส่งภาพตัวอย่าง"
-          }
-        }
-      }
-    },
-    "Preview via" : {
-      "extractionState" : "manual",
-      "localizations" : {
-        "th" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "ภาพตัวอย่างผ่าน"
-          }
-        }
-      }
-    },
-    "previewConnectionMode" : {
-      "extractionState" : "manual",
-      "localizations" : {
-        "th" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "previewConnectionMode"
-          }
-        }
-      }
-    },
     "previewFrameRate" : {
       "extractionState" : "manual",
       "localizations" : {
@@ -4717,6 +4660,16 @@
         }
       }
     },
+    "Retry scheduled " : {
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ตั้งเวลาลองใหม่ "
+          }
+        }
+      }
+    },
     "Review" : {
       "extractionState" : "manual",
       "localizations" : {
@@ -5049,16 +5002,6 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "เซสชันจะเสร็จสิ้นไม่ได้จนกว่าจะยอมรับรูปภาพทุกภาพ"
-          }
-        }
-      }
-    },
-    "Session controls always use Wi-Fi. 60 FPS uses more bandwidth; choose cable preview for the smoothest result. Sony USB live view may be limited by the camera." : {
-      "localizations" : {
-        "th" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "คำสั่งควบคุมเซสชันใช้ Wi-Fi เสมอ 60 FPS ใช้แบนด์วิดท์มากขึ้น เลือกภาพตัวอย่างผ่านสายเพื่อความลื่นไหลสูงสุด ภาพสดผ่าน USB ของ Sony อาจถูกจำกัดโดยกล้อง"
           }
         }
       }
@@ -5761,6 +5704,16 @@
         }
       }
     },
+    "The printed QR is still valid. Retrying the upload will restore the same link." : {
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "คิวอาร์ที่พิมพ์ยังใช้งานได้ การลองอัปโหลดใหม่จะคงลิงก์เดิมไว้"
+          }
+        }
+      }
+    },
     "This Mac can't verify its owner right now. Try your PIN." : {
       "extractionState" : "manual",
       "localizations" : {
@@ -5886,17 +5839,6 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "อัปโหลดรูปภาพขึ้นคลาวด์หลังแต่ละเซสชัน"
-          }
-        }
-      }
-    },
-    "USB preview client is connected." : {
-      "extractionState" : "manual",
-      "localizations" : {
-        "th" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "ไคลเอนต์ภาพตัวอย่าง USB เชื่อมต่ออยู่"
           }
         }
       }
@@ -6027,17 +5969,6 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "ความกว้าง"
-          }
-        }
-      }
-    },
-    "Wireless (Wi-Fi)" : {
-      "extractionState" : "manual",
-      "localizations" : {
-        "th" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "ไร้สาย (Wi-Fi)"
           }
         }
       }

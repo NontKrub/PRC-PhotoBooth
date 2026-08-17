@@ -139,6 +139,7 @@ final class SessionRecoveryService {
         }
 
         for manifest in manifests where manifest.status == .finalizing {
+            removeAbandonedGIFTemporaries(for: manifest)
             automaticallyRecoveringSessions.append(manifest.id)
             jobQueue.enqueueFinalizationJobs(for: manifest)
             if defaults.bool(forKey: "cloudUploadEnabled") {
@@ -175,6 +176,17 @@ final class SessionRecoveryService {
             throw RecoveryError.invalidCapture(issue)
         }
         return try workspace.loadAcceptedImages(manifest: manifest)
+    }
+
+    private func removeAbandonedGIFTemporaries(for manifest: SessionManifest) {
+        let directory = URL(fileURLWithPath: manifest.absoluteDirectoryPath, isDirectory: true)
+        guard let files = try? FileManager.default.contentsOfDirectory(
+            at: directory,
+            includingPropertiesForKeys: nil
+        ) else { return }
+        for file in files where file.lastPathComponent.hasPrefix(".booth-") && file.pathExtension == "gif" {
+            try? FileManager.default.removeItem(at: file)
+        }
     }
 
 }

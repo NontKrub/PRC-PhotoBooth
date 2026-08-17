@@ -30,6 +30,7 @@ struct TemplateFrameSlotEditor: View {
     let canvasHeight: Double
     let photoCount: Int
     let frame: CGImage?
+    let foregroundOverlay: CGImage?
     @Environment(\.dismiss) private var dismiss
     @State private var selection: TemplateCanvasSelection?
 
@@ -99,12 +100,45 @@ struct TemplateFrameSlotEditor: View {
                         .contentShape(Rectangle())
                         .onTapGesture { selection = nil }
                     canvasGrid(w: displaySize.width, h: displaySize.height)
-                    ForEach(elements) { element in
+                    ForEach(elements.filter { if case .photo = $0 { true } else { false } }) { element in
                         elementView(element, in: displaySize)
                     }
+                    if let foregroundOverlay {
+                        Image(foregroundOverlay, scale: 1, orientation: .up, label: Text("Foreground overlay"))
+                            .resizable()
+                            .scaledToFill()
+                            .frame(width: displaySize.width, height: displaySize.height)
+                            .clipped()
+                            .allowsHitTesting(false)
+                    }
+                    ForEach(elements.filter { if case .qrCode = $0 { true } else { false } }) { element in
+                        elementView(element, in: displaySize)
+                    }
+                    selectionChrome(in: displaySize)
                 }
                 .frame(width: displaySize.width, height: displaySize.height)
                 .clipped()
+                .coordinateSpace(name: "templateCanvas")
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func selectionChrome(in displaySize: CGSize) -> some View {
+        let rect: CGRect? = switch selection {
+        case .photo(let id): slots.first(where: { $0.id == id }).map { CanvasElementGeometry.canvasRect($0.normalizedRect, in: displaySize) }
+        case .qrCode(let id): qrCodeElements.first(where: { $0.id == id }).map { CanvasElementGeometry.canvasRect($0.normalizedRect, in: displaySize) }
+        case nil: nil
+        }
+        if let rect {
+            Rectangle()
+                .strokeBorder(Color.accentColor, lineWidth: 2)
+                .frame(width: rect.width, height: rect.height)
+                .position(x: rect.midX, y: rect.midY)
+                .allowsHitTesting(false)
+            ForEach([CGPoint(x: rect.minX, y: rect.minY), CGPoint(x: rect.maxX, y: rect.minY), CGPoint(x: rect.minX, y: rect.maxY), CGPoint(x: rect.maxX, y: rect.maxY)], id: \.self) { point in
+                Circle().fill(.white).overlay(Circle().strokeBorder(Color.accentColor, lineWidth: 1.5))
+                    .frame(width: 10, height: 10).position(point).allowsHitTesting(false)
             }
         }
     }
@@ -130,13 +164,18 @@ struct TemplateFrameSlotEditor: View {
 
     @ViewBuilder
     private func elementView(_ element: TemplateCanvasElement, in displaySize: CGSize) -> some View {
+        let minimumElementSize = CGSize(
+            width: displaySize.width / CGFloat(max(canvasWidth, 1)),
+            height: displaySize.height / CGFloat(max(canvasHeight, 1))
+        )
+
         switch element {
         case .photo(let slot):
             ResizableCanvasElementView(
                 rect: CanvasElementGeometry.canvasRect(slot.normalizedRect, in: displaySize),
                 rotation: slot.rotation,
                 isSelected: selection == .photo(slot.id),
-                minimumSize: CGSize(width: 40, height: 40),
+                minimumSize: minimumElementSize,
                 canvasSize: displaySize,
                 onTap: { selection = .photo(slot.id) },
                 onMove: { move(.photo(slot.id), by: $0, in: displaySize) },
@@ -156,7 +195,7 @@ struct TemplateFrameSlotEditor: View {
                 rect: CanvasElementGeometry.canvasRect(element.normalizedRect, in: displaySize),
                 rotation: element.rotation,
                 isSelected: selection == .qrCode(element.id),
-                minimumSize: CGSize(width: 40, height: 40),
+                minimumSize: minimumElementSize,
                 canvasSize: displaySize,
                 onTap: { selection = .qrCode(element.id) },
                 onMove: { move(.qrCode(element.id), by: $0, in: displaySize) },

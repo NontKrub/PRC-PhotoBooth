@@ -46,7 +46,6 @@ targets:
           - _prc-preview._tcp
           - _prc-photobooth._tcp
           - _prc-photobooth._udp
-          - _prc-hq._tcp
     entitlements:
       path: Mac/PRC-PhotoBooth-Mac.entitlements
       properties:
@@ -122,7 +121,6 @@ targets:
           - _prc-preview._tcp
           - _prc-photobooth._tcp
           - _prc-photobooth._udp
-          - _prc-hq._tcp
         UIRequiresFullScreen: true
         UIStatusBarHidden: true
     entitlements:

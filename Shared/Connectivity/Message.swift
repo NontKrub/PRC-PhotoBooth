@@ -1,12 +1,5 @@
 import Foundation
 
-// Selects the high-bandwidth preview transport. Session controls use the
-// selected BoothTransport; USB remains an optional preview-only path.
-public enum PreviewTransport: String, Codable, Sendable {
-    case wireless
-    case usb
-}
-
 public enum CaptureFailureReason: String, Codable, Sendable, Equatable {
     case transferTimeout
     case cameraBusy
@@ -45,6 +38,53 @@ public struct CaptureFailureSummary: Codable, Sendable, Equatable {
     }
 }
 
+public struct SessionMessageContext: Codable, Sendable, Equatable, Hashable {
+    public var sessionID: String
+    public var sequence: UInt64
+
+    public init(sessionID: String, sequence: UInt64) {
+        self.sessionID = sessionID
+        self.sequence = sequence
+    }
+}
+
+public struct CountdownDescriptor: Codable, Sendable, Equatable {
+    public var photoIndex: Int
+    public var captureAt: Date
+
+    public init(photoIndex: Int, captureAt: Date) {
+        self.photoIndex = photoIndex
+        self.captureAt = captureAt
+    }
+}
+
+// The iPad uses one gate for every Mac-issued, session-sensitive message.
+// A reconnect snapshot moves the baseline forward before queued packets can apply.
+public struct SessionMessageGate: Sendable, Equatable {
+    public private(set) var currentSessionID: String?
+    public private(set) var latestAcceptedSequence: UInt64
+
+    public init(currentSessionID: String? = nil, latestAcceptedSequence: UInt64 = 0) {
+        self.currentSessionID = currentSessionID
+        self.latestAcceptedSequence = latestAcceptedSequence
+    }
+
+    public mutating func synchronize(sessionID: String?, sequence: UInt64) {
+        currentSessionID = sessionID
+        latestAcceptedSequence = sessionID == nil ? 0 : sequence
+    }
+
+    public mutating func accept(_ context: SessionMessageContext) -> Bool {
+        guard let currentSessionID,
+              context.sessionID == currentSessionID,
+              context.sequence > latestAcceptedSequence else {
+            return false
+        }
+        latestAcceptedSequence = context.sequence
+        return true
+    }
+}
+
 public enum CaptureRecoveryAction: Codable, Sendable, Equatable {
     case retryReceive(photoIndex: Int)
     case retake(photoIndex: Int)
@@ -53,25 +93,52 @@ public enum CaptureRecoveryAction: Codable, Sendable, Equatable {
 }
 
 public struct BoothTransportHello: Codable, Sendable, Equatable {
-    public static let currentProtocolVersion = 1
+    public static let currentProtocolVersion = 2
 
     public var protocolVersion: Int
     public var appVersion: String
     public var role: DeviceRole
     public var deviceID: String
+    public var deviceName: String
     public var capabilities: [String]
+    public var networkPreference: BoothNetworkPreference?
 
     public init(
         role: DeviceRole,
         appVersion: String = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "dev",
         deviceID: String = UUID().uuidString,
-        capabilities: [String] = ["control", "preview", "state-sync"]
+        deviceName: String? = nil,
+        capabilities: [String] = ["control", "preview", "state-sync", "preview-identity"],
+        networkPreference: BoothNetworkPreference? = .wifi
     ) {
         self.protocolVersion = Self.currentProtocolVersion
         self.appVersion = appVersion
         self.role = role
         self.deviceID = deviceID
+        self.deviceName = deviceName?.isEmpty == false ? deviceName! : deviceID
         self.capabilities = capabilities
+        self.networkPreference = networkPreference
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case protocolVersion
+        case appVersion
+        case role
+        case deviceID
+        case deviceName
+        case capabilities
+        case networkPreference
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        protocolVersion = try container.decode(Int.self, forKey: .protocolVersion)
+        appVersion = try container.decode(String.self, forKey: .appVersion)
+        role = try container.decode(DeviceRole.self, forKey: .role)
+        deviceID = try container.decode(String.self, forKey: .deviceID)
+        deviceName = try container.decodeIfPresent(String.self, forKey: .deviceName) ?? deviceID
+        capabilities = try container.decode([String].self, forKey: .capabilities)
+        networkPreference = try container.decodeIfPresent(BoothNetworkPreference.self, forKey: .networkPreference)
     }
 }
 
@@ -84,6 +151,12 @@ public struct SessionSyncSnapshot: Codable, Sendable, Equatable {
     public var stripThumbnailData: Data?
     public var isMirrored: Bool
     public var isBoothPaused: Bool
+    public var sequence: UInt64
+    public var countdown: CountdownDescriptor?
+    public var keptShots: [Int: Data]
+    public var acceptedPhotoIndices: [Int]
+    public var deferredPhotoIndices: [Int]
+    public var nextPhotoIndex: Int
 
     public init(
         config: EventConfig,
@@ -93,7 +166,13 @@ public struct SessionSyncSnapshot: Codable, Sendable, Equatable {
         reviewThumbnailData: Data? = nil,
         stripThumbnailData: Data? = nil,
         isMirrored: Bool,
-        isBoothPaused: Bool = false
+        isBoothPaused: Bool = false,
+        sequence: UInt64 = 0,
+        countdown: CountdownDescriptor? = nil,
+        keptShots: [Int: Data] = [:],
+        acceptedPhotoIndices: [Int] = [],
+        deferredPhotoIndices: [Int] = [],
+        nextPhotoIndex: Int = 0
     ) {
         self.config = config
         self.sessionID = sessionID
@@ -103,6 +182,12 @@ public struct SessionSyncSnapshot: Codable, Sendable, Equatable {
         self.stripThumbnailData = stripThumbnailData
         self.isMirrored = isMirrored
         self.isBoothPaused = isBoothPaused
+        self.sequence = sequence
+        self.countdown = countdown
+        self.keptShots = keptShots
+        self.acceptedPhotoIndices = acceptedPhotoIndices
+        self.deferredPhotoIndices = deferredPhotoIndices
+        self.nextPhotoIndex = nextPhotoIndex
     }
 }
 
@@ -116,18 +201,17 @@ public enum Message: Codable, Sendable, Equatable {
     case eventExperienceCatalog(catalog: CustomerExperienceCatalog)
     case eventExperienceAsset(packet: ExperienceAssetPacket)
     case setMirrored(isMirrored: Bool)
-    case setPreviewTransport(transport: PreviewTransport)
-    case sessionStart
+    case sessionStart(context: SessionMessageContext?)
     case customerSessionRequest(selection: CustomerSessionSelection)
     case sessionRequestRejected(reason: String)
-    case sessionPrepared(config: EventConfig, presentation: SessionPresentation)
-    case beginCountdown(photoIndex: Int, seconds: Int)
-    case shotCaptured(index: Int, thumbnailData: Data)
-    case captureRecovery(photoIndex: Int, failure: CaptureFailureSummary)
-    case captureRecoveryAction(action: CaptureRecoveryAction)
-    case reviewDecision(action: ReviewAction)
-    case sessionFinished(qrPayload: String, stripThumbData: Data?, gifThumbData: Data?)
-    case operatorOverride(action: OperatorAction)
+    case sessionPrepared(config: EventConfig, presentation: SessionPresentation, context: SessionMessageContext)
+    case beginCountdown(context: SessionMessageContext, descriptor: CountdownDescriptor)
+    case shotCaptured(context: SessionMessageContext, index: Int, thumbnailData: Data)
+    case captureRecovery(context: SessionMessageContext, photoIndex: Int, failure: CaptureFailureSummary)
+    case captureRecoveryAction(context: SessionMessageContext, action: CaptureRecoveryAction)
+    case reviewDecision(context: SessionMessageContext, action: ReviewAction)
+    case sessionFinished(context: SessionMessageContext, qrPayload: String, stripThumbData: Data?, gifThumbData: Data?)
+    case operatorOverride(context: SessionMessageContext?, action: OperatorAction)
     case heartbeat
 }
 

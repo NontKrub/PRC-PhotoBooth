@@ -5,6 +5,37 @@ import Foundation
 
 @Suite("SessionJobQueue")
 struct SessionJobQueueTests {
+    @Test("cloud upload does not block another session's finalization")
+    @MainActor
+    func cloudUploadDoesNotBlockAnotherSession() async throws {
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let executor = BlockingCloudJobExecutor()
+        let queue = SessionJobQueue(
+            store: JobQueueStore(fileURL: directory.appendingPathComponent("jobs.json")),
+            executor: executor
+        )
+        let sessionA = makeManifest()
+        let sessionB = makeManifest()
+
+        queue.start()
+        queue.enqueueFinalizationJobs(for: sessionA)
+        try await waitUntil { await executor.snapshot().kinds.count == 3 }
+        queue.enqueueCloudUpload(for: sessionA)
+        try await waitUntil { await executor.snapshot().cloudUploadStarted }
+
+        queue.enqueueFinalizationJobs(for: sessionB)
+        try await waitUntil {
+            await queue.job(sessionID: sessionB.id, status: .succeeded, kind: .renderStrip) != nil
+        }
+
+        #expect(await executor.snapshot().cloudUploadStarted)
+        #expect(await executor.snapshot().cloudUploadCompleted == false)
+
+        await executor.releaseCloudUpload()
+        try await waitUntil { await executor.snapshot().cloudUploadCompleted }
+    }
+
     @Test("runs required jobs in priority order and one at a time")
     @MainActor
     func runsRequiredJobsInOrder() async throws {
@@ -47,6 +78,7 @@ struct SessionJobQueueTests {
             Issue.record("Expected render-strip retry state")
             return
         }
+        #expect(job.lastFailureDisposition == .retryable)
         queue.retry(jobID: job.id)
         try await waitUntil {
             await queue.job(status: .succeeded, kind: .renderStrip) != nil
@@ -75,6 +107,93 @@ struct SessionJobQueueTests {
         #expect(await queue.job(status: .succeeded, kind: .renderStrip) != nil)
         #expect(await queue.job(status: .succeeded, kind: .registerDownload) != nil)
         #expect(await queue.job(status: .failed, kind: .renderGIF) != nil)
+        #expect((await queue.job(status: .failed, kind: .renderGIF))?.lastFailureDisposition == .permanent)
+    }
+
+    @Test("manual cloud requeue reports the store result")
+    @MainActor
+    func reportsCloudRequeueResult() async throws {
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = JobQueueStore(fileURL: directory.appendingPathComponent("jobs.json"))
+        var job = try await store.enqueue(sessionID: "session", kind: .cloudUpload)
+        job.status = .failed
+        try await store.update(job)
+        let queue = SessionJobQueue(store: store, executor: TestJobExecutor())
+        queue.start()
+
+        let result = RequeueResultBox()
+        queue.forceRequeueCloudUpload(sessionID: "session") { value in
+            Task { await result.set(value) }
+        }
+        try await waitUntil { await result.value != nil }
+        #expect(await result.value == .queued)
+    }
+
+    @Test("cancelling a running cloud job cancels execution and leaves the job cancelled")
+    @MainActor
+    func cancellingRunningCloudJobStopsExecution() async throws {
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let executor = CancellableCloudJobExecutor()
+        let queue = SessionJobQueue(
+            store: JobQueueStore(fileURL: directory.appendingPathComponent("jobs.json")),
+            executor: executor
+        )
+        let manifest = makeManifest()
+
+        queue.start()
+        queue.enqueueFinalizationJobs(for: manifest)
+        try await waitUntil { await queue.job(sessionID: manifest.id, status: .succeeded, kind: .registerDownload) != nil }
+        queue.enqueueCloudUpload(for: manifest)
+        try await waitUntil { await executor.snapshot().started }
+
+        guard let job = await queue.job(sessionID: manifest.id, status: .running, kind: .cloudUpload) else {
+            Issue.record("Expected cloud upload to be running")
+            return
+        }
+        queue.cancel(jobID: job.id)
+
+        try await waitUntil { await queue.job(sessionID: manifest.id, status: .cancelled, kind: .cloudUpload) != nil }
+        let snapshot = await executor.snapshot()
+        #expect(snapshot.cancelled)
+        #expect(await queue.job(sessionID: manifest.id, status: .waitingRetry, kind: .cloudUpload) == nil)
+        #expect(await queue.job(sessionID: manifest.id, status: .failed, kind: .cloudUpload) == nil)
+    }
+
+    @Test("cloud worker executes another job after a cancelled upload")
+    @MainActor
+    func cloudWorkerContinuesAfterCancellation() async throws {
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let executor = CancellableCloudJobExecutor()
+        let queue = SessionJobQueue(
+            store: JobQueueStore(fileURL: directory.appendingPathComponent("jobs.json")),
+            executor: executor
+        )
+        let first = makeManifest()
+        let second = makeManifest()
+
+        queue.start()
+        queue.enqueueFinalizationJobs(for: first)
+        try await waitUntil { await queue.job(sessionID: first.id, status: .succeeded, kind: .registerDownload) != nil }
+        queue.enqueueCloudUpload(for: first)
+        try await waitUntil { await executor.snapshot().started }
+        guard let firstJob = await queue.job(sessionID: first.id, status: .running, kind: .cloudUpload) else {
+            Issue.record("Expected first cloud upload to be running")
+            return
+        }
+        queue.cancel(jobID: firstJob.id)
+        try await waitUntil { await queue.job(sessionID: first.id, status: .cancelled, kind: .cloudUpload) != nil }
+
+        queue.enqueueFinalizationJobs(for: second)
+        try await waitUntil("second register-download") { await queue.job(sessionID: second.id, status: .succeeded, kind: .registerDownload) != nil }
+        queue.enqueueCloudUpload(for: second)
+        try await waitUntil("second cloud-upload") { await queue.job(sessionID: second.id, status: .succeeded, kind: .cloudUpload) != nil }
+
+        let snapshot = await executor.snapshot()
+        #expect(snapshot.cancelled)
+        #expect(snapshot.completed)
     }
 }
 
@@ -110,9 +229,95 @@ private final class TestJobExecutor: SessionJobExecuting {
     func snapshot() -> Snapshot { snapshotValue }
 }
 
+@MainActor
+private final class BlockingCloudJobExecutor: SessionJobExecuting {
+    struct Snapshot: Sendable {
+        var kinds: [SessionJobKind] = []
+        var cloudUploadStarted = false
+        var cloudUploadCompleted = false
+    }
+
+    private let cloudGate = AsyncGate()
+    private var snapshotValue = Snapshot()
+
+    func execute(_ job: SessionJob) async throws {
+        snapshotValue.kinds.append(job.kind)
+        if job.kind == .cloudUpload {
+            snapshotValue.cloudUploadStarted = true
+            await cloudGate.wait()
+            snapshotValue.cloudUploadCompleted = true
+        }
+    }
+
+    func snapshot() -> Snapshot { snapshotValue }
+
+    func releaseCloudUpload() async {
+        await cloudGate.open()
+    }
+}
+
+@MainActor
+private final class CancellableCloudJobExecutor: SessionJobExecuting {
+    struct Snapshot: Sendable {
+        var started = false
+        var cancelled = false
+        var completed = false
+    }
+
+    private var snapshotValue = Snapshot()
+
+    func execute(_ job: SessionJob) async throws {
+        guard job.kind == .cloudUpload else { return }
+        let shouldBlock = !snapshotValue.started
+        snapshotValue.started = true
+        do {
+            if shouldBlock {
+                try await Task.sleep(for: .seconds(10))
+            }
+            snapshotValue.completed = true
+        } catch {
+            snapshotValue.cancelled = Task.isCancelled
+            throw error
+        }
+    }
+
+    func snapshot() -> Snapshot { snapshotValue }
+}
+
+private actor AsyncGate {
+    private var isOpen = false
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+
+    func wait() async {
+        if isOpen { return }
+        await withCheckedContinuation { continuation in
+            waiters.append(continuation)
+        }
+    }
+
+    func open() {
+        isOpen = true
+        let continuations = waiters
+        waiters.removeAll()
+        continuations.forEach { $0.resume() }
+    }
+}
+
+private actor RequeueResultBox {
+    private(set) var value: CloudUploadRequeueResult?
+
+    func set(_ value: CloudUploadRequeueResult) {
+        self.value = value
+    }
+}
+
 private extension SessionJobQueue {
     func job(status: SessionJobStatus, kind: SessionJobKind) async -> SessionJob? {
         jobs.first { $0.status == status && $0.kind == kind }
+    }
+
+    func job(sessionID: String, status: SessionJobStatus, kind: SessionJobKind) async -> SessionJob? {
+        jobs.first { $0.sessionID == sessionID && $0.status == status && $0.kind == kind }
     }
 }
 
@@ -151,14 +356,24 @@ private func makeManifest(withGIFFrames: Bool = false) -> SessionManifest {
 private func waitUntil(
     _ condition: @escaping @Sendable () async -> Bool
 ) async throws {
+    try await waitUntil("condition", condition)
+}
+
+private func waitUntil(
+    _ label: String,
+    _ condition: @escaping @Sendable () async -> Bool
+) async throws {
     for _ in 0..<100 {
         if await condition() { return }
         try await Task.sleep(for: .milliseconds(25))
     }
-    throw TimeoutError()
+    throw TimeoutError(label: label)
 }
 
-private struct TimeoutError: Error {}
+private struct TimeoutError: Error, CustomStringConvertible {
+    let label: String
+    var description: String { "Timed out waiting for \(label)" }
+}
 
 private func temporaryDirectory() throws -> URL {
     let directory = FileManager.default.temporaryDirectory

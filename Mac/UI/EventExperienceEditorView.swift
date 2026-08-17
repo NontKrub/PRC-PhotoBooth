@@ -24,12 +24,14 @@ struct EventExperienceEditorView: View {
     @State private var selectedTemplateID: String?
     @State private var previews: [String: CGImage] = [:]
     @State private var frames: [String: CGImage] = [:]
+    @State private var foregroundOverlays: [String: CGImage] = [:]
     @State private var isLoading = true
     @State private var isLoadingPreviews = false
     @State private var isSaving = false
     @State private var errorMessage: String?
     @State private var editingTemplateID: String?
     @State private var previewLoadID = UUID()
+    @State private var editingSession: EventExperienceEditingSession?
 
     var body: some View {
         Group {
@@ -76,6 +78,14 @@ struct EventExperienceEditorView: View {
                         }
                     }
 
+                    Section("GIF quality") {
+                        Picker("GIF quality", selection: $document.gifQualityPreset) {
+                            Text("Compact — Smaller file, fastest guest download").tag(GIFQualityPreset.compact)
+                            Text("Balanced — Recommended").tag(GIFQualityPreset.balanced)
+                            Text("High — Best quality, larger file").tag(GIFQualityPreset.high)
+                        }
+                    }
+
                     EventGallerySettingsView(configuration: $document.gallery, serverURL: coordinator.serverURL)
 
                     if let errorMessage {
@@ -87,7 +97,7 @@ struct EventExperienceEditorView: View {
         .navigationTitle("Guest Experience")
         .toolbar {
             ToolbarItem(placement: .cancellationAction) {
-                Button("Back") { dismiss() }
+                Button("Back", action: discardAndDismiss)
                     .disabled(isSaving)
             }
             ToolbarItem(placement: .confirmationAction) {
@@ -98,14 +108,19 @@ struct EventExperienceEditorView: View {
             }
         }
         .task(id: event.id) {
+            var session: EventExperienceEditingSession?
             do {
+                session = try await coordinator.experienceStore.beginEditing(eventID: event.id)
                 document = try await coordinator.loadExperienceDocument(for: event)
+                editingSession = session
                 selectedTemplateID = document.defaultTemplateID
                 isLoading = false
                 previewLoadID = UUID()
             } catch is CancellationError {
+                if let session { try? await coordinator.experienceStore.discardEditing(session) }
                 return
             } catch {
+                if let session { try? await coordinator.experienceStore.discardEditing(session) }
                 errorMessage = error.localizedDescription
                 isLoading = false
             }
@@ -125,6 +140,8 @@ struct EventExperienceEditorView: View {
         .onChange(of: document.templates) { oldTemplates, newTemplates in
             let templateIDs = Set(newTemplates.map(\.id))
             previews = previews.filter { templateIDs.contains($0.key) }
+            frames = frames.filter { templateIDs.contains($0.key) }
+            foregroundOverlays = foregroundOverlays.filter { templateIDs.contains($0.key) }
             for template in newTemplates {
                 if oldTemplates.first(where: { $0.id == template.id }) != template {
                     previews[template.id] = nil
@@ -137,16 +154,35 @@ struct EventExperienceEditorView: View {
         )) { template in
             if let index = document.templates.firstIndex(where: { $0.id == template.id }) {
                 NavigationStack {
-                    TemplateDetailView(template: $document.templates[index], frame: frames[template.id]) { url in
+                    TemplateDetailView(
+                        template: $document.templates[index],
+                        frame: frames[template.id],
+                        foregroundOverlay: foregroundOverlays[template.id]
+                    ) { url in
                         importFrame(url, templateID: template.id)
+                    } onImportForegroundOverlay: { url in
+                        importForegroundOverlay(url, templateID: template.id)
+                    } onRemoveForegroundOverlay: {
+                        document.templates[index].foregroundOverlayFileName = nil
+                        foregroundOverlays[template.id] = nil
+                        previews[template.id] = nil
+                        previewLoadID = UUID()
                     } onImportPromptImage: { photoIndex, url in
                         importPromptImage(url, templateID: template.id, photoIndex: photoIndex)
                     }
                     .navigationTitle(template.name.value(for: operatorLanguage))
                 }
                 .frame(minWidth: 560, minHeight: 620)
-                .task { await loadFrame(templateID: template.id) }
+                .task {
+                    await loadFrame(templateID: template.id)
+                    await loadForegroundOverlay(templateID: template.id)
+                }
             }
+        }
+        .onDisappear {
+            guard let session = editingSession else { return }
+            editingSession = nil
+            Task { try? await coordinator.experienceStore.discardEditing(session) }
         }
     }
 
@@ -187,13 +223,24 @@ struct EventExperienceEditorView: View {
             return prompt
         }
         document.templates.append(copy)
-        Task {
-            try? await coordinator.experienceStore.duplicateTemplateAssets(
-                eventID: event.id,
-                sourceTemplateID: source.id,
-                destinationTemplateID: copy.id,
-                promptIDMap: promptIDMap
-            )
+        Task { @MainActor in
+            do {
+                try await coordinator.experienceStore.duplicateTemplateAssets(
+                    eventID: event.id,
+                    sourceTemplateID: source.id,
+                    destinationTemplateID: copy.id,
+                    promptIDMap: promptIDMap,
+                    editingSession: editingSession
+                )
+                frames[copy.id] = frames[source.id]
+                previews[copy.id] = previews[source.id]
+                previewLoadID = UUID()
+            } catch {
+                document.templates.removeAll { $0.id == copy.id }
+                frames.removeValue(forKey: copy.id)
+                previews.removeValue(forKey: copy.id)
+                errorMessage = error.localizedDescription
+            }
         }
     }
 
@@ -240,12 +287,42 @@ struct EventExperienceEditorView: View {
                 let imported = try await coordinator.experienceStore.importTemplateFrame(
                     eventID: event.id,
                     templateID: templateID,
-                    sourceURL: url
+                    sourceURL: url,
+                    editingSession: editingSession
                 )
                 guard let index = document.templates.firstIndex(where: { $0.id == templateID }) else { return }
                 document.templates[index].frameFileName = imported.fileName
                 document.templates[index].updatedAt = Date()
-                await loadFrame(templateID: templateID)
+                guard let source = CGImageSourceCreateWithURL(imported.url as CFURL, nil),
+                      let image = CGImageSourceCreateImageAtIndex(source, 0, nil) else {
+                    frames[templateID] = nil
+                    throw EventExperienceError.importFailed("Imported frame could not be decoded.")
+                }
+                frames[templateID] = image
+                previews[templateID] = nil
+                previewLoadID = UUID()
+            } catch {
+                errorMessage = error.localizedDescription
+            }
+        }
+    }
+
+    private func importForegroundOverlay(_ url: URL, templateID: String) {
+        Task {
+            do {
+                let imported = try await coordinator.experienceStore.importTemplateForegroundOverlay(
+                    eventID: event.id,
+                    templateID: templateID,
+                    sourceURL: url,
+                    editingSession: editingSession
+                )
+                guard let index = document.templates.firstIndex(where: { $0.id == templateID }),
+                      let image = loadCGImage(from: imported.url) else {
+                    throw EventExperienceError.importFailed("Imported foreground overlay could not be decoded.")
+                }
+                document.templates[index].foregroundOverlayFileName = imported.fileName
+                document.templates[index].updatedAt = Date()
+                foregroundOverlays[templateID] = image
                 previews[templateID] = nil
                 previewLoadID = UUID()
             } catch {
@@ -256,21 +333,52 @@ struct EventExperienceEditorView: View {
 
     private func loadFrame(templateID: String) async {
         do {
+            guard frames[templateID] == nil else { return }
+            guard let template = document.templates.first(where: { $0.id == templateID }),
+                  let fileName = template.frameFileName else {
+                frames[templateID] = nil
+                return
+            }
             guard let data = try await coordinator.experienceStore.readTemplateFrame(
                 eventID: event.id,
-                templateID: templateID
+                templateID: templateID,
+                fileName: fileName,
+                editingSession: editingSession
             ),
             let source = CGImageSourceCreateWithData(data as CFData, nil),
             let image = CGImageSourceCreateImageAtIndex(source, 0, nil) else {
                 frames[templateID] = nil
                 return
             }
+            guard frames[templateID] == nil else { return }
             frames[templateID] = image
         } catch is CancellationError {
             return
         } catch {
             frames[templateID] = nil
             errorMessage = "Template frame is missing or corrupt."
+        }
+    }
+
+    private func loadForegroundOverlay(templateID: String) async {
+        do {
+            guard foregroundOverlays[templateID] == nil,
+                  let template = document.templates.first(where: { $0.id == templateID }),
+                  let fileName = template.foregroundOverlayFileName,
+                  let data = try await coordinator.experienceStore.readTemplateForegroundOverlay(
+                    eventID: event.id,
+                    templateID: templateID,
+                    fileName: fileName,
+                    editingSession: editingSession
+                  ),
+                  let source = CGImageSourceCreateWithData(data as CFData, nil),
+                  let image = CGImageSourceCreateImageAtIndex(source, 0, nil) else { return }
+            foregroundOverlays[templateID] = image
+        } catch is CancellationError {
+            return
+        } catch {
+            foregroundOverlays[templateID] = nil
+            errorMessage = "Template foreground overlay is missing or corrupt."
         }
     }
 
@@ -283,7 +391,8 @@ struct EventExperienceEditorView: View {
                 let imported = try await coordinator.experienceStore.importPromptImage(
                     eventID: event.id,
                     promptID: promptID,
-                    sourceURL: url
+                    sourceURL: url,
+                    editingSession: editingSession
                 )
                 document.templates[templateIndex].posePrompts[promptIndex].imageFileName = imported.fileName
             } catch {
@@ -297,7 +406,8 @@ struct EventExperienceEditorView: View {
         guard !templates.isEmpty else { return }
         let dataByID = try await coordinator.experienceStore.readTemplatePreviews(
             eventID: event.id,
-            templates: templates
+            templates: templates,
+            editingSession: editingSession
         )
         for template in templates {
             try Task.checkCancellation()
@@ -312,19 +422,48 @@ struct EventExperienceEditorView: View {
         isSaving = true
         Task {
             do {
-                try await coordinator.saveExperienceDocument(document, for: event)
-                for template in document.templates {
+                try await coordinator.saveExperienceDocument(
+                    document,
+                    for: event,
+                    editingSession: editingSession
+                )
+            } catch {
+                errorMessage = error.localizedDescription
+                isSaving = false
+                return
+            }
+
+            editingSession = nil
+            var previewError: Error?
+            for template in document.templates {
+                do {
                     _ = try await coordinator.experienceStore.rebuildPreview(
                         eventID: event.id,
                         templateID: template.id
                     )
+                } catch {
+                    previewError = previewError ?? error
                 }
-                coordinator.refreshActiveExperience()
-                dismiss()
-            } catch {
-                errorMessage = error.localizedDescription
-                isSaving = false
             }
+            coordinator.refreshActiveExperience()
+            if let previewError {
+                errorMessage = "Event saved. Template previews need rebuilding: \(previewError.localizedDescription)"
+                isSaving = false
+            } else {
+                dismiss()
+            }
+        }
+    }
+
+    private func discardAndDismiss() {
+        guard let session = editingSession else {
+            dismiss()
+            return
+        }
+        editingSession = nil
+        Task {
+            try? await coordinator.experienceStore.discardEditing(session)
+            dismiss()
         }
     }
 

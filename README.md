@@ -27,15 +27,15 @@ Version 1.2 has no audio countdown. Countdown and pose prompts are visual only.
 ```text
 ┌─────────────────────┐       Network.framework            ┌─────────────────────┐
 │  macOS operator app │ ─────────────────────────────────▶ │  iPad kiosk app     │
-│                     │   control + wireless preview       │                     │
-│ camera / capture    │ ◀──────── optional USB preview ─── │ start / review / QR │
+│                     │   control + preview                │                     │
+│ camera / capture    │ ◀────── Wi-Fi or wired LAN ─────── │ start / review / QR │
 │ persistence / output│                                    │                     │
 └──────────┬──────────┘                                    └─────────────────────┘
            │
            └── Shared models, session state machine, and message protocol
 ```
 
-Control messages are JSON-encoded and sent reliably over a framed Network.framework control connection. Preview JPEGs use a separate latest-frame-wins connection, so preview traffic cannot delay session controls. Bonjour advertises `_prc-control._tcp` and `_prc-preview._tcp`. In wired mode, the existing `_prc-hq._tcp` USB preview path remains available. A DEBUG-only `--legacy-multipeer` flag keeps the old adapter available while hardware migration is validated.
+Control messages are JSON-encoded and sent reliably over a framed Network.framework control connection. Preview JPEGs use a separate latest-frame-wins connection within the same `NetworkBoothTransport`, so preview traffic cannot delay session controls. The operator chooses Wi-Fi or LAN; LAN requires Network.framework's `.wiredEthernet` interface and falls back to Wi-Fi after a failed path or validated handshake. Bonjour advertises `_prc-control._tcp` and `_prc-preview._tcp`. A DEBUG-only `--legacy-multipeer` flag keeps the old adapter available while hardware migration is validated.
 
 ## Requirements
 
@@ -46,7 +46,7 @@ Control messages are JSON-encoded and sent reliably over a framed Network.framew
 - A camera supported by AVFoundation or a compatible USB-tethered camera for DSLR mode
 - Local-network access between the Mac and iPad for discovery and control
 
-The Mac target is configured as a universal application for Apple Silicon and Intel Macs. Camera, microphone, and local-network permissions must be granted at first launch. A USB-C preview also requires a trusted cable connection between the Mac and iPad.
+The Mac target is configured as a universal application for Apple Silicon and Intel Macs. Camera, microphone, and local-network permissions must be granted at first launch. LAN mode requires a reachable wired Ethernet path on both devices; otherwise the transport reports and uses Wi-Fi fallback.
 
 ## Getting started
 
@@ -105,7 +105,7 @@ xcodebuild \
 2. In Event Setup, create an event, choose the number of photos and countdown, import an optional frame PNG, and set the photo slots.
 3. Mark the event as active and select the camera source in the operator console.
 4. Launch the iPad app on the same local network. The apps discover each other automatically through Network.framework Bonjour.
-5. Choose Wireless or Cable for the preview transport if needed. Cable mode is for the live preview stream; it does not replace the control connection.
+5. Choose Wi-Fi or LAN in the Mac operator settings. LAN prefers wired Ethernet and automatically falls back to Wi-Fi if the wired route or validated iPad handshake is unavailable.
 6. Start a session from the iPad or operator console. After each capture, keep the photo or retake it.
 7. Open Operations before an event and run Safe Checks. Run Full Preflight when a diagnostic camera capture or printer test is appropriate.
 8. When the session finishes, queued required jobs make the strip and QR available first; GIF, cloud upload, and automatic printing continue independently.

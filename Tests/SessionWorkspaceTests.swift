@@ -13,7 +13,9 @@ struct SessionWorkspaceTests {
         let root = try temporaryDirectory()
         defer { try? FileManager.default.removeItem(at: root) }
         let frame = root.appendingPathComponent("source.png")
+        let foreground = root.appendingPathComponent("foreground.png")
         try makeImage().writePNG(to: frame)
+        try makeImage(red: false).writePNG(to: foreground)
 
         let workspace = SessionWorkspace()
         let descriptor = try workspace.createWorkspace(
@@ -21,12 +23,15 @@ struct SessionWorkspaceTests {
             eventName: "Party / One",
             outputRoot: root.appendingPathComponent("output"),
             startedAt: Date(timeIntervalSince1970: 1_700_000_000),
-            frameSourceURL: frame
+            frameSourceURL: frame,
+            foregroundOverlaySourceURL: foreground
         )
 
         #expect(descriptor.relativeDirectoryPath.contains("Party - One"))
         #expect(descriptor.absoluteDirectoryPath.hasSuffix("12345678"))
         #expect(FileManager.default.fileExists(atPath: URL(fileURLWithPath: descriptor.absoluteDirectoryPath).appendingPathComponent(".work/frame.png").path))
+        #expect(descriptor.foregroundOverlaySnapshotFileName == ".work/foreground.png")
+        #expect(FileManager.default.fileExists(atPath: URL(fileURLWithPath: descriptor.absoluteDirectoryPath).appendingPathComponent(".work/foreground.png").path))
     }
 
     @Test("saves accepted image and deterministic GIF frames, replacing an index safely")

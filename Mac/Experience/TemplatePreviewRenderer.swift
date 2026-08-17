@@ -7,7 +7,7 @@ import UniformTypeIdentifiers
 struct TemplatePreviewRenderer {
     static let maxDimension = 640
 
-    func render(template: EventTemplateDefinition, frame: CGImage?) throws -> CGImage {
+    func render(template: EventTemplateDefinition, frame: CGImage?, foregroundOverlay: CGImage? = nil) throws -> CGImage {
         let config = EventConfig(
             photoCount: template.photoCount,
             canvasWidth: template.canvasWidth,
@@ -18,7 +18,7 @@ struct TemplatePreviewRenderer {
         let placeholders = Dictionary(uniqueKeysWithValues: (0..<template.photoCount).map { index in
             (index, placeholder(index: index))
         })
-        let image = try Compositor(config: config, framePNG: frame).render(
+        let image = try Compositor(config: config, framePNG: frame, foregroundOverlayPNG: foregroundOverlay).render(
             images: placeholders,
             qrPayload: "https://example.invalid/s/preview/"
         )

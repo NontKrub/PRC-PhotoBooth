@@ -26,7 +26,6 @@
 		<string>_prc-preview._tcp</string>
 		<string>_prc-photobooth._tcp</string>
 		<string>_prc-photobooth._udp</string>
-		<string>_prc-hq._tcp</string>
 	</array>
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>PRC PhotoBooth connects to the operator Mac over local network for camera preview and session control.</string>

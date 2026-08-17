@@ -61,7 +61,7 @@ struct OperatorConsoleView: View {
     var cameraPanel: some View {
         ZStack {
             Color.black
-            if !coordinator.cameraPermissionGranted {
+            if !coordinator.selectedCaptureSourceReady {
                 permissionDeniedOverlay
             } else {
                 ActiveCameraPreviewView(
@@ -106,16 +106,22 @@ struct OperatorConsoleView: View {
         VStack(spacing: 16) {
             Image(systemName: "camera.fill.badge.ellipsis")
                 .font(.system(size: 44)).foregroundStyle(.orange)
-            Text("Camera Access Required")
+            Text(coordinator.cameraSourceKind == .dslr ? "DSLR Not Connected" : "Camera Access Required")
                 .font(.headline).foregroundStyle(.white)
-            Text("Grant camera access in System Settings → Privacy & Security → Camera.")
+            Text(coordinator.cameraSourceKind == .dslr
+                 ? "Connect the selected DSLR or choose AVFoundation capture."
+                 : "Grant camera access in System Settings → Privacy & Security → Camera.")
                 .font(.caption).foregroundStyle(.white.opacity(0.7))
                 .multilineTextAlignment(.center)
                 .frame(maxWidth: 260)
-            Button("Open System Settings") {
-                NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Camera")!)
+            if coordinator.cameraSourceKind == .avFoundation {
+                Button("Open System Settings") {
+                    if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Camera") {
+                        NSWorkspace.shared.open(url)
+                    }
+                }
+                .buttonStyle(.borderedProminent)
             }
-            .buttonStyle(.borderedProminent)
         }
         .padding(32)
     }
@@ -127,8 +133,9 @@ struct OperatorConsoleView: View {
             Circle().fill(connectionColor).frame(width: 8, height: 8)
             Text(connectionLabel).font(.caption)
             Spacer()
-            if case .connected = coordinator.multipeer.connectionState {
-                Image(systemName: "wifi").font(.caption).foregroundStyle(.green)
+            if case .connected = coordinator.connectionStatus.state {
+                Image(systemName: coordinator.connectionStatus.effectiveNetwork == .lan ? "cable.connector" : "wifi")
+                    .font(.caption).foregroundStyle(.green)
             }
         }
         .padding(.horizontal, 12)
@@ -170,7 +177,7 @@ struct OperatorConsoleView: View {
     }
 
     var connectionColor: Color {
-        switch coordinator.multipeer.connectionState {
+        switch coordinator.connectionStatus.state {
         case .connected:    return .green
         case .connecting:   return .yellow
         case .disconnected: return .red
@@ -178,9 +185,17 @@ struct OperatorConsoleView: View {
     }
 
     var connectionLabel: String {
-        switch coordinator.multipeer.connectionState {
-        case .connected(let name): return operatorFormat("iPad connected: %@", locale: locale, name)
-        case .connecting:          return operatorString("Connecting to iPad…", locale: locale)
+        switch coordinator.connectionStatus.state {
+        case .connected:
+            let name = coordinator.connectionStatus.peerDisplayName ?? "iPad"
+            let route = switch coordinator.connectionStatus.effectiveNetwork {
+            case .lan: "Connected via Ethernet"
+            case .wifi where coordinator.connectionStatus.isFallbackActive: "Using Wi-Fi fallback"
+            case .wifi: "Using Wi-Fi"
+            case .unavailable: "Connected"
+            }
+            return "iPad connected: \(name) · \(route)"
+        case .connecting:          return operatorConnectingRoute(coordinator.connectionStatus, locale: locale)
         case .disconnected:        return operatorString("iPad not connected", locale: locale)
         }
     }
@@ -503,10 +518,78 @@ struct OperatorConsoleView: View {
             if case .finished = sm.phase {
                 Button("Print Again") { showPrintAgainConfirmation = true }
                     .buttonStyle(.bordered)
+                finishedWebDeliveryStatus
             }
             if case .processing = sm.phase {
                 processingStatus
             }
+        }
+    }
+
+    @ViewBuilder
+    private var finishedWebDeliveryStatus: some View {
+        let sessionID = coordinator.lastCompletedSessionID ?? sm.currentSessionID
+        if !sessionID.isEmpty,
+           let job = coordinator.jobQueue.jobs.first(where: {
+               $0.sessionID == sessionID && $0.kind == .cloudUpload
+           }) {
+            VStack(alignment: .leading, spacing: 4) {
+                HStack {
+                    Label("Web Delivery", systemImage: webDeliveryIcon(job))
+                    Spacer()
+                    Text(webDeliveryStatus(job))
+                        .font(.caption)
+                        .foregroundStyle(webDeliveryColor(job))
+                }
+                if job.status == .waitingRetry, let next = job.nextAttemptAt {
+                    (Text("Retry scheduled ") + Text(next, style: .relative))
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+                if job.status == .failed || job.status == .cancelled {
+                    Text(job.lastError ?? "The QR may not work until the upload is retried.")
+                        .font(.caption2)
+                        .foregroundStyle(.red)
+                    Text("The printed QR is still valid. Retrying the upload will restore the same link.")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                    Button("Retry Web Upload") {
+                        coordinator.retryCloudUpload(sessionID: sessionID)
+                    }
+                    .buttonStyle(.bordered)
+                }
+            }
+        }
+    }
+
+    private func webDeliveryStatus(_ job: SessionJob) -> String {
+        switch job.status {
+        case .pending: return "Waiting"
+        case .running: return "Uploading… Attempt \(job.attemptCount)"
+        case .waitingRetry: return "Retry scheduled"
+        case .succeeded: return "Uploaded"
+        case .failed: return "Upload failed"
+        case .cancelled: return "Upload cancelled"
+        }
+    }
+
+    private func webDeliveryIcon(_ job: SessionJob) -> String {
+        switch job.status {
+        case .pending, .waitingRetry: return "clock"
+        case .running: return "arrow.triangle.2.circlepath"
+        case .succeeded: return "checkmark.circle.fill"
+        case .failed: return "exclamationmark.triangle.fill"
+        case .cancelled: return "xmark.circle.fill"
+        }
+    }
+
+    private func webDeliveryColor(_ job: SessionJob) -> Color {
+        switch job.status {
+        case .succeeded: return .green
+        case .failed: return .red
+        case .cancelled: return .secondary
+        case .running, .waitingRetry: return .orange
+        case .pending: return .secondary
         }
     }
 
@@ -556,15 +639,12 @@ struct OperatorConsoleView: View {
             .buttonStyle(.borderedProminent)
             .disabled(coordinator.activeEvent == nil
                       || (sm.phase != .idle && sm.phase != .readyToStart)
-                      || !coordinator.cameraPermissionGranted
-                      || !coordinator.capture.isRunning
-                      || (coordinator.cameraSourceKind == .dslr && !coordinator.capture.dslr.isRunning)
+                      || !coordinator.selectedCaptureSourceReady
                       || !coordinator.isCustomerDisplayReady
                       || coordinator.recoveryService.recoverableCaptureSession != nil)
             .help(coordinator.activeEvent == nil ? "Select an active event first" :
-                  !coordinator.cameraPermissionGranted ? "Camera permission required" :
-                  !coordinator.capture.isRunning ? "Start the selected camera first" :
-                  (coordinator.cameraSourceKind == .dslr && !coordinator.capture.dslr.isRunning) ? "Connect DSLR camera first" :
+                  !coordinator.selectedCaptureSourceReady && coordinator.cameraSourceKind == .avFoundation ? "Camera permission or AVFoundation camera required" :
+                  !coordinator.selectedCaptureSourceReady ? "Connect the selected DSLR camera first" :
                   !coordinator.isCustomerDisplayReady ? "Connect an iPad or activate the external viewer" :
                   coordinator.recoveryService.recoverableCaptureSession != nil ? "Resume or discard the unfinished session in Operations." : "")
 
@@ -602,7 +682,7 @@ struct OperatorConsoleView: View {
         .tint(tint)
     }
 
-    var iPadConnected: Bool { if case .connected = coordinator.multipeer.connectionState { return true }; return false }
+    var iPadConnected: Bool { if case .connected = coordinator.connectionStatus.state { return true }; return false }
     var canRetake: Bool { if case .review = sm.phase { return true }; return false }
     var canSkip: Bool   { if case .review = sm.phase { return true }; return false }
 

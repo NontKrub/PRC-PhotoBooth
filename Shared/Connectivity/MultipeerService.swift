@@ -41,6 +41,7 @@ private final class SessionReference: @unchecked Sendable {
 public final class MultipeerService: NSObject, BoothTransport {
     public typealias ConnectionState = BoothConnectionState
 
+    public let connectionStatus: BoothConnectionStatus
     public private(set) var connectionState: ConnectionState = .disconnected
     public private(set) var peerName: String = ""
     public private(set) var connectedPeerNames: [String] = []
@@ -59,6 +60,13 @@ public final class MultipeerService: NSObject, BoothTransport {
     // packets are disposable and coalesced so they cannot starve controls.
     public var onControlMessage: (@MainActor (Message) -> Void)?
     public var onPreviewFrame:   (@MainActor (Data) -> Void)?
+
+    public var requestedNetworkPreference: BoothNetworkPreference {
+        get { connectionStatus.requestedNetwork }
+        set {
+            publishStatus(requestedNetwork: newValue)
+        }
+    }
 
     public let role: DeviceRole
 
@@ -81,8 +89,12 @@ public final class MultipeerService: NSObject, BoothTransport {
     private var latestPreviewFrame: (peer: String, data: Data)?
     private var previewDeliveryTask: Task<Void, Never>?
 
-    public init(role: DeviceRole) {
+    public init(
+        role: DeviceRole,
+        connectionStatus: BoothConnectionStatus? = nil
+    ) {
         self.role = role
+        self.connectionStatus = connectionStatus ?? BoothConnectionStatus()
         self.peerTracker = PeerConnectionTracker(localRole: role)
         #if os(macOS)
         let name = Host.current().localizedName ?? "PRC-Mac"
@@ -185,6 +197,7 @@ public final class MultipeerService: NSObject, BoothTransport {
         peerName = ""
         connectionState = .disconnected
         lastHeartbeatReceived = .distantPast
+        publishStatus()
     }
 
     private func invalidateCurrentSession() {
@@ -310,11 +323,38 @@ public final class MultipeerService: NSObject, BoothTransport {
         guard let activePeerName = peerTracker.activePeer else {
             peerName = ""
             connectionState = .disconnected
+            publishStatus()
             return
         }
 
         peerName = activePeerName
         connectionState = .connected(peerName: activePeerName)
+        publishStatus()
+    }
+
+    private func publishStatus(requestedNetwork: BoothNetworkPreference? = nil) {
+        let preference = requestedNetwork ?? connectionStatus.requestedNetwork
+        let peer = peerName.isEmpty ? nil : peerName
+        let route: BoothNetworkRouteState
+        switch connectionState {
+        case .connected:
+            route = preference == .lan ? .fallbackWiFi(peer: peer) : .connectedWiFi(peer: peer ?? "")
+        case .connecting:
+            route = .connectingWiFi
+        case .disconnected:
+            route = .disconnected
+        }
+        connectionStatus.publish(
+            requestedNetwork: preference,
+            state: connectionState,
+            peerID: peer,
+            peerDisplayName: peer,
+            routeState: route,
+            effectiveNetwork: peer == nil ? .unavailable : .wifi,
+            fallbackReason: preference == .lan && peer != nil ? "Legacy Multipeer transport uses Wi-Fi" : nil,
+            isLANPathAvailable: connectionStatus.isLANPathAvailable,
+            isWiFiPathAvailable: connectionStatus.isWiFiPathAvailable
+        )
     }
 
     private func cancelHandshakeTimeout(for peerName: String) {
@@ -443,6 +483,7 @@ extension MultipeerService: MCSessionDelegate {
                 print("[MPC] transport connected: \(name)")
                 if !peerTracker.hasVerifiedPeer {
                     connectionState = .connecting
+                    publishStatus()
                     startConnectionTimeout()
                 }
                 startHandshakeTimeout(for: name, attemptID: attemptID)
@@ -452,6 +493,7 @@ extension MultipeerService: MCSessionDelegate {
                 // negotiating in the background.
                 if !peerTracker.hasVerifiedPeer {
                     connectionState = .connecting
+                    publishStatus()
                     startConnectionTimeout()
                 }
             case .notConnected:
