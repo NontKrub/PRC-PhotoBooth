@@ -9,16 +9,19 @@ struct EventSetupView: View {
     // Live query — updates automatically when events are added/deleted
     @Query(sort: \BoothEvent.createdAt, order: .reverse) private var events: [BoothEvent]
 
-    @State private var selectedEventID: String?
+    @State private var selectedEventIDs = Set<String>()
     @State private var showNewEventSheet = false
+    @State private var pendingDeleteIDs = Set<String>()
+    @State private var showDeleteConfirmation = false
 
     private var selectedEvent: BoothEvent? {
-        events.first { $0.id == selectedEventID }
+        guard selectedEventIDs.count == 1, let id = selectedEventIDs.first else { return nil }
+        return events.first { $0.id == id }
     }
 
     var body: some View {
         NavigationSplitView {
-            List(selection: $selectedEventID) {
+            List(selection: $selectedEventIDs) {
                 ForEach(events) { event in
                     VStack(alignment: .leading, spacing: 2) {
                         HStack {
@@ -40,10 +43,14 @@ struct EventSetupView: View {
                     .contextMenu {
                         Button("Set Active") { setActive(event) }
                         Divider()
-                        Button("Delete", role: .destructive) { delete(event) }
+                        Button("Delete", role: .destructive) {
+                            pendingDeleteIDs = [event.id]
+                            showDeleteConfirmation = true
+                        }
                     }
                 }
             }
+            .onDeleteCommand { requestDeleteSelected() }
             .navigationTitle("Events (\(events.count))")
             .toolbar {
                 ToolbarItem {
@@ -51,10 +58,23 @@ struct EventSetupView: View {
                         Label("New Event", systemImage: "plus")
                     }
                 }
+                if selectedEventIDs.count > 1 {
+                    ToolbarItem {
+                        Button("Delete \(selectedEventIDs.count) Events…", role: .destructive) {
+                            requestDeleteSelected()
+                        }
+                    }
+                }
             }
         } detail: {
             if let event = selectedEvent {
                 EventDetailView(event: event)
+            } else if selectedEventIDs.count > 1 {
+                ContentUnavailableView {
+                    Label("\(selectedEventIDs.count) Events Selected", systemImage: "checkmark.circle")
+                } description: {
+                    Text("Choose Delete to remove the selected events.")
+                }
             } else {
                 ContentUnavailableView {
                     Label("No Event Selected", systemImage: "calendar")
@@ -68,8 +88,20 @@ struct EventSetupView: View {
                 let event = BoothEvent(name: name, photoCount: count, countdownSeconds: seconds)
                 modelContext.insert(event)
                 saveChanges()
-                selectedEventID = event.id
+                selectedEventIDs = [event.id]
             }
+        }
+        .confirmationDialog(
+            "Delete \(pendingDeleteIDs.count) Events?",
+            isPresented: $showDeleteConfirmation,
+            titleVisibility: .visible
+        ) {
+            Button("Cancel", role: .cancel) {}
+            Button("Delete \(pendingDeleteIDs.count) Events", role: .destructive) {
+                deleteEvents(ids: pendingDeleteIDs)
+            }
+        } message: {
+            Text(deleteConfirmationMessage)
         }
     }
 
@@ -80,10 +112,33 @@ struct EventSetupView: View {
         coordinator.activeEvent = event
     }
 
-    private func delete(_ event: BoothEvent) {
-        if selectedEventID == event.id { selectedEventID = nil }
-        if coordinator.activeEvent?.id == event.id { coordinator.activeEvent = nil }
-        modelContext.delete(event)
+    private func requestDeleteSelected() {
+        guard !selectedEventIDs.isEmpty else { return }
+        pendingDeleteIDs = selectedEventIDs
+        showDeleteConfirmation = true
+    }
+
+    private var deleteConfirmationMessage: String {
+        guard let activeID = coordinator.activeEvent?.id,
+              pendingDeleteIDs.contains(activeID) else {
+            return "This permanently deletes the selected events."
+        }
+        return "This permanently deletes the selected events. The active event is included and the booth will have no active event."
+    }
+
+    private func deleteEvents(ids: Set<String>) {
+        let plan = EventSelectionLogic.deletionPlan(
+            selectedIDs: ids,
+            activeID: coordinator.activeEvent?.id
+        )
+        if plan.removesActiveEvent {
+            coordinator.activeEvent = nil
+        }
+        for event in events where plan.ids.contains(event.id) {
+            modelContext.delete(event)
+        }
+        selectedEventIDs.subtract(plan.ids)
+        pendingDeleteIDs = []
         saveChanges()
     }
 

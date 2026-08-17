@@ -4,7 +4,6 @@ import Observation
 
 enum ConfiguredPrinterStatus: Sendable, Equatable {
     case systemDefault
-    case available(name: String)
     case unavailable(name: String)
 }
 
@@ -19,9 +18,6 @@ struct PrinterTestResult: Sendable, Equatable {
 struct PrinterPrintRequest {
     var sourceURL: URL?
     var isTestPage: Bool
-    var printerName: String?
-    var paperSizeRawValue: String
-    var copies: Int
     var showsPrintDialog: Bool
     var testDate: Date
 }
@@ -37,7 +33,6 @@ protocol PrinterBackend: AnyObject {
 @Observable
 final class PrinterService {
     private let backend: any PrinterBackend
-    private let defaults: UserDefaults
 
     private(set) var availablePrinterNames: [String] = []
     private(set) var lastTestResult: PrinterTestResult?
@@ -48,24 +43,23 @@ final class PrinterService {
     private(set) var lastPrintAt: Date?
     private(set) var lastPrintError: String?
 
-    init(backend: any PrinterBackend = AppKitPrinterBackend(), defaults: UserDefaults = .standard) {
+    init(backend: any PrinterBackend = AppKitPrinterBackend()) {
         self.backend = backend
-        self.defaults = defaults
         refreshPrinters()
     }
 
     func refreshPrinters() {
         availablePrinterNames = backend.availablePrinterNames()
-        if !defaults.bool(forKey: "selphySkipPrintDialog") || !hasConfiguredPrinter {
-            defaults.set(false, forKey: "selphyAutoPrintAfterSession")
-        }
         invalidateTestResult()
     }
 
     func configuredPrinterStatus() -> ConfiguredPrinterStatus {
-        let saved = defaults.string(forKey: "selphyPrinterName") ?? ""
-        guard !saved.isEmpty else { return .systemDefault }
-        return availablePrinterNames.contains(saved) ? .available(name: saved) : .unavailable(name: saved)
+        guard let name = backend.defaultPrinterName(), !name.isEmpty else {
+            return .unavailable(name: "No system default printer")
+        }
+        return availablePrinterNames.isEmpty || availablePrinterNames.contains(name)
+            ? .systemDefault
+            : .unavailable(name: name)
     }
 
     func invalidateTestResult() {
@@ -73,26 +67,10 @@ final class PrinterService {
     }
 
     func printTestPage() async throws {
-        let status = configuredPrinterStatus()
-        let printerName: String?
-        do {
-            printerName = try selectedPrinterName(for: status)
-        } catch {
-            lastTestResult = PrinterTestResult(
-                date: Date(),
-                printerName: configuredPrinterLabel,
-                isSuccess: false,
-                message: error.localizedDescription
-            )
-            throw JobExecutionError.retryable(error.localizedDescription)
-        }
         let request = PrinterPrintRequest(
             sourceURL: nil,
             isTestPage: true,
-            printerName: printerName,
-            paperSizeRawValue: paperSizeRawValue,
-            copies: copies,
-            showsPrintDialog: false,
+            showsPrintDialog: true,
             testDate: Date()
         )
         isPrinting = true
@@ -105,17 +83,26 @@ final class PrinterService {
             lastPrintError = nil
             lastTestResult = PrinterTestResult(
                 date: request.testDate,
-                printerName: printerName ?? "System Default",
+                printerName: backend.defaultPrinterName() ?? "System Default",
                 isSuccess: true,
                 message: "Test print submitted."
             )
         } catch {
+            if case PrinterServiceError.cancelled = error {
+                lastTestResult = PrinterTestResult(
+                    date: request.testDate,
+                    printerName: backend.defaultPrinterName() ?? "System Default",
+                    isSuccess: false,
+                    message: "Print dialog cancelled."
+                )
+                return
+            }
             printFailureCount += 1
             lastPrintAt = request.testDate
             lastPrintError = error.localizedDescription
             lastTestResult = PrinterTestResult(
                 date: request.testDate,
-                printerName: printerName ?? "System Default",
+                printerName: backend.defaultPrinterName() ?? "System Default",
                 isSuccess: false,
                 message: error.localizedDescription
             )
@@ -127,19 +114,9 @@ final class PrinterService {
         guard FileManager.default.fileExists(atPath: url.path) else {
             throw JobExecutionError.permanent("Photo strip is missing: \(url.path)")
         }
-        let status = configuredPrinterStatus()
-        let printerName: String?
-        do {
-            printerName = try selectedPrinterName(for: status)
-        } catch {
-            throw JobExecutionError.retryable(error.localizedDescription)
-        }
         let request = PrinterPrintRequest(
             sourceURL: url,
             isTestPage: false,
-            printerName: printerName,
-            paperSizeRawValue: paperSizeRawValue,
-            copies: copies,
             showsPrintDialog: showPrintDialog,
             testDate: Date()
         )
@@ -152,6 +129,9 @@ final class PrinterService {
             lastPrintAt = request.testDate
             lastPrintError = nil
         } catch {
+            if case PrinterServiceError.cancelled = error {
+                return
+            }
             printFailureCount += 1
             lastPrintAt = request.testDate
             lastPrintError = error.localizedDescription
@@ -159,38 +139,6 @@ final class PrinterService {
         }
     }
 
-    private var paperSizeRawValue: String {
-        defaults.string(forKey: "selphyPaperSize") ?? SelphyPaperSize.postcard.rawValue
-    }
-
-    private var copies: Int {
-        max(1, defaults.integer(forKey: "selphyCopies"))
-    }
-
-    private var configuredPrinterLabel: String {
-        switch configuredPrinterStatus() {
-        case .systemDefault: return "System Default"
-        case .available(let name), .unavailable(let name): return name
-        }
-    }
-
-    private var hasConfiguredPrinter: Bool {
-        switch configuredPrinterStatus() {
-        case .available: return true
-        case .unavailable: return false
-        case .systemDefault:
-            guard let name = backend.defaultPrinterName() else { return false }
-            return availablePrinterNames.contains(name)
-        }
-    }
-
-    private func selectedPrinterName(for status: ConfiguredPrinterStatus) throws -> String? {
-        switch status {
-        case .systemDefault: return nil
-        case .available(let name): return name
-        case .unavailable(let name): throw PrinterServiceError.unavailable(name)
-        }
-    }
 }
 
 @MainActor
@@ -204,44 +152,30 @@ private final class AppKitPrinterBackend: PrinterBackend {
     }
 
     func submit(_ request: PrinterPrintRequest) async throws {
-        let paper = SelphyPaperSize(rawValue: request.paperSizeRawValue) ?? .postcard
+        let printInfo = NSPrintInfo.shared.copy() as! NSPrintInfo
+        let paperSize = printInfo.paperSize
         let view: NSView
         if let sourceURL = request.sourceURL,
            let image = NSImage(contentsOf: sourceURL) {
-            let imageView = NSImageView(frame: NSRect(origin: .zero, size: paper.pointSize))
+            let imageView = NSImageView(frame: NSRect(origin: .zero, size: paperSize))
             imageView.image = image
             imageView.imageScaling = .scaleProportionallyUpOrDown
             view = imageView
         } else {
             view = PrinterTestPageView(
-                frame: NSRect(origin: .zero, size: paper.pointSize),
-                printerName: request.printerName ?? "System Default",
-                paperSize: paper.rawValue,
+                frame: NSRect(origin: .zero, size: paperSize),
+                printerName: printInfo.printer.name,
+                paperSize: "\(Int(paperSize.width)) × \(Int(paperSize.height)) pt",
                 date: request.testDate
             )
         }
 
-        let printInfo = NSPrintInfo.shared.copy() as! NSPrintInfo
-        if let printerName = request.printerName {
-            guard let printer = NSPrinter(name: printerName) else {
-                throw PrinterServiceError.unavailable(printerName)
-            }
-            printInfo.printer = printer
-        }
-        printInfo.paperSize = paper.pointSize
-        printInfo.orientation = .portrait
-        printInfo.topMargin = 0
-        printInfo.bottomMargin = 0
-        printInfo.leftMargin = 0
-        printInfo.rightMargin = 0
-        printInfo.isHorizontallyCentered = true
-        printInfo.isVerticallyCentered = true
-        printInfo.dictionary().setValue(request.copies, forKey: "NSCopies")
-
         let operation = NSPrintOperation(view: view, printInfo: printInfo)
         operation.showsPrintPanel = request.showsPrintDialog
         operation.showsProgressPanel = true
-        guard operation.run() else { throw PrinterServiceError.rejected }
+        guard operation.run() else {
+            throw request.showsPrintDialog ? PrinterServiceError.cancelled : PrinterServiceError.rejected
+        }
     }
 }
 
@@ -303,11 +237,13 @@ private final class PrinterTestPageView: NSView {
 
 enum PrinterServiceError: LocalizedError {
     case unavailable(String)
+    case cancelled
     case rejected
 
     var errorDescription: String? {
         switch self {
         case .unavailable(let name): return "Configured printer unavailable: \(name)"
+        case .cancelled: return "Print dialog cancelled."
         case .rejected: return "The print operation was rejected."
         }
     }

@@ -14,6 +14,21 @@ struct CanvasElementGeometryTests {
         #expect(result == CGRect(x: 340, y: 540, width: 60, height: 60))
     }
 
+    @Test("group movement preserves relative geometry at the canvas edge")
+    func groupMovePreservesRelativeGeometry() {
+        let result = CanvasElementGeometry.groupMoved([
+            CGRect(x: 300, y: 100, width: 50, height: 50),
+            CGRect(x: 100, y: 200, width: 40, height: 60)
+        ], by: CGSize(width: 100, height: -300), in: canvas)
+
+        #expect(result == [
+            CGRect(x: 350, y: 0, width: 50, height: 50),
+            CGRect(x: 150, y: 100, width: 40, height: 60)
+        ])
+        #expect(result[0].minX - result[1].minX == 200)
+        #expect(result[0].minY - result[1].minY == -100)
+    }
+
     @Test("resizing keeps a positive minimum display size")
     func resizeEnforcesMinimumSize() {
         let result = CanvasElementGeometry.resized(

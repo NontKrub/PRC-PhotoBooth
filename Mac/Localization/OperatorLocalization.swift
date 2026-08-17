@@ -46,10 +46,6 @@ func operatorConnectingRoute(_ status: BoothConnectionStatus, locale: Locale) ->
     }
 }
 
-func operatorPaperSizeName(_ size: SelphyPaperSize, locale: Locale) -> String {
-    operatorString(size.rawValue, locale: locale)
-}
-
 func operatorFlashModeName(_ mode: DSLRFlashMode, locale: Locale) -> String {
     operatorString(mode.rawValue, locale: locale)
 }

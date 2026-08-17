@@ -41,6 +41,17 @@ enum CanvasElementGeometry {
         clamped(rect.offsetBy(dx: delta.width, dy: delta.height), in: canvasSize)
     }
 
+    static func groupMoved(_ rects: [CGRect], by delta: CGSize, in canvasSize: CGSize) -> [CGRect] {
+        guard !rects.isEmpty else { return [] }
+        let minimumX = rects.map { -$0.minX }.max() ?? 0
+        let maximumX = rects.map { canvasSize.width - $0.maxX }.min() ?? 0
+        let minimumY = rects.map { -$0.minY }.max() ?? 0
+        let maximumY = rects.map { canvasSize.height - $0.maxY }.min() ?? 0
+        let x = min(max(delta.width, minimumX), maximumX)
+        let y = min(max(delta.height, minimumY), maximumY)
+        return rects.map { $0.offsetBy(dx: x, dy: y) }
+    }
+
     static func duplicated(_ rect: CGRect, offset: CGSize, in canvasSize: CGSize) -> CGRect {
         moved(rect, by: offset, in: canvasSize)
     }

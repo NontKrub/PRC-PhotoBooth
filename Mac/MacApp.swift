@@ -31,7 +31,7 @@ private struct ProtectedSettingsView: View {
     var body: some View {
         Group {
             if isUnlocked {
-                SettingsView()
+                SettingsView(onResetPIN: { isUnlocked = false })
             } else {
                 PINGateView(
                     mode: isPINSet() ? .verify : .setup,

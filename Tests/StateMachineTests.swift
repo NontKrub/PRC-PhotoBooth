@@ -47,6 +47,21 @@ struct StateMachineTests {
         #expect(sm.keptShots[0] == nil)
     }
 
+    @Test("current review image is separate from synchronized history thumbnail")
+    func currentReviewImageIsSeparate() {
+        let sm = SessionStateMachine()
+        sm.startSession(config: EventConfig(photoCount: 1, countdownSeconds: 3))
+        sm.beginCountdown(photoIndex: 0)
+        let thumbnail = Data([0x01])
+        let review = Data(repeating: 0x02, count: 10)
+        sm.enterReview(photoIndex: 0, thumbnailData: thumbnail, reviewImageData: review)
+
+        #expect(sm.keptShots[0] == thumbnail)
+        #expect(sm.reviewImageData == review)
+        sm.keepShot(photoIndex: 0)
+        #expect(sm.reviewImageData == nil)
+    }
+
     @Test("session preparation waits for an explicit countdown")
     func sessionPreparationWaitsForCountdown() async {
         let sm = SessionStateMachine()

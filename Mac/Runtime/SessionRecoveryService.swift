@@ -145,8 +145,7 @@ final class SessionRecoveryService {
             if defaults.bool(forKey: "cloudUploadEnabled") {
                 jobQueue.enqueueCloudUpload(for: manifest)
             }
-            if defaults.bool(forKey: "selphyAutoPrintAfterSession") &&
-                defaults.bool(forKey: "selphySkipPrintDialog") {
+            if defaults.bool(forKey: "selphyAutoPrintAfterSession") {
                 jobQueue.enqueueAutoPrint(for: manifest)
             }
         }

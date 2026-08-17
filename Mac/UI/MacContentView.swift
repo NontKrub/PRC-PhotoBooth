@@ -25,7 +25,7 @@ struct MacContentView: View {
                 .tabItem { Label("Event Setup", systemImage: "slider.horizontal.3") }
                 .tag(2)
 
-            AdminDashboardView(onPINReset: beginPINReset)
+            AdminDashboardView()
                 .tabItem { Label("Analytics", systemImage: "chart.bar") }
                 .tag(3)
         }
@@ -87,24 +87,32 @@ struct MacContentView: View {
         }
     }
 
-    private func beginPINReset() {
-        clearPIN()
-        isAdminUnlocked = false
-        pendingTab = selectedTab
-        showPINSetup = true
-    }
 }
 
 // MARK: - Settings
 
+private enum SettingsSection: String, CaseIterable, Identifiable {
+    case general = "General"
+    case camera = "Camera"
+    case network = "iPad & Network"
+    case display = "Display"
+    case printing = "Printing"
+    case cloud = "Cloud"
+    case security = "Security"
+
+    var id: String { rawValue }
+}
+
 struct SettingsView: View {
+    let onResetPIN: () -> Void
+
+    init(onResetPIN: @escaping () -> Void = {}) {
+        self.onResetPIN = onResetPIN
+    }
+
     @Environment(BoothCoordinator.self) private var coordinator
     @Environment(\.locale) private var locale
 
-    @AppStorage("selphyPaperSize")       private var paperSize      = SelphyPaperSize.postcard.rawValue
-    @AppStorage("selphyCopies")          private var copies         = 1
-    @AppStorage("selphySkipPrintDialog") private var skipDialog     = false
-    @AppStorage("selphyPrinterName")     private var printerName    = ""
     @AppStorage("selphyAutoPrintAfterSession") private var autoPrint = false
 
     @AppStorage("cloudUploadEnabled")    private var cloudEnabled   = false
@@ -114,34 +122,58 @@ struct SettingsView: View {
     @AppStorage("operatorLanguage")      private var operatorLanguage = OperatorLanguage.system.rawValue
     @AppStorage(BoothCoordinator.eventFolderPathKey) private var eventFolderPath = ""
     @State private var selectedScreenIndex = 0
+    @State private var selectedSection: SettingsSection = .general
     @State private var showCloudSSHSetup = false
+    @State private var showResetPINConfirmation = false
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 24) {
-                operatorLanguageSection
-                cameraFeatureStatusSection
-                ipadSection
-                externalDisplaySection
-                eventFolderSection
-                printerSection
-                cloudSection
+        VStack(alignment: .leading, spacing: 0) {
+            Picker("Settings section", selection: $selectedSection) {
+                ForEach(SettingsSection.allCases) { section in
+                    Text(section.rawValue).tag(section)
+                }
             }
-            .padding(24)
+            .pickerStyle(.segmented)
+            .padding(.horizontal, 24)
+            .padding(.top, 16)
+
+            Divider().padding(.top, 14)
+
+            ScrollView {
+                settingsPage
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(24)
+            }
         }
         .navigationTitle("Settings")
         .sheet(isPresented: $showCloudSSHSetup) {
             CloudSSHSetupView(setup: coordinator.cloudSSHSetup)
         }
-        .onChange(of: skipDialog) { _, value in
-            if !value { autoPrint = false }
-            coordinator.printer.invalidateTestResult()
-        }
-        .onChange(of: printerName) { _, _ in coordinator.printer.invalidateTestResult() }
-        .onChange(of: paperSize) { _, _ in coordinator.printer.invalidateTestResult() }
         .task {
             coordinator.printer.refreshPrinters()
-            if !skipDialog { autoPrint = false }
+        }
+    }
+
+    @ViewBuilder
+    private var settingsPage: some View {
+        switch selectedSection {
+        case .general:
+            VStack(alignment: .leading, spacing: 24) {
+                operatorLanguageSection
+                eventFolderSection
+            }
+        case .camera:
+            cameraFeatureStatusSection
+        case .network:
+            ipadSection
+        case .display:
+            externalDisplaySection
+        case .printing:
+            printerSection
+        case .cloud:
+            cloudSection
+        case .security:
+            securitySection
         }
     }
 
@@ -260,6 +292,19 @@ struct SettingsView: View {
                             .foregroundStyle(.orange)
                     }
 
+                    Picker("Preview quality", selection: Binding(
+                        get: { coordinator.previewQualityPreset },
+                        set: { coordinator.previewQualityPreset = $0 }
+                    )) {
+                        ForEach(PreviewQualityPreset.allCases) { preset in
+                            Text(preset.rawValue.capitalized).tag(preset)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+                    .frame(width: 300)
+                    Text("Auto uses Standard on Wi-Fi and High on a stable Ethernet route.")
+                        .font(.caption2).foregroundStyle(.secondary)
+
                     Picker("Preview frame rate", selection: Binding(
                         get: { coordinator.previewFrameRate },
                         set: { coordinator.previewFrameRate = $0 }
@@ -270,8 +315,29 @@ struct SettingsView: View {
                     }
                     .pickerStyle(.segmented)
                     .frame(width: 300)
+                    .disabled(coordinator.previewQualityPreset == .high)
                     Text("Preview frame rate is independent of the selected network route. 60 FPS uses more bandwidth.")
                         .font(.caption2).foregroundStyle(.secondary)
+
+                    Button {
+                        coordinator.testEthernetConnection()
+                    } label: {
+                        Label(
+                            coordinator.ethernetTestInProgress ? "Testing Ethernet…" : "Test Ethernet Connection",
+                            systemImage: "cable.connector"
+                        )
+                    }
+                    .buttonStyle(.bordered)
+                    .disabled(coordinator.ethernetTestInProgress || coordinator.isCaptureSessionActive)
+
+                    if let result = coordinator.ethernetTestResult {
+                        Text(result)
+                            .font(.caption)
+                            .foregroundStyle(result.hasPrefix("✓") ? .green : .orange)
+                    }
+
+                    Divider()
+                    networkDiagnostics(status)
                 }
             }
             .padding(4)
@@ -287,6 +353,62 @@ struct SettingsView: View {
         case .wifi: return "Using Wi-Fi"
         case .lan: return "Connected via Ethernet"
         case .unavailable: return "Network route unavailable"
+        }
+    }
+
+    private func networkDiagnostics(_ status: BoothConnectionStatus) -> some View {
+        let metrics = status.previewDiagnostics
+        return VStack(alignment: .leading, spacing: 6) {
+            Text("Network diagnostics").font(.headline)
+            diagnosticRow("Requested connection", status.requestedNetwork == .lan ? "LAN" : "Wi-Fi")
+            diagnosticRow("Effective connection", connectionRouteDescription(status))
+            diagnosticRow("Ethernet path observation", pathObservationText(status.lanPathObservation))
+            diagnosticRow("Wi-Fi path observation", pathObservationText(status.wifiPathObservation))
+            diagnosticRow("Control channel", connectionStateText(status.state))
+            diagnosticRow("Preview channel", status.isPreviewChannelConnected ? "Connected" : "Disconnected")
+            diagnosticRow("Peer", status.peerDisplayName ?? "None")
+            diagnosticRow("LAN handshake", handshakeText(status.lanHandshake))
+            diagnosticRow("Last network error", status.lastNetworkError ?? "None")
+            diagnosticRow("Preview FPS", String(format: "%.1f", metrics.fps))
+            diagnosticRow("Preview throughput", ByteCountFormatter.string(fromByteCount: Int64(metrics.bytesPerSecond), countStyle: .file) + "/s")
+            diagnosticRow("Frames submitted", "\(metrics.framesSubmitted)")
+            diagnosticRow("Frames sent", "\(metrics.framesSent)")
+            diagnosticRow("Frames coalesced", "\(metrics.framesCoalesced)")
+        }
+    }
+
+    private func diagnosticRow(_ label: String, _ value: String) -> some View {
+        HStack {
+            Text(label).foregroundStyle(.secondary)
+            Spacer()
+            Text(value).textSelection(.enabled)
+        }
+        .font(.caption)
+    }
+
+    private func pathObservationText(_ observation: BoothPathObservation) -> String {
+        switch observation {
+        case .unknown: return "Unknown"
+        case .available: return "Available"
+        case .unavailable: return "Unavailable"
+        }
+    }
+
+    private func handshakeText(_ state: BoothLANHandshakeState) -> String {
+        switch state {
+        case .unknown: return "Unknown"
+        case .waiting: return "Waiting"
+        case .ready: return "Ready"
+        case .timeout: return "Timeout"
+        case .failed: return "Failed"
+        }
+    }
+
+    private func connectionStateText(_ state: BoothConnectionState) -> String {
+        switch state {
+        case .connected: return "Connected"
+        case .connecting: return "Connecting"
+        case .disconnected: return "Disconnected"
         }
     }
 
@@ -420,48 +542,55 @@ struct SettingsView: View {
         }
     }
 
+    private var securitySection: some View {
+        GroupBox("Admin Access") {
+            VStack(alignment: .leading, spacing: 12) {
+                LabeledContent("Admin PIN") {
+                    Text(isPINSet() ? "Configured" : "Not configured")
+                        .foregroundStyle(isPINSet() ? .green : .orange)
+                }
+                Button("Reset Admin PIN…", role: .destructive) {
+                    showResetPINConfirmation = true
+                }
+                Text("Resetting re-locks Settings and requires PIN setup before protected access.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            .padding(4)
+        }
+        .confirmationDialog("Reset Admin PIN?", isPresented: $showResetPINConfirmation) {
+            Button("Reset PIN", role: .destructive) {
+                clearPIN()
+                onResetPIN()
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("You will be asked to create a new PIN the next time Settings is opened.")
+        }
+    }
+
     // MARK: Printer
 
     private var printerSection: some View {
         GroupBox {
             VStack(alignment: .leading, spacing: 12) {
-                Picker("Printer", selection: $printerName) {
-                    Text("System Default").tag("")
-                    ForEach(coordinator.printer.availablePrinterNames, id: \.self) { name in
-                        Text(name).tag(name)
-                    }
-                }
-                .frame(width: 360)
-
                 Text(printerStatusText)
                     .font(.caption)
                     .foregroundStyle(printerStatusColor)
 
-                Picker("Paper Size", selection: $paperSize) {
-                    ForEach(SelphyPaperSize.allCases, id: \.rawValue) {
-                        Text(operatorPaperSizeName($0, locale: locale)).tag($0.rawValue)
-                    }
-                }
-                .frame(width: 280)
-
-                Stepper("Copies: \(copies)", value: $copies, in: 1...5)
-
-                Toggle("Skip system print dialog", isOn: $skipDialog)
-                    .help("Suppresses the macOS print dialog. Enable Automatic Printing separately to print after each session.")
-
                 Toggle("Automatic Printing", isOn: $autoPrint)
-                    .disabled(!skipDialog || !printerIsConfigured)
+                    .disabled(!printerIsConfigured)
                     .help("Prints the strip after required download jobs succeed.")
 
-                Button("Test Print") {
+                Button("Print Test…") {
                     Task { try? await coordinator.printer.printTestPage() }
                 }
                 .buttonStyle(.bordered)
-                .disabled(coordinator.printer.isPrinting || !printerIsConfigured)
+                .disabled(coordinator.printer.isPrinting)
 
                 Divider()
 
-                Button("Open System Print Settings…") {
+                Button("Open Printers & Scanners…") {
                     NSWorkspace.shared.open(
                         URL(string: "x-apple.systempreferences:com.apple.Printers-Scanners-Settings")!
                     )
@@ -476,17 +605,15 @@ struct SettingsView: View {
 
     private var printerIsConfigured: Bool {
         switch coordinator.printer.configuredPrinterStatus() {
-        case .systemDefault: return NSPrinter.printerNames.contains(NSPrintInfo.shared.printer.name)
-        case .available: return true
+        case .systemDefault: return true
         case .unavailable: return false
         }
     }
 
     private var printerStatusText: String {
         switch coordinator.printer.configuredPrinterStatus() {
-        case .systemDefault: return operatorString("Using the macOS System Default printer.", locale: locale)
-        case .available(let name): return operatorFormat("Configured printer: %@", locale: locale, name)
-        case .unavailable(let name): return operatorFormat("Configured printer unavailable: %@", locale: locale, name)
+        case .systemDefault: return "System default: \(NSPrintInfo.shared.printer.name)"
+        case .unavailable(let name): return "System printer unavailable: \(name)"
         }
     }
 

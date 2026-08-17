@@ -44,7 +44,9 @@ public final class NetworkBoothTransport: BoothTransport {
             print("[NetworkRoute] Preference changed: \(oldValue.rawValue) -> \(newValue.rawValue)")
             let command = routeMachine.preferenceChanged(
                 to: newValue,
-                lanAvailable: pathAvailable(.wiredEthernet),
+                // LAN selection starts a real wired attempt; the monitor is diagnostic and
+                // must not turn a known-unsatisfied sample into an immediate fallback.
+                lanAvailable: newValue == .lan || pathAvailable(.wiredEthernet),
                 wifiAvailable: pathAvailable(.wifi)
             )
             apply(command, reason: nil)
@@ -122,7 +124,7 @@ public final class NetworkBoothTransport: BoothTransport {
             let lanAvailable = pathAvailable(.wiredEthernet)
             let wifiAvailable = pathAvailable(.wifi)
             let command = routeMachine.start(
-                lanAvailable: requestedPreference == .lan ? lanAvailable : false,
+                lanAvailable: requestedPreference == .lan ? true : lanAvailable,
                 wifiAvailable: wifiAvailable
             )
             apply(command, reason: nil)
@@ -606,7 +608,6 @@ public final class NetworkBoothTransport: BoothTransport {
         if channel == .control, controlBrowser != nil { return }
         if channel == .preview, previewBrowser != nil { return }
         let serviceType = channel == .control ? Self.controlServiceType : Self.previewServiceType
-        let interfaceAtStart = activeInterface
         let browser = NWBrowser(
             for: .bonjour(type: serviceType, domain: nil),
             using: makeParameters(for: activeInterface)
@@ -727,6 +728,12 @@ public final class NetworkBoothTransport: BoothTransport {
                       self.isCurrent(connection, channel: channel) else { return }
                 switch state {
                 case .ready:
+                    if self.activeInterface == .wiredEthernet,
+                       let path = connection.currentPath,
+                       !path.usesInterfaceType(.wiredEthernet) {
+                        self.connectionDidClose(connection, channel: channel, reason: "Transport became ready on a non-Ethernet path")
+                        return
+                    }
                     if channel == .control {
                         if self.activeInterface == .wiredEthernet {
                             self.lanHandshakeState = .waiting

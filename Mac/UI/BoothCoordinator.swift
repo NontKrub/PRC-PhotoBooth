@@ -28,20 +28,6 @@ func shouldScheduleAutomaticCloudRetry(previous: Bool?, isSatisfied: Bool) -> Bo
     isSatisfied && previous != true
 }
 
-enum SelphyPaperSize: String, CaseIterable {
-    case postcard   = "Postcard (4×6\")"
-    case lSize      = "L-size (3.5×5\")"
-    case creditCard = "Credit Card"
-
-    var pointSize: NSSize {
-        switch self {
-        case .postcard:    return NSSize(width: 288, height: 432) // 4×6 in at 72 pt/in
-        case .lSize:       return NSSize(width: 252, height: 360)
-        case .creditCard:  return NSSize(width: 153, height: 244)
-        }
-    }
-}
-
 @MainActor
 @Observable
 final class BoothCoordinator {
@@ -114,6 +100,17 @@ final class BoothCoordinator {
             multipeer.requestedNetworkPreference = newValue
         }
     }
+    private(set) var ethernetTestInProgress = false
+    private(set) var ethernetTestResult: String?
+
+    var isCaptureSessionActive: Bool {
+        switch stateMachine.phase {
+        case .idle, .selectingExperience, .readyToStart, .finished:
+            return false
+        default:
+            return true
+        }
+    }
     var previewFrameRate: PreviewFrameRate {
         get { PreviewFrameRate(rawValue: UserDefaults.standard.integer(forKey: "previewFrameRate")) ?? .standard }
         set {
@@ -145,6 +142,7 @@ final class BoothCoordinator {
     private let networkMonitor = NWPathMonitor()
     private var lastNetworkSatisfied: Bool?
     private var automaticCloudRetryTask: Task<Void, Never>?
+    private var ethernetTestTask: Task<Void, Never>?
     private var previewQualityTask: Task<Void, Never>?
     private var previewQualityPolicy = PreviewQualityPolicy()
     private var lastAutomaticCloudRetryAt: Date?
@@ -866,6 +864,43 @@ final class BoothCoordinator {
         }
     }
 
+    func testEthernetConnection() {
+        guard !isCaptureSessionActive, !ethernetTestInProgress else { return }
+        ethernetTestInProgress = true
+        ethernetTestResult = nil
+        if requestedNetworkPreference == .lan {
+            multipeer.disconnect()
+            multipeer.start()
+        } else {
+            requestedNetworkPreference = .lan
+        }
+        ethernetTestTask?.cancel()
+        ethernetTestTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            defer {
+                self.ethernetTestInProgress = false
+                self.ethernetTestTask = nil
+            }
+            let startedAt = Date()
+            while !Task.isCancelled && Date().timeIntervalSince(startedAt) < NetworkBoothTransport.lanHandshakeTimeout {
+                let status = self.connectionStatus
+                if case .connected(let peer) = status.state,
+                   status.effectiveNetwork == .lan {
+                    let elapsed = Date().timeIntervalSince(startedAt)
+                    self.ethernetTestResult = "✓ Connected to \(peer) · Control: Ready · Preview: \(status.isPreviewChannelConnected ? "Ready" : "Waiting") · Route: Ethernet · Handshake: \(String(format: "%.1f", elapsed)) s"
+                    return
+                }
+                try? await Task.sleep(for: .milliseconds(200))
+            }
+            let status = self.connectionStatus
+            if status.peerDisplayName == nil {
+                self.ethernetTestResult = "⚠ Ethernet test timed out: iPad not discovered."
+            } else {
+                self.ethernetTestResult = "⚠ Ethernet test failed: \(status.lastNetworkError ?? "control or hello did not become ready")"
+            }
+        }
+    }
+
     func setMirrored(_ isMirrored: Bool) {
         capture.camera.isMirrored = isMirrored
         multipeer.sendControl(.setMirrored(isMirrored: isMirrored))
@@ -1005,10 +1040,8 @@ final class BoothCoordinator {
         }()
         let printerConfigured: Bool = {
             switch printer.configuredPrinterStatus() {
-            case .available: return true
+            case .systemDefault: return true
             case .unavailable: return false
-            case .systemDefault:
-                return NSPrinter.printerNames.contains(NSPrintInfo.shared.printer.name)
             }
         }()
         var startupHealth = startupComponents
@@ -2015,8 +2048,7 @@ final class BoothCoordinator {
         if manifest.cloudDelivery != nil || UserDefaults.standard.bool(forKey: "cloudUploadEnabled") {
             jobQueue.enqueueCloudUpload(for: manifest)
         }
-        if UserDefaults.standard.bool(forKey: "selphyAutoPrintAfterSession") &&
-            UserDefaults.standard.bool(forKey: "selphySkipPrintDialog") {
+        if UserDefaults.standard.bool(forKey: "selphyAutoPrintAfterSession") {
             jobQueue.enqueueAutoPrint(for: manifest)
         }
     }
@@ -2367,8 +2399,7 @@ final class BoothCoordinator {
                 errorMessage = "Print could not load the completed session: \(error.localizedDescription)"
                 return
             }
-            let skipDialog = UserDefaults.standard.bool(forKey: "selphySkipPrintDialog")
-            if skipDialog {
+            if UserDefaults.standard.bool(forKey: "selphyAutoPrintAfterSession") {
                 if let existing = jobQueue.jobs.first(where: { $0.sessionID == sessionID && $0.kind == .autoPrint }),
                    existing.status == .failed || existing.status == .cancelled {
                     jobQueue.retry(jobID: existing.id)
@@ -2402,7 +2433,7 @@ final class BoothCoordinator {
             do {
                 try await printer.printStrip(
                     at: url,
-                    showPrintDialog: !UserDefaults.standard.bool(forKey: "selphySkipPrintDialog")
+                    showPrintDialog: true
                 )
             } catch {
                 errorMessage = "Print failed: \(error.localizedDescription)"
@@ -2611,14 +2642,14 @@ final class BoothCoordinator {
 
     private var printerLabel: String {
         switch printer.configuredPrinterStatus() {
-        case .systemDefault: return "System Default"
-        case .available(let name), .unavailable(let name): return name
+        case .systemDefault: return NSPrintInfo.shared.printer.name
+        case .unavailable(let name): return name
         }
     }
 
     private var printerStatusLabel: String {
         switch printer.configuredPrinterStatus() {
-        case .systemDefault, .available: return "available"
+        case .systemDefault: return "available"
         case .unavailable: return "unavailable"
         }
     }

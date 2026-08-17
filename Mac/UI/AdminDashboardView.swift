@@ -4,8 +4,6 @@ import Charts
 import UniformTypeIdentifiers
 
 struct AdminDashboardView: View {
-    let onPINReset: () -> Void
-
     @Environment(BoothCoordinator.self) private var coordinator
     @Environment(\.modelContext) private var modelContext
     @Environment(\.locale) private var locale
@@ -16,7 +14,6 @@ struct AdminDashboardView: View {
     @State private var endDate   = Date()
     @State private var selectedEventFilter: String? = nil   // nil = all events
     @State private var selectedSession: BoothSession? = nil
-    @State private var showClearPIN = false
     @State private var manifests: [String: SessionManifest] = [:]
     @State private var galleryStatuses: [String: GalleryApprovalStatus] = [:]
 
@@ -126,17 +123,7 @@ struct AdminDashboardView: View {
                 Button(action: exportCSV) {
                     Label("Export CSV", systemImage: "square.and.arrow.up")
                 }
-                Button(action: { showClearPIN = true }) {
-                    Label("Reset PIN", systemImage: "lock.rotation")
-                }
-                .help("Remove the admin PIN (you will be prompted to create a new one next time)")
             }
-        }
-        .confirmationDialog("Reset Admin PIN?", isPresented: $showClearPIN) {
-            Button("Reset PIN", role: .destructive, action: onPINReset)
-            Button("Cancel", role: .cancel) {}
-        } message: {
-            Text("You will be asked to create a new PIN now.")
         }
         .task(id: allSessions.count) {
             await loadExperienceAnalytics()

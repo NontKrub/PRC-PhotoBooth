@@ -9,20 +9,72 @@ struct OperationsView: View {
     @State private var serverStatus = LocalWebServerStatus(state: .stopped, registeredTokenCount: 0)
     @State private var boothHealth = BoothHealthSnapshot.empty
     @State private var manifests: [String: SessionManifest] = [:]
+    @AppStorage("operations.readinessExpanded") private var readinessExpanded = true
+    @AppStorage("operations.preflightExpanded") private var preflightExpanded = false
+    @AppStorage("operations.recoveryExpanded") private var recoveryExpanded = true
+    @AppStorage("operations.webDeliveryExpanded") private var webDeliveryExpanded = false
+    @AppStorage("operations.queueExpanded") private var queueExpanded = false
+    @AppStorage("operations.galleryExpanded") private var galleryExpanded = false
+    @AppStorage("operations.printerExpanded") private var printerExpanded = false
+    @AppStorage("operations.serverExpanded") private var serverExpanded = false
+    @AppStorage("operations.healthExpanded") private var healthExpanded = false
+    @AppStorage("operations.remoteExpanded") private var remoteExpanded = false
 
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 20) {
-                readinessSummary
-                preflightResults
-                recoverySection
-                webDeliverySection
-                queueSection
-                GalleryModerationView()
-                printerSection
-                serverSection
-                healthSection
-                remoteOperatorSection
+                DisclosureGroup(isExpanded: $readinessExpanded) {
+                    readinessSummary
+                } label: {
+                    operationsHeader("Booth Readiness", readinessTitle, readinessColor)
+                }
+                DisclosureGroup(isExpanded: $preflightExpanded) {
+                    preflightResults
+                } label: {
+                    operationsHeader("Preflight Results", "\(coordinator.preflight.results.count) checks", .secondary)
+                }
+                if coordinator.recoveryService.recoverableCaptureSession != nil {
+                    DisclosureGroup(isExpanded: $recoveryExpanded) {
+                        recoverySection
+                    } label: {
+                        operationsHeader("Session Recovery", "Available", .orange)
+                    }
+                }
+                DisclosureGroup(isExpanded: $webDeliveryExpanded) {
+                    webDeliverySection
+                } label: {
+                    operationsHeader("Web Delivery", "\(coordinator.jobQueue.jobs.filter { $0.kind == .cloudUpload }.count) jobs", .secondary)
+                }
+                DisclosureGroup(isExpanded: $queueExpanded) {
+                    queueSection
+                } label: {
+                    operationsHeader("Persistent Queue", "\(coordinator.jobQueue.jobs.count) jobs", .secondary)
+                }
+                DisclosureGroup(isExpanded: $galleryExpanded) {
+                    GalleryModerationView()
+                } label: {
+                    operationsHeader("Gallery Moderation", nil, .secondary)
+                }
+                DisclosureGroup(isExpanded: $printerExpanded) {
+                    printerSection
+                } label: {
+                    operationsHeader("Printer", printerStatusText, .secondary)
+                }
+                DisclosureGroup(isExpanded: $serverExpanded) {
+                    serverSection
+                } label: {
+                    operationsHeader("Local Server", serverStatusText, .secondary)
+                }
+                DisclosureGroup(isExpanded: $healthExpanded) {
+                    healthSection
+                } label: {
+                    operationsHeader("Device Health", boothHealth.status.rawValue.capitalized, .secondary)
+                }
+                DisclosureGroup(isExpanded: $remoteExpanded) {
+                    remoteOperatorSection
+                } label: {
+                    operationsHeader("Remote Operator", nil, .secondary)
+                }
             }
             .padding(24)
         }
@@ -67,6 +119,17 @@ struct OperationsView: View {
         } message: {
             Text("Accepted files and the unfinished SwiftData session will be removed. The cancelled manifest remains for diagnostics.")
         }
+    }
+
+    private func operationsHeader(_ title: String, _ value: String?, _ color: Color) -> some View {
+        HStack {
+            Text(title).font(.headline)
+            Spacer()
+            if let value {
+                Text(value).font(.caption).foregroundStyle(color)
+            }
+        }
+        .contentShape(Rectangle())
     }
 
     private var readinessSummary: some View {
@@ -301,7 +364,7 @@ struct OperationsView: View {
         GroupBox("Printer Diagnostics") {
             VStack(alignment: .leading, spacing: 8) {
                 Text(printerStatusText)
-                Text("\(operatorString("Paper", locale: locale)): \(UserDefaults.standard.string(forKey: "selphyPaperSize") ?? SelphyPaperSize.postcard.rawValue) · \(operatorString("Copies", locale: locale)): \(max(1, UserDefaults.standard.integer(forKey: "selphyCopies")))")
+                Text("System default: \(NSPrintInfo.shared.printer.name)")
                     .font(.caption).foregroundStyle(.secondary)
                 if let result = coordinator.printer.lastTestResult {
                     Label(result.message, systemImage: result.isSuccess ? "checkmark.circle" : "xmark.circle")
@@ -452,9 +515,8 @@ struct OperationsView: View {
 
     private var printerStatusText: String {
         switch coordinator.printer.configuredPrinterStatus() {
-        case .systemDefault: return operatorString("Selected printer: System Default", locale: locale)
-        case .available(let name): return operatorFormat("Selected printer: %@", locale: locale, name)
-        case .unavailable(let name): return operatorFormat("Configured printer unavailable: %@", locale: locale, name)
+        case .systemDefault: return "System default: \(NSPrintInfo.shared.printer.name)"
+        case .unavailable(let name): return "System printer unavailable: \(name)"
         }
     }
 

@@ -1,4 +1,5 @@
 import SwiftUI
+import AppKit
 
 enum TemplateCanvasSelection: Hashable {
     case photo(String)
@@ -32,11 +33,25 @@ struct TemplateFrameSlotEditor: View {
     let frame: CGImage?
     let foregroundOverlay: CGImage?
     @Environment(\.dismiss) private var dismiss
-    @State private var selection: TemplateCanvasSelection?
+    @State private var selection = Set<TemplateCanvasSelection>()
+    @State private var selectionAnchor: TemplateCanvasSelection?
+    @State private var undoStack: [EditorSnapshot] = []
+    @State private var redoStack: [EditorSnapshot] = []
+    @FocusState private var editorFocused: Bool
 
     private let previewPayload = "https://example.invalid/s/preview/"
 
     private var canvasSize: CGSize { CGSize(width: canvasWidth, height: canvasHeight) }
+
+    private struct EditorSnapshot: Equatable {
+        var slots: [SharedPhotoSlot]
+        var qrCodeElements: [SharedQRCodeElement]
+        var selection: Set<TemplateCanvasSelection>
+    }
+
+    private var snapshot: EditorSnapshot {
+        EditorSnapshot(slots: slots, qrCodeElements: qrCodeElements, selection: selection)
+    }
 
     private var elements: [TemplateCanvasElement] {
         (slots.map(TemplateCanvasElement.photo) + qrCodeElements.map(TemplateCanvasElement.qrCode))
@@ -53,6 +68,38 @@ struct TemplateFrameSlotEditor: View {
             }
         }
         .frame(minWidth: 820, minHeight: 600)
+        .focusable()
+        .focused($editorFocused)
+        .onAppear { editorFocused = true }
+        .onDeleteCommand { deleteSelection() }
+        .onKeyPress(phases: .down) { press in
+            if press.modifiers.contains(.command), press.characters.lowercased() == "a" {
+                selectAll()
+                return .handled
+            }
+            if press.modifiers.contains(.command), press.characters.lowercased() == "d" {
+                duplicateSelection()
+                return .handled
+            }
+            if press.modifiers.contains(.command), press.characters.lowercased() == "z" {
+                press.modifiers.contains(.shift) ? redo() : undo()
+                return .handled
+            }
+            if press.key == .escape {
+                selection.removeAll()
+                selectionAnchor = nil
+                return .handled
+            }
+            let step = press.modifiers.contains(.shift) ? 10.0 : 1.0
+            switch press.key {
+            case .leftArrow: nudgeSelection(by: CGSize(width: -step, height: 0))
+            case .rightArrow: nudgeSelection(by: CGSize(width: step, height: 0))
+            case .upArrow: nudgeSelection(by: CGSize(width: 0, height: -step))
+            case .downArrow: nudgeSelection(by: CGSize(width: 0, height: step))
+            default: return .ignored
+            }
+            return .handled
+        }
     }
 
     private var toolbar: some View {
@@ -63,7 +110,7 @@ struct TemplateFrameSlotEditor: View {
             Button(action: addQRCode) {
                 Label("Add QR Code", systemImage: "qrcode")
             }
-            if selection != nil {
+            if !selection.isEmpty {
                 Button(action: duplicateSelection) {
                     Label("Duplicate", systemImage: "plus.square.on.square")
                 }
@@ -71,6 +118,11 @@ struct TemplateFrameSlotEditor: View {
                     Label("Delete", systemImage: "trash")
                 }
             }
+            Button("Select All", action: selectAll)
+            Button("Undo", systemImage: "arrow.uturn.backward", action: undo)
+                .disabled(undoStack.isEmpty)
+            Button("Redo", systemImage: "arrow.uturn.forward", action: redo)
+                .disabled(redoStack.isEmpty)
             Spacer()
             Button("Done") { dismiss() }
                 .buttonStyle(.borderedProminent)
@@ -98,7 +150,10 @@ struct TemplateFrameSlotEditor: View {
                     }
                     Color.clear
                         .contentShape(Rectangle())
-                        .onTapGesture { selection = nil }
+                        .onTapGesture {
+                            selection.removeAll()
+                            selectionAnchor = nil
+                        }
                     canvasGrid(w: displaySize.width, h: displaySize.height)
                     ForEach(elements.filter { if case .photo = $0 { true } else { false } }) { element in
                         elementView(element, in: displaySize)
@@ -125,20 +180,19 @@ struct TemplateFrameSlotEditor: View {
 
     @ViewBuilder
     private func selectionChrome(in displaySize: CGSize) -> some View {
-        let rect: CGRect? = switch selection {
-        case .photo(let id): slots.first(where: { $0.id == id }).map { CanvasElementGeometry.canvasRect($0.normalizedRect, in: displaySize) }
-        case .qrCode(let id): qrCodeElements.first(where: { $0.id == id }).map { CanvasElementGeometry.canvasRect($0.normalizedRect, in: displaySize) }
-        case nil: nil
-        }
-        if let rect {
-            Rectangle()
-                .strokeBorder(Color.accentColor, lineWidth: 2)
-                .frame(width: rect.width, height: rect.height)
-                .position(x: rect.midX, y: rect.midY)
-                .allowsHitTesting(false)
-            ForEach([CGPoint(x: rect.minX, y: rect.minY), CGPoint(x: rect.maxX, y: rect.minY), CGPoint(x: rect.minX, y: rect.maxY), CGPoint(x: rect.maxX, y: rect.maxY)], id: \.self) { point in
-                Circle().fill(.white).overlay(Circle().strokeBorder(Color.accentColor, lineWidth: 1.5))
-                    .frame(width: 10, height: 10).position(point).allowsHitTesting(false)
+        ForEach(Array(selection), id: \.self) { item in
+            if let rect = displayRect(for: item, in: displaySize) {
+                Rectangle()
+                    .strokeBorder(Color.accentColor, lineWidth: 2)
+                    .frame(width: rect.width, height: rect.height)
+                    .position(x: rect.midX, y: rect.midY)
+                    .allowsHitTesting(false)
+                if selection.count == 1 {
+                    ForEach([CGPoint(x: rect.minX, y: rect.minY), CGPoint(x: rect.maxX, y: rect.minY), CGPoint(x: rect.minX, y: rect.maxY), CGPoint(x: rect.maxX, y: rect.maxY)], id: \.self) { point in
+                        Circle().fill(.white).overlay(Circle().strokeBorder(Color.accentColor, lineWidth: 1.5))
+                            .frame(width: 10, height: 10).position(point).allowsHitTesting(false)
+                    }
+                }
             }
         }
     }
@@ -174,15 +228,15 @@ struct TemplateFrameSlotEditor: View {
             ResizableCanvasElementView(
                 rect: CanvasElementGeometry.canvasRect(slot.normalizedRect, in: displaySize),
                 rotation: slot.rotation,
-                isSelected: selection == .photo(slot.id),
+                isSelected: selection.contains(.photo(slot.id)),
                 minimumSize: minimumElementSize,
                 canvasSize: displaySize,
-                onTap: { selection = .photo(slot.id) },
+                onTap: { select(.photo(slot.id)) },
                 onMove: { move(.photo(slot.id), by: $0, in: displaySize) },
                 onResize: { resize(.photo(slot.id), to: $0, in: displaySize) }
             ) {
                 Rectangle()
-                    .fill(Color.blue.opacity(selection == .photo(slot.id) ? 0.25 : 0.15))
+                    .fill(Color.blue.opacity(selection.contains(.photo(slot.id)) ? 0.25 : 0.15))
                     .overlay {
                         VStack(spacing: 2) {
                             Text("Photo \(slot.photoIndex + 1)").font(.caption.bold()).foregroundStyle(.white)
@@ -194,10 +248,10 @@ struct TemplateFrameSlotEditor: View {
             ResizableCanvasElementView(
                 rect: CanvasElementGeometry.canvasRect(element.normalizedRect, in: displaySize),
                 rotation: element.rotation,
-                isSelected: selection == .qrCode(element.id),
+                isSelected: selection.contains(.qrCode(element.id)),
                 minimumSize: minimumElementSize,
                 canvasSize: displaySize,
-                onTap: { selection = .qrCode(element.id) },
+                onTap: { select(.qrCode(element.id)) },
                 onMove: { move(.qrCode(element.id), by: $0, in: displaySize) },
                 onResize: { resize(.qrCode(element.id), to: $0, in: displaySize) }
             ) {
@@ -228,13 +282,7 @@ struct TemplateFrameSlotEditor: View {
             Text("Canvas Elements (\(elements.count))")
                 .font(.headline)
                 .padding(.top)
-            List(elements) { element in
-                Button {
-                    switch element {
-                    case .photo(let slot): selection = .photo(slot.id)
-                    case .qrCode(let qrCode): selection = .qrCode(qrCode.id)
-                    }
-                } label: {
+            List(elements, selection: $selection) { element in
                     HStack {
                         Text(elementLabel(element))
                         Spacer()
@@ -242,14 +290,24 @@ struct TemplateFrameSlotEditor: View {
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
-                }
-                .buttonStyle(.plain)
+                    .tag(canvasSelection(element))
             }
 
-            if let selection {
+            if selection.count == 1, let selected = selection.first {
                 Divider()
-                selectionInspector(selection)
+                selectionInspector(selected)
                     .padding(.horizontal)
+            } else if selection.count > 1 {
+                Divider()
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("\(selection.count) Elements Selected")
+                        .font(.subheadline.bold())
+                    HStack {
+                        Button("Duplicate", action: duplicateSelection)
+                        Button("Delete", role: .destructive, action: deleteSelection)
+                    }
+                }
+                .padding(.horizontal)
             }
             Spacer()
         }
@@ -315,8 +373,11 @@ struct TemplateFrameSlotEditor: View {
             zOrder: nextZOrder,
             photoIndex: photoIndex
         )
-        slots.append(slot)
-        selection = .photo(slot.id)
+        recordMutation {
+            slots.append(slot)
+            selection = [.photo(slot.id)]
+            selectionAnchor = .photo(slot.id)
+        }
     }
 
     private func addQRCode() {
@@ -327,8 +388,11 @@ struct TemplateFrameSlotEditor: View {
             normalizedRect: CanvasElementGeometry.normalizedRect(rect, in: canvasSize),
             zOrder: nextZOrder
         )
-        qrCodeElements.append(element)
-        selection = .qrCode(element.id)
+        recordMutation {
+            qrCodeElements.append(element)
+            selection = [.qrCode(element.id)]
+            selectionAnchor = .qrCode(element.id)
+        }
     }
 
     private var nextZOrder: Int {
@@ -336,51 +400,82 @@ struct TemplateFrameSlotEditor: View {
     }
 
     private func duplicateSelection() {
-        guard let selection else { return }
+        guard !selection.isEmpty else { return }
         let offset = CGSize(width: min(canvasWidth, canvasHeight) * 0.02, height: min(canvasWidth, canvasHeight) * 0.02)
-        switch selection {
-        case .photo(let id):
-            guard let index = slotIndex(id) else { return }
-            var duplicate = slots[index]
-            duplicate.id = UUID().uuidString
-            duplicate.zOrder = nextZOrder
-            duplicate.normalizedRect = CanvasElementGeometry.normalizedRect(
-                CanvasElementGeometry.duplicated(CanvasElementGeometry.canvasRect(duplicate.normalizedRect, in: canvasSize), offset: offset, in: canvasSize),
-                in: canvasSize
-            )
-            slots.append(duplicate)
-            self.selection = .photo(duplicate.id)
-        case .qrCode(let id):
-            guard let index = qrIndex(id) else { return }
-            var duplicate = qrCodeElements[index]
-            duplicate.id = UUID().uuidString
-            duplicate.zOrder = nextZOrder
-            duplicate.normalizedRect = CanvasElementGeometry.normalizedRect(
-                CanvasElementGeometry.duplicated(CanvasElementGeometry.canvasRect(duplicate.normalizedRect, in: canvasSize), offset: offset, in: canvasSize),
-                in: canvasSize
-            )
-            qrCodeElements.append(duplicate)
-            self.selection = .qrCode(duplicate.id)
+        let selected = elements.filter { selection.contains(canvasSelection($0)) }
+        guard !selected.isEmpty else { return }
+        let sourceRects = selected.compactMap { element -> CGRect? in
+            switch element {
+            case .photo(let slot): return CanvasElementGeometry.canvasRect(slot.normalizedRect, in: canvasSize)
+            case .qrCode(let qrCode): return CanvasElementGeometry.canvasRect(qrCode.normalizedRect, in: canvasSize)
+            }
+        }
+        guard sourceRects.count == selected.count else { return }
+        let duplicateRects = CanvasElementGeometry.groupMoved(sourceRects, by: offset, in: canvasSize)
+        let newIDs = SelectionLogic.uniqueIDs(
+            count: selected.count,
+            existing: Set(elements.map(\.id))
+        ) { UUID().uuidString }
+        let newZOrders = SelectionLogic.nextZOrders(
+            existing: elements.map(\.zOrder),
+            count: selected.count
+        )
+        recordMutation {
+            var newSelection = Set<TemplateCanvasSelection>()
+            for (index, element) in selected.enumerated() {
+                switch element {
+                case .photo(let slot):
+                    var duplicate = slot
+                    duplicate.id = newIDs[index]
+                    duplicate.zOrder = newZOrders[index]
+                    duplicate.normalizedRect = CanvasElementGeometry.normalizedRect(duplicateRects[index], in: canvasSize)
+                    slots.append(duplicate)
+                    newSelection.insert(.photo(duplicate.id))
+                case .qrCode(let qrCode):
+                    var duplicate = qrCode
+                    duplicate.id = newIDs[index]
+                    duplicate.zOrder = newZOrders[index]
+                    duplicate.normalizedRect = CanvasElementGeometry.normalizedRect(duplicateRects[index], in: canvasSize)
+                    qrCodeElements.append(duplicate)
+                    newSelection.insert(.qrCode(duplicate.id))
+                }
+            }
+            selection = newSelection
+            selectionAnchor = newSelection.first
         }
     }
 
     private func deleteSelection() {
-        guard let selection else { return }
-        switch selection {
-        case .photo(let id): slots.removeAll { $0.id == id }
-        case .qrCode(let id): qrCodeElements.removeAll { $0.id == id }
+        guard !selection.isEmpty else { return }
+        let deleting = selection
+        recordMutation {
+            slots.removeAll { deleting.contains(.photo($0.id)) }
+            qrCodeElements.removeAll { deleting.contains(.qrCode($0.id)) }
+            selection.removeAll()
+            selectionAnchor = nil
         }
-        self.selection = nil
     }
 
-    private func move(_ selection: TemplateCanvasSelection, by delta: CGSize, in displaySize: CGSize) {
-        let current = CanvasElementGeometry.canvasRect(rect(for: selection), in: displaySize)
-        let moved = CanvasElementGeometry.moved(current, by: delta, in: displaySize)
-        setRect(for: selection, to: CanvasElementGeometry.normalizedRect(moved, in: displaySize))
+    private func move(_ dragged: TemplateCanvasSelection, by delta: CGSize, in displaySize: CGSize) {
+        let moving = selection.contains(dragged) ? elements.filter { selection.contains(canvasSelection($0)) }.map(canvasSelection) : [dragged]
+        let current = moving.compactMap { displayRect(for: $0, in: displaySize) }
+        guard current.count == moving.count else { return }
+        let moved = CanvasElementGeometry.groupMoved(current, by: delta, in: displaySize)
+        recordMutation {
+            for (item, rect) in zip(moving, moved) {
+                setRect(for: item, to: CanvasElementGeometry.normalizedRect(rect, in: displaySize))
+            }
+            if !selection.contains(dragged) {
+                selection = [dragged]
+                selectionAnchor = dragged
+            }
+        }
     }
 
-    private func resize(_ selection: TemplateCanvasSelection, to rect: CGRect, in displaySize: CGSize) {
-        setRect(for: selection, to: CanvasElementGeometry.normalizedRect(rect, in: displaySize))
+    private func resize(_ item: TemplateCanvasSelection, to rect: CGRect, in displaySize: CGSize) {
+        recordMutation {
+            setRect(for: item, to: CanvasElementGeometry.normalizedRect(rect, in: displaySize))
+        }
     }
 
     private func rect(for selection: TemplateCanvasSelection) -> CGRect {
@@ -400,21 +495,97 @@ struct TemplateFrameSlotEditor: View {
     private func slotIndex(_ id: String) -> Int? { slots.firstIndex { $0.id == id } }
     private func qrIndex(_ id: String) -> Int? { qrCodeElements.firstIndex { $0.id == id } }
 
+    private func canvasSelection(_ element: TemplateCanvasElement) -> TemplateCanvasSelection {
+        switch element {
+        case .photo(let slot): return .photo(slot.id)
+        case .qrCode(let qrCode): return .qrCode(qrCode.id)
+        }
+    }
+
+    private func displayRect(for selection: TemplateCanvasSelection, in displaySize: CGSize) -> CGRect? {
+        guard let rect = rectIfPresent(for: selection) else { return nil }
+        return CanvasElementGeometry.canvasRect(rect, in: displaySize)
+    }
+
+    private func rectIfPresent(for selection: TemplateCanvasSelection) -> CGRect? {
+        switch selection {
+        case .photo(let id): return slotIndex(id).map { slots[$0].normalizedRect }
+        case .qrCode(let id): return qrIndex(id).map { qrCodeElements[$0].normalizedRect }
+        }
+    }
+
+    private func select(_ item: TemplateCanvasSelection) {
+        let modifiers = NSEvent.modifierFlags
+        if modifiers.contains(.shift), let anchor = selectionAnchor {
+            let ordered = elements.map(canvasSelection)
+            selection = SelectionLogic.range(from: anchor, to: item, in: ordered)
+        } else if modifiers.contains(.command) {
+            selection = SelectionLogic.toggled(selection, id: item)
+        } else {
+            selection = [item]
+        }
+        selectionAnchor = item
+    }
+
+    private func selectAll() {
+        selection = Set(elements.map(canvasSelection))
+        selectionAnchor = elements.last.map(canvasSelection)
+    }
+
+    private func nudgeSelection(by delta: CGSize) {
+        guard !selection.isEmpty else { return }
+        let items = elements.filter { selection.contains(canvasSelection($0)) }.map(canvasSelection)
+        let rects = items.compactMap { displayRect(for: $0, in: canvasSize) }
+        guard rects.count == items.count else { return }
+        let moved = CanvasElementGeometry.groupMoved(rects, by: delta, in: canvasSize)
+        recordMutation {
+            for (item, rect) in zip(items, moved) {
+                setRect(for: item, to: CanvasElementGeometry.normalizedRect(rect, in: canvasSize))
+            }
+        }
+    }
+
+    private func recordMutation(_ mutation: () -> Void) {
+        let before = snapshot
+        mutation()
+        guard before != snapshot else { return }
+        undoStack.append(before)
+        redoStack.removeAll()
+    }
+
+    private func undo() {
+        guard let previous = undoStack.popLast() else { return }
+        redoStack.append(snapshot)
+        slots = previous.slots
+        qrCodeElements = previous.qrCodeElements
+        selection = previous.selection
+    }
+
+    private func redo() {
+        guard let next = redoStack.popLast() else { return }
+        undoStack.append(snapshot)
+        slots = next.slots
+        qrCodeElements = next.qrCodeElements
+        selection = next.selection
+    }
+
     private enum RectField { case x, y, width, height }
 
     private func rectBinding(_ selection: TemplateCanvasSelection, field: RectField) -> Binding<Double> {
         Binding(
             get: { value(of: rect(for: selection), field: field) },
             set: { newValue in
-                var rect = rect(for: selection)
-                let value = newValue.isFinite ? newValue : 0
-                switch field {
-                case .x: rect.origin.x = value
-                case .y: rect.origin.y = value
-                case .width: rect.size.width = max(0.001, value)
-                case .height: rect.size.height = max(0.001, value)
+                recordMutation {
+                    var rect = rect(for: selection)
+                    let value = newValue.isFinite ? newValue : 0
+                    switch field {
+                    case .x: rect.origin.x = value
+                    case .y: rect.origin.y = value
+                    case .width: rect.size.width = max(0.001, value)
+                    case .height: rect.size.height = max(0.001, value)
+                    }
+                    setRect(for: selection, to: rect)
                 }
-                setRect(for: selection, to: rect)
             }
         )
     }
@@ -429,9 +600,11 @@ struct TemplateFrameSlotEditor: View {
             },
             set: { newValue in
                 guard newValue.isFinite else { return }
-                switch selection {
-                case .photo(let id): slots[slotIndex(id)!].rotation = newValue
-                case .qrCode(let id): qrCodeElements[qrIndex(id)!].rotation = newValue
+                recordMutation {
+                    switch selection {
+                    case .photo(let id): slots[slotIndex(id)!].rotation = newValue
+                    case .qrCode(let id): qrCodeElements[qrIndex(id)!].rotation = newValue
+                    }
                 }
             }
         )
@@ -449,7 +622,10 @@ struct TemplateFrameSlotEditor: View {
     private func photoIndexBinding(_ id: String) -> Binding<Int> {
         Binding(
             get: { slots[slotIndex(id)!].photoIndex },
-            set: { slots[slotIndex(id)!].photoIndex = min(max($0, 0), max(0, photoCount - 1)) }
+            set: {
+                let value = min(max($0, 0), max(0, photoCount - 1))
+                recordMutation { slots[slotIndex(id)!].photoIndex = value }
+            }
         )
     }
 }

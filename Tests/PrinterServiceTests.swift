@@ -5,33 +5,33 @@ import Foundation
 
 @Suite("PrinterService")
 struct PrinterServiceTests {
-    @Test("lists printers and detects unavailable configured printer")
+    @Test("reports the macOS system default printer")
     @MainActor
     func listsAndDetectsMissingPrinter() {
-        let defaults = testDefaults()
         let backend = TestPrinterBackend(names: ["Canon Selphy"], defaultName: "Canon Selphy")
-        let printer = PrinterService(backend: backend, defaults: defaults)
+        let printer = PrinterService(backend: backend)
 
         printer.refreshPrinters()
         #expect(printer.availablePrinterNames == ["Canon Selphy"])
         #expect(printer.configuredPrinterStatus() == .systemDefault)
 
-        defaults.set("Missing", forKey: "selphyPrinterName")
-        #expect(printer.configuredPrinterStatus() == .unavailable(name: "Missing"))
+        let noDefault = PrinterService(
+            backend: TestPrinterBackend(names: ["Canon Selphy"], defaultName: nil)
+        )
+        #expect(noDefault.configuredPrinterStatus() == .unavailable(name: "No system default printer"))
     }
 
     @Test("successful and failed test prints update diagnostics")
     @MainActor
     func recordsTestResults() async throws {
-        let defaults = testDefaults()
         let backend = TestPrinterBackend(names: ["Canon"], defaultName: "Canon")
-        let printer = PrinterService(backend: backend, defaults: defaults)
+        let printer = PrinterService(backend: backend)
 
         try await printer.printTestPage()
         #expect(printer.lastTestResult?.isSuccess == true)
-        #expect(await backend.requests.last?.showsPrintDialog == false)
+        #expect(backend.requests.last?.showsPrintDialog == true)
 
-        await backend.failNext(with: TestPrinterError.offline)
+        backend.failNext(with: TestPrinterError.offline)
         do {
             try await printer.printTestPage()
             Issue.record("Expected test print failure")
@@ -40,39 +40,48 @@ struct PrinterServiceTests {
         }
     }
 
-    @Test("printer and paper changes invalidate the test result")
+    @Test("refresh invalidates the test result")
     @MainActor
     func invalidatesTestResult() async throws {
-        let defaults = testDefaults()
         let backend = TestPrinterBackend(names: ["Canon", "Other"], defaultName: "Canon")
-        let printer = PrinterService(backend: backend, defaults: defaults)
+        let printer = PrinterService(backend: backend)
 
         try await printer.printTestPage()
         #expect(printer.lastTestResult != nil)
-        defaults.set("Other", forKey: "selphyPrinterName")
-        printer.invalidateTestResult()
+        printer.refreshPrinters()
         #expect(printer.lastTestResult == nil)
 
         try await printer.printTestPage()
-        defaults.set(SelphyPaperSize.lSize.rawValue, forKey: "selphyPaperSize")
-        printer.invalidateTestResult()
+        printer.refreshPrinters()
         #expect(printer.lastTestResult == nil)
     }
 
     @Test("interactive printing honors dialog setting")
     @MainActor
     func interactivePrintingHonorsDialog() async throws {
-        let defaults = testDefaults()
         let backend = TestPrinterBackend(names: ["Canon"], defaultName: "Canon")
-        let printer = PrinterService(backend: backend, defaults: defaults)
+        let printer = PrinterService(backend: backend)
         let file = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try Data([1]).write(to: file)
         defer { try? FileManager.default.removeItem(at: file) }
 
         try await printer.printStrip(at: file, showPrintDialog: true)
-        #expect(await backend.requests.last?.showsPrintDialog == true)
+        #expect(backend.requests.last?.showsPrintDialog == true)
         try await printer.printStrip(at: file, showPrintDialog: false)
-        #expect(await backend.requests.last?.showsPrintDialog == false)
+        #expect(backend.requests.last?.showsPrintDialog == false)
+    }
+
+    @Test("cancelling the system panel is not a retryable print failure")
+    @MainActor
+    func cancellationIsHandled() async throws {
+        let backend = TestPrinterBackend(names: ["Canon"], defaultName: "Canon")
+        let printer = PrinterService(backend: backend)
+        backend.failNext(with: PrinterServiceError.cancelled)
+
+        try await printer.printTestPage()
+
+        #expect(printer.lastTestResult?.message == "Print dialog cancelled.")
+        #expect(printer.printFailureCount == 0)
     }
 }
 
@@ -112,13 +121,4 @@ private final class TestPrinterBackend: PrinterBackend {
 private enum TestPrinterError: LocalizedError {
     case offline
     var errorDescription: String? { "Printer offline" }
-}
-
-@MainActor
-private func testDefaults() -> UserDefaults {
-    let suite = UserDefaults(suiteName: "PRC-Printer-\(UUID().uuidString)")!
-    suite.set(SelphyPaperSize.postcard.rawValue, forKey: "selphyPaperSize")
-    suite.set(1, forKey: "selphyCopies")
-    suite.set(false, forKey: "selphySkipPrintDialog")
-    return suite
 }
