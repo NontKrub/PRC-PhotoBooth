@@ -195,3 +195,19 @@
 - [ ] Mac Debug/Release, iPad Debug/Release, and full Swift Testing suite pass.
 - [ ] Computer Use Mac UI test attempted; physical iPad/device test attempted and blockers recorded.
 - [ ] Delete only recorded temporary test events; restore PIN to `1324`; final diff/security/artifact review.
+
+## v1.4 completion ledger
+
+- [x] Guest Experience staged Save/Back lifecycle
+- [x] Operations failure badges remain visible while collapsed
+- [x] Event single-active invariant
+- [x] Frame editor anchor-aware Undo/Redo
+- [x] 24 pt Guest Experience spacing
+- [x] LAN regression tests
+- [x] Printing regression
+- [x] Review image/reconnect regression
+- [x] Preview Auto/Standard/High regression
+- [x] Mac Debug/Release and iPad Debug/Release final builds
+- [x] Full test suite: 286 passed; one documented pre-existing localization failure
+- [ ] Computer Use Mac validation: launch passed; UI interaction blocked by native pipe closure
+- [ ] Physical hardware validation (not run; hardware unavailable)

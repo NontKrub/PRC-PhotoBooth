@@ -21,6 +21,21 @@ struct SelectionLogicTests {
         #expect(SelectionLogic.range(from: "missing", to: "c", in: ["a", "b", "c"]) == ["c"])
     }
 
+    @Test("restored anchor stays selected and valid")
+    func restoresAnchor() {
+        #expect(SelectionLogic.restoredAnchor("b", selection: ["a", "b"], validElements: ["a", "b"]) == "b")
+        #expect(SelectionLogic.restoredAnchor("missing", selection: ["a"], validElements: ["a"]) == "a")
+        #expect(SelectionLogic.restoredAnchor("b", selection: ["a"], validElements: ["a", "b"]) == "a")
+        #expect(SelectionLogic.restoredAnchor("b", selection: [], validElements: ["a", "b"]) == nil)
+    }
+
+    @Test("activating one event leaves only that event active")
+    func activeEventSelectionIsExclusive() {
+        #expect(EventSelectionLogic.activeIDs(eventIDs: ["a", "b"], selectedID: "b") == ["b"])
+        #expect(EventSelectionLogic.activeIDs(eventIDs: ["a", "b"], selectedID: nil).isEmpty)
+        #expect(EventSelectionLogic.activeIDs(eventIDs: ["a", "b"], selectedID: "missing").isEmpty)
+    }
+
     @Test("batch deletion identifies an included active event")
     func deletionPlanIncludesActiveEvent() {
         let plan = EventSelectionLogic.deletionPlan(selectedIDs: ["a", "b"], activeID: "b")

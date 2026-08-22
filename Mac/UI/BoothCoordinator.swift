@@ -71,6 +71,10 @@ final class BoothCoordinator {
     var activeEvent: BoothEvent? {
         didSet {
             capture.captureRotationDegrees = activeEvent?.cameraRotationDegrees ?? 0
+            if activeEvent == nil {
+                activeExperienceDocument = nil
+                experienceCatalog = nil
+            }
             let snapshot = activeEvent.map { makeEventSnapshot($0) }
             Task { @MainActor [weak self] in
                 guard let self, let snapshot else { return }
@@ -407,6 +411,7 @@ final class BoothCoordinator {
     private func loadExperience(for snapshot: BoothEventSnapshot) async {
         do {
             let document = try await experienceStore.ensureDocument(for: snapshot)
+            guard activeEvent?.id == snapshot.id else { return }
             activeExperienceDocument = document
             experienceCatalog = CustomerExperienceCatalogBuilder().build(event: snapshot, document: document)
             if let event = activeEvent, event.id == snapshot.id {
@@ -434,6 +439,17 @@ final class BoothCoordinator {
         }
     }
 
+    @discardableResult
+    func setActiveEvent(_ event: BoothEvent?) -> Bool {
+        guard store.setActiveEvent(event) else {
+            let detail = store.lastPersistenceError ?? "unknown error"
+            errorMessage = "Event changes could not be saved: \(detail)"
+            return false
+        }
+        activeEvent = event
+        return true
+    }
+
     func loadExperienceDocument(for event: BoothEvent) async throws -> EventExperienceDocument {
         let snapshot = makeEventSnapshot(event)
         return try await experienceStore.ensureDocument(for: snapshot)
@@ -459,13 +475,35 @@ final class BoothCoordinator {
         } else {
             try await experienceStore.save(normalized)
         }
-        try LegacyEventMirrorService().updateLegacyEvent(event, using: normalized, modelContext: store.context)
+        do {
+            try LegacyEventMirrorService().updateLegacyEvent(event, using: normalized, modelContext: store.context)
+        } catch {
+            errorMessage = "Event saved, but compatibility fields could not be updated: \(error.localizedDescription)"
+        }
         if activeEvent?.id == event.id {
             activeExperienceDocument = normalized
             let snapshot = makeEventSnapshot(event)
             experienceCatalog = CustomerExperienceCatalogBuilder().build(event: snapshot, document: normalized)
             sendExperienceCatalog()
             await refreshServerRoutes()
+        }
+    }
+
+    func rebuildExperiencePreviews(eventID: String) async {
+        do {
+            let savedDocument = try await experienceStore.load(eventID: eventID)
+            var failures: [String] = []
+            for template in savedDocument.templates {
+                do {
+                    _ = try await experienceStore.rebuildPreview(eventID: eventID, templateID: template.id)
+                } catch {
+                    failures.append("\(template.name.english): \(error.localizedDescription)")
+                }
+            }
+            guard !failures.isEmpty else { return }
+            errorMessage = "Event saved. Template previews need rebuilding: \(failures.joined(separator: "; "))"
+        } catch {
+            errorMessage = "Event saved, but template previews could not be rebuilt: \(error.localizedDescription)"
         }
     }
 

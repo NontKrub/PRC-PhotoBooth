@@ -45,6 +45,16 @@ public enum BoothNetworkRouteCommand: Equatable, Sendable {
     case none
 }
 
+func previewPeerMatchesControlPeer(
+    previewPeerID: String?,
+    controlPeerID: String?,
+    identityRequired: Bool
+) -> Bool {
+    guard identityRequired else { return true }
+    guard let previewPeerID, let controlPeerID else { return false }
+    return previewPeerID == controlPeerID
+}
+
 struct BoothRouteDiscoverySelection: Equatable, Sendable {
     enum Decision: Equatable, Sendable {
         case accepted

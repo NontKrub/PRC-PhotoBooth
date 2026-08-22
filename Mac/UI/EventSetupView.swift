@@ -106,10 +106,7 @@ struct EventSetupView: View {
     }
 
     private func setActive(_ event: BoothEvent) {
-        events.forEach { $0.isActive = false }
-        event.isActive = true
-        saveChanges()
-        coordinator.activeEvent = event
+        _ = coordinator.setActiveEvent(event)
     }
 
     private func requestDeleteSelected() {
@@ -132,7 +129,7 @@ struct EventSetupView: View {
             activeID: coordinator.activeEvent?.id
         )
         if plan.removesActiveEvent {
-            coordinator.activeEvent = nil
+            guard coordinator.setActiveEvent(nil) else { return }
         }
         for event in events where plan.ids.contains(event.id) {
             modelContext.delete(event)
@@ -171,8 +168,19 @@ struct EventDetailView: View {
 
             Section("Status") {
                 LabeledContent("Active") {
-                    Toggle("", isOn: $event.isActive)
-                        .onChange(of: event.isActive) { _, _ in saveChanges() }
+                    Toggle(
+                        "",
+                        isOn: Binding(
+                            get: { event.isActive },
+                            set: { isActive in
+                                if isActive {
+                                    _ = coordinator.setActiveEvent(event)
+                                } else if event.isActive {
+                                    _ = coordinator.setActiveEvent(nil)
+                                }
+                            }
+                        )
+                    )
                 }
             }
 

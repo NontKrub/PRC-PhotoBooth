@@ -591,3 +591,27 @@ Implementation slices:
 6. Bump both targets to 1.4 through `project.yml`, regenerate, run all builds/tests, manually test with Computer Use and physical iPad when possible, clean temporary test events, and review the final diff.
 
 Acceptance gates: no initial Ethernet fallback, framed review messages stay below the 2 MiB payload limit, historical sync remains small, Mac/iPad/tests build separately, `git diff --check` is clean, and all hardware-only limits are reported honestly.
+
+## v1.4 operator experience/connectivity completion
+
+Baseline was recorded on feature/v1.4-operator-experience-connectivity at
+60d9c7b99898940e52f8c22708db75c324e52f4a; the worktree already contained
+unrelated localization and Xcode user-state changes, which remain preserved.
+
+Completed implementation slices:
+
+- [x] Staged Guest Experience Save/Back transaction; preview rebuild is now a post-save warning path.
+- [x] Operations section severity summaries and persistent collapsed-header indicators.
+- [x] Coordinator/store-owned single-active-event changes, including nil deactivation.
+- [x] Frame-editor Undo/Redo selection-anchor restoration and stale-anchor validation.
+- [x] Guest Experience single-pass 24 pt horizontal/top spacing.
+- [x] LAN preview/control peer identity regression guard; existing route fallback coverage retained.
+
+Existing regression coverage remains green for printing, review-image reconnect,
+and Preview Quality. The final suite ran 287 tests in 48 suites: 286 passed
+and one pre-existing Thai localization failure remains in the dirty
+Mac/Localizable.xcstrings catalog (the Auto preview-route description). Mac/iPad
+Debug and Release builds passed.
+Computer Use launched the Mac app but UI interaction was blocked when the
+native accessibility pipe closed. Physical iPad, Ethernet, Sony, printer,
+and display checks are hardware-dependent and remain unrun.

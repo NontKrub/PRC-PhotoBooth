@@ -73,12 +73,21 @@ final class DataStore {
         catch { record(error); return nil }
     }
 
-    func setActiveEvent(_ event: BoothEvent) {
-        // Deactivate all, then activate this one
+    @discardableResult
+    func setActiveEvent(_ event: BoothEvent?) -> Bool {
         let all = fetchEvents()
-        all.forEach { $0.isActive = false }
-        event.isActive = true
-        save()
+        if let event, !all.contains(where: { $0.id == event.id }) { return false }
+        let previousStates = Dictionary(uniqueKeysWithValues: all.map { ($0.id, $0.isActive) })
+        let activeIDs = EventSelectionLogic.activeIDs(
+            eventIDs: all.map(\.id),
+            selectedID: event?.id
+        )
+        all.forEach { $0.isActive = activeIDs.contains($0.id) }
+        guard saveChanges() else {
+            all.forEach { $0.isActive = previousStates[$0.id] ?? false }
+            return false
+        }
+        return true
     }
 
     // MARK: - Sessions

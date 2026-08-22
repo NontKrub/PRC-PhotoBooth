@@ -32,6 +32,17 @@ enum SelectionLogic {
         let first = (existing.max() ?? -1) + 1
         return (0..<count).map { first + $0 }
     }
+
+    static func restoredAnchor<T: Hashable>(
+        _ anchor: T?,
+        selection: Set<T>,
+        validElements: Set<T>
+    ) -> T? {
+        guard let anchor, validElements.contains(anchor), selection.contains(anchor) else {
+            return selection.first(where: validElements.contains)
+        }
+        return anchor
+    }
 }
 
 struct EventDeletionPlan: Equatable {
@@ -40,6 +51,11 @@ struct EventDeletionPlan: Equatable {
 }
 
 enum EventSelectionLogic {
+    static func activeIDs(eventIDs: [String], selectedID: String?) -> Set<String> {
+        guard let selectedID, eventIDs.contains(selectedID) else { return [] }
+        return [selectedID]
+    }
+
     static func deletionPlan(selectedIDs: Set<String>, activeID: String?) -> EventDeletionPlan {
         EventDeletionPlan(
             ids: selectedIDs,

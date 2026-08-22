@@ -244,3 +244,30 @@ struct TransportCallbackPolicyTests {
         #expect(gate.accepts(currentGeneration))
     }
 }
+
+@Suite("Preview channel identity")
+struct PreviewChannelIdentityTests {
+    @Test("preview channel must match the verified control peer")
+    func matchesControlPeer() {
+        #expect(previewPeerMatchesControlPeer(
+            previewPeerID: "peer",
+            controlPeerID: "peer",
+            identityRequired: true
+        ))
+        #expect(!previewPeerMatchesControlPeer(
+            previewPeerID: "stale-peer",
+            controlPeerID: "peer",
+            identityRequired: true
+        ))
+        #expect(!previewPeerMatchesControlPeer(
+            previewPeerID: nil,
+            controlPeerID: "peer",
+            identityRequired: true
+        ))
+        #expect(previewPeerMatchesControlPeer(
+            previewPeerID: nil,
+            controlPeerID: nil,
+            identityRequired: false
+        ))
+    }
+}

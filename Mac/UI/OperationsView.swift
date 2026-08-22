@@ -1,6 +1,113 @@
 import SwiftUI
 import AppKit
 
+enum OperationsSectionSeverity: Int, Sendable, Equatable {
+    case normal
+    case warning
+    case failure
+}
+
+struct OperationsSectionStatus: Sendable, Equatable {
+    var summary: String?
+    var severity: OperationsSectionSeverity
+}
+
+enum OperationsStatusLogic {
+    static func readiness(_ readiness: BoothReadinessStatus) -> OperationsSectionStatus {
+        switch readiness {
+        case .ready: return OperationsSectionStatus(summary: "Ready", severity: .normal)
+        case .readyWithWarnings: return OperationsSectionStatus(summary: "Warnings", severity: .warning)
+        case .notReady: return OperationsSectionStatus(summary: "Not ready", severity: .failure)
+        case .checking: return OperationsSectionStatus(summary: "Checking…", severity: .warning)
+        }
+    }
+
+    static func preflight(_ results: [PreflightCheckResult]) -> OperationsSectionStatus {
+        let failures = results.filter { $0.status == .failed }.count
+        if failures > 0 { return OperationsSectionStatus(summary: "\(failures) failed", severity: .failure) }
+        let warnings = results.filter { $0.status == .warning }.count
+        if warnings > 0 { return OperationsSectionStatus(summary: "\(warnings) warnings", severity: .warning) }
+        return OperationsSectionStatus(summary: "\(results.count) checks", severity: .normal)
+    }
+
+    static func recovery(isAvailable: Bool) -> OperationsSectionStatus {
+        OperationsSectionStatus(summary: isAvailable ? "Available" : nil, severity: isAvailable ? .warning : .normal)
+    }
+
+    static func webDelivery(_ jobs: [SessionJob], configured: Bool) -> OperationsSectionStatus {
+        guard !jobs.isEmpty || configured else {
+            return OperationsSectionStatus(summary: "Not configured", severity: .normal)
+        }
+        let failures = jobs.filter { $0.status == .failed || $0.status == .cancelled }.count
+        if failures > 0 { return OperationsSectionStatus(summary: "\(failures) failed", severity: .failure) }
+        let retrying = jobs.filter { $0.status == .waitingRetry }.count
+        if retrying > 0 { return OperationsSectionStatus(summary: "\(retrying) retrying", severity: .warning) }
+        let running = jobs.filter { $0.status == .running }.count
+        if running > 0 { return OperationsSectionStatus(summary: "\(running) uploading", severity: .normal) }
+        if jobs.allSatisfy({ $0.status == .succeeded }) {
+            return OperationsSectionStatus(summary: "\(jobs.count) uploaded", severity: .normal)
+        }
+        return OperationsSectionStatus(summary: "\(jobs.count) jobs", severity: .normal)
+    }
+
+    static func queue(_ jobs: [SessionJob], persistenceError: String?) -> OperationsSectionStatus {
+        if persistenceError != nil {
+            return OperationsSectionStatus(summary: "Persistence failed", severity: .failure)
+        }
+        let requiredFailures = jobs.filter {
+            !$0.kind.isOptional && ($0.status == .failed || $0.status == .cancelled)
+        }.count
+        if requiredFailures > 0 {
+            return OperationsSectionStatus(summary: "\(requiredFailures) failed", severity: .failure)
+        }
+        let failures = jobs.filter { $0.status == .failed || $0.status == .cancelled }.count
+        if failures > 0 {
+            return OperationsSectionStatus(summary: "\(failures) failed", severity: .warning)
+        }
+        let retrying = jobs.filter { $0.status == .waitingRetry }.count
+        if retrying > 0 {
+            return OperationsSectionStatus(summary: "\(retrying) retrying", severity: .warning)
+        }
+        return OperationsSectionStatus(summary: "\(jobs.count) jobs", severity: .normal)
+    }
+
+    static func printer(
+        _ status: ConfiguredPrinterStatus,
+        lastTestResult: PrinterTestResult?
+    ) -> OperationsSectionStatus {
+        if case .unavailable = status {
+            return OperationsSectionStatus(summary: "Unavailable", severity: .failure)
+        }
+        if let result = lastTestResult {
+            if result.message == "Print dialog cancelled." {
+                return OperationsSectionStatus(summary: "Test cancelled", severity: .normal)
+            }
+            if !result.isSuccess {
+                return OperationsSectionStatus(summary: "Test failed", severity: .failure)
+            }
+        }
+        return OperationsSectionStatus(summary: "System Default", severity: .normal)
+    }
+
+    static func server(_ status: LocalWebServerStatus) -> OperationsSectionStatus {
+        switch status.state {
+        case .stopped: return OperationsSectionStatus(summary: "Stopped", severity: .warning)
+        case .starting: return OperationsSectionStatus(summary: "Starting…", severity: .normal)
+        case .ready: return OperationsSectionStatus(summary: "Ready", severity: .normal)
+        case .failed: return OperationsSectionStatus(summary: "Failed", severity: .failure)
+        }
+    }
+
+    static func health(_ status: BoothHealthStatus) -> OperationsSectionStatus {
+        switch status {
+        case .healthy: return OperationsSectionStatus(summary: "Healthy", severity: .normal)
+        case .degraded: return OperationsSectionStatus(summary: "Degraded", severity: .warning)
+        case .unavailable: return OperationsSectionStatus(summary: "Unavailable", severity: .failure)
+        case .unknown: return OperationsSectionStatus(summary: "Unknown", severity: .warning)
+        }
+    }
+}
+
 struct OperationsView: View {
     @Environment(BoothCoordinator.self) private var coordinator
     @Environment(\.locale) private var locale
@@ -26,54 +133,54 @@ struct OperationsView: View {
                 DisclosureGroup(isExpanded: $readinessExpanded) {
                     readinessSummary
                 } label: {
-                    operationsHeader("Booth Readiness", readinessTitle, readinessColor)
+                    operationsHeader(title: "Booth Readiness", status: readinessStatus)
                 }
                 DisclosureGroup(isExpanded: $preflightExpanded) {
                     preflightResults
                 } label: {
-                    operationsHeader("Preflight Results", "\(coordinator.preflight.results.count) checks", .secondary)
+                    operationsHeader(title: "Preflight Results", status: preflightStatus)
                 }
                 if coordinator.recoveryService.recoverableCaptureSession != nil {
                     DisclosureGroup(isExpanded: $recoveryExpanded) {
                         recoverySection
                     } label: {
-                        operationsHeader("Session Recovery", "Available", .orange)
+                        operationsHeader(title: "Session Recovery", status: recoveryStatus)
                     }
                 }
                 DisclosureGroup(isExpanded: $webDeliveryExpanded) {
                     webDeliverySection
                 } label: {
-                    operationsHeader("Web Delivery", "\(coordinator.jobQueue.jobs.filter { $0.kind == .cloudUpload }.count) jobs", .secondary)
+                    operationsHeader(title: "Web Delivery", status: webDeliveryHeaderStatus)
                 }
                 DisclosureGroup(isExpanded: $queueExpanded) {
                     queueSection
                 } label: {
-                    operationsHeader("Persistent Queue", "\(coordinator.jobQueue.jobs.count) jobs", .secondary)
+                    operationsHeader(title: "Persistent Queue", status: queueStatus)
                 }
                 DisclosureGroup(isExpanded: $galleryExpanded) {
                     GalleryModerationView()
                 } label: {
-                    operationsHeader("Gallery Moderation", nil, .secondary)
+                    operationsHeader(title: "Gallery Moderation", status: .init(summary: nil, severity: .normal))
                 }
                 DisclosureGroup(isExpanded: $printerExpanded) {
                     printerSection
                 } label: {
-                    operationsHeader("Printer", printerStatusText, .secondary)
+                    operationsHeader(title: "Printer", status: printerSectionStatus)
                 }
                 DisclosureGroup(isExpanded: $serverExpanded) {
                     serverSection
                 } label: {
-                    operationsHeader("Local Server", serverStatusText, .secondary)
+                    operationsHeader(title: "Local Server", status: serverSectionStatus)
                 }
                 DisclosureGroup(isExpanded: $healthExpanded) {
                     healthSection
                 } label: {
-                    operationsHeader("Device Health", boothHealth.status.rawValue.capitalized, .secondary)
+                    operationsHeader(title: "Device Health", status: healthSectionStatus)
                 }
                 DisclosureGroup(isExpanded: $remoteExpanded) {
                     remoteOperatorSection
                 } label: {
-                    operationsHeader("Remote Operator", nil, .secondary)
+                    operationsHeader(title: "Remote Operator", status: .init(summary: nil, severity: .normal))
                 }
             }
             .padding(24)
@@ -121,12 +228,19 @@ struct OperationsView: View {
         }
     }
 
-    private func operationsHeader(_ title: String, _ value: String?, _ color: Color) -> some View {
+    private func operationsHeader(title: String, status: OperationsSectionStatus) -> some View {
         HStack {
             Text(title).font(.headline)
             Spacer()
-            if let value {
-                Text(value).font(.caption).foregroundStyle(color)
+            if status.severity != .normal {
+                Image(systemName: status.severity == .failure ? "xmark.octagon.fill" : "exclamationmark.triangle.fill")
+                    .foregroundStyle(status.severity == .failure ? .red : .orange)
+                    .accessibilityLabel(status.severity == .failure ? "Failure" : "Warning")
+            }
+            if let summary = status.summary {
+                Text(summary)
+                    .font(.caption)
+                    .foregroundStyle(status.severity == .failure ? .red : status.severity == .warning ? .orange : .secondary)
             }
         }
         .contentShape(Rectangle())
@@ -473,6 +587,44 @@ struct OperationsView: View {
                 }
             }
         }
+    }
+
+    private var readinessStatus: OperationsSectionStatus {
+        OperationsStatusLogic.readiness(coordinator.preflight.readiness)
+    }
+
+    private var preflightStatus: OperationsSectionStatus {
+        OperationsStatusLogic.preflight(coordinator.preflight.results)
+    }
+
+    private var recoveryStatus: OperationsSectionStatus {
+        OperationsStatusLogic.recovery(isAvailable: coordinator.recoveryService.recoverableCaptureSession != nil)
+    }
+
+    private var webDeliveryHeaderStatus: OperationsSectionStatus {
+        OperationsStatusLogic.webDelivery(
+            coordinator.jobQueue.jobs.filter { $0.kind == .cloudUpload },
+            configured: UserDefaults.standard.bool(forKey: "cloudUploadEnabled")
+        )
+    }
+
+    private var queueStatus: OperationsSectionStatus {
+        OperationsStatusLogic.queue(coordinator.jobQueue.jobs, persistenceError: coordinator.jobQueue.lastQueueError)
+    }
+
+    private var printerSectionStatus: OperationsSectionStatus {
+        OperationsStatusLogic.printer(
+            coordinator.printer.configuredPrinterStatus(),
+            lastTestResult: coordinator.printer.lastTestResult
+        )
+    }
+
+    private var serverSectionStatus: OperationsSectionStatus {
+        OperationsStatusLogic.server(serverStatus)
+    }
+
+    private var healthSectionStatus: OperationsSectionStatus {
+        OperationsStatusLogic.health(boothHealth.status)
     }
 
     private func healthValue(_ label: String, _ value: String) -> some View {

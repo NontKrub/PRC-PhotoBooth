@@ -47,10 +47,16 @@ struct TemplateFrameSlotEditor: View {
         var slots: [SharedPhotoSlot]
         var qrCodeElements: [SharedQRCodeElement]
         var selection: Set<TemplateCanvasSelection>
+        var selectionAnchor: TemplateCanvasSelection?
     }
 
     private var snapshot: EditorSnapshot {
-        EditorSnapshot(slots: slots, qrCodeElements: qrCodeElements, selection: selection)
+        EditorSnapshot(
+            slots: slots,
+            qrCodeElements: qrCodeElements,
+            selection: selection,
+            selectionAnchor: selectionAnchor
+        )
     }
 
     private var elements: [TemplateCanvasElement] {
@@ -556,17 +562,25 @@ struct TemplateFrameSlotEditor: View {
     private func undo() {
         guard let previous = undoStack.popLast() else { return }
         redoStack.append(snapshot)
-        slots = previous.slots
-        qrCodeElements = previous.qrCodeElements
-        selection = previous.selection
+        restore(previous)
     }
 
     private func redo() {
         guard let next = redoStack.popLast() else { return }
         undoStack.append(snapshot)
-        slots = next.slots
-        qrCodeElements = next.qrCodeElements
-        selection = next.selection
+        restore(next)
+    }
+
+    private func restore(_ state: EditorSnapshot) {
+        slots = state.slots
+        qrCodeElements = state.qrCodeElements
+        let validElements = Set(elements.map(canvasSelection))
+        selection = state.selection.intersection(validElements)
+        selectionAnchor = SelectionLogic.restoredAnchor(
+            state.selectionAnchor,
+            selection: selection,
+            validElements: validElements
+        )
     }
 
     private enum RectField { case x, y, width, height }

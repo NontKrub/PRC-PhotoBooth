@@ -536,6 +536,39 @@ struct EventExperienceStoreTests {
         #expect((try await store.load(eventID: "event-1")).templates[0].frameFileName == "frame.png")
     }
 
+    @Test("committed editor state survives a later preview rebuild failure")
+    func committedStateSurvivesPreviewFailure() async throws {
+        let root = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = EventExperienceStore(baseDirectory: root)
+        let original = document(for: validTemplate())
+        try await store.save(original)
+
+        var committed = original
+        committed.templates[0].name = LocalizedText(english: "Saved", thai: "")
+        let session = try await store.beginEditing(eventID: "event-1")
+        try await store.commitEditing(session, document: committed)
+
+        let templateDirectory = root.appendingPathComponent(
+            "EventExperiences/event-1/Templates/\(committed.templates[0].id)"
+        )
+        try FileManager.default.createDirectory(at: templateDirectory, withIntermediateDirectories: true)
+        try FileManager.default.removeItem(at: templateDirectory)
+        try Data([1]).write(to: templateDirectory)
+
+        do {
+            _ = try await store.rebuildPreview(eventID: "event-1", templateID: committed.templates[0].id)
+            Issue.record("Expected preview rebuild to fail")
+        } catch {
+            // Expected: the template asset directory is deliberately blocked.
+        }
+
+        #expect((try await store.load(eventID: "event-1")).templates[0].name.english == "Saved")
+        #expect(!FileManager.default.fileExists(atPath: root.appendingPathComponent(
+            "EventExperiences/.editor-staging/\(session.id)"
+        ).path))
+    }
+
     @Test("new staged frame disappears when editing is cancelled")
     func discardsNewStagedFrame() async throws {
         let root = try temporaryDirectory()

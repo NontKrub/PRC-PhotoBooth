@@ -51,6 +51,9 @@
         }
       }
     },
+    "%@ Elements Selected" : {
+
+    },
     "%@ is open — it may block the camera session." : {
       "localizations" : {
         "th" : {
@@ -140,6 +143,7 @@
       }
     },
     "%@: %@ · %@: %@" : {
+      "extractionState" : "stale",
       "localizations" : {
         "en" : {
           "stringUnit" : {
@@ -657,6 +661,9 @@
         }
       }
     },
+    "Auto uses Standard on Wi-Fi and High on a stable Ethernet route." : {
+
+    },
     "Automatic" : {
       "localizations" : {
         "th" : {
@@ -743,6 +750,9 @@
           }
         }
       }
+    },
+    "Balanced — Recommended" : {
+
     },
     "Between 2 GB and 10 GB is available." : {
       "extractionState" : "manual",
@@ -853,6 +863,7 @@
       }
     },
     "Camera Access Required" : {
+      "extractionState" : "stale",
       "localizations" : {
         "th" : {
           "stringUnit" : {
@@ -1124,6 +1135,9 @@
         }
       }
     },
+    "Choose Delete to remove the selected events." : {
+
+    },
     "Choose Event Folder…" : {
       "extractionState" : "manual",
       "localizations" : {
@@ -1285,6 +1299,9 @@
           }
         }
       }
+    },
+    "Compact — Smaller file, fastest guest download" : {
+
     },
     "Completed" : {
       "extractionState" : "manual",
@@ -2384,6 +2401,9 @@
         }
       }
     },
+    "Foreground overlay" : {
+
+    },
     "Frame" : {
       "extractionState" : "manual",
       "localizations" : {
@@ -2537,6 +2557,7 @@
       }
     },
     "Grant camera access in System Settings → Privacy & Security → Camera." : {
+      "extractionState" : "stale",
       "localizations" : {
         "th" : {
           "stringUnit" : {
@@ -2665,6 +2686,9 @@
           }
         }
       }
+    },
+    "High — Best quality, larger file" : {
+
     },
     "High Contrast" : {
       "extractionState" : "manual",
@@ -2903,6 +2927,9 @@
           }
         }
       }
+    },
+    "LAN" : {
+
     },
     "LAN URL: %@" : {
       "localizations" : {
@@ -3235,6 +3262,9 @@
           }
         }
       }
+    },
+    "Network diagnostics" : {
+
     },
     "New Event" : {
       "localizations" : {
@@ -4074,6 +4104,9 @@
         }
       }
     },
+    "Preview frame rate is independent of the selected network route. 60 FPS uses more bandwidth." : {
+
+    },
     "previewFrameRate" : {
       "extractionState" : "manual",
       "localizations" : {
@@ -4604,6 +4637,9 @@
           }
         }
       }
+    },
+    "Resetting re-locks Settings and requires PIN setup before protected access." : {
+
     },
     "Resume" : {
       "extractionState" : "manual",
@@ -5512,6 +5548,7 @@
       }
     },
     "System Default" : {
+      "extractionState" : "stale",
       "localizations" : {
         "th" : {
           "stringUnit" : {
@@ -5520,6 +5557,9 @@
           }
         }
       }
+    },
+    "System default: %@" : {
+
     },
     "Template" : {
       "localizations" : {
@@ -5962,6 +6002,9 @@
         }
       }
     },
+    "Wi-Fi" : {
+
+    },
     "Width" : {
       "extractionState" : "stale",
       "localizations" : {
@@ -5974,6 +6017,7 @@
       }
     },
     "You will be asked to create a new PIN now." : {
+      "extractionState" : "stale",
       "localizations" : {
         "th" : {
           "stringUnit" : {
@@ -5982,6 +6026,9 @@
           }
         }
       }
+    },
+    "You will be asked to create a new PIN the next time Settings is opened." : {
+
     },
     "Z%@" : {
       "localizations" : {

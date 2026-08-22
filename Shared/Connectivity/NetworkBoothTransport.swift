@@ -915,8 +915,11 @@ public final class NetworkBoothTransport: BoothTransport {
             flushPreviewFrame()
             return
         }
-        guard let previewPeerID else { return }
-        guard previewPeerID == expectedPeerDeviceID else {
+        guard previewPeerMatchesControlPeer(
+            previewPeerID: previewPeerID,
+            controlPeerID: expectedPeerDeviceID,
+            identityRequired: previewPeerSupportsIdentity
+        ) else {
             connectionDidClose(previewConnection, channel: .preview, reason: "preview peer does not match control peer")
             return
         }

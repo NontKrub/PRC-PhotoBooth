@@ -57,6 +57,8 @@ struct EventExperienceEditorView: View {
                     }
                     .pickerStyle(.segmented)
                     .labelsHidden()
+                    .padding(.horizontal, 24)
+                    .padding(.top, 24)
                     .padding(.bottom, 18)
 
                     ScrollView {
@@ -70,11 +72,10 @@ struct EventExperienceEditorView: View {
                             }
                         }
                         .frame(maxWidth: 960, alignment: .leading)
-                        .padding(24)
+                        .padding(.horizontal, 24)
+                        .padding(.vertical, 24)
                     }
                 }
-                .padding(.horizontal, 24)
-                .padding(.top, 24)
             }
         }
         .navigationTitle("Guest Experience")
@@ -455,13 +456,15 @@ struct EventExperienceEditorView: View {
     }
 
     private func save() {
+        guard let session = editingSession else { return }
         isSaving = true
+        let eventID = event.id
         Task {
             do {
                 try await coordinator.saveExperienceDocument(
                     document,
                     for: event,
-                    editingSession: editingSession
+                    editingSession: session
                 )
             } catch {
                 errorMessage = error.localizedDescription
@@ -470,24 +473,9 @@ struct EventExperienceEditorView: View {
             }
 
             editingSession = nil
-            var previewError: Error?
-            for template in document.templates {
-                do {
-                    _ = try await coordinator.experienceStore.rebuildPreview(
-                        eventID: event.id,
-                        templateID: template.id
-                    )
-                } catch {
-                    previewError = previewError ?? error
-                }
-            }
             coordinator.refreshActiveExperience()
-            if let previewError {
-                errorMessage = "Event saved. Template previews need rebuilding: \(previewError.localizedDescription)"
-                isSaving = false
-            } else {
-                dismiss()
-            }
+            dismiss()
+            await coordinator.rebuildExperiencePreviews(eventID: eventID)
         }
     }
 
