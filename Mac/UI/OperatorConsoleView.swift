@@ -4,11 +4,13 @@ import AVFoundation
 struct OperatorConsoleView: View {
     var onOpenOperations: () -> Void
     @Environment(BoothCoordinator.self) private var coordinator
+    @Environment(BoothConnectionStatus.self) private var connectionStatus
     @Environment(SessionStateMachine.self) private var sm
     @Environment(\.locale) private var locale
     @State private var showPrintPrompt = false
     @State private var showPrintAgainConfirmation = false
     @State private var showGrid = false
+    @AppStorage("selphyAutoPrintAfterSession") private var autoPrint = false
 
     var body: some View {
         HStack(spacing: 0) {
@@ -40,7 +42,7 @@ struct OperatorConsoleView: View {
             .frame(width: 300)
         }
         .onChange(of: sm.phase) { _, newPhase in
-            if case .finished = newPhase { showPrintPrompt = true }
+            if case .finished = newPhase { showPrintPrompt = !autoPrint }
         }
         .alert("Print Photo Strip?", isPresented: $showPrintPrompt) {
             Button("Print") { coordinator.printCurrentStrip() }
@@ -116,9 +118,7 @@ struct OperatorConsoleView: View {
                 .frame(maxWidth: 260)
             if coordinator.cameraSourceKind == .avFoundation {
                 Button("Open System Settings") {
-                    if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Camera") {
-                        NSWorkspace.shared.open(url)
-                    }
+                    _ = SystemSettingsRouter.open(.cameraPrivacy)
                 }
                 .buttonStyle(.borderedProminent)
             }
@@ -133,8 +133,9 @@ struct OperatorConsoleView: View {
             Circle().fill(connectionColor).frame(width: 8, height: 8)
             Text(connectionLabel).font(.caption)
             Spacer()
-            if case .connected = coordinator.connectionStatus.state {
-                Image(systemName: coordinator.connectionStatus.effectiveNetwork == .lan ? "cable.connector" : "wifi")
+            let presentation = BoothConnectionPresentationResolver.resolve(connectionStatus)
+            if presentation.controlConnected {
+                Image(systemName: presentation.effectiveTransport == "Ethernet" ? "cable.connector" : "wifi")
                     .font(.caption).foregroundStyle(.green)
             }
         }
@@ -177,27 +178,20 @@ struct OperatorConsoleView: View {
     }
 
     var connectionColor: Color {
-        switch coordinator.connectionStatus.state {
-        case .connected:    return .green
-        case .connecting:   return .yellow
+        switch connectionStatus.state {
+        case .connected: return .green
+        case .connecting: return .yellow
         case .disconnected: return .red
         }
     }
 
     var connectionLabel: String {
-        switch coordinator.connectionStatus.state {
-        case .connected:
-            let name = coordinator.connectionStatus.peerDisplayName ?? "iPad"
-            let route = switch coordinator.connectionStatus.effectiveNetwork {
-            case .lan: "Connected via Ethernet"
-            case .wifi where coordinator.connectionStatus.isFallbackActive: "Using Wi-Fi fallback"
-            case .wifi: "Using Wi-Fi"
-            case .unavailable: "Connected"
-            }
-            return "iPad connected: \(name) · \(route)"
-        case .connecting:          return operatorConnectingRoute(coordinator.connectionStatus, locale: locale)
-        case .disconnected:        return operatorString("iPad not connected", locale: locale)
+        let presentation = BoothConnectionPresentationResolver.resolve(connectionStatus)
+        if presentation.controlConnected {
+            let name = presentation.peerName ?? "iPad"
+            return "iPad connected: \(name) · \(presentation.effectiveTransport)"
         }
+        return presentation.stateText
     }
 
     // MARK: - Camera source picker
@@ -516,7 +510,7 @@ struct OperatorConsoleView: View {
                     .tint(.orange)
             }
             if case .finished = sm.phase {
-                Button("Print Again") { showPrintAgainConfirmation = true }
+                Button(autoPrint ? "Print Another Copy…" : "Print Again") { showPrintAgainConfirmation = true }
                     .buttonStyle(.bordered)
                 finishedWebDeliveryStatus
             }
@@ -682,7 +676,10 @@ struct OperatorConsoleView: View {
         .tint(tint)
     }
 
-    var iPadConnected: Bool { if case .connected = coordinator.connectionStatus.state { return true }; return false }
+    var iPadConnected: Bool {
+        if case .connected = connectionStatus.state { return true }
+        return false
+    }
     var canRetake: Bool { if case .review = sm.phase { return true }; return false }
     var canSkip: Bool   { if case .review = sm.phase { return true }; return false }
 

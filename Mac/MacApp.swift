@@ -9,6 +9,7 @@ struct MacApp: App {
         WindowGroup("PRC PhotoBooth — Operator") {
             MacContentView()
                 .environment(coordinator)
+                .environment(coordinator.connectionStatus)
                 .environment(coordinator.stateMachine)
                 .modelContainer(DataStore.shared.container)
         }
@@ -19,6 +20,7 @@ struct MacApp: App {
         Settings {
             ProtectedSettingsView()
                 .environment(coordinator)
+                .environment(coordinator.connectionStatus)
         }
         #endif
     }

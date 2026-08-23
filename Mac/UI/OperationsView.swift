@@ -110,6 +110,7 @@ enum OperationsStatusLogic {
 
 struct OperationsView: View {
     @Environment(BoothCoordinator.self) private var coordinator
+    @Environment(BoothConnectionStatus.self) private var connectionStatus
     @Environment(\.locale) private var locale
     @State private var showPrinterConfirmation = false
     @State private var showDiscardConfirmation = false
@@ -493,7 +494,7 @@ struct OperationsView: View {
                     }
                     .buttonStyle(.bordered)
                     Button("Open System Print Settings…") {
-                        NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.Printers-Scanners-Settings")!)
+                        _ = SystemSettingsRouter.open(.printersAndScanners)
                     }
                     .buttonStyle(.bordered)
                 }
@@ -528,12 +529,8 @@ struct OperationsView: View {
                 }
                 HStack(spacing: 18) {
                     healthValue("Control", boothHealth.controlConnection)
-                    let route = switch coordinator.connectionStatus.effectiveNetwork {
-                    case .lan: "LAN"
-                    case .wifi where coordinator.connectionStatus.isFallbackActive: "Wi-Fi fallback"
-                    case .wifi: "Wi-Fi"
-                    case .unavailable: "Unavailable"
-                    }
+                    let presentation = BoothConnectionPresentationResolver.resolve(connectionStatus)
+                    let route = presentation.effectiveTransport
                     healthValue("Route", route)
                     healthValue("Preview", camera.livePreviewActive ? "Active" : "Inactive")
                     healthValue("PTP", camera.ptpHealthy.map { $0 ? "Healthy" : "Degraded" } ?? "n/a")

@@ -31,6 +31,34 @@ public struct BoothPreviewDiagnostics: Equatable, Sendable {
     public init() {}
 }
 
+public struct EthernetProbeResult: Equatable, Sendable {
+    public let interfaceAvailable: Bool
+    public let peerDiscovered: Bool
+    public let controlConnected: Bool
+    public let handshakeSucceeded: Bool
+    public let previewConnected: Bool
+    public let duration: TimeInterval
+    public let error: String?
+
+    public init(
+        interfaceAvailable: Bool,
+        peerDiscovered: Bool,
+        controlConnected: Bool,
+        handshakeSucceeded: Bool,
+        previewConnected: Bool,
+        duration: TimeInterval,
+        error: String?
+    ) {
+        self.interfaceAvailable = interfaceAvailable
+        self.peerDiscovered = peerDiscovered
+        self.controlConnected = controlConnected
+        self.handshakeSucceeded = handshakeSucceeded
+        self.previewConnected = previewConnected
+        self.duration = duration
+        self.error = error
+    }
+}
+
 @MainActor
 @Observable
 public final class BoothConnectionStatus {
@@ -53,7 +81,7 @@ public final class BoothConnectionStatus {
 
     public var isFallbackActive: Bool {
         if case .fallbackWiFi = routeState { return true }
-        return false
+        return fallbackReason != nil && requestedNetwork == .lan
     }
 
     public init(requestedNetwork: BoothNetworkPreference = .wifi) {

@@ -1,5 +1,6 @@
-import Foundation
 import AppKit
+import Foundation
+import ImageIO
 import Observation
 
 enum ConfiguredPrinterStatus: Sendable, Equatable {
@@ -14,12 +15,68 @@ struct PrinterTestResult: Sendable, Equatable {
     var message: String
 }
 
+enum PrinterDocument: Equatable, Sendable {
+    case testPage(date: Date)
+    case photoStrip(URL)
+}
+
+enum PrintLayoutMode: String, CaseIterable, Equatable, Sendable {
+    case fit
+    case fill
+    case actualSize
+
+    var title: String {
+        switch self {
+        case .fit: return "Fit to Page"
+        case .fill: return "Fill Page"
+        case .actualSize: return "Actual Size"
+        }
+    }
+}
+
+enum PrintLayoutGeometry {
+    static func destinationRect(
+        imageSize: CGSize,
+        printableBounds: CGRect,
+        mode: PrintLayoutMode
+    ) -> CGRect {
+        guard imageSize.width > 0,
+              imageSize.height > 0,
+              printableBounds.width > 0,
+              printableBounds.height > 0 else {
+            return .zero
+        }
+
+        let scale: CGFloat
+        switch mode {
+        case .fit:
+            scale = min(
+                printableBounds.width / imageSize.width,
+                printableBounds.height / imageSize.height
+            )
+        case .fill:
+            scale = max(
+                printableBounds.width / imageSize.width,
+                printableBounds.height / imageSize.height
+            )
+        case .actualSize:
+            scale = 1
+        }
+
+        let size = CGSize(width: imageSize.width * scale, height: imageSize.height * scale)
+        return CGRect(
+            x: printableBounds.midX - size.width / 2,
+            y: printableBounds.midY - size.height / 2,
+            width: size.width,
+            height: size.height
+        )
+    }
+}
+
 @MainActor
 struct PrinterPrintRequest {
-    var sourceURL: URL?
-    var isTestPage: Bool
-    var showsPrintDialog: Bool
-    var testDate: Date
+    let document: PrinterDocument
+    let showsPrintDialog: Bool
 }
 
 @MainActor
@@ -50,28 +107,30 @@ final class PrinterService {
 
     func refreshPrinters() {
         availablePrinterNames = backend.availablePrinterNames()
-        invalidateTestResult()
+        if let result = lastTestResult, result.printerName != backend.defaultPrinterName() {
+            lastTestResult = nil
+        }
     }
 
     func configuredPrinterStatus() -> ConfiguredPrinterStatus {
         guard let name = backend.defaultPrinterName(), !name.isEmpty else {
             return .unavailable(name: "No system default printer")
         }
-        return availablePrinterNames.isEmpty || availablePrinterNames.contains(name)
+        return availablePrinterNames.contains(name)
             ? .systemDefault
             : .unavailable(name: name)
     }
 
-    func invalidateTestResult() {
+    func clearTestResult() {
         lastTestResult = nil
     }
 
     func printTestPage() async throws {
+        refreshPrinters()
+        let date = Date()
         let request = PrinterPrintRequest(
-            sourceURL: nil,
-            isTestPage: true,
-            showsPrintDialog: true,
-            testDate: Date()
+            document: .testPage(date: date),
+            showsPrintDialog: true
         )
         isPrinting = true
         printRequestCount += 1
@@ -79,10 +138,10 @@ final class PrinterService {
         do {
             try await backend.submit(request)
             printSuccessCount += 1
-            lastPrintAt = request.testDate
+            lastPrintAt = date
             lastPrintError = nil
             lastTestResult = PrinterTestResult(
-                date: request.testDate,
+                date: date,
                 printerName: backend.defaultPrinterName() ?? "System Default",
                 isSuccess: true,
                 message: "Test print submitted."
@@ -90,7 +149,7 @@ final class PrinterService {
         } catch {
             if case PrinterServiceError.cancelled = error {
                 lastTestResult = PrinterTestResult(
-                    date: request.testDate,
+                    date: date,
                     printerName: backend.defaultPrinterName() ?? "System Default",
                     isSuccess: false,
                     message: "Print dialog cancelled."
@@ -98,10 +157,10 @@ final class PrinterService {
                 return
             }
             printFailureCount += 1
-            lastPrintAt = request.testDate
+            lastPrintAt = date
             lastPrintError = error.localizedDescription
             lastTestResult = PrinterTestResult(
-                date: request.testDate,
+                date: date,
                 printerName: backend.defaultPrinterName() ?? "System Default",
                 isSuccess: false,
                 message: error.localizedDescription
@@ -111,14 +170,17 @@ final class PrinterService {
     }
 
     func printStrip(at url: URL, showPrintDialog: Bool) async throws {
+        refreshPrinters()
         guard FileManager.default.fileExists(atPath: url.path) else {
-            throw JobExecutionError.permanent("Photo strip is missing: \(url.path)")
+            throw JobExecutionError.permanent(PrinterServiceError.missingSource(url).localizedDescription)
         }
+        guard Self.isReadableImage(at: url) else {
+            throw JobExecutionError.permanent(PrinterServiceError.invalidImage(url).localizedDescription)
+        }
+
         let request = PrinterPrintRequest(
-            sourceURL: url,
-            isTestPage: false,
-            showsPrintDialog: showPrintDialog,
-            testDate: Date()
+            document: .photoStrip(url),
+            showsPrintDialog: showPrintDialog
         )
         isPrinting = true
         printRequestCount += 1
@@ -126,19 +188,24 @@ final class PrinterService {
         do {
             try await backend.submit(request)
             printSuccessCount += 1
-            lastPrintAt = request.testDate
+            lastPrintAt = Date()
             lastPrintError = nil
         } catch {
-            if case PrinterServiceError.cancelled = error {
-                return
-            }
+            if case PrinterServiceError.cancelled = error { return }
             printFailureCount += 1
-            lastPrintAt = request.testDate
+            lastPrintAt = Date()
             lastPrintError = error.localizedDescription
+            if let error = error as? PrinterServiceError, error.isPermanent {
+                throw JobExecutionError.permanent(error.localizedDescription)
+            }
             throw JobExecutionError.retryable(error.localizedDescription)
         }
     }
 
+    private static func isReadableImage(at url: URL) -> Bool {
+        guard let source = CGImageSourceCreateWithURL(url as CFURL, nil) else { return false }
+        return CGImageSourceCreateImageAtIndex(source, 0, nil) != nil
+    }
 }
 
 @MainActor
@@ -152,33 +219,139 @@ private final class AppKitPrinterBackend: PrinterBackend {
     }
 
     func submit(_ request: PrinterPrintRequest) async throws {
-        let printInfo = NSPrintInfo.shared.copy() as! NSPrintInfo
-        let paperSize = printInfo.paperSize
+        guard let printInfo = NSPrintInfo.shared.copy() as? NSPrintInfo else {
+            throw PrinterServiceError.unavailable("Print configuration unavailable")
+        }
+        let imageableBounds = printInfo.imageablePageBounds
+        let printableFrame = NSRect(origin: .zero, size: imageableBounds.size)
         let view: NSView
-        if let sourceURL = request.sourceURL,
-           let image = NSImage(contentsOf: sourceURL) {
-            let imageView = NSImageView(frame: NSRect(origin: .zero, size: paperSize))
-            imageView.image = image
-            imageView.imageScaling = .scaleProportionallyUpOrDown
-            view = imageView
-        } else {
+
+        switch request.document {
+        case .testPage(let date):
             view = PrinterTestPageView(
-                frame: NSRect(origin: .zero, size: paperSize),
+                frame: printableFrame,
                 printerName: printInfo.printer.name,
-                paperSize: "\(Int(paperSize.width)) × \(Int(paperSize.height)) pt",
-                date: request.testDate
+                paperSize: "\(Int(imageableBounds.width)) × \(Int(imageableBounds.height)) pt",
+                date: date
             )
+        case .photoStrip(let sourceURL):
+            guard let image = NSImage(contentsOf: sourceURL) else {
+                throw PrinterServiceError.invalidImage(sourceURL)
+            }
+            view = PrintablePhotoStripView(frame: printableFrame, image: image)
         }
 
         let operation = NSPrintOperation(view: view, printInfo: printInfo)
         operation.showsPrintPanel = request.showsPrintDialog
         operation.showsProgressPanel = true
+        if request.showsPrintDialog {
+            var options = operation.printPanel.options
+            options.formUnion([
+                .showsCopies,
+                .showsPaperSize,
+                .showsOrientation,
+                .showsScaling,
+                .showsPreview,
+                .showsPageSetupAccessory
+            ])
+            operation.printPanel.options = options
+            if let printableView = view as? PrintablePhotoStripView {
+                operation.printPanel.addAccessoryController(
+                    PrintLayoutAccessoryController(printableView: printableView)
+                )
+            }
+        }
         guard operation.run() else {
             throw request.showsPrintDialog ? PrinterServiceError.cancelled : PrinterServiceError.rejected
         }
     }
 }
 
+@MainActor
+private final class PrintablePhotoStripView: NSView {
+    private let image: NSImage
+    var layoutMode: PrintLayoutMode = .fit {
+        didSet { needsDisplay = true }
+    }
+
+    init(frame: NSRect, image: NSImage) {
+        self.image = image
+        super.init(frame: frame)
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("Printable photo strip does not support NSCoder.")
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        NSColor.white.setFill()
+        bounds.fill()
+        let destination = PrintLayoutGeometry.destinationRect(
+            imageSize: image.size,
+            printableBounds: bounds,
+            mode: layoutMode
+        )
+        image.draw(in: destination, from: .zero, operation: .sourceOver, fraction: 1)
+    }
+}
+
+@MainActor
+private final class PrintLayoutAccessoryController: NSViewController, NSPrintPanelAccessorizing {
+    private weak var printableView: PrintablePhotoStripView?
+    private let selector: NSSegmentedControl
+
+    init(printableView: PrintablePhotoStripView) {
+        self.printableView = printableView
+        selector = NSSegmentedControl(
+            labels: PrintLayoutMode.allCases.map(\.title),
+            trackingMode: .selectOne,
+            target: nil,
+            action: nil
+        )
+        super.init(nibName: nil, bundle: nil)
+        title = "Photo Layout"
+        selector.target = self
+        selector.action = #selector(layoutModeChanged(_:))
+        selector.selectedSegment = 0
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("Print layout accessory does not support NSCoder.")
+    }
+
+    override func loadView() {
+        let label = NSTextField(labelWithString: "Photo layout")
+        let stack = NSStackView(views: [label, selector])
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.spacing = 8
+        stack.edgeInsets = NSEdgeInsets(top: 12, left: 12, bottom: 12, right: 12)
+        view = stack
+    }
+
+    func localizedSummaryItems() -> [[NSPrintPanel.AccessorySummaryKey: String]] {
+        [[
+            .itemName: "Photo Layout",
+            .itemDescription: currentMode.title
+        ]]
+    }
+
+    func keyPathsForValuesAffectingPreview() -> Set<String> {
+        ["selectedSegment"]
+    }
+
+    private var currentMode: PrintLayoutMode {
+        guard PrintLayoutMode.allCases.indices.contains(selector.selectedSegment) else { return .fit }
+        return PrintLayoutMode.allCases[selector.selectedSegment]
+    }
+
+    @objc private func layoutModeChanged(_ sender: NSSegmentedControl) {
+        guard PrintLayoutMode.allCases.indices.contains(sender.selectedSegment) else { return }
+        printableView?.layoutMode = currentMode
+    }
+}
+
+@MainActor
 private final class PrinterTestPageView: NSView {
     private let printerName: String
     private let paperSize: String
@@ -239,12 +412,23 @@ enum PrinterServiceError: LocalizedError {
     case unavailable(String)
     case cancelled
     case rejected
+    case missingSource(URL)
+    case invalidImage(URL)
+
+    var isPermanent: Bool {
+        switch self {
+        case .missingSource, .invalidImage: return true
+        case .unavailable, .cancelled, .rejected: return false
+        }
+    }
 
     var errorDescription: String? {
         switch self {
         case .unavailable(let name): return "Configured printer unavailable: \(name)"
         case .cancelled: return "Print dialog cancelled."
         case .rejected: return "The print operation was rejected."
+        case .missingSource(let url): return "Photo strip is missing: \(url.path)"
+        case .invalidImage(let url): return "Photo strip is unreadable: \(url.path)"
         }
     }
 }

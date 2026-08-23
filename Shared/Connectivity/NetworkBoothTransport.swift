@@ -11,6 +11,8 @@ public final class NetworkBoothTransport: BoothTransport {
     private static let controlServiceType = "_prc-control._tcp"
     private static let previewServiceType = "_prc-preview._tcp"
     private static let routeDiscoveryGracePeriod: TimeInterval = 0.75
+    private static let lanRecoveryStabilityPeriod: TimeInterval = 2
+    private static let lanRecoveryCooldown: TimeInterval = 5
     private static let previewIdentityCapability = "preview-identity"
     private static let heartbeatInterval: TimeInterval = 2
     private static let heartbeatTimeout: TimeInterval = 8
@@ -37,6 +39,7 @@ public final class NetworkBoothTransport: BoothTransport {
         get { requestedPreference }
         set {
             guard requestedPreference != newValue else { return }
+            cancelLANRecovery()
             let oldValue = requestedPreference
             requestedPreference = newValue
             fallbackActive = false
@@ -76,6 +79,9 @@ public final class NetworkBoothTransport: BoothTransport {
     private var lanHandshakeTask: Task<Void, Never>?
     private var lastControlMessageAt = Date.distantPast
     private var reconnectTask: Task<Void, Never>?
+    private var lanRecoveryTask: Task<Void, Never>?
+    private var lanRecoveryPending = false
+    private var lastLANRecoveryAttemptAt: Date?
     private var reconnectAttempt = 0
     private var shouldReconnect = true
     private var controlEndpointDescription: String?
@@ -100,6 +106,8 @@ public final class NetworkBoothTransport: BoothTransport {
     private var lanHandshakeState: BoothLANHandshakeState = .unknown
     private var lastNetworkError: String?
 
+    public var canAttemptPreferredLANRecovery: @MainActor () -> Bool = { true }
+
     public init(
         role: DeviceRole,
         networkPreference: BoothNetworkPreference = .wifi,
@@ -114,6 +122,7 @@ public final class NetworkBoothTransport: BoothTransport {
 
     public func start() {
         shouldReconnect = true
+        cancelLANRecovery()
         reconnectAttempt = 0
         routeMachine = BoothNetworkRouteMachine(preference: requestedPreference)
         startPathMonitors()
@@ -133,6 +142,7 @@ public final class NetworkBoothTransport: BoothTransport {
 
     public func disconnect() {
         shouldReconnect = false
+        cancelLANRecovery()
         cancelRouteDiscovery()
         stopPathMonitors()
         tearDownActiveTransport()
@@ -151,6 +161,39 @@ public final class NetworkBoothTransport: BoothTransport {
         previewFramesSubmitted += 1
         flushPreviewFrame()
         publishPreviewMetricsIfNeeded()
+    }
+
+    public func probeEthernet() async -> EthernetProbeResult {
+        let startedAt = Date()
+        let interfaceAvailable = didReceiveLANPathUpdate && isLANPathAvailable
+        let usingLAN = activeInterface == .wiredEthernet
+        let peerDiscovered = usingLAN && !peerName.isEmpty
+        let controlConnected = usingLAN && connectionState == .connected(peerName: peerName)
+        let handshakeSucceeded = usingLAN && lanHandshakeState == .ready
+        let previewConnected = usingLAN && connectionStatus.isPreviewChannelConnected
+
+        let error: String?
+        if !interfaceAvailable {
+            error = "No Ethernet interface available."
+        } else if !peerDiscovered {
+            error = "No PRC PhotoBooth iPad found over Ethernet."
+        } else if !controlConnected || !handshakeSucceeded {
+            error = "Ethernet control handshake is not ready."
+        } else if !previewConnected {
+            error = "Ethernet preview channel is not ready."
+        } else {
+            error = nil
+        }
+
+        return EthernetProbeResult(
+            interfaceAvailable: interfaceAvailable,
+            peerDiscovered: peerDiscovered,
+            controlConnected: controlConnected,
+            handshakeSucceeded: handshakeSucceeded,
+            previewConnected: previewConnected,
+            duration: Date().timeIntervalSince(startedAt),
+            error: error
+        )
     }
 
     private enum PathKind {
@@ -211,11 +254,18 @@ public final class NetworkBoothTransport: BoothTransport {
         didReceiveLANPathUpdate = true
         isLANPathAvailable = available
         publishPathAvailability()
-        guard activeInterface == .wiredEthernet else { return }
-        guard !available else {
-            print("[NetworkRoute] Wired Ethernet path available")
+        if available {
+            guard activeInterface == .wifi,
+                  requestedPreference == .lan,
+                  fallbackActive else { return }
+            scheduleLANRecovery(after: Self.lanRecoveryStabilityPeriod)
             return
         }
+        if activeInterface == .wifi {
+            cancelLANRecovery()
+            return
+        }
+        guard activeInterface == .wiredEthernet else { return }
         if case .connectingLAN = routeMachine.state {
             // Initial monitor samples can race route establishment.
             return
@@ -223,6 +273,63 @@ public final class NetworkBoothTransport: BoothTransport {
         if role == .iPad || requestedPreference == .lan {
             activateWiFiFallback(reason: "LAN unavailable")
         }
+    }
+
+    private func scheduleLANRecovery(after delay: TimeInterval) {
+        guard lanRecoveryTask == nil,
+              shouldReconnect,
+              activeInterface == .wifi,
+              requestedPreference == .lan,
+              fallbackActive,
+              isLANPathAvailable else { return }
+
+        lanRecoveryPending = true
+        lanRecoveryTask = Task { @MainActor [weak self] in
+            do {
+                try await Task.sleep(for: .seconds(delay))
+            } catch {
+                return
+            }
+            guard let self, !Task.isCancelled else { return }
+            self.lanRecoveryTask = nil
+            guard self.isLANPathAvailable,
+                  self.shouldReconnect,
+                  self.activeInterface == .wifi,
+                  self.requestedPreference == .lan,
+                  self.fallbackActive else { return }
+            self.attemptPendingLANRecoveryIfIdle()
+        }
+    }
+
+    public func attemptPendingLANRecoveryIfIdle() {
+        guard lanRecoveryPending,
+              shouldReconnect,
+              activeInterface == .wifi,
+              requestedPreference == .lan,
+              fallbackActive,
+              isLANPathAvailable,
+              canAttemptPreferredLANRecovery() else { return }
+        if let lastAttempt = lastLANRecoveryAttemptAt,
+           Date().timeIntervalSince(lastAttempt) < Self.lanRecoveryCooldown {
+            scheduleLANRecovery(after: Self.lanRecoveryCooldown - Date().timeIntervalSince(lastAttempt))
+            return
+        }
+        lanRecoveryPending = false
+        lastLANRecoveryAttemptAt = Date()
+        let command = routeMachine.lanPathChanged(
+            isAvailable: true,
+            wifiAvailable: pathAvailable(.wifi),
+            boothIsIdle: true
+        )
+        guard command == .startLAN else { return }
+        print("[NetworkRoute] LAN stable; attempting preferred LAN recovery")
+        apply(command, reason: "LAN returned")
+    }
+
+    private func cancelLANRecovery() {
+        lanRecoveryTask?.cancel()
+        lanRecoveryTask = nil
+        lanRecoveryPending = false
     }
 
     private func handleWiFiPathUpdate(_ available: Bool) {

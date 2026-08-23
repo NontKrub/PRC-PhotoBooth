@@ -19,6 +19,11 @@ struct PrinterServiceTests {
             backend: TestPrinterBackend(names: ["Canon Selphy"], defaultName: nil)
         )
         #expect(noDefault.configuredPrinterStatus() == .unavailable(name: "No system default printer"))
+
+        let noDetectedPrinters = PrinterService(
+            backend: TestPrinterBackend(names: [], defaultName: "Canon Selphy")
+        )
+        #expect(noDetectedPrinters.configuredPrinterStatus() == .unavailable(name: "Canon Selphy"))
     }
 
     @Test("successful and failed test prints update diagnostics")
@@ -40,18 +45,18 @@ struct PrinterServiceTests {
         }
     }
 
-    @Test("refresh invalidates the test result")
+    @Test("refresh preserves a useful test result")
     @MainActor
-    func invalidatesTestResult() async throws {
+    func preservesTestResult() async throws {
         let backend = TestPrinterBackend(names: ["Canon", "Other"], defaultName: "Canon")
         let printer = PrinterService(backend: backend)
 
         try await printer.printTestPage()
         #expect(printer.lastTestResult != nil)
         printer.refreshPrinters()
-        #expect(printer.lastTestResult == nil)
+        #expect(printer.lastTestResult != nil)
 
-        try await printer.printTestPage()
+        backend.defaultName = "Other"
         printer.refreshPrinters()
         #expect(printer.lastTestResult == nil)
     }
@@ -62,13 +67,77 @@ struct PrinterServiceTests {
         let backend = TestPrinterBackend(names: ["Canon"], defaultName: "Canon")
         let printer = PrinterService(backend: backend)
         let file = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-        try Data([1]).write(to: file)
+        try validPNGData.write(to: file)
         defer { try? FileManager.default.removeItem(at: file) }
 
         try await printer.printStrip(at: file, showPrintDialog: true)
         #expect(backend.requests.last?.showsPrintDialog == true)
+        if case .photoStrip(let submittedURL) = backend.requests.last?.document {
+            #expect(submittedURL == file)
+        } else {
+            Issue.record("Expected a photo-strip document")
+        }
         try await printer.printStrip(at: file, showPrintDialog: false)
         #expect(backend.requests.last?.showsPrintDialog == false)
+    }
+
+    @Test("missing strip fails permanently without submitting a test page")
+    @MainActor
+    func missingStripFailsWithoutFallback() async throws {
+        let backend = TestPrinterBackend(names: ["Canon"], defaultName: "Canon")
+        let printer = PrinterService(backend: backend)
+        let file = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+
+        do {
+            try await printer.printStrip(at: file, showPrintDialog: true)
+            Issue.record("Expected missing strip failure")
+        } catch let error as JobExecutionError {
+            if case .permanent = error {
+                // Expected.
+            } else {
+                Issue.record("Expected permanent failure")
+            }
+        }
+
+        #expect(backend.requests.isEmpty)
+    }
+
+    @Test("corrupt strip fails permanently without submitting a test page")
+    @MainActor
+    func corruptStripFailsWithoutFallback() async throws {
+        let backend = TestPrinterBackend(names: ["Canon"], defaultName: "Canon")
+        let printer = PrinterService(backend: backend)
+        let file = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try Data([1, 2, 3]).write(to: file)
+        defer { try? FileManager.default.removeItem(at: file) }
+
+        do {
+            try await printer.printStrip(at: file, showPrintDialog: true)
+            Issue.record("Expected corrupt image failure")
+        } catch let error as JobExecutionError {
+            if case .permanent = error {
+                // Expected.
+            } else {
+                Issue.record("Expected permanent failure")
+            }
+        }
+
+        #expect(backend.requests.isEmpty)
+    }
+
+    @Test("test print uses an explicit test-page document")
+    @MainActor
+    func testPrintUsesTestPageDocument() async throws {
+        let backend = TestPrinterBackend(names: ["Canon"], defaultName: "Canon")
+        let printer = PrinterService(backend: backend)
+
+        try await printer.printTestPage()
+
+        if case .testPage = backend.requests.last?.document {
+            // Expected.
+        } else {
+            Issue.record("Expected a test-page document")
+        }
     }
 
     @Test("cancelling the system panel is not a retryable print failure")
@@ -88,12 +157,12 @@ struct PrinterServiceTests {
 @MainActor
 private final class TestPrinterBackend: PrinterBackend {
     struct Request: Sendable {
-        var sourceURL: URL?
+        var document: PrinterDocument
         var showsPrintDialog: Bool
     }
 
     let names: [String]
-    let defaultName: String?
+    var defaultName: String?
     private(set) var requests: [Request] = []
     private var nextError: Error?
 
@@ -110,7 +179,7 @@ private final class TestPrinterBackend: PrinterBackend {
             self.nextError = nil
             throw nextError
         }
-        requests.append(Request(sourceURL: request.sourceURL, showsPrintDialog: request.showsPrintDialog))
+        requests.append(Request(document: request.document, showsPrintDialog: request.showsPrintDialog))
     }
 
     func failNext(with error: Error) {
@@ -122,3 +191,5 @@ private enum TestPrinterError: LocalizedError {
     case offline
     var errorDescription: String? { "Printer offline" }
 }
+
+private let validPNGData = Data(base64Encoded: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=")!

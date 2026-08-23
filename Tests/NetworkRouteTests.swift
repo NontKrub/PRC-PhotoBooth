@@ -87,15 +87,37 @@ struct NetworkRouteTests {
         #expect(route.effectiveTransport == .unavailable)
     }
 
-    @Test("Healthy Wi-Fi fallback does not switch when LAN reappears")
-    func fallbackHasHysteresis() {
+    @Test("Healthy Wi-Fi fallback recovers LAN while the booth is idle")
+    func fallbackRecoversLANWhenIdle() {
         var route = BoothNetworkRouteMachine(preference: .lan)
         _ = route.start(lanAvailable: false, wifiAvailable: true)
         _ = route.wifiConnected(peer: "iPad", fallback: true)
 
-        #expect(route.lanPathChanged(isAvailable: true, wifiAvailable: true) == .none)
-        #expect(route.state == .fallbackWiFi(peer: "iPad"))
+        #expect(route.lanPathChanged(isAvailable: true, wifiAvailable: true, boothIsIdle: true) == .startLAN)
+        #expect(route.state == .connectingLAN)
         #expect(route.transportDisconnected(lanAvailable: true, wifiAvailable: true) == .startLAN)
+    }
+
+    @Test("LAN return during capture remains on Wi-Fi until idle")
+    func fallbackDefersLANRecoveryDuringCapture() {
+        var route = BoothNetworkRouteMachine(preference: .lan)
+        _ = route.start(lanAvailable: false, wifiAvailable: true)
+        _ = route.wifiConnected(peer: "iPad", fallback: true)
+
+        #expect(route.lanPathChanged(isAvailable: true, wifiAvailable: true, boothIsIdle: false) == .none)
+        #expect(route.state == .fallbackWiFi(peer: "iPad"))
+        #expect(route.lanPathChanged(isAvailable: true, wifiAvailable: true, boothIsIdle: true) == .startLAN)
+        #expect(route.state == .connectingLAN)
+    }
+
+    @Test("LAN recovery command is emitted once after the route starts")
+    func fallbackRecoveryDoesNotFlap() {
+        var route = BoothNetworkRouteMachine(preference: .lan)
+        _ = route.start(lanAvailable: false, wifiAvailable: true)
+        _ = route.wifiConnected(peer: "iPad", fallback: true)
+
+        #expect(route.lanPathChanged(isAvailable: true, wifiAvailable: true) == .startLAN)
+        #expect(route.lanPathChanged(isAvailable: true, wifiAvailable: true) == .none)
     }
 
     @Test("Wi-Fi loss stays unavailable when Wi-Fi is selected")
@@ -218,6 +240,30 @@ struct RouteDiscoveryPolicyTests {
 
         #expect(accepted == .accepted)
         #expect(selection.selectedInterface == .wiredEthernet)
+    }
+}
+
+@Suite("Ethernet diagnostics")
+@MainActor
+struct EthernetDiagnosticsTests {
+    @Test("Ethernet probe does not change the requested route")
+    func probeIsNonDestructive() async {
+        let status = BoothConnectionStatus(requestedNetwork: .wifi)
+        let transport = NetworkBoothTransport(
+            role: .mac,
+            networkPreference: .wifi,
+            connectionStatus: status
+        )
+
+        let result = await transport.probeEthernet()
+
+        #expect(transport.requestedNetworkPreference == .wifi)
+        #expect(!result.interfaceAvailable)
+        #expect(!result.peerDiscovered)
+        #expect(!result.controlConnected)
+        #expect(!result.handshakeSucceeded)
+        #expect(!result.previewConnected)
+        #expect(result.error != nil)
     }
 }
 

@@ -3,6 +3,7 @@ import AppKit
 
 struct MacContentView: View {
     @Environment(BoothCoordinator.self) private var coordinator
+    @Environment(\.scenePhase) private var scenePhase
     @State private var selectedTab = 0
     @State private var showPINSetup = false
     @State private var showPINVerify = false
@@ -42,6 +43,9 @@ struct MacContentView: View {
                     showPINSetup = true
                 }
             }
+        }
+        .onChange(of: scenePhase) { _, newPhase in
+            if newPhase == .active { coordinator.printer.refreshPrinters() }
         }
         .sheet(isPresented: $showPINSetup) {
             PINGateView(mode: .setup) {
@@ -111,7 +115,9 @@ struct SettingsView: View {
     }
 
     @Environment(BoothCoordinator.self) private var coordinator
+    @Environment(BoothConnectionStatus.self) private var connectionStatus
     @Environment(\.locale) private var locale
+    @Environment(\.scenePhase) private var scenePhase
 
     @AppStorage("selphyAutoPrintAfterSession") private var autoPrint = false
 
@@ -151,6 +157,9 @@ struct SettingsView: View {
         }
         .task {
             coordinator.printer.refreshPrinters()
+        }
+        .onChange(of: scenePhase) { _, newPhase in
+            if newPhase == .active { coordinator.printer.refreshPrinters() }
         }
     }
 
@@ -231,17 +240,23 @@ struct SettingsView: View {
     private var ipadSection: some View {
         GroupBox {
             VStack(alignment: .leading, spacing: 12) {
-                let status = coordinator.connectionStatus
+                let status = connectionStatus
+                let presentation = BoothConnectionPresentationResolver.resolve(status)
                 let peers = status.connectedPeerNames
-                if case .connected = status.state {
+                if presentation.controlConnected {
                     VStack(alignment: .leading, spacing: 2) {
                         Label("Connected: \(status.peerDisplayName ?? "iPad")", systemImage: "ipad")
-                        Text(connectionRouteDescription(status))
+                        Text(presentation.effectiveTransport)
                             .font(.caption)
-                            .foregroundStyle(status.isFallbackActive ? .orange : .secondary)
+                            .foregroundStyle(presentation.fallbackText == nil ? Color.secondary : Color.orange)
+                        if let fallbackText = presentation.fallbackText {
+                            Text(fallbackText)
+                                .font(.caption)
+                                .foregroundStyle(.orange)
+                        }
                     }
                 } else if case .connecting = status.state {
-                    Label(operatorConnectingRoute(status, locale: locale), systemImage: "network")
+                    Label(presentation.stateText, systemImage: "network")
                         .foregroundStyle(.secondary)
                 } else if peers.isEmpty {
                     Label("No iPads connected", systemImage: "ipad.slash")
@@ -330,10 +345,8 @@ struct SettingsView: View {
                     .buttonStyle(.bordered)
                     .disabled(coordinator.ethernetTestInProgress || coordinator.isCaptureSessionActive)
 
-                    if let result = coordinator.ethernetTestResult {
-                        Text(result)
-                            .font(.caption)
-                            .foregroundStyle(result.hasPrefix("✓") ? .green : .orange)
+                    if let result = coordinator.ethernetProbeResult {
+                        ethernetProbeView(result)
                     }
 
                     Divider()
@@ -348,20 +361,32 @@ struct SettingsView: View {
     }
 
     private func connectionRouteDescription(_ status: BoothConnectionStatus) -> String {
-        switch status.effectiveNetwork {
-        case .wifi where status.isFallbackActive: return "Using Wi-Fi fallback"
-        case .wifi: return "Using Wi-Fi"
-        case .lan: return "Connected via Ethernet"
-        case .unavailable: return "Network route unavailable"
+        BoothConnectionPresentationResolver.resolve(status).effectiveTransport
+    }
+
+    private func ethernetProbeView(_ result: EthernetProbeResult) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            diagnosticRow("Ethernet interface", result.interfaceAvailable ? "✓ Ready" : "✕ Unavailable")
+            diagnosticRow("iPad discovery", result.peerDiscovered ? "✓ Ready" : "✕ Not found")
+            diagnosticRow("Control connection", result.controlConnected ? "✓ Ready" : "—")
+            diagnosticRow("LAN handshake", result.handshakeSucceeded ? "✓ Ready" : "—")
+            diagnosticRow("Preview channel", result.previewConnected ? "✓ Ready" : "—")
+            diagnosticRow("Duration", String(format: "%.2f s", result.duration))
+            if let error = result.error {
+                Text(error).font(.caption).foregroundStyle(.orange)
+            }
         }
+        .font(.caption)
     }
 
     private func networkDiagnostics(_ status: BoothConnectionStatus) -> some View {
         let metrics = status.previewDiagnostics
+        let presentation = BoothConnectionPresentationResolver.resolve(status)
         return VStack(alignment: .leading, spacing: 6) {
             Text("Network diagnostics").font(.headline)
             diagnosticRow("Requested connection", status.requestedNetwork == .lan ? "LAN" : "Wi-Fi")
             diagnosticRow("Effective connection", connectionRouteDescription(status))
+            diagnosticRow("Fallback", presentation.fallbackText ?? "Inactive")
             diagnosticRow("Ethernet path observation", pathObservationText(status.lanPathObservation))
             diagnosticRow("Wi-Fi path observation", pathObservationText(status.wifiPathObservation))
             diagnosticRow("Control channel", connectionStateText(status.state))
@@ -591,9 +616,7 @@ struct SettingsView: View {
                 Divider()
 
                 Button("Open Printers & Scanners…") {
-                    NSWorkspace.shared.open(
-                        URL(string: "x-apple.systempreferences:com.apple.Printers-Scanners-Settings")!
-                    )
+                    _ = SystemSettingsRouter.open(.printersAndScanners)
                 }
             }
             .padding(4)

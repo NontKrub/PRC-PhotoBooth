@@ -105,7 +105,7 @@ final class BoothCoordinator {
         }
     }
     private(set) var ethernetTestInProgress = false
-    private(set) var ethernetTestResult: String?
+    private(set) var ethernetProbeResult: EthernetProbeResult?
 
     var isCaptureSessionActive: Bool {
         switch stateMachine.phase {
@@ -334,6 +334,12 @@ final class BoothCoordinator {
         }
 
         setupMultipeerHandlers()
+        if let networkTransport = multipeer as? NetworkBoothTransport {
+            networkTransport.canAttemptPreferredLANRecovery = { [weak self] in
+                guard let self else { return false }
+                return !self.isCaptureSessionActive
+            }
+        }
         multipeer.start()
         networkMonitor.pathUpdateHandler = { [weak self] path in
             Task { @MainActor [weak self] in
@@ -905,13 +911,7 @@ final class BoothCoordinator {
     func testEthernetConnection() {
         guard !isCaptureSessionActive, !ethernetTestInProgress else { return }
         ethernetTestInProgress = true
-        ethernetTestResult = nil
-        if requestedNetworkPreference == .lan {
-            multipeer.disconnect()
-            multipeer.start()
-        } else {
-            requestedNetworkPreference = .lan
-        }
+        ethernetProbeResult = nil
         ethernetTestTask?.cancel()
         ethernetTestTask = Task { @MainActor [weak self] in
             guard let self else { return }
@@ -919,24 +919,24 @@ final class BoothCoordinator {
                 self.ethernetTestInProgress = false
                 self.ethernetTestTask = nil
             }
-            let startedAt = Date()
-            while !Task.isCancelled && Date().timeIntervalSince(startedAt) < NetworkBoothTransport.lanHandshakeTimeout {
-                let status = self.connectionStatus
-                if case .connected(let peer) = status.state,
-                   status.effectiveNetwork == .lan {
-                    let elapsed = Date().timeIntervalSince(startedAt)
-                    self.ethernetTestResult = "✓ Connected to \(peer) · Control: Ready · Preview: \(status.isPreviewChannelConnected ? "Ready" : "Waiting") · Route: Ethernet · Handshake: \(String(format: "%.1f", elapsed)) s"
-                    return
-                }
-                try? await Task.sleep(for: .milliseconds(200))
-            }
-            let status = self.connectionStatus
-            if status.peerDisplayName == nil {
-                self.ethernetTestResult = "⚠ Ethernet test timed out: iPad not discovered."
+            if let networkTransport = self.multipeer as? NetworkBoothTransport {
+                self.ethernetProbeResult = await networkTransport.probeEthernet()
             } else {
-                self.ethernetTestResult = "⚠ Ethernet test failed: \(status.lastNetworkError ?? "control or hello did not become ready")"
+                self.ethernetProbeResult = EthernetProbeResult(
+                    interfaceAvailable: false,
+                    peerDiscovered: false,
+                    controlConnected: false,
+                    handshakeSucceeded: false,
+                    previewConnected: false,
+                    duration: 0,
+                    error: "Production Ethernet transport is unavailable."
+                )
             }
         }
+    }
+
+    private func attemptPendingLANRecoveryIfIdle() {
+        (multipeer as? NetworkBoothTransport)?.attemptPendingLANRecoveryIfIdle()
     }
 
     func setMirrored(_ isMirrored: Bool) {
@@ -987,6 +987,8 @@ final class BoothCoordinator {
     }
 
     func runSafePreflight() async {
+        printer.refreshPrinters()
+        attemptPendingLANRecoveryIfIdle()
         let context = await makePreflightContext()
         await preflight.runSafeChecks(using: context)
     }
@@ -1970,6 +1972,7 @@ final class BoothCoordinator {
         guard currentSession != nil, var manifest = currentManifest else {
             reviewDecisionPending = false
             stateMachine.reset()
+            attemptPendingLANRecoveryIfIdle()
             return
         }
         manifest.status = .cancelled
@@ -1999,6 +2002,7 @@ final class BoothCoordinator {
         capture.resetStills()
         reviewDecisionPending = false
         stateMachine.reset()
+        attemptPendingLANRecoveryIfIdle()
     }
 
     private func resumeRecoveredSession(manifest: SessionManifest, images: [Int: CGImage]) {
@@ -2288,6 +2292,7 @@ final class BoothCoordinator {
         currentSession = nil
         lastSessionPresentation = currentSessionPresentation
         currentSessionPresentation = nil
+        attemptPendingLANRecoveryIfIdle()
     }
 
     private func restoreDownloadTokens() async {
@@ -2430,20 +2435,12 @@ final class BoothCoordinator {
         guard let sessionID = lastCompletedSessionID else { return }
         Task { @MainActor [weak self] in
             guard let self else { return }
+            printer.refreshPrinters()
             let manifest: SessionManifest
             do {
                 manifest = try await manifestStore.load(sessionID: sessionID)
             } catch {
                 errorMessage = "Print could not load the completed session: \(error.localizedDescription)"
-                return
-            }
-            if UserDefaults.standard.bool(forKey: "selphyAutoPrintAfterSession") {
-                if let existing = jobQueue.jobs.first(where: { $0.sessionID == sessionID && $0.kind == .autoPrint }),
-                   existing.status == .failed || existing.status == .cancelled {
-                    jobQueue.retry(jobID: existing.id)
-                } else {
-                    jobQueue.enqueueAutoPrint(for: manifest)
-                }
                 return
             }
             let url = URL(fileURLWithPath: manifest.absoluteDirectoryPath).appendingPathComponent(manifest.stripFileName ?? "strip.png")
@@ -2459,6 +2456,7 @@ final class BoothCoordinator {
         guard let sessionID = lastCompletedSessionID else { return }
         Task { @MainActor [weak self] in
             guard let self else { return }
+            printer.refreshPrinters()
             let manifest: SessionManifest
             do {
                 manifest = try await manifestStore.load(sessionID: sessionID)
