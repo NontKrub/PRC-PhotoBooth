@@ -338,12 +338,16 @@ struct SettingsView: View {
                         coordinator.testEthernetConnection()
                     } label: {
                         Label(
-                            coordinator.ethernetTestInProgress ? "Testing Ethernet…" : "Test Ethernet Connection",
+                            coordinator.ethernetTestInProgress ? "Checking Ethernet…" : "Check Ethernet Status",
                             systemImage: "cable.connector"
                         )
                     }
                     .buttonStyle(.bordered)
                     .disabled(coordinator.ethernetTestInProgress || coordinator.isCaptureSessionActive)
+
+                    Text("Current route verification only. Switch Connection to LAN for a full booth connection test.")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
 
                     if let result = coordinator.ethernetProbeResult {
                         ethernetProbeView(result)

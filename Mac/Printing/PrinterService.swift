@@ -238,7 +238,7 @@ private final class AppKitPrinterBackend: PrinterBackend {
             guard let image = NSImage(contentsOf: sourceURL) else {
                 throw PrinterServiceError.invalidImage(sourceURL)
             }
-            view = PrintablePhotoStripView(frame: printableFrame, image: image)
+            view = PrintablePhotoStripView(image: image, printInfo: printInfo)
         }
 
         let operation = NSPrintOperation(view: view, printInfo: printInfo)
@@ -270,25 +270,37 @@ private final class AppKitPrinterBackend: PrinterBackend {
 @MainActor
 private final class PrintablePhotoStripView: NSView {
     private let image: NSImage
+    private let printInfo: NSPrintInfo
     var layoutMode: PrintLayoutMode = .fit {
         didSet { needsDisplay = true }
     }
 
-    init(frame: NSRect, image: NSImage) {
+    init(image: NSImage, printInfo: NSPrintInfo) {
         self.image = image
-        super.init(frame: frame)
+        self.printInfo = printInfo
+        super.init(frame: printInfo.imageablePageBounds)
     }
 
     required init?(coder: NSCoder) {
         fatalError("Printable photo strip does not support NSCoder.")
     }
 
+    override func knowsPageRange(_ range: NSRangePointer) -> Bool {
+        range.pointee = NSRange(location: 1, length: 1)
+        return true
+    }
+
+    override func rectForPage(_ page: Int) -> NSRect {
+        printInfo.imageablePageBounds
+    }
+
     override func draw(_ dirtyRect: NSRect) {
+        let printableBounds = printInfo.imageablePageBounds
         NSColor.white.setFill()
-        bounds.fill()
+        printableBounds.fill()
         let destination = PrintLayoutGeometry.destinationRect(
             imageSize: image.size,
-            printableBounds: bounds,
+            printableBounds: printableBounds,
             mode: layoutMode
         )
         image.draw(in: destination, from: .zero, operation: .sourceOver, fraction: 1)
@@ -299,6 +311,7 @@ private final class PrintablePhotoStripView: NSView {
 private final class PrintLayoutAccessoryController: NSViewController, NSPrintPanelAccessorizing {
     private weak var printableView: PrintablePhotoStripView?
     private let selector: NSSegmentedControl
+    @objc dynamic private var selectedLayoutModeRawValue = PrintLayoutMode.fit.rawValue
 
     init(printableView: PrintablePhotoStripView) {
         self.printableView = printableView
@@ -337,7 +350,7 @@ private final class PrintLayoutAccessoryController: NSViewController, NSPrintPan
     }
 
     func keyPathsForValuesAffectingPreview() -> Set<String> {
-        ["selectedSegment"]
+        [#keyPath(selectedLayoutModeRawValue)]
     }
 
     private var currentMode: PrintLayoutMode {
@@ -347,7 +360,11 @@ private final class PrintLayoutAccessoryController: NSViewController, NSPrintPan
 
     @objc private func layoutModeChanged(_ sender: NSSegmentedControl) {
         guard PrintLayoutMode.allCases.indices.contains(sender.selectedSegment) else { return }
-        printableView?.layoutMode = currentMode
+        let mode = currentMode
+        willChangeValue(forKey: "localizedSummaryItems")
+        selectedLayoutModeRawValue = mode.rawValue
+        didChangeValue(forKey: "localizedSummaryItems")
+        printableView?.layoutMode = mode
     }
 }
 

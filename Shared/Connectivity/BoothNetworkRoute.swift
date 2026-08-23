@@ -171,9 +171,16 @@ public struct BoothNetworkRouteMachine: Equatable, Sendable {
         boothIsIdle: Bool = true
     ) -> BoothNetworkRouteCommand {
         if isAvailable {
-            guard case .fallbackWiFi = state, boothIsIdle else { return .none }
-            state = .connectingLAN
-            return .startLAN
+            switch state {
+            case .disconnected where preference == .lan:
+                state = .connectingLAN
+                return .startLAN
+            case .fallbackWiFi where boothIsIdle:
+                state = .connectingLAN
+                return .startLAN
+            default:
+                return .none
+            }
         }
         switch state {
         case .connectingLAN:
@@ -188,7 +195,15 @@ public struct BoothNetworkRouteMachine: Equatable, Sendable {
     }
 
     public mutating func wifiPathChanged(isAvailable: Bool, lanAvailable: Bool) -> BoothNetworkRouteCommand {
-        guard !isAvailable else { return .none }
+        if isAvailable {
+            guard case .disconnected = state else { return .none }
+            switch preference {
+            case .wifi:
+                return startWiFiIfAvailable(true, fallback: false)
+            case .lan:
+                return lanAvailable ? .none : startWiFiIfAvailable(true, fallback: true)
+            }
+        }
         switch state {
         case .connectingWiFi, .connectedWiFi, .fallbackWiFi:
             if preference == .lan, lanAvailable {

@@ -87,6 +87,63 @@ struct NetworkRouteTests {
         #expect(route.effectiveTransport == .unavailable)
     }
 
+    @Test("LAN return after total loss restarts the preferred route")
+    func totalNetworkLossRecoversLAN() {
+        var route = BoothNetworkRouteMachine(preference: .lan)
+        _ = route.start(lanAvailable: false, wifiAvailable: false)
+
+        let command = route.lanPathChanged(isAvailable: true, wifiAvailable: false)
+
+        #expect(command == .startLAN)
+        #expect(route.state == .connectingLAN)
+    }
+
+    @Test("Wi-Fi return after total loss restarts the preferred route")
+    func totalNetworkLossRecoversWiFi() {
+        var route = BoothNetworkRouteMachine(preference: .wifi)
+        _ = route.start(lanAvailable: false, wifiAvailable: false)
+
+        let command = route.wifiPathChanged(isAvailable: true, lanAvailable: false)
+
+        #expect(command == .startWiFi(fallback: false))
+        #expect(route.state == .connectingWiFi)
+    }
+
+    @Test("Wi-Fi return after total loss uses fallback for LAN preference")
+    func totalNetworkLossRecoversWiFiFallback() {
+        var route = BoothNetworkRouteMachine(preference: .lan)
+        _ = route.start(lanAvailable: false, wifiAvailable: false)
+
+        let command = route.wifiPathChanged(isAvailable: true, lanAvailable: false)
+
+        #expect(command == .startWiFi(fallback: true))
+        #expect(route.state == .connectingWiFi)
+    }
+
+    @Test("LAN wins when both paths return")
+    func bothPathsReturningPreferLAN() {
+        var route = BoothNetworkRouteMachine(preference: .lan)
+        _ = route.start(lanAvailable: false, wifiAvailable: false)
+
+        let wifiCommand = route.wifiPathChanged(isAvailable: true, lanAvailable: true)
+        let lanCommand = route.lanPathChanged(isAvailable: true, wifiAvailable: true)
+
+        #expect(wifiCommand == .none)
+        #expect(lanCommand == .startLAN)
+        #expect(route.state == .connectingLAN)
+    }
+
+    @Test("Rapid LAN availability flaps do not restart an active LAN probe")
+    func rapidLANAvailabilityFlapsDoNotStorm() {
+        var route = BoothNetworkRouteMachine(preference: .lan)
+        _ = route.start(lanAvailable: false, wifiAvailable: false)
+
+        #expect(route.lanPathChanged(isAvailable: true, wifiAvailable: false) == .startLAN)
+        #expect(route.lanPathChanged(isAvailable: false, wifiAvailable: false) == .none)
+        #expect(route.lanPathChanged(isAvailable: true, wifiAvailable: false) == .none)
+        #expect(route.state == .connectingLAN)
+    }
+
     @Test("Healthy Wi-Fi fallback recovers LAN while the booth is idle")
     func fallbackRecoversLANWhenIdle() {
         var route = BoothNetworkRouteMachine(preference: .lan)

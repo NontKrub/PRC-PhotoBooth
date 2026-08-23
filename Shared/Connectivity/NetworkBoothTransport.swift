@@ -175,6 +175,8 @@ public final class NetworkBoothTransport: BoothTransport {
         let error: String?
         if !interfaceAvailable {
             error = "No Ethernet interface available."
+        } else if !usingLAN {
+            error = "Current route verification only. Switch Connection to LAN for a full booth connection test."
         } else if !peerDiscovered {
             error = "No PRC PhotoBooth iPad found over Ethernet."
         } else if !controlConnected || !handshakeSucceeded {
@@ -255,14 +257,30 @@ public final class NetworkBoothTransport: BoothTransport {
         isLANPathAvailable = available
         publishPathAvailability()
         if available {
-            guard activeInterface == .wifi,
-                  requestedPreference == .lan,
-                  fallbackActive else { return }
-            scheduleLANRecovery(after: Self.lanRecoveryStabilityPeriod)
+            if activeInterface == .wifi,
+               requestedPreference == .lan,
+               fallbackActive {
+                scheduleLANRecovery(after: Self.lanRecoveryStabilityPeriod)
+                return
+            }
+            guard role == .mac, activeInterface == nil else { return }
+            let command = routeMachine.lanPathChanged(
+                isAvailable: true,
+                wifiAvailable: pathAvailable(.wifi)
+            )
+            apply(command, reason: command == .startLAN ? "LAN returned" : nil)
             return
         }
         if activeInterface == .wifi {
             cancelLANRecovery()
+            return
+        }
+        if role == .mac, activeInterface == nil {
+            let command = routeMachine.wifiPathChanged(
+                isAvailable: isWiFiPathAvailable,
+                lanAvailable: false
+            )
+            apply(command, reason: command == .startWiFi(fallback: true) ? "LAN unavailable" : nil)
             return
         }
         guard activeInterface == .wiredEthernet else { return }
@@ -336,7 +354,16 @@ public final class NetworkBoothTransport: BoothTransport {
         didReceiveWiFiPathUpdate = true
         isWiFiPathAvailable = available
         publishPathAvailability()
-        guard activeInterface == .wifi, !available else { return }
+        if available {
+            guard role == .mac, activeInterface == nil else { return }
+            let command = routeMachine.wifiPathChanged(
+                isAvailable: true,
+                lanAvailable: pathAvailable(.wiredEthernet)
+            )
+            apply(command, reason: command == .startWiFi(fallback: true) ? "LAN unavailable" : nil)
+            return
+        }
+        guard activeInterface == .wifi else { return }
 
         if role == .iPad {
             startRouteDiscovery()
@@ -1229,7 +1256,14 @@ public final class NetworkBoothTransport: BoothTransport {
                 self.startRouteDiscovery()
                 return
             }
-            guard self.activeInterface != nil else { return }
+            if self.activeInterface == nil {
+                let command = self.routeMachine.start(
+                    lanAvailable: self.pathAvailable(.wiredEthernet),
+                    wifiAvailable: self.pathAvailable(.wifi)
+                )
+                self.apply(command, reason: nil)
+                return
+            }
             if self.role == .mac {
                 if self.controlListener == nil { self.startListener(channel: .control) }
                 if self.previewListener == nil { self.startListener(channel: .preview) }

@@ -11,9 +11,9 @@ enum SystemSettingsRouter {
     static func url(for destination: SystemSettingsDestination) -> URL? {
         switch destination {
         case .printersAndScanners:
-            return URL(string: "x-apple.systempreferences:com.apple.Printing-Settings.extension")
+            return URL(string: "x-apple.systempreferences:com.apple.Print-Scan-Settings.extension")
         case .cameraPrivacy:
-            return URL(string: "x-apple.systempreferences:com.apple.PrivacySecurity.extension?Privacy_Camera")
+            return URL(string: "x-apple.systempreferences:com.apple.settings.PrivacySecurity.extension?Privacy_Camera")
         }
     }
 

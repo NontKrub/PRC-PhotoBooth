@@ -52,7 +52,15 @@
       }
     },
     "%@ Elements Selected" : {
-
+      "extractionState" : "manual",
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%1$@ รายการที่เลือก"
+          }
+        }
+      }
     },
     "%@ is open — it may block the camera session." : {
       "localizations" : {
@@ -662,7 +670,15 @@
       }
     },
     "Auto uses Standard on Wi-Fi and High on a stable Ethernet route." : {
-
+      "extractionState" : "manual",
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "โหมดอัตโนมัติใช้ Standard บน Wi-Fi และ High บนอีเทอร์เน็ตที่เสถียร"
+          }
+        }
+      }
     },
     "Automatic" : {
       "localizations" : {
@@ -752,7 +768,15 @@
       }
     },
     "Balanced — Recommended" : {
-
+      "extractionState" : "manual",
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "สมดุล — แนะนำ"
+          }
+        }
+      }
     },
     "Between 2 GB and 10 GB is available." : {
       "extractionState" : "manual",
@@ -1136,7 +1160,15 @@
       }
     },
     "Choose Delete to remove the selected events." : {
-
+      "extractionState" : "manual",
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "เลือก Delete เพื่อลบอีเวนต์ที่เลือก"
+          }
+        }
+      }
     },
     "Choose Event Folder…" : {
       "extractionState" : "manual",
@@ -1301,7 +1333,15 @@
       }
     },
     "Compact — Smaller file, fastest guest download" : {
-
+      "extractionState" : "manual",
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "กะทัดรัด — ไฟล์เล็ก ดาวน์โหลดสำหรับแขกได้เร็วที่สุด"
+          }
+        }
+      }
     },
     "Completed" : {
       "extractionState" : "manual",
@@ -2402,7 +2442,15 @@
       }
     },
     "Foreground overlay" : {
-
+      "extractionState" : "manual",
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ภาพซ้อนด้านหน้า"
+          }
+        }
+      }
     },
     "Frame" : {
       "extractionState" : "manual",
@@ -2688,7 +2736,15 @@
       }
     },
     "High — Best quality, larger file" : {
-
+      "extractionState" : "manual",
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "สูง — คุณภาพดีที่สุด ไฟล์ใหญ่ขึ้น"
+          }
+        }
+      }
     },
     "High Contrast" : {
       "extractionState" : "manual",
@@ -2929,7 +2985,15 @@
       }
     },
     "LAN" : {
-
+      "extractionState" : "manual",
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "LAN"
+          }
+        }
+      }
     },
     "LAN URL: %@" : {
       "localizations" : {
@@ -3264,7 +3328,15 @@
       }
     },
     "Network diagnostics" : {
-
+      "extractionState" : "manual",
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "การวินิจฉัยเครือข่าย"
+          }
+        }
+      }
     },
     "New Event" : {
       "localizations" : {
@@ -4105,7 +4177,15 @@
       }
     },
     "Preview frame rate is independent of the selected network route. 60 FPS uses more bandwidth." : {
-
+      "extractionState" : "manual",
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "อัตราเฟรมภาพตัวอย่างไม่ขึ้นกับเส้นทางเครือข่ายที่เลือก 60 FPS ใช้แบนด์วิดท์มากขึ้น"
+          }
+        }
+      }
     },
     "previewFrameRate" : {
       "extractionState" : "manual",
@@ -4639,7 +4719,15 @@
       }
     },
     "Resetting re-locks Settings and requires PIN setup before protected access." : {
-
+      "extractionState" : "manual",
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "การรีเซ็ตจะล็อกการตั้งค่าอีกครั้งและต้องตั้งค่า PIN ก่อนเข้าถึงแบบมีการป้องกัน"
+          }
+        }
+      }
     },
     "Resume" : {
       "extractionState" : "manual",
@@ -5559,7 +5647,15 @@
       }
     },
     "System default: %@" : {
-
+      "extractionState" : "manual",
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ค่าเริ่มต้นของระบบ: %1$@"
+          }
+        }
+      }
     },
     "Template" : {
       "localizations" : {
@@ -6003,7 +6099,15 @@
       }
     },
     "Wi-Fi" : {
-
+      "extractionState" : "manual",
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Wi-Fi"
+          }
+        }
+      }
     },
     "Width" : {
       "extractionState" : "stale",
@@ -6028,7 +6132,15 @@
       }
     },
     "You will be asked to create a new PIN the next time Settings is opened." : {
-
+      "extractionState" : "manual",
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ระบบจะให้คุณสร้าง PIN ใหม่เมื่อเปิด Settings ครั้งถัดไป"
+          }
+        }
+      }
     },
     "Z%@" : {
       "localizations" : {

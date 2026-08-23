@@ -44,6 +44,54 @@ struct BoothConnectionPresentationTests {
         #expect(BoothConnectionPresentationResolver.resolve(status).stateText == "Connecting via Wi-Fi fallback")
     }
 
+    @Test("network return states use the same presentation for Console and Settings")
+    func networkReturnStates() {
+        let status = BoothConnectionStatus(requestedNetwork: .lan)
+        status.publish(
+            requestedNetwork: .lan,
+            state: .disconnected,
+            peerID: nil,
+            peerDisplayName: nil,
+            routeState: .disconnected,
+            effectiveNetwork: .unavailable,
+            isLANPathAvailable: false,
+            isWiFiPathAvailable: false
+        )
+        let unavailable = BoothConnectionPresentationResolver.resolve(status)
+        #expect(unavailable.stateText == "No iPad connected")
+        #expect(unavailable.effectiveTransport == "Unavailable")
+        #expect(unavailable == BoothConnectionPresentationResolver.resolve(status))
+
+        status.publish(
+            requestedNetwork: .lan,
+            state: .connecting,
+            peerID: nil,
+            peerDisplayName: nil,
+            routeState: .connectingLAN,
+            effectiveNetwork: .unavailable,
+            isLANPathAvailable: true,
+            isWiFiPathAvailable: false
+        )
+        let lanRecovery = BoothConnectionPresentationResolver.resolve(status)
+        #expect(lanRecovery.stateText == "Connecting via LAN")
+        #expect(lanRecovery == BoothConnectionPresentationResolver.resolve(status))
+
+        status.publish(
+            requestedNetwork: .lan,
+            state: .connecting,
+            peerID: nil,
+            peerDisplayName: nil,
+            routeState: .connectingWiFi,
+            effectiveNetwork: .unavailable,
+            fallbackReason: "LAN unavailable",
+            isLANPathAvailable: false,
+            isWiFiPathAvailable: true
+        )
+        let wifiRecovery = BoothConnectionPresentationResolver.resolve(status)
+        #expect(wifiRecovery.stateText == "Connecting via Wi-Fi fallback")
+        #expect(wifiRecovery == BoothConnectionPresentationResolver.resolve(status))
+    }
+
     @Test("connected LAN and Wi-Fi fallback expose the same details")
     func connectedRoutes() {
         let status = BoothConnectionStatus(requestedNetwork: .lan)
