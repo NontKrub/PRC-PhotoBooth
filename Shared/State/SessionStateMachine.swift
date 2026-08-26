@@ -1,17 +1,50 @@
 import Foundation
+#if os(macOS)
 import Observation
+#else
+import Combine
+#endif
 
-@MainActor
+#if os(macOS)
 @Observable
+#endif
+@MainActor
 public final class SessionStateMachine {
+#if os(iOS)
+    @Published
+#endif
     public private(set) var phase: BoothPhase = .idle
+#if os(iOS)
+    @Published
+#endif
     public var config: EventConfig = EventConfig()
+#if os(iOS)
+    @Published
+#endif
     public private(set) var keptShots: [Int: Data] = [:]   // photoIndex → JPEG thumbnail
+#if os(iOS)
+    @Published
+#endif
     public private(set) var reviewImageData: Data? = nil
+#if os(iOS)
+    @Published
+#endif
     public private(set) var acceptedPhotoIndices: Set<Int> = []
+#if os(iOS)
+    @Published
+#endif
     public private(set) var deferredPhotoIndices: Set<Int> = []
+#if os(iOS)
+    @Published
+#endif
     public private(set) var currentSessionID: String = ""
+#if os(iOS)
+    @Published
+#endif
     public private(set) var nextPhotoIndex: Int = 0
+#if os(iOS)
+    @Published
+#endif
     public private(set) var countdownDeadline: Date?
 
     public init() {}
@@ -265,3 +298,7 @@ public final class SessionStateMachine {
         }
     }
 }
+
+#if os(iOS)
+extension SessionStateMachine: ObservableObject {}
+#endif

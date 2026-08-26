@@ -2,7 +2,7 @@ import SwiftUI
 
 struct ReviewView: View {
     let photoIndex: Int
-    @Environment(iPadViewModel.self) private var vm
+    @EnvironmentObject private var vm: iPadViewModel
 
     private var isThai: Bool { vm.selectedLanguage == .thai }
 
@@ -49,7 +49,6 @@ struct ReviewView: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .aspectRatio(contentMode: .fit)
                 .padding(.horizontal, 36)
-                .containerRelativeFrame(.vertical) { height, _ in height * 0.68 }
                 .shadow(color: .black.opacity(0.5), radius: 24, y: 8)
 
                 Spacer()

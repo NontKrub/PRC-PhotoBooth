@@ -3,7 +3,7 @@ import SwiftUI
 // Combined Finish + QR screen
 struct FinishAndQRView: View {
     let qrPayload: String
-    @Environment(iPadViewModel.self) private var vm
+    @EnvironmentObject private var vm: iPadViewModel
     @State private var qrImage: CGImage?
 
     private var isThai: Bool { vm.selectedLanguage == .thai }

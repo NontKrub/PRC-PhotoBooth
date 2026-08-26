@@ -3,7 +3,7 @@ import CoreImage
 
 // Shows the live camera preview streamed from the Mac.
 struct PreviewMirrorView: View {
-    @Environment(iPadViewModel.self) private var vm
+    @EnvironmentObject private var vm: iPadViewModel
 
     var body: some View {
         GeometryReader { geo in

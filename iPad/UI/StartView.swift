@@ -1,7 +1,7 @@
 import SwiftUI
 
 struct StartView: View {
-    @Environment(iPadViewModel.self) private var vm
+    @EnvironmentObject private var vm: iPadViewModel
     @State private var pressed = false
 
     private var isThai: Bool { vm.selectedLanguage == .thai }
@@ -61,7 +61,7 @@ struct StartView: View {
                         .background(Color.white)
                         .clipShape(RoundedRectangle(cornerRadius: 20))
                         .scaleEffect(pressed ? 0.96 : 1.0)
-                        .animation(.spring(duration: 0.2), value: pressed)
+                        .animation(.spring(response: 0.2, dampingFraction: 0.8), value: pressed)
                 }
                 .buttonStyle(.plain)
                 .disabled(vm.isSessionRequestPending)

@@ -1,6 +1,8 @@
 import Foundation
 import MultipeerConnectivity
+#if os(macOS)
 import Observation
+#endif
 #if os(iOS)
 import UIKit
 #endif
@@ -36,8 +38,10 @@ private final class SessionReference: @unchecked Sendable {
     }
 }
 
-@MainActor
+#if os(macOS)
 @Observable
+#endif
+@MainActor
 public final class MultipeerService: NSObject, BoothTransport {
     public typealias ConnectionState = BoothConnectionState
 

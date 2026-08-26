@@ -1,7 +1,7 @@
 import SwiftUI
 
 struct IdleView: View {
-    @Environment(iPadViewModel.self) private var vm
+    @EnvironmentObject private var vm: iPadViewModel
     @State private var pulse = false
 
     var body: some View {

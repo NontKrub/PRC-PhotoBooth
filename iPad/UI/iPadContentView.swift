@@ -1,7 +1,7 @@
 import SwiftUI
 
 struct iPadContentView: View {
-    @Environment(iPadViewModel.self) private var vm
+    @EnvironmentObject private var vm: iPadViewModel
 
     var body: some View {
         ZStack {

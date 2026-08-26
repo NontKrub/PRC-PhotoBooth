@@ -1,31 +1,30 @@
 import Foundation
-import Observation
+import Combine
 import CoreImage
 import CoreGraphics
 
 // iPad-side coordinator — receives messages from Mac, drives local UI state.
 @MainActor
-@Observable
-final class iPadViewModel {
+final class iPadViewModel: ObservableObject {
     let multipeer: BoothTransport
     let stateMachine: SessionStateMachine
 
-    var latestPreviewImage: CGImage?
-    var eventConfig: EventConfig = EventConfig()
-    var experienceCatalog: CustomerExperienceCatalog?
-    var experienceAssets: [String: CGImage] = [:]
-    var selectedTemplateID: String?
-    var selectedFilterID: PhotoFilterID?
-    var selectedLanguage: CustomerLanguage = .english
-    var sessionPresentation: SessionPresentation?
-    var promptImages: [String: CGImage] = [:]
-    private(set) var isSessionRequestPending = false
-    private(set) var reviewDecisionPending = false
-    private(set) var recoveryActionPending = false
-    var sessionRequestError: String?
-    var stripThumbImage: CGImage?
-    var isMirrored = false
-    var isBoothPaused = false
+    @Published var latestPreviewImage: CGImage?
+    @Published var eventConfig: EventConfig = EventConfig()
+    @Published var experienceCatalog: CustomerExperienceCatalog?
+    @Published var experienceAssets: [String: CGImage] = [:]
+    @Published var selectedTemplateID: String?
+    @Published var selectedFilterID: PhotoFilterID?
+    @Published var selectedLanguage: CustomerLanguage = .english
+    @Published var sessionPresentation: SessionPresentation?
+    @Published var promptImages: [String: CGImage] = [:]
+    @Published private(set) var isSessionRequestPending = false
+    @Published private(set) var reviewDecisionPending = false
+    @Published private(set) var recoveryActionPending = false
+    @Published var sessionRequestError: String?
+    @Published var stripThumbImage: CGImage?
+    @Published var isMirrored = false
+    @Published var isBoothPaused = false
 
     private var pendingPreviewJPEG: Data?
     private var previewDecodeTask: Task<Void, Never>?
@@ -41,8 +40,10 @@ final class iPadViewModel {
     private var countdownTask: Task<Void, Never>?
     private var sessionMessageGate = SessionMessageGate()
 #if DEBUG
-    private(set) var demoKioskMode = false
+    @Published private(set) var demoKioskMode = false
 #endif
+
+    private var observationCancellables = Set<AnyCancellable>()
 
     init() {
 #if DEBUG
@@ -55,6 +56,12 @@ final class iPadViewModel {
         multipeer = NetworkBoothTransport(role: .iPad)
 #endif
         stateMachine = SessionStateMachine()
+        stateMachine.objectWillChange
+            .sink { [weak self] _ in self?.objectWillChange.send() }
+            .store(in: &observationCancellables)
+        multipeer.connectionStatus.objectWillChange
+            .sink { [weak self] _ in self?.objectWillChange.send() }
+            .store(in: &observationCancellables)
         setupHandlers()
         multipeer.start()
         startPreviewStaleMonitor()

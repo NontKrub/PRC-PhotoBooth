@@ -5,7 +5,7 @@ options:
   createIntermediateGroups: true
   deploymentTarget:
     macOS: "15.0"
-    iOS: "18.0"
+    iOS: "16.0"
   swift: "6.0"
   xcodeVersion: "27"
   generateEmptyDirectories: true
@@ -96,7 +96,7 @@ targets:
   PRC-PhotoBooth-iPad:
     type: application
     platform: iOS
-    deploymentTarget: "18.0"
+    deploymentTarget: "16.0"
     sources:
       - path: Shared
         excludes:
@@ -131,7 +131,7 @@ targets:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.nont.prcphoto.ipad
         SWIFT_VERSION: 6.0
-        IPHONEOS_DEPLOYMENT_TARGET: "18.0"
+        IPHONEOS_DEPLOYMENT_TARGET: "16.0"
         TARGETED_DEVICE_FAMILY: "2"
         CODE_SIGN_STYLE: Automatic
         DEVELOPMENT_TEAM: ""

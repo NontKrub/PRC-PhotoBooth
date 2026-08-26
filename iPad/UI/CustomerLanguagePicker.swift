@@ -1,7 +1,7 @@
 import SwiftUI
 
 struct CustomerLanguagePicker: View {
-    @Environment(iPadViewModel.self) private var vm
+    @EnvironmentObject private var vm: iPadViewModel
 
     var body: some View {
         HStack(spacing: 8) {

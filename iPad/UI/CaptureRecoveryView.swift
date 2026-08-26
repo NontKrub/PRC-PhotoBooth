@@ -3,7 +3,7 @@ import SwiftUI
 struct CaptureRecoveryView: View {
     let photoIndex: Int
     let failure: CaptureFailureSummary
-    @Environment(iPadViewModel.self) private var vm
+    @EnvironmentObject private var vm: iPadViewModel
 
     private var thai: Bool { vm.selectedLanguage == .thai }
 

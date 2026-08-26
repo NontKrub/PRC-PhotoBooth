@@ -1,5 +1,9 @@
 import Foundation
+#if os(macOS)
 import Observation
+#else
+import Combine
+#endif
 
 public enum BoothConnectionState: Codable, Equatable, Sendable {
     case disconnected
@@ -59,24 +63,74 @@ public struct EthernetProbeResult: Equatable, Sendable {
     }
 }
 
-@MainActor
+#if os(macOS)
 @Observable
+#endif
+@MainActor
 public final class BoothConnectionStatus {
+#if os(iOS)
+    @Published
+#endif
     public private(set) var state: BoothConnectionState = .disconnected
+#if os(iOS)
+    @Published
+#endif
     public private(set) var peerID: String?
+#if os(iOS)
+    @Published
+#endif
     public private(set) var peerDisplayName: String?
+#if os(iOS)
+    @Published
+#endif
     public private(set) var connectedPeerNames: [String] = []
+#if os(iOS)
+    @Published
+#endif
     public private(set) var requestedNetwork: BoothNetworkPreference
+#if os(iOS)
+    @Published
+#endif
     public private(set) var effectiveNetwork: BoothEffectiveNetworkTransport = .unavailable
+#if os(iOS)
+    @Published
+#endif
     public private(set) var routeState: BoothNetworkRouteState = .disconnected
+#if os(iOS)
+    @Published
+#endif
     public private(set) var fallbackReason: String?
+#if os(iOS)
+    @Published
+#endif
     public private(set) var isLANPathAvailable = false
+#if os(iOS)
+    @Published
+#endif
     public private(set) var isWiFiPathAvailable = false
+#if os(iOS)
+    @Published
+#endif
     public private(set) var lanPathObservation: BoothPathObservation = .unknown
+#if os(iOS)
+    @Published
+#endif
     public private(set) var wifiPathObservation: BoothPathObservation = .unknown
+#if os(iOS)
+    @Published
+#endif
     public private(set) var lanHandshake: BoothLANHandshakeState = .unknown
+#if os(iOS)
+    @Published
+#endif
     public private(set) var lastNetworkError: String?
+#if os(iOS)
+    @Published
+#endif
     public private(set) var isPreviewChannelConnected = false
+#if os(iOS)
+    @Published
+#endif
     public private(set) var previewDiagnostics = BoothPreviewDiagnostics()
 
     public var isFallbackActive: Bool {
@@ -163,6 +217,10 @@ public final class BoothConnectionStatus {
         )
     }
 }
+
+#if os(iOS)
+extension BoothConnectionStatus: ObservableObject {}
+#endif
 
 @MainActor
 public protocol BoothTransport: AnyObject {

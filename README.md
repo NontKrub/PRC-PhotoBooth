@@ -40,7 +40,7 @@ Control messages are JSON-encoded and sent reliably over a framed Network.framew
 ## Requirements
 
 - macOS 15 or later
-- iPadOS 18 or later
+- iPadOS 16 or later
 - Xcode 27 and Swift 6
 - [XcodeGen](https://github.com/yonaskolb/XcodeGen) when regenerating the project from `project.yml`
 - A camera supported by AVFoundation or a compatible USB-tethered camera for DSLR mode
