@@ -64,6 +64,11 @@ final class iPadViewModel: ObservableObject {
         networkTransport?.connectToPeer(peerID)
     }
 
+    func requestPairing(with peerID: String) {
+        guard canChangeConnection else { return }
+        networkTransport?.requestPairing(with: peerID)
+    }
+
     func pair(peerID: String, pin: String) {
         guard canChangeConnection else { return }
         networkTransport?.pairWithPIN(peerID: peerID, pin: pin)

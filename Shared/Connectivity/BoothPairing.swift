@@ -70,7 +70,9 @@ public struct BoothDiscoveredPeer: Identifiable, Equatable, Sendable {
 
 public enum BoothPairingState: Equatable, Sendable {
     case idle
+    case waitingForMac(peerID: String)
     case pairing(expiresAt: Date)
+    case incoming(request: IncomingBoothPairingRequest, expiresAt: Date)
     case authenticating(peerID: String)
     case authenticated(peerID: String)
     case failed(String)
@@ -92,6 +94,98 @@ public struct BoothPairingSessionInfo: Codable, Sendable, Equatable {
         self.macDeviceID = macDeviceID
         self.macDeviceName = macDeviceName
         self.expiresAt = expiresAt
+    }
+}
+
+public struct BoothPairingIntent: Codable, Sendable, Equatable {
+    public let iPadIdentity: BoothDeviceIdentity
+    public let targetMacDeviceID: String
+
+    public init(iPadIdentity: BoothDeviceIdentity, targetMacDeviceID: String) {
+        self.iPadIdentity = iPadIdentity
+        self.targetMacDeviceID = targetMacDeviceID
+    }
+
+    public func validate(peerHello: BoothTransportHello, localMacDeviceID: String) throws {
+        guard targetMacDeviceID == localMacDeviceID else { throw BoothPairingError.wrongDevice }
+        guard peerHello.protocolVersion == BoothTransportHello.currentProtocolVersion else {
+            throw BoothPairingError.incompatibleProtocol
+        }
+        guard peerHello.role == .iPad, iPadIdentity.role == .iPad else {
+            throw BoothPairingError.wrongRole
+        }
+        guard !iPadIdentity.id.isEmpty,
+              !iPadIdentity.displayName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              peerHello.deviceID == iPadIdentity.id else {
+            throw BoothPairingError.invalidPairingIntent
+        }
+    }
+}
+
+public struct IncomingBoothPairingRequest: Sendable, Equatable {
+    public let iPadIdentity: BoothDeviceIdentity
+    public let receivedAt: Date
+
+    public init(iPadIdentity: BoothDeviceIdentity, receivedAt: Date = Date()) {
+        self.iPadIdentity = iPadIdentity
+        self.receivedAt = receivedAt
+    }
+}
+
+public enum BoothPairingIntentPolicy {
+    public static let requestCooldown: TimeInterval = 4
+
+    public enum Decision: Equatable, Sendable {
+        case startSession
+        case reuseSession
+        case reject(reason: String)
+    }
+
+    public static func decide(
+        iPadID: String,
+        activeRequestID: String?,
+        hasActivePairingSession: Bool,
+        boothIsIdle: Bool,
+        hasAuthenticatedPeer: Bool,
+        lastRequestAt: Date?,
+        now: Date
+    ) -> Decision {
+        if hasAuthenticatedPeer {
+            return .reject(reason: "Another iPad is currently connected.")
+        }
+        if !boothIsIdle {
+            return .reject(reason: "Pairing is unavailable while a photo session is active.")
+        }
+        if hasActivePairingSession {
+            if activeRequestID == nil || activeRequestID == iPadID {
+                return .reuseSession
+            }
+            return .reject(reason: "Another iPad is currently being paired.")
+        }
+        if let lastRequestAt,
+           now.timeIntervalSince(lastRequestAt) < requestCooldown {
+            return .reject(reason: "Please wait before trying again.")
+        }
+        return .startSession
+    }
+}
+
+public enum BoothPairingTrustPolicy {
+    public static func accepts(
+        result: BoothPairingResult,
+        pendingPairingRequest: BoothPairingRequest?,
+        targetPeerID: String?
+    ) -> Bool {
+        guard result.accepted,
+              let pendingPairingRequest,
+              let macIdentity = result.macIdentity,
+              macIdentity.role == .mac,
+              let secret = result.sharedSecret,
+              secret.count == 32,
+              !macIdentity.displayName.isEmpty,
+              macIdentity.id == targetPeerID,
+              pendingPairingRequest.targetMacDeviceID == macIdentity.id else { return false }
+        return true
     }
 }
 
@@ -449,6 +543,7 @@ public enum BoothPairingError: LocalizedError, Equatable {
     case invalidQRPayload
     case unsupportedQRSchema
     case wrongDevice
+    case invalidPairingIntent
     case wrongRole
     case incompatibleProtocol
     case unpaired
@@ -466,6 +561,7 @@ public enum BoothPairingError: LocalizedError, Equatable {
         case .invalidQRPayload: return "Pairing QR code could not be read."
         case .unsupportedQRSchema: return "This pairing QR code uses an unsupported format."
         case .wrongDevice: return "Pairing code belongs to a different Mac."
+        case .invalidPairingIntent: return "Pairing request does not match this connection."
         case .wrongRole: return "The discovered device has the wrong booth role."
         case .incompatibleProtocol: return "This device uses an older PRC PhotoBooth connection protocol. Update both devices to v1.4.2."
         case .unpaired: return "This device is not paired."

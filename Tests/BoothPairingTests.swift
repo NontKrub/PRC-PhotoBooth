@@ -5,6 +5,120 @@ import Testing
 
 @Suite("Booth pairing")
 struct BoothPairingTests {
+    @Test("pairing intent validates its target, role, protocol, and hello identity")
+    func pairingIntentValidation() throws {
+        let intent = BoothPairingIntent(
+            iPadIdentity: BoothDeviceIdentity(id: "ipad-1", displayName: "PRC-iPad-01", role: .iPad),
+            targetMacDeviceID: "mac-1"
+        )
+        let hello = BoothTransportHello(
+            role: .iPad,
+            deviceID: "ipad-1",
+            deviceName: "PRC-iPad-01"
+        )
+
+        try intent.validate(peerHello: hello, localMacDeviceID: "mac-1")
+
+        #expect(throws: BoothPairingError.wrongDevice) {
+            try intent.validate(peerHello: hello, localMacDeviceID: "other-mac")
+        }
+
+        let mismatchedHello = BoothTransportHello(
+            role: .iPad,
+            deviceID: "other-ipad",
+            deviceName: "Other iPad"
+        )
+        #expect(throws: BoothPairingError.invalidPairingIntent) {
+            try intent.validate(peerHello: mismatchedHello, localMacDeviceID: "mac-1")
+        }
+    }
+
+    @Test("pairing intent policy reuses, rejects, cools down, or starts safely")
+    func pairingIntentPolicy() {
+        let now = Date(timeIntervalSince1970: 60_000)
+
+        #expect(BoothPairingIntentPolicy.decide(
+            iPadID: "ipad-1",
+            activeRequestID: "ipad-1",
+            hasActivePairingSession: true,
+            boothIsIdle: true,
+            hasAuthenticatedPeer: false,
+            lastRequestAt: nil,
+            now: now
+        ) == .reuseSession)
+        #expect(BoothPairingIntentPolicy.decide(
+            iPadID: "ipad-2",
+            activeRequestID: "ipad-1",
+            hasActivePairingSession: true,
+            boothIsIdle: true,
+            hasAuthenticatedPeer: false,
+            lastRequestAt: nil,
+            now: now
+        ) == .reject(reason: "Another iPad is currently being paired."))
+        #expect(BoothPairingIntentPolicy.decide(
+            iPadID: "ipad-1",
+            activeRequestID: nil,
+            hasActivePairingSession: false,
+            boothIsIdle: false,
+            hasAuthenticatedPeer: false,
+            lastRequestAt: nil,
+            now: now
+        ) == .reject(reason: "Pairing is unavailable while a photo session is active."))
+        #expect(BoothPairingIntentPolicy.decide(
+            iPadID: "ipad-1",
+            activeRequestID: nil,
+            hasActivePairingSession: false,
+            boothIsIdle: true,
+            hasAuthenticatedPeer: true,
+            lastRequestAt: nil,
+            now: now
+        ) == .reject(reason: "Another iPad is currently connected."))
+        #expect(BoothPairingIntentPolicy.decide(
+            iPadID: "ipad-1",
+            activeRequestID: nil,
+            hasActivePairingSession: false,
+            boothIsIdle: true,
+            hasAuthenticatedPeer: false,
+            lastRequestAt: now.addingTimeInterval(-1),
+            now: now
+        ) == .reject(reason: "Please wait before trying again."))
+        #expect(BoothPairingIntentPolicy.decide(
+            iPadID: "ipad-1",
+            activeRequestID: nil,
+            hasActivePairingSession: false,
+            boothIsIdle: true,
+            hasAuthenticatedPeer: false,
+            lastRequestAt: now.addingTimeInterval(-5),
+            now: now
+        ) == .startSession)
+    }
+
+    @Test("pairing intent alone cannot create trust before a PIN or QR request")
+    func pairingResultTrustGate() {
+        let result = BoothPairingResult(
+            accepted: true,
+            macIdentity: macIdentity,
+            sharedSecret: Data(repeating: 0x11, count: 32)
+        )
+        let request = BoothPairingRequest(
+            sessionID: "session",
+            targetMacDeviceID: macIdentity.id,
+            iPadIdentity: BoothDeviceIdentity(id: "ipad-1", displayName: "PRC-iPad-01", role: .iPad),
+            method: .pin("123456")
+        )
+
+        #expect(!BoothPairingTrustPolicy.accepts(
+            result: result,
+            pendingPairingRequest: nil,
+            targetPeerID: macIdentity.id
+        ))
+        #expect(BoothPairingTrustPolicy.accepts(
+            result: result,
+            pendingPairingRequest: request,
+            targetPeerID: macIdentity.id
+        ))
+    }
+
     @Test("installation identity remains stable and rename keeps the ID")
     func stableIdentity() {
         let suite = "BoothPairingTests.identity.\(UUID().uuidString)"

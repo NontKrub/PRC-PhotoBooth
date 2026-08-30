@@ -8,6 +8,7 @@ struct iPadConnectionSettingsView: View {
     @State private var showPINEntry = false
     @State private var showQRScanner = false
     @State private var selectedPeerForPIN: String?
+    @State private var automaticPairingPeerID: String?
     @State private var peerToForget: String?
     @State private var pairingError: String?
 
@@ -35,6 +36,19 @@ struct iPadConnectionSettingsView: View {
         .task {
             if editedDeviceName.isEmpty {
                 editedDeviceName = transport?.deviceIdentity.displayName ?? "PRC Booth iPad"
+            }
+        }
+        .onChange(of: status.pairingState) { pairingState in
+            guard let automaticPairingPeerID else { return }
+            switch pairingState {
+            case .pairing:
+                selectedPeerForPIN = automaticPairingPeerID
+                self.automaticPairingPeerID = nil
+                showPINEntry = true
+            case .failed:
+                self.automaticPairingPeerID = nil
+            default:
+                break
             }
         }
         .sheet(isPresented: $showPINEntry) {
@@ -189,12 +203,12 @@ struct iPadConnectionSettingsView: View {
                                         .disabled(!vm.canChangeConnection || status.peerID == peer.id && status.isPeerAuthenticated)
                                         .accessibilityIdentifier("Connect Mac")
                                 } else {
-                                    Button("Pair") {
-                                        selectedPeerForPIN = peer.id
-                                        showPINEntry = true
+                                    Button("Connect") {
+                                        automaticPairingPeerID = peer.id
+                                        vm.requestPairing(with: peer.id)
                                     }
                                     .disabled(!vm.canChangeConnection)
-                                    .accessibilityIdentifier("Pair Mac")
+                                    .accessibilityIdentifier("Connect Mac")
                                 }
                             }
                         }
@@ -233,7 +247,12 @@ struct iPadConnectionSettingsView: View {
         switch status.pairingState {
         case .idle:
             return status.preferredPeerID == nil ? "Select or pair a Mac." : "Not connected"
+        case .waitingForMac(let peerID):
+            let macName = nearbyMacs.first { $0.id == peerID }?.displayName ?? "the selected Mac"
+            return "Waiting for Mac…\nA pairing code will appear on \"\(macName)\"."
         case .pairing:
+            return "Pairing"
+        case .incoming:
             return "Pairing"
         case .authenticating:
             return "Authenticating"

@@ -62,7 +62,11 @@ public final class NetworkBoothTransport: BoothTransport {
     private var localIdentity: BoothDeviceIdentity
     private var targetPeerID: String?
     private var pendingPairingRequest: BoothPairingRequest?
+    private var pendingPairingIntent: BoothPairingIntent?
     private var currentPairingSession: BoothPairingSession?
+    private var incomingPairingRequest: IncomingBoothPairingRequest?
+    private var lastPairingIntentAt: [String: Date] = [:]
+    private var pendingPairingFailure: String?
     private var peerHello: BoothTransportHello?
     private var peerAuthenticated = false
     private var pendingAuthChallenge: BoothAuthChallenge?
@@ -117,6 +121,7 @@ public final class NetworkBoothTransport: BoothTransport {
     private var lastNetworkError: String?
 
     public var canAttemptPreferredLANRecovery: @MainActor () -> Bool = { true }
+    public var canAcceptIncomingPairing: @MainActor () -> Bool = { true }
 
     public init(
         role: DeviceRole,
@@ -165,11 +170,18 @@ public final class NetworkBoothTransport: BoothTransport {
 
     @discardableResult
     public func startPairingSession() -> Bool {
+        startPairingSession(keepingControlConnection: false)
+    }
+
+    @discardableResult
+    private func startPairingSession(keepingControlConnection: Bool) -> Bool {
         guard role == .mac else { return false }
         do {
-            if !peerAuthenticated {
+            if !keepingControlConnection, !peerAuthenticated {
                 controlConnection?.cancel()
             }
+            incomingPairingRequest = nil
+            pendingPairingFailure = nil
             currentPairingSession?.invalidate()
             currentPairingSession = try BoothPairingSession.make(macIdentity: localIdentity)
             if let expiresAt = currentPairingSession?.info.expiresAt {
@@ -185,8 +197,12 @@ public final class NetworkBoothTransport: BoothTransport {
     }
 
     public func cancelPairingSession() {
+        if incomingPairingRequest != nil {
+            sendPairingFailure("Pairing cancelled on Mac.")
+        }
         currentPairingSession?.invalidate()
         currentPairingSession = nil
+        incomingPairingRequest = nil
         if !peerAuthenticated {
             controlConnection?.cancel()
         }
@@ -209,10 +225,34 @@ public final class NetworkBoothTransport: BoothTransport {
 
     public func connectToPeer(_ peerID: String) {
         guard role == .iPad, trustedStore.trustedPeerIDs.contains(peerID) else { return }
+        pendingPairingIntent = nil
+        pendingPairingFailure = nil
         trustedStore.preferredPeerID = peerID
         targetPeerID = peerID
         restartDiscoveryForPeerSelection()
         publishPairingStatus()
+    }
+
+    public func requestPairing(with peerID: String) {
+        guard role == .iPad, !trustedStore.trustedPeerIDs.contains(peerID) else { return }
+        guard let peer = discoveredPeersByID[peerID], peer.role == .mac else {
+            connectionStatus.publishPairing(state: .failed("The selected Mac was not found."))
+            return
+        }
+        guard peer.protocolVersion == BoothTransportHello.currentProtocolVersion else {
+            connectionStatus.publishPairing(state: .failed(BoothPairingError.incompatibleProtocol.localizedDescription))
+            return
+        }
+
+        pendingPairingRequest = nil
+        pendingPairingFailure = nil
+        targetPeerID = peerID
+        pendingPairingIntent = BoothPairingIntent(
+            iPadIdentity: localIdentity,
+            targetMacDeviceID: peerID
+        )
+        connectionStatus.publishPairing(state: .waitingForMac(peerID: peerID))
+        restartDiscoveryForPeerSelection()
     }
 
     public func pairWithPIN(peerID: String, pin: String) {
@@ -253,7 +293,12 @@ public final class NetworkBoothTransport: BoothTransport {
     public func forgetPeer(_ peerID: String) {
         let wasCurrent = peerDeviceID == peerID
         trustedStore.forget(peerID: peerID)
-        if targetPeerID == peerID { targetPeerID = nil }
+        if targetPeerID == peerID {
+            targetPeerID = nil
+            pendingPairingRequest = nil
+            pendingPairingIntent = nil
+            pendingPairingFailure = nil
+        }
         if wasCurrent { controlConnection?.cancel() }
         publishPairingStatus()
         if role == .iPad { restartDiscoveryForPeerSelection() }
@@ -263,6 +308,8 @@ public final class NetworkBoothTransport: BoothTransport {
         trustedStore.forgetAll()
         targetPeerID = nil
         pendingPairingRequest = nil
+        pendingPairingIntent = nil
+        pendingPairingFailure = nil
         peerAuthenticated = false
         controlConnection?.cancel()
         publishPairingStatus()
@@ -877,13 +924,23 @@ public final class NetworkBoothTransport: BoothTransport {
         peerDeviceID = nil
         expectedPeerDeviceID = nil
         let pairingState: BoothPairingState
-        if let session = currentPairingSession, session.isActive() {
+        if let incomingPairingRequest,
+           let session = currentPairingSession {
+            pairingState = .incoming(
+                request: incomingPairingRequest,
+                expiresAt: session.info.expiresAt
+            )
+        } else if let session = currentPairingSession, session.isActive() {
             pairingState = .pairing(expiresAt: session.info.expiresAt)
         } else if let pendingPairingRequest {
             pairingState = .pairing(
                 expiresAt: discoveredPeersByID[pendingPairingRequest.targetMacDeviceID]?.pairingExpiresAt
                     ?? Date().addingTimeInterval(BoothPairingSession.lifetime)
             )
+        } else if let pendingPairingIntent {
+            pairingState = .waitingForMac(peerID: pendingPairingIntent.targetMacDeviceID)
+        } else if let pendingPairingFailure {
+            pairingState = .failed(pendingPairingFailure)
         } else {
             pairingState = .idle
         }
@@ -1085,7 +1142,15 @@ public final class NetworkBoothTransport: BoothTransport {
 
     private func accept(_ connection: NWConnection, channel: BoothTransportChannel) {
         if role == .mac, channel == .control, controlConnection != nil {
-            connection.cancel()
+            let reason: String
+            if peerAuthenticated {
+                reason = "Another iPad is currently connected."
+            } else if currentPairingSession?.isActive() == true {
+                reason = "Another iPad is currently being paired."
+            } else {
+                reason = "Another pairing request is already in progress."
+            }
+            rejectIncomingConnection(connection, reason: reason)
             return
         }
         guard activeInterface != nil else {
@@ -1223,6 +1288,10 @@ public final class NetworkBoothTransport: BoothTransport {
         switch message {
         case .helloDetails(let hello):
             handleHello(hello)
+        case .pairingIntent(let intent):
+            handlePairingIntent(intent)
+        case .pairingSessionAvailable(let session):
+            handlePairingSessionAvailable(session)
         case .pairingRequest(let request):
             handlePairingRequest(request)
         case .pairingResult(let result):
@@ -1233,6 +1302,11 @@ public final class NetworkBoothTransport: BoothTransport {
             handleAuthProof(proof)
         case .connectionRejected(let reason):
             lastNetworkError = reason
+            if pendingPairingRequest != nil || pendingPairingIntent != nil {
+                pendingPairingFailure = reason
+                pendingPairingRequest = nil
+                pendingPairingIntent = nil
+            }
             connectionStatus.publishPairing(authenticated: false, state: .failed(reason))
             connectionDidClose(controlConnection, channel: .control, reason: reason)
         case .heartbeat:
@@ -1285,8 +1359,6 @@ public final class NetworkBoothTransport: BoothTransport {
             case .unpaired:
                 if let session = currentPairingSession, session.isActive() {
                     connectionStatus.publishPairing(state: .pairing(expiresAt: session.info.expiresAt))
-                } else {
-                    rejectControlConnection("This iPad is not paired with this Mac.")
                 }
             case .notSelected:
                 rejectControlConnection("This Mac is configured for another iPad. Select this iPad in Mac Settings first.")
@@ -1305,6 +1377,10 @@ public final class NetworkBoothTransport: BoothTransport {
             }
             return
         }
+        if let pendingPairingIntent {
+            send(.pairingIntent(intent: pendingPairingIntent), on: controlConnection, channel: .control)
+            return
+        }
         guard BoothPeerSelectionPolicy.canAutomaticallyConnect(
             peerID: hello.deviceID,
             preferredPeerID: trustedStore.preferredPeerID,
@@ -1317,8 +1393,86 @@ public final class NetworkBoothTransport: BoothTransport {
         beginAuthentication(with: hello.deviceID)
     }
 
+    private func handlePairingIntent(_ intent: BoothPairingIntent) {
+        guard role == .mac, let hello = peerHello else {
+            rejectControlConnection(BoothPairingError.invalidPairingIntent.localizedDescription)
+            return
+        }
+        do {
+            try intent.validate(peerHello: hello, localMacDeviceID: localIdentity.id)
+        } catch {
+            rejectControlConnection(error.localizedDescription)
+            return
+        }
+
+        let now = Date()
+        let decision = BoothPairingIntentPolicy.decide(
+            iPadID: intent.iPadIdentity.id,
+            activeRequestID: incomingPairingRequest?.iPadIdentity.id,
+            hasActivePairingSession: currentPairingSession?.isActive(at: now) == true,
+            boothIsIdle: canAcceptIncomingPairing(),
+            hasAuthenticatedPeer: peerAuthenticated,
+            lastRequestAt: lastPairingIntentAt[intent.iPadIdentity.id],
+            now: now
+        )
+
+        switch decision {
+        case .reject(let reason):
+            sendPairingFailure(reason)
+            rejectControlConnection(reason)
+        case .reuseSession:
+            guard let session = currentPairingSession else {
+                sendPairingFailure("Pairing session is unavailable.")
+                return
+            }
+            let request = incomingPairingRequest ?? IncomingBoothPairingRequest(
+                iPadIdentity: intent.iPadIdentity,
+                receivedAt: now
+            )
+            incomingPairingRequest = request
+            publishPairingStatus(state: .incoming(request: request, expiresAt: session.info.expiresAt))
+            send(.pairingSessionAvailable(session: session.info), on: controlConnection, channel: .control)
+        case .startSession:
+            lastPairingIntentAt[intent.iPadIdentity.id] = now
+            guard startPairingSession(keepingControlConnection: true),
+                  let session = currentPairingSession else {
+                sendPairingFailure("Pairing mode could not be started.")
+                return
+            }
+            let request = IncomingBoothPairingRequest(
+                iPadIdentity: intent.iPadIdentity,
+                receivedAt: now
+            )
+            incomingPairingRequest = request
+            publishPairingStatus(state: .incoming(request: request, expiresAt: session.info.expiresAt))
+            send(.pairingSessionAvailable(session: session.info), on: controlConnection, channel: .control)
+        }
+    }
+
+    private func handlePairingSessionAvailable(_ session: BoothPairingSessionInfo) {
+        guard role == .iPad,
+              let intent = pendingPairingIntent,
+              intent.targetMacDeviceID == session.macDeviceID,
+              let hello = peerHello,
+              hello.role == .mac,
+              hello.deviceID == session.macDeviceID,
+              !session.sessionID.isEmpty,
+              !session.macDeviceName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              session.expiresAt > Date() else { return }
+
+        if var peer = discoveredPeersByID[session.macDeviceID] {
+            peer.pairingSessionID = session.sessionID
+            peer.pairingExpiresAt = session.expiresAt
+            discoveredPeersByID[session.macDeviceID] = peer
+        }
+        pendingPairingFailure = nil
+        publishPairingStatus(state: .pairing(expiresAt: session.expiresAt))
+    }
+
     private func beginPairing(peerID: String, sessionID: String, method: BoothPairingMethod) {
         let expiresAt = discoveredPeersByID[peerID]?.pairingExpiresAt ?? Date().addingTimeInterval(BoothPairingSession.lifetime)
+        pendingPairingIntent = nil
+        pendingPairingFailure = nil
         pendingPairingRequest = BoothPairingRequest(
             sessionID: sessionID,
             targetMacDeviceID: peerID,
@@ -1327,6 +1481,11 @@ public final class NetworkBoothTransport: BoothTransport {
         )
         targetPeerID = peerID
         connectionStatus.publishPairing(state: .pairing(expiresAt: expiresAt))
+        if didReceiveHello, peerDeviceID == peerID, !peerAuthenticated,
+           let pendingPairingRequest {
+            send(.pairingRequest(request: pendingPairingRequest), on: controlConnection, channel: .control)
+            return
+        }
         restartDiscoveryForPeerSelection()
     }
 
@@ -1342,6 +1501,7 @@ public final class NetworkBoothTransport: BoothTransport {
             return
         }
         guard var session = currentPairingSession else {
+            incomingPairingRequest = nil
             sendPairingFailure("Pairing mode is not active.")
             return
         }
@@ -1377,6 +1537,7 @@ public final class NetworkBoothTransport: BoothTransport {
                 trustedStore.preferredPeerID = peer.id
                 trustedStore.autoReconnect = true
                 currentPairingSession = nil
+                incomingPairingRequest = nil
                 refreshAdvertisedServices()
                 publishPairingStatus()
                 send(
@@ -1391,6 +1552,7 @@ public final class NetworkBoothTransport: BoothTransport {
                 beginAuthentication(with: peer.id)
             } catch {
                 currentPairingSession = nil
+                incomingPairingRequest = nil
                 refreshAdvertisedServices()
                 sendPairingFailure(error.localizedDescription)
             }
@@ -1405,12 +1567,14 @@ public final class NetworkBoothTransport: BoothTransport {
             sendPairingFailure(reason)
         case .expired:
             currentPairingSession = nil
+            incomingPairingRequest = nil
             refreshAdvertisedServices()
             connectionStatus.publishPairing(state: .failed("Pairing code expired"))
             sendPairingFailure("Pairing code expired.")
             rejectControlConnection("Pairing code expired.")
         case .locked:
             currentPairingSession = nil
+            incomingPairingRequest = nil
             refreshAdvertisedServices()
             connectionStatus.publishPairing(state: .failed("Too many incorrect pairing PIN attempts."))
             sendPairingFailure("Too many incorrect pairing PIN attempts.")
@@ -1428,15 +1592,17 @@ public final class NetworkBoothTransport: BoothTransport {
 
     private func handlePairingResult(_ result: BoothPairingResult) {
         guard role == .iPad else { return }
-        guard result.accepted,
-              let macIdentity = result.macIdentity,
-              macIdentity.role == .mac,
-              let secret = result.sharedSecret,
-              secret.count == 32,
-              !macIdentity.displayName.isEmpty,
-              macIdentity.id == targetPeerID else {
+        guard BoothPairingTrustPolicy.accepts(
+            result: result,
+            pendingPairingRequest: pendingPairingRequest,
+            targetPeerID: targetPeerID
+        ),
+        let macIdentity = result.macIdentity,
+        let secret = result.sharedSecret else {
             let reason = result.reason ?? "Pairing rejected."
             pendingPairingRequest = nil
+            pendingPairingIntent = nil
+            pendingPairingFailure = reason
             connectionStatus.publishPairing(state: .failed(reason))
             return
         }
@@ -1453,10 +1619,15 @@ public final class NetworkBoothTransport: BoothTransport {
             trustedStore.preferredPeerID = macIdentity.id
             trustedStore.autoReconnect = true
             pendingPairingRequest = nil
+            pendingPairingIntent = nil
+            pendingPairingFailure = nil
             targetPeerID = macIdentity.id
             publishPairingStatus()
             beginAuthentication(with: macIdentity.id)
         } catch {
+            pendingPairingRequest = nil
+            pendingPairingIntent = nil
+            pendingPairingFailure = error.localizedDescription
             connectionStatus.publishPairing(state: .failed(error.localizedDescription))
         }
     }
@@ -1518,6 +1689,10 @@ public final class NetworkBoothTransport: BoothTransport {
 
     private func completeAuthentication(with hello: BoothTransportHello) {
         peerAuthenticated = true
+        pendingPairingRequest = nil
+        pendingPairingIntent = nil
+        pendingPairingFailure = nil
+        incomingPairingRequest = nil
         expectedPeerDeviceID = hello.deviceID
         peerDeviceID = hello.deviceID
         peerName = hello.deviceName.isEmpty ? hello.deviceID : hello.deviceName
@@ -1545,6 +1720,19 @@ public final class NetworkBoothTransport: BoothTransport {
             startBrowser(channel: .preview)
         }
         onControlMessage?(.hello(role: hello.role))
+    }
+
+    private func rejectIncomingConnection(_ connection: NWConnection, reason: String) {
+        connection.stateUpdateHandler = { [weak self, weak connection] state in
+            guard case .ready = state, let connection else { return }
+            Task { @MainActor [weak self, weak connection] in
+                guard let self, let connection else { return }
+                self.send(.connectionRejected(reason: reason), on: connection, channel: .control)
+                do { try await Task.sleep(for: .milliseconds(100)) } catch { return }
+                connection.cancel()
+            }
+        }
+        connection.start(queue: .main)
     }
 
     private func rejectControlConnection(_ reason: String) {

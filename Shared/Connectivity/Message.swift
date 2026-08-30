@@ -195,6 +195,8 @@ public struct SessionSyncSnapshot: Codable, Sendable, Equatable {
 public enum Message: Codable, Sendable, Equatable {
     case hello(role: DeviceRole)
     case helloDetails(hello: BoothTransportHello)
+    case pairingIntent(intent: BoothPairingIntent)
+    case pairingSessionAvailable(session: BoothPairingSessionInfo)
     case pairingRequest(request: BoothPairingRequest)
     case pairingResult(result: BoothPairingResult)
     case authChallenge(challenge: BoothAuthChallenge)

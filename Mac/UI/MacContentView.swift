@@ -3,6 +3,7 @@ import AppKit
 
 struct MacContentView: View {
     @Environment(BoothCoordinator.self) private var coordinator
+    @Environment(BoothConnectionStatus.self) private var connectionStatus
     @Environment(\.scenePhase) private var scenePhase
     @State private var selectedTab = 0
     @State private var showPINSetup = false
@@ -10,6 +11,7 @@ struct MacContentView: View {
     @State private var pendingTab: Int? = nil
     @State private var isAdminUnlocked = false
     @State private var showCloudSSHSetup = false
+    @State private var showIncomingPairingSheet = false
     @AppStorage("operatorLanguage") private var operatorLanguage = OperatorLanguage.system.rawValue
 
     var body: some View {
@@ -47,6 +49,9 @@ struct MacContentView: View {
         .onChange(of: scenePhase) { _, newPhase in
             if newPhase == .active { coordinator.printer.refreshPrinters() }
         }
+        .onChange(of: connectionStatus.pairingState) { _, pairingState in
+            showIncomingPairingSheet = if case .incoming = pairingState { true } else { false }
+        }
         .sheet(isPresented: $showPINSetup) {
             PINGateView(mode: .setup) {
                 showPINSetup = false
@@ -76,9 +81,20 @@ struct MacContentView: View {
         .sheet(isPresented: $showCloudSSHSetup) {
             CloudSSHSetupView(setup: coordinator.cloudSSHSetup)
         }
+        .sheet(isPresented: $showIncomingPairingSheet) {
+            if let transport = coordinator.multipeer as? NetworkBoothTransport {
+                MacPairingSheet(
+                    transport: transport,
+                    incomingRequest: incomingPairingRequest
+                )
+            }
+        }
         .task {
             if coordinator.cloudSSHSetup.shouldPresentFirstRun {
                 showCloudSSHSetup = true
+            }
+            if case .incoming = connectionStatus.pairingState {
+                showIncomingPairingSheet = true
             }
         }
     }
@@ -89,6 +105,11 @@ struct MacContentView: View {
         case .english: return Locale(identifier: "en")
         case .thai: return Locale(identifier: "th")
         }
+    }
+
+    private var incomingPairingRequest: IncomingBoothPairingRequest? {
+        guard case .incoming(let request, _) = connectionStatus.pairingState else { return nil }
+        return request
     }
 
 }
@@ -885,14 +906,29 @@ struct SettingsView: View {
 
 private struct MacPairingSheet: View {
     let transport: NetworkBoothTransport
+    let incomingRequest: IncomingBoothPairingRequest?
+
+    init(transport: NetworkBoothTransport, incomingRequest: IncomingBoothPairingRequest? = nil) {
+        self.transport = transport
+        self.incomingRequest = incomingRequest
+    }
 
     @Environment(\.dismiss) private var dismiss
     @State private var now = Date()
 
     var body: some View {
         VStack(spacing: 16) {
-            Text("Pair New iPad")
+            Text(incomingRequest == nil ? "Pair New iPad" : "Connect New iPad")
                 .font(.title.bold())
+
+            if let incomingRequest {
+                Text("\"\(incomingRequest.iPadIdentity.displayName)\" wants to connect to this Mac.")
+                    .multilineTextAlignment(.center)
+                    .accessibilityIdentifier("Pairing Requesting iPad")
+                Text("Only continue if you recognize this iPad.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
 
             if let session = transport.currentPairingSessionInfo {
                 let expired = session.expiresAt <= now
@@ -901,7 +937,7 @@ private struct MacPairingSheet: View {
                         .foregroundStyle(.orange)
                         .accessibilityIdentifier("Pairing expired")
                 } else {
-                    Text("Pairing PIN")
+                    Text(incomingRequest == nil ? "Pairing PIN" : "Pairing Code")
                         .font(.headline)
                     if let pin = transport.pairingPINForDisplay {
                         Text(pin)

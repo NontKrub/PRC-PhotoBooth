@@ -20,6 +20,20 @@ This is the active checklist. Historical v1.3/v1.4 notes remain below and are no
 - [ ] Run physical Ethernet, PIN/QR, printer, camera, and long-run gates.
 - [ ] Mark release-ready only after all non-hardware blockers pass.
 
+## v1.4.2 Pairing UX + GIF Dimension Hardening
+
+- [x] Add untrusted iPad pairing-intent and session-availability messages
+- [x] Auto-start Mac pairing session with request safeguards
+- [x] Root-level Mac incoming pairing popup using MacPairingSheet
+- [x] iPad unified Connect flow and automatic PIN entry
+- [x] Pairing intent validation, trust gate, cooldown, active-session, and connected-peer tests
+- [x] GIF portrait dimensions for every preset
+- [x] GIF landscape and square dimensions
+- [x] GIF no-upscale behavior
+- [x] GIF same-dimension frame regression
+- [x] GIF non-square layer-position regression
+- [ ] Computer Use / physical-device validation
+
 ---
 
 # Historical: PRC PhotoBooth v1.3 TODO

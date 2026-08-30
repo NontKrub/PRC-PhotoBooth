@@ -117,6 +117,138 @@ struct GIFEncoderTests {
         }
     }
 
+    @Test("production GIF keeps portrait dimensions for every quality preset")
+    func productionRendererPortraitDimensions() async throws {
+        for preset in GIFQualityPreset.allCases {
+            let fixture = try makeRendererFixture(canvasWidth: 1200, canvasHeight: 1800)
+            defer { try? FileManager.default.removeItem(at: fixture.root) }
+            let destination = fixture.root.appendingPathComponent("portrait-\(preset.rawValue).gif")
+            try await TemplateGIFRenderer(
+                compositor: fixture.compositor,
+                filterPipeline: PhotoFilterPipeline(),
+                sampler: GIFFrameSampler(targetFramesPerShot: preset.frameCount),
+                encoder: GIFEncoder(preset: preset)
+            ).render(
+                manifest: fixture.manifest,
+                acceptedImages: fixture.acceptedImages,
+                directory: fixture.root,
+                qrPayload: nil,
+                to: destination
+            )
+
+            let source = try #require(CGImageSourceCreateWithURL(destination as CFURL, nil))
+            let dimensions = try gifDimensions(source)
+            let expected: (width: Int, height: Int) = switch preset {
+            case .compact: (213, 320)
+            case .balanced: (240, 360)
+            case .high: (320, 480)
+            }
+            #expect(dimensions.width == expected.width)
+            #expect(dimensions.height == expected.height)
+        }
+    }
+
+    @Test("production GIF keeps landscape balanced dimensions")
+    func productionRendererLandscapeDimensions() async throws {
+        let fixture = try makeRendererFixture(canvasWidth: 1800, canvasHeight: 1200)
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let destination = fixture.root.appendingPathComponent("landscape.gif")
+        try await TemplateGIFRenderer(
+            compositor: fixture.compositor,
+            filterPipeline: PhotoFilterPipeline(),
+            sampler: GIFFrameSampler(targetFramesPerShot: GIFQualityPreset.balanced.frameCount),
+            encoder: GIFEncoder(preset: .balanced)
+        ).render(
+            manifest: fixture.manifest,
+            acceptedImages: fixture.acceptedImages,
+            directory: fixture.root,
+            qrPayload: nil,
+            to: destination
+        )
+
+        let source = try #require(CGImageSourceCreateWithURL(destination as CFURL, nil))
+        let dimensions = try gifDimensions(source)
+        #expect(dimensions.width == 360)
+        #expect(dimensions.height == 240)
+    }
+
+    @Test("production GIF keeps square balanced dimensions")
+    func productionRendererSquareDimensions() async throws {
+        let fixture = try makeRendererFixture(canvasWidth: 1200, canvasHeight: 1200)
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let destination = fixture.root.appendingPathComponent("square.gif")
+        try await TemplateGIFRenderer(
+            compositor: fixture.compositor,
+            filterPipeline: PhotoFilterPipeline(),
+            sampler: GIFFrameSampler(targetFramesPerShot: GIFQualityPreset.balanced.frameCount),
+            encoder: GIFEncoder(preset: .balanced)
+        ).render(
+            manifest: fixture.manifest,
+            acceptedImages: fixture.acceptedImages,
+            directory: fixture.root,
+            qrPayload: nil,
+            to: destination
+        )
+
+        let source = try #require(CGImageSourceCreateWithURL(destination as CFURL, nil))
+        let dimensions = try gifDimensions(source)
+        #expect(dimensions.width == 360)
+        #expect(dimensions.height == 360)
+    }
+
+    @Test("production GIF does not upscale a smaller-than-limit canvas")
+    func productionRendererDoesNotUpscale() async throws {
+        let fixture = try makeRendererFixture(canvasWidth: 200, canvasHeight: 300)
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let destination = fixture.root.appendingPathComponent("small.gif")
+        try await TemplateGIFRenderer(
+            compositor: fixture.compositor,
+            filterPipeline: PhotoFilterPipeline(),
+            sampler: GIFFrameSampler(targetFramesPerShot: GIFQualityPreset.high.frameCount),
+            encoder: GIFEncoder(preset: .high)
+        ).render(
+            manifest: fixture.manifest,
+            acceptedImages: fixture.acceptedImages,
+            directory: fixture.root,
+            qrPayload: nil,
+            to: destination
+        )
+
+        let source = try #require(CGImageSourceCreateWithURL(destination as CFURL, nil))
+        let dimensions = try gifDimensions(source)
+        #expect(dimensions.width == 200)
+        #expect(dimensions.height == 300)
+    }
+
+    @Test("production GIF keeps every frame at the same dimensions")
+    func productionRendererFrameDimensionsMatch() async throws {
+        let fixture = try makeRendererFixture(canvasWidth: 640, canvasHeight: 960)
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let destination = fixture.root.appendingPathComponent("same-dimensions.gif")
+        try await TemplateGIFRenderer(
+            compositor: fixture.compositor,
+            filterPipeline: PhotoFilterPipeline(),
+            sampler: GIFFrameSampler(targetFramesPerShot: GIFQualityPreset.balanced.frameCount),
+            encoder: GIFEncoder(preset: .balanced)
+        ).render(
+            manifest: fixture.manifest,
+            acceptedImages: fixture.acceptedImages,
+            directory: fixture.root,
+            qrPayload: nil,
+            to: destination
+        )
+
+        let source = try #require(CGImageSourceCreateWithURL(destination as CFURL, nil))
+        let count = CGImageSourceGetCount(source)
+        let first = try gifDimensions(source, at: 0)
+        #expect(count == GIFQualityPreset.balanced.frameCount)
+        for index in 1..<count {
+            let dimensions = try gifDimensions(source, at: index)
+            #expect(dimensions.width == first.width)
+            #expect(dimensions.height == first.height)
+        }
+    }
+
     @Test("benchmarks old and preset GIF output on one shared rendered fixture")
     func benchmarksGIFPresets() async throws {
         let fixture = try makeBenchmarkFixture()
@@ -242,6 +374,57 @@ struct GIFEncoderTests {
         #expect(qrPixels.contains { ($0 >> 24) < 40 && (($0 >> 16) & 0xff) < 40 && (($0 >> 8) & 0xff) < 40 })
     }
 
+    @Test("production renderer keeps layers positioned on a non-square canvas")
+    func productionRendererNonSquareLayerOrder() async throws {
+        let fixture = try makeBenchmarkFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        var config = fixture.manifest.eventConfig
+        config.slots = [
+            SharedPhotoSlot(
+                id: "inset-photo",
+                normalizedRect: CGRect(x: 0.1, y: 0.1, width: 0.8, height: 0.8),
+                photoIndex: 0
+            )
+        ]
+        var manifest = fixture.manifest
+        manifest.eventConfig = config
+        let destination = fixture.root.appendingPathComponent("non-square-layers.gif")
+        try await TemplateGIFRenderer(
+            compositor: Compositor(
+                config: config,
+                framePNG: benchmarkFrameImage(),
+                foregroundOverlayPNG: benchmarkForegroundImage()
+            ),
+            filterPipeline: PhotoFilterPipeline(),
+            sampler: GIFFrameSampler(targetFramesPerShot: 1),
+            encoder: GIFEncoder(frameDelay: 0.1, maxDimension: 960)
+        ).render(
+            manifest: manifest,
+            acceptedImages: fixture.acceptedImages,
+            directory: fixture.root,
+            qrPayload: "https://example.test/non-square",
+            to: destination
+        )
+
+        let source = try #require(CGImageSourceCreateWithURL(destination as CFURL, nil))
+        let image = try #require(CGImageSourceCreateImageAtIndex(source, 0, nil))
+        let normalizedImage = try #require(rgbaImage(image))
+        #expect(image.width == 640)
+        #expect(image.height == 960)
+
+        let framePixel = pixel(normalizedImage, x: 50, y: 50)
+        let foregroundPixel = pixel(normalizedImage, x: 320, y: 5)
+        let photoPixel = pixel(normalizedImage, x: 320, y: 480)
+        #expect(((framePixel >> 24) & 0xff) < 100)
+        #expect(((foregroundPixel >> 24) & 0xff) > 150)
+        #expect(photoPixel != framePixel)
+        let qrPixels = stride(from: 840, to: 950, by: 8).flatMap { y in
+            stride(from: 495, to: 610, by: 8).map { x in pixel(normalizedImage, x: x, y: y) }
+        }
+        let hasDarkQRCodePixel = qrPixels.contains { ($0 >> 24) < 40 && (($0 >> 16) & 0xff) < 40 && (($0 >> 8) & 0xff) < 40 }
+        #expect(hasDarkQRCodePixel)
+    }
+
     @Test("production renderer rejects missing, corrupt, and traversing source frames")
     func productionRendererRejectsBadSources() async throws {
         let missingAccepted = try makeRendererFixture()
@@ -330,7 +513,11 @@ struct GIFEncoderTests {
         let compositor: Compositor
     }
 
-    private func makeRendererFixture(stillPhotoIndex: Int? = nil) throws -> RendererFixture {
+    private func makeRendererFixture(
+        stillPhotoIndex: Int? = nil,
+        canvasWidth: Int = 80,
+        canvasHeight: Int = 80
+    ) throws -> RendererFixture {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("PRC-GIF-render-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         var acceptedImages: [Int: CGImage] = [:]
@@ -370,8 +557,8 @@ struct GIFEncoderTests {
             eventID: "event",
             eventName: "GIF Test",
             photoCount: 2,
-            canvasWidth: 80,
-            canvasHeight: 80,
+            canvasWidth: CGFloat(canvasWidth),
+            canvasHeight: CGFloat(canvasHeight),
             slots: [
                 SharedPhotoSlot(id: "left", normalizedRect: CGRect(x: 0, y: 0, width: 0.5, height: 1), photoIndex: 0),
                 SharedPhotoSlot(id: "right", normalizedRect: CGRect(x: 0.5, y: 0, width: 0.5, height: 1), photoIndex: 1)
@@ -590,6 +777,16 @@ struct GIFEncoderTests {
         guard CGImageDestinationFinalize(destination) else { throw CocoaError(.fileWriteUnknown) }
     }
 
+    private func gifDimensions(
+        _ source: CGImageSource,
+        at index: Int = 0
+    ) throws -> (width: Int, height: Int) {
+        let properties = try #require(CGImageSourceCopyPropertiesAtIndex(source, index, nil) as? [CFString: Any])
+        let width = try #require(properties[kCGImagePropertyPixelWidth] as? Int)
+        let height = try #require(properties[kCGImagePropertyPixelHeight] as? Int)
+        return (width, height)
+    }
+
     private func pixel(_ image: CGImage, x: Int, y: Int) -> UInt32 {
         guard let providerData = image.dataProvider?.data else { return 0 }
         let data = providerData as NSData
@@ -602,5 +799,19 @@ struct GIFEncoderTests {
             | UInt32(rgba[1]) << 16
             | UInt32(rgba[2]) << 8
             | UInt32(rgba[3])
+    }
+
+    private func rgbaImage(_ image: CGImage) -> CGImage? {
+        guard let context = CGContext(
+            data: nil,
+            width: image.width,
+            height: image.height,
+            bitsPerComponent: 8,
+            bytesPerRow: 0,
+            space: CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        ) else { return nil }
+        context.draw(image, in: CGRect(x: 0, y: 0, width: image.width, height: image.height))
+        return context.makeImage()
     }
 }

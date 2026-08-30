@@ -339,6 +339,10 @@ final class BoothCoordinator {
                 guard let self else { return false }
                 return !self.isCaptureSessionActive
             }
+            networkTransport.canAcceptIncomingPairing = { [weak self] in
+                guard let self else { return false }
+                return !self.isCaptureSessionActive
+            }
         }
         multipeer.start()
         networkMonitor.pathUpdateHandler = { [weak self] path in

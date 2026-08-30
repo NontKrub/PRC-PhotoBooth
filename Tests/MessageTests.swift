@@ -15,6 +15,16 @@ struct MessageTests {
             .hello(role: .mac),
             .hello(role: .iPad),
             .helloDetails(hello: BoothTransportHello(role: .mac, deviceID: "mac-test")),
+            .pairingIntent(intent: BoothPairingIntent(
+                iPadIdentity: BoothDeviceIdentity(id: "ipad-test", displayName: "PRC-iPad-01", role: .iPad),
+                targetMacDeviceID: "mac-test"
+            )),
+            .pairingSessionAvailable(session: BoothPairingSessionInfo(
+                sessionID: "pairing-session",
+                macDeviceID: "mac-test",
+                macDeviceName: "PRC-Booth-01",
+                expiresAt: Date(timeIntervalSince1970: 1_700_000_120)
+            )),
             .pairingRequest(request: BoothPairingRequest(
                 sessionID: "pairing-session",
                 targetMacDeviceID: "mac-test",
