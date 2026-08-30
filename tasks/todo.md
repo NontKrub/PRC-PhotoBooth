@@ -16,7 +16,7 @@ This is the active checklist. Historical v1.3/v1.4 notes remain below and are no
 - [x] GitHub Xcode 27 iPad lane passed: run 33315413899 passed all build, test, generic-device compile, packaging, and upload steps.
 - [x] GitHub stable macOS/Xcode 16.4 lane passed: run 33315413899 passed Release build and Mac tests.
 - [x] Run final Ponytail review and rerun affected gates; no unnecessary code or scope found.
-- [ ] Run Computer Use Mac/iPad GUI matrix; record blocked window/camera/network cases honestly.
+- [ ] Run Computer Use Mac/iPad GUI matrix; Mac Release app launched and Event Setup opened, but Settings focus/Forget-iPad flow was blocked by a Computer Use native-pipe failure; iPad, camera, and network cases remain untested.
 - [ ] Run physical Ethernet, PIN/QR, printer, camera, and long-run gates.
 - [ ] Mark release-ready only after all non-hardware blockers pass.
 
