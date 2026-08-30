@@ -413,6 +413,19 @@ actor EventExperienceStore {
         return previewURL
     }
 
+    func rebuildPreviews(eventID: String) throws -> (document: EventExperienceDocument, failures: [String]) {
+        let document = try load(eventID: eventID)
+        var failures: [String] = []
+        for template in document.templates {
+            do {
+                _ = try rebuildPreview(eventID: eventID, templateID: template.id)
+            } catch {
+                failures.append("\(template.name.english): \(error.localizedDescription)")
+            }
+        }
+        return (try load(eventID: eventID), failures)
+    }
+
     func validate(_ document: EventExperienceDocument) throws {
         guard document.schemaVersion == EventExperienceDocument.currentSchemaVersion else {
             throw EventExperienceError.unsupportedSchema(document.schemaVersion)

@@ -458,7 +458,6 @@ struct EventExperienceEditorView: View {
     private func save() {
         guard let session = editingSession else { return }
         isSaving = true
-        let eventID = event.id
         Task {
             do {
                 try await coordinator.saveExperienceDocument(
@@ -473,9 +472,7 @@ struct EventExperienceEditorView: View {
             }
 
             editingSession = nil
-            coordinator.refreshActiveExperience()
             dismiss()
-            await coordinator.rebuildExperiencePreviews(eventID: eventID)
         }
     }
 

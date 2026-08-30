@@ -481,6 +481,16 @@ final class BoothCoordinator {
         } else {
             try await experienceStore.save(normalized)
         }
+        var previewErrorMessage: String?
+        do {
+            let result = try await experienceStore.rebuildPreviews(eventID: normalized.eventID)
+            normalized = result.document
+            if !result.failures.isEmpty {
+                previewErrorMessage = "Event saved. Template previews need rebuilding: \(result.failures.joined(separator: "; "))"
+            }
+        } catch {
+            previewErrorMessage = "Event saved, but template previews could not be rebuilt: \(error.localizedDescription)"
+        }
         do {
             try LegacyEventMirrorService().updateLegacyEvent(event, using: normalized, modelContext: store.context)
         } catch {
@@ -493,24 +503,7 @@ final class BoothCoordinator {
             sendExperienceCatalog()
             await refreshServerRoutes()
         }
-    }
-
-    func rebuildExperiencePreviews(eventID: String) async {
-        do {
-            let savedDocument = try await experienceStore.load(eventID: eventID)
-            var failures: [String] = []
-            for template in savedDocument.templates {
-                do {
-                    _ = try await experienceStore.rebuildPreview(eventID: eventID, templateID: template.id)
-                } catch {
-                    failures.append("\(template.name.english): \(error.localizedDescription)")
-                }
-            }
-            guard !failures.isEmpty else { return }
-            errorMessage = "Event saved. Template previews need rebuilding: \(failures.joined(separator: "; "))"
-        } catch {
-            errorMessage = "Event saved, but template previews could not be rebuilt: \(error.localizedDescription)"
-        }
+        if let previewErrorMessage { errorMessage = previewErrorMessage }
     }
 
     func retryCloudUpload(sessionID: String) {

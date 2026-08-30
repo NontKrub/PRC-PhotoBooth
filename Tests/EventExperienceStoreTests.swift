@@ -556,17 +556,38 @@ struct EventExperienceStoreTests {
         try FileManager.default.removeItem(at: templateDirectory)
         try Data([1]).write(to: templateDirectory)
 
-        do {
-            _ = try await store.rebuildPreview(eventID: "event-1", templateID: committed.templates[0].id)
-            Issue.record("Expected preview rebuild to fail")
-        } catch {
-            // Expected: the template asset directory is deliberately blocked.
-        }
+        let result = try await store.rebuildPreviews(eventID: "event-1")
 
+        #expect(result.failures.count == 1)
         #expect((try await store.load(eventID: "event-1")).templates[0].name.english == "Saved")
         #expect(!FileManager.default.fileExists(atPath: root.appendingPathComponent(
             "EventExperiences/.editor-staging/\(session.id)"
         ).path))
+    }
+
+    @Test("rebuilding previews makes a newly added second template publishable")
+    func rebuildsPreviewBeforePublishingSecondTemplate() async throws {
+        let root = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = EventExperienceStore(baseDirectory: root)
+        let first = validTemplate(id: "template-1")
+        let original = document(for: first)
+        try await store.save(original)
+
+        var edited = original
+        edited.templates.append(validTemplate(id: "template-2"))
+        let session = try await store.beginEditing(eventID: "event-1")
+        try await store.commitEditing(session, document: edited)
+
+        let result = try await store.rebuildPreviews(eventID: "event-1")
+        let previews = try await store.readTemplatePreviews(
+            eventID: "event-1",
+            templates: result.document.templates
+        )
+
+        #expect(result.failures.isEmpty)
+        #expect(result.document.templates.allSatisfy { $0.previewFileName == "preview.jpg" })
+        #expect(previews.keys.count == 2)
     }
 
     @Test("new staged frame disappears when editing is cancelled")
