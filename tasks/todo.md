@@ -10,8 +10,12 @@ This is the active checklist. Historical v1.3/v1.4 notes remain below and are no
 - [x] Add protocol-v3 pairing/auth messages, six-digit PIN, two-minute expiry, attempt limit, QR payload, HMAC reconnect, forget, and selected-peer policy.
 - [x] Add Mac/iPad pairing settings, QR scanner permission/error paths, accessibility identifiers, and localized visible strings.
 - [x] Update CI triggers, Release artifacts, generic device compile, stable runner lane, README, and current release plan.
-- [x] Run final full Mac and iPad automated matrix; Mac tests 337/337 and iPad tests 4/4 passed; Mac/iPad Debug and Release builds plus generic iOS Release compile passed.
-- [x] Run final Ponytail review; removed one unused discovery helper, then reran the final gates.
+- [x] Run final local Mac and iPad automated matrix; Mac tests 338/338 and iPad tests 4/4 passed; Mac/iPad Debug and Release builds plus generic iOS Release compile passed.
+- [x] Run focused pairing/protocol/printing/preflight/LAN tests: 79/79 passed.
+- [ ] GitHub Xcode 27 Mac lane passed.
+- [ ] GitHub Xcode 27 iPad lane passed.
+- [ ] GitHub stable macOS/Xcode 16.4 lane passed.
+- [ ] Run final Ponytail review and rerun affected gates.
 - [ ] Run Computer Use Mac/iPad GUI matrix; record blocked window/camera/network cases honestly.
 - [ ] Run physical Ethernet, PIN/QR, printer, camera, and long-run gates.
 - [ ] Mark release-ready only after all non-hardware blockers pass.

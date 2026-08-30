@@ -165,13 +165,21 @@ struct SettingsView: View {
                 MacPairingSheet(transport: transport)
             }
         }
-        .confirmationDialog("Forget iPad?", item: $peerToForget) { peer in
-            Button("Forget " + peer.displayName, role: .destructive) {
-                (coordinator.multipeer as? NetworkBoothTransport)?.forgetPeer(peer.id)
-                peerToForget = nil
+        .confirmationDialog(
+            "Forget iPad?",
+            isPresented: Binding(
+                get: { peerToForget != nil },
+                set: { if !$0 { peerToForget = nil } }
+            )
+        ) {
+            if let peer = peerToForget {
+                Button("Forget " + peer.displayName, role: .destructive) {
+                    (coordinator.multipeer as? NetworkBoothTransport)?.forgetPeer(peer.id)
+                    peerToForget = nil
+                }
             }
             Button("Cancel", role: .cancel) { peerToForget = nil }
-        } message: { peer in
+        } message: {
             Text("This iPad must be paired again before it can reconnect.")
         }
         .confirmationDialog("Forget all paired iPads?", isPresented: $showForgetAllPeers) {

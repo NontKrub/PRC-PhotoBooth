@@ -239,9 +239,9 @@ final class BoothCoordinator {
             self?.cleanupCompletedWorkingFiles()
             Task { @MainActor [weak self] in
                 guard let self else { return }
-                await refreshServerRoutes()
-                if jobQueue.lastQueueError != nil {
-                    await runSafePreflight()
+                await self.refreshServerRoutes()
+                if self.jobQueue.lastQueueError != nil {
+                    await self.runSafePreflight()
                 }
             }
         }
