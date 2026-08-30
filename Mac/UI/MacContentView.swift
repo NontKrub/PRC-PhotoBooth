@@ -131,6 +131,7 @@ struct SettingsView: View {
     @State private var selectedSection: SettingsSection = .general
     @State private var showCloudSSHSetup = false
     @State private var showResetPINConfirmation = false
+    @State private var diagnosticsCopied = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -349,6 +350,55 @@ struct SettingsView: View {
                         .font(.caption2)
                         .foregroundStyle(.secondary)
 
+                    HStack(spacing: 8) {
+                        Button {
+                            coordinator.reconnectIPad()
+                        } label: {
+                            Label(
+                                isRouteTransitioning(status) ? "Reconnecting…" : "Reconnect iPad",
+                                systemImage: "arrow.clockwise"
+                            )
+                        }
+                        .buttonStyle(.bordered)
+                        .disabled(coordinator.isCaptureSessionActive || isRouteTransitioning(status))
+
+                        if coordinator.multipeer is NetworkBoothTransport,
+                           coordinator.requestedNetworkPreference == .lan,
+                           status.isFallbackActive,
+                           status.isLANPathAvailable {
+                            Button {
+                                coordinator.retryLANNow()
+                            } label: {
+                                Label("Retry LAN Now", systemImage: "cable.connector.horizontal")
+                            }
+                            .buttonStyle(.bordered)
+                            .disabled(
+                                coordinator.isCaptureSessionActive
+                                    || isRouteTransitioning(status)
+                            )
+                        }
+
+                        Button {
+                            coordinator.copyDiagnostics()
+                            diagnosticsCopied = true
+                        } label: {
+                            Label(
+                                diagnosticsCopied ? "Copied" : "Copy Diagnostics",
+                                systemImage: diagnosticsCopied ? "checkmark" : "doc.on.clipboard"
+                            )
+                        }
+                        .buttonStyle(.bordered)
+                    }
+
+                    if coordinator.multipeer is NetworkBoothTransport,
+                       coordinator.requestedNetworkPreference == .lan,
+                       status.isFallbackActive,
+                       status.isLANPathAvailable {
+                        Text("Ethernet is available. Retry the preferred wired connection now.")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+
                     if let result = coordinator.ethernetProbeResult {
                         ethernetProbeView(result)
                     }
@@ -438,6 +488,15 @@ struct SettingsView: View {
         case .connected: return "Connected"
         case .connecting: return "Connecting"
         case .disconnected: return "Disconnected"
+        }
+    }
+
+    private func isRouteTransitioning(_ status: BoothConnectionStatus) -> Bool {
+        switch status.routeState {
+        case .connectingLAN, .connectingWiFi:
+            return true
+        case .disconnected, .connectedLAN, .connectedWiFi, .fallbackWiFi:
+            return false
         }
     }
 

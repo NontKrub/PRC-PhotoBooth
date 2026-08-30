@@ -44,7 +44,10 @@ struct EventSetupView: View {
                         Button("Set Active") { setActive(event) }
                         Divider()
                         Button("Delete", role: .destructive) {
-                            pendingDeleteIDs = [event.id]
+                            pendingDeleteIDs = EventSelectionLogic.contextMenuDeletionIDs(
+                                clickedID: event.id,
+                                selectedIDs: selectedEventIDs
+                            )
                             showDeleteConfirmation = true
                         }
                     }

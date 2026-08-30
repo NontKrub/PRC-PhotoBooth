@@ -935,6 +935,65 @@ final class BoothCoordinator {
         }
     }
 
+    func reconnectIPad() {
+        guard !isCaptureSessionActive else { return }
+        multipeer.restart()
+    }
+
+    func retryLANNow() {
+        guard !isCaptureSessionActive else { return }
+        _ = (multipeer as? NetworkBoothTransport)?.retryPreferredLANNow()
+    }
+
+    func copyDiagnostics() {
+        let printerDefaultStatus: String = switch printer.configuredPrinterStatus() {
+        case .systemDefault: "System Default"
+        case .unavailable(let name): "Unavailable: \(name)"
+        }
+#if arch(arm64)
+        let architecture = "arm64"
+#elseif arch(x86_64)
+        let architecture = "x86_64"
+#else
+        let architecture = "unknown"
+#endif
+        let snapshot = BoothDiagnosticsReport.Snapshot(
+            appVersion: Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "Unknown",
+            appBuild: Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "Unknown",
+            macOS: ProcessInfo.processInfo.operatingSystemVersionString,
+            architecture: architecture,
+            generatedAt: Date(),
+            requestedNetwork: connectionStatus.requestedNetwork,
+            effectiveNetwork: connectionStatus.effectiveNetwork,
+            connectionState: connectionStatus.state,
+            fallbackReason: connectionStatus.isFallbackActive
+                ? connectionStatus.fallbackReason ?? "Active"
+                : nil,
+            peerName: connectionStatus.peerDisplayName,
+            ethernetPath: connectionStatus.lanPathObservation,
+            wifiPath: connectionStatus.wifiPathObservation,
+            lanHandshake: connectionStatus.lanHandshake,
+            controlConnected: {
+                if case .connected = connectionStatus.state { return true }
+                return false
+            }(),
+            previewConnected: connectionStatus.isPreviewChannelConnected,
+            lastNetworkError: connectionStatus.lastNetworkError,
+            previewDiagnostics: connectionStatus.previewDiagnostics,
+            printerDefaultStatus: printerDefaultStatus,
+            printerName: printerLabel,
+            lastPrinterTest: printer.lastTestResult,
+            printRequestCount: printer.printRequestCount,
+            printSuccessCount: printer.printSuccessCount,
+            printFailureCount: printer.printFailureCount,
+            lastPrintError: printer.lastPrintError,
+            preflightReadiness: preflight.readiness,
+            preflightResults: preflight.results
+        )
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(BoothDiagnosticsReport.make(snapshot), forType: .string)
+    }
+
     private func attemptPendingLANRecoveryIfIdle() {
         (multipeer as? NetworkBoothTransport)?.attemptPendingLANRecoveryIfIdle()
     }

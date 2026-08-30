@@ -1593,6 +1593,17 @@
         }
       }
     },
+    "Copied" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "คัดลอกแล้ว"
+          }
+        }
+      }
+    },
     "Copy" : {
       "extractionState" : "manual",
       "localizations" : {
@@ -1600,6 +1611,17 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "คัดลอก"
+          }
+        }
+      }
+    },
+    "Copy Diagnostics" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "คัดลอกข้อมูลวินิจฉัย"
           }
         }
       }
@@ -1676,6 +1698,17 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "บัตรเครดิต"
+          }
+        }
+      }
+    },
+    "Current route verification only. Switch Connection to LAN for a full booth connection test." : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ตรวจสอบเส้นทางปัจจุบันเท่านั้น เปลี่ยนการเชื่อมต่อเป็น LAN เพื่อทดสอบการเชื่อมต่อบูธแบบเต็มรูปแบบ"
           }
         }
       }
@@ -2122,6 +2155,17 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "ข้อผิดพลาด: %1$@"
+          }
+        }
+      }
+    },
+    "Ethernet is available. Retry the preferred wired connection now." : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "อีเทอร์เน็ตพร้อมใช้งาน ลองเชื่อมต่อแบบใช้สายที่ต้องการอีกครั้งทันที"
           }
         }
       }
@@ -4532,6 +4576,28 @@
         }
       }
     },
+    "Reconnect iPad" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "เชื่อมต่อ iPad ใหม่"
+          }
+        }
+      }
+    },
+    "Reconnecting…" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "กำลังเชื่อมต่อใหม่…"
+          }
+        }
+      }
+    },
     "Refresh" : {
       "extractionState" : "manual",
       "localizations" : {
@@ -4769,6 +4835,17 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "ลองใหม่"
+          }
+        }
+      }
+    },
+    "Retry LAN Now" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ลองเชื่อมต่อ LAN อีกครั้ง"
           }
         }
       }

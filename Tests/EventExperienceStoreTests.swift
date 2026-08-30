@@ -632,10 +632,14 @@ struct EventExperienceStoreTests {
     @Test("bulk preview reads honor cancellation")
     func cancelsPreviewReads() async throws {
         let store = EventExperienceStore(baseDirectory: try temporaryDirectory())
+        let (stream, continuation) = AsyncStream<Void>.makeStream()
         let task = Task {
-            try await store.readTemplatePreviews(eventID: "event-1", templates: [])
+            for await _ in stream { break }
+            _ = try await store.readTemplatePreviews(eventID: "event-1", templates: [])
         }
         task.cancel()
+        continuation.yield(())
+        continuation.finish()
 
         do {
             _ = try await task.value

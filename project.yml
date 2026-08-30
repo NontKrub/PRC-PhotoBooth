@@ -173,6 +173,25 @@ targets:
       - target: PRC-PhotoBooth-Mac
       - sdk: Vision.framework
 
+  # ───────────────────────────────────────────────
+  # Unit Tests (iPad host)
+  # ───────────────────────────────────────────────
+  PRC-PhotoBooth-iPadTests:
+    type: bundle.unit-test
+    platform: iOS
+    deploymentTarget: "16.0"
+    sources:
+      - iPadTests
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.nont.prcphoto.ipad.tests
+        SWIFT_VERSION: 6.0
+        IPHONEOS_DEPLOYMENT_TARGET: "16.0"
+        TARGETED_DEVICE_FAMILY: "2"
+        GENERATE_INFOPLIST_FILE: YES
+    dependencies:
+      - target: PRC-PhotoBooth-iPad
+
 schemes:
   PRC-PhotoBooth-Mac:
     build:
@@ -197,3 +216,13 @@ schemes:
       config: Debug
       targets:
         - PRC-PhotoBoothTests
+
+  PRC-PhotoBooth-iPadTests:
+    build:
+      targets:
+        PRC-PhotoBooth-iPad: all
+        PRC-PhotoBooth-iPadTests: [test]
+    test:
+      config: Debug
+      targets:
+        - PRC-PhotoBooth-iPadTests

@@ -152,6 +152,28 @@ public final class NetworkBoothTransport: BoothTransport {
         publishStatus()
     }
 
+    @discardableResult
+    public func retryPreferredLANNow() -> Bool {
+        guard shouldReconnect,
+              requestedPreference == .lan,
+              activeInterface == .wifi,
+              fallbackActive,
+              isLANPathAvailable,
+              canAttemptPreferredLANRecovery() else { return false }
+
+        cancelLANRecovery()
+        let command = routeMachine.manualPreferredLANRetry(
+            lanAvailable: isLANPathAvailable,
+            wifiAvailable: pathAvailable(.wifi),
+            boothIsIdle: true
+        )
+        guard command == .startLAN else { return false }
+        lastLANRecoveryAttemptAt = Date()
+        print("[NetworkRoute] Manual LAN retry")
+        apply(command, reason: "Manual LAN retry")
+        return true
+    }
+
     public func sendControl(_ message: Message) {
         send(message, on: controlConnection, channel: .control)
     }

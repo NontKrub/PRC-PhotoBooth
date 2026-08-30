@@ -212,6 +212,85 @@ struct NetworkRouteTests {
         #expect(command == .unavailable)
         #expect(route.state == .disconnected)
     }
+
+    @Test("Manual LAN retry starts from a healthy Wi-Fi fallback")
+    func manualLANRetryStartsFromFallback() {
+        var route = fallbackLANRoute()
+
+        #expect(route.manualPreferredLANRetry(lanAvailable: true, wifiAvailable: true, boothIsIdle: true) == .startLAN)
+        #expect(route.state == .connectingLAN)
+    }
+
+    @Test("Manual LAN retry waits until the booth is idle")
+    func manualLANRetryIsBlockedDuringCapture() {
+        var route = fallbackLANRoute()
+
+        #expect(route.manualPreferredLANRetry(lanAvailable: true, wifiAvailable: true, boothIsIdle: false) == .none)
+        #expect(route.state == .fallbackWiFi(peer: "iPad"))
+    }
+
+    @Test("Manual LAN retry requires an available wired path")
+    func manualLANRetryRequiresLAN() {
+        var route = fallbackLANRoute()
+
+        #expect(route.manualPreferredLANRetry(lanAvailable: false, wifiAvailable: true, boothIsIdle: true) == .none)
+        #expect(route.state == .fallbackWiFi(peer: "iPad"))
+    }
+
+    @Test("Manual LAN retry does not override Wi-Fi preference")
+    func manualLANRetryRespectsWiFiPreference() {
+        var route = BoothNetworkRouteMachine(preference: .wifi)
+        _ = route.start(lanAvailable: false, wifiAvailable: true)
+        _ = route.wifiConnected(peer: "iPad", fallback: false)
+
+        #expect(route.manualPreferredLANRetry(lanAvailable: true, wifiAvailable: true, boothIsIdle: true) == .none)
+        #expect(route.state == .connectedWiFi(peer: "iPad"))
+    }
+
+    @Test("Manual LAN retry does not restart an active LAN route")
+    func manualLANRetryRequiresFallback() {
+        var route = BoothNetworkRouteMachine(preference: .lan)
+        _ = route.start(lanAvailable: true, wifiAvailable: true)
+        _ = route.lanHandshakeSucceeded(peer: "iPad")
+
+        #expect(route.manualPreferredLANRetry(lanAvailable: true, wifiAvailable: true, boothIsIdle: true) == .none)
+        #expect(route.state == .connectedLAN(peer: "iPad"))
+    }
+
+    @Test("Failed manual LAN handshake returns to Wi-Fi fallback")
+    func failedManualLANRetryFallsBack() {
+        var route = fallbackLANRoute()
+        _ = route.manualPreferredLANRetry(lanAvailable: true, wifiAvailable: true, boothIsIdle: true)
+
+        #expect(route.lanHandshakeTimedOut(wifiAvailable: true) == .startWiFi(fallback: true))
+        #expect(route.state == .connectingWiFi)
+        #expect(route.preference == .lan)
+    }
+
+    @Test("Successful manual LAN handshake reaches connected LAN")
+    func successfulManualLANRetryConnects() {
+        var route = fallbackLANRoute()
+        _ = route.manualPreferredLANRetry(lanAvailable: true, wifiAvailable: true, boothIsIdle: true)
+
+        #expect(route.lanHandshakeSucceeded(peer: "iPad") == .none)
+        #expect(route.state == .connectedLAN(peer: "iPad"))
+        #expect(route.preference == .lan)
+    }
+
+    @Test("Repeated manual LAN retry emits one start command")
+    func repeatedManualLANRetryDoesNotDuplicateTransport() {
+        var route = fallbackLANRoute()
+
+        #expect(route.manualPreferredLANRetry(lanAvailable: true, wifiAvailable: true, boothIsIdle: true) == .startLAN)
+        #expect(route.manualPreferredLANRetry(lanAvailable: true, wifiAvailable: true, boothIsIdle: true) == .none)
+    }
+}
+
+private func fallbackLANRoute() -> BoothNetworkRouteMachine {
+    var route = BoothNetworkRouteMachine(preference: .lan)
+    _ = route.start(lanAvailable: false, wifiAvailable: true)
+    _ = route.wifiConnected(peer: "iPad", fallback: true)
+    return route
 }
 
 @Suite("iPad route discovery policy")

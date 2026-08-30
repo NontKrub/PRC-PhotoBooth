@@ -15,11 +15,21 @@ concurrency:
 jobs:
   build-mac-app:
     name: Build macOS app
-    runs-on: macos-15
+    runs-on: xcode-27
 
     steps:
       - name: Check out source
         uses: actions/checkout@v5
+
+      - name: Verify Xcode 27 toolchain
+        run: |
+          set -euo pipefail
+          xcodebuild -version
+          swift --version
+          xcodebuild -version | grep -q 'Xcode 27' || {
+            echo 'Expected Xcode 27 toolchain.' >&2
+            exit 1
+          }
 
       - name: Install XcodeGen
         run: |
@@ -32,7 +42,6 @@ jobs:
 
       - name: Show toolchain
         run: |
-          xcodebuild -version
           xcodegen --version
 
       - name: Generate Xcode project
@@ -60,6 +69,18 @@ jobs:
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
             test
+
+      - name: Build macOS app (Release)
+        run: |
+          xcodebuild \
+            -project PRC-PhotoBooth.xcodeproj \
+            -scheme PRC-PhotoBooth-Mac \
+            -configuration Release \
+            -destination "platform=macOS" \
+            -derivedDataPath "$RUNNER_TEMP/PRC-PhotoBooth-DerivedData" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            build
 
       - name: Package app
         id: package
@@ -90,11 +111,21 @@ jobs:
 
   build-ipad-app:
     name: Build iPad Simulator app
-    runs-on: macos-15
+    runs-on: xcode-27
 
     steps:
       - name: Check out source
         uses: actions/checkout@v5
+
+      - name: Verify Xcode 27 toolchain
+        run: |
+          set -euo pipefail
+          xcodebuild -version
+          swift --version
+          xcodebuild -version | grep -q 'Xcode 27' || {
+            echo 'Expected Xcode 27 toolchain.' >&2
+            exit 1
+          }
 
       - name: Install XcodeGen
         run: |
@@ -107,7 +138,6 @@ jobs:
 
       - name: Show toolchain
         run: |
-          xcodebuild -version
           xcodegen --version
 
       - name: Generate Xcode project
@@ -125,6 +155,38 @@ jobs:
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
             build
+
+      - name: Build iPad Simulator app (Release)
+        run: |
+          xcodebuild \
+            -project PRC-PhotoBooth.xcodeproj \
+            -scheme PRC-PhotoBooth-iPad \
+            -configuration Release \
+            -destination "generic/platform=iOS Simulator" \
+            -sdk iphonesimulator \
+            -derivedDataPath "$RUNNER_TEMP/PRC-PhotoBooth-iPad-DerivedData" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            build
+
+      - name: Run iPad tests
+        run: |
+          set -euo pipefail
+          ipad_udid="$(xcrun simctl list devices available | sed -nE '/iPad/ s/.*\(([0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12})\).*/\1/p' | head -n 1)"
+          test -n "$ipad_udid" || {
+            echo 'No available iPad simulator found.' >&2
+            exit 1
+          }
+          echo "Testing on discovered iPad simulator: $ipad_udid"
+          xcodebuild \
+            -project PRC-PhotoBooth.xcodeproj \
+            -scheme PRC-PhotoBooth-iPadTests \
+            -configuration Debug \
+            -destination "platform=iOS Simulator,id=$ipad_udid" \
+            -derivedDataPath "$RUNNER_TEMP/PRC-PhotoBooth-iPad-DerivedData" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            test
 
       - name: Package app
         id: package

@@ -49,6 +49,22 @@ struct SelectionLogicTests {
         #expect(!plan.removesActiveEvent)
     }
 
+    @Test("context-menu delete keeps the full selection for a selected event")
+    func contextMenuDeleteUsesSelection() {
+        #expect(EventSelectionLogic.contextMenuDeletionIDs(
+            clickedID: "a",
+            selectedIDs: ["a", "b", "c"]
+        ) == ["a", "b", "c"])
+    }
+
+    @Test("context-menu delete targets only an unselected event")
+    func contextMenuDeleteUsesClickedEvent() {
+        #expect(EventSelectionLogic.contextMenuDeletionIDs(
+            clickedID: "c",
+            selectedIDs: ["a", "b"]
+        ) == ["c"])
+    }
+
     @Test("duplicate IDs are unique and z-order continues after existing elements")
     func duplicateIDsAndZOrder() {
         var candidates = ["existing", "existing", "copy-1", "copy-2"]

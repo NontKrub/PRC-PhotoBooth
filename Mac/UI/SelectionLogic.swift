@@ -56,6 +56,10 @@ enum EventSelectionLogic {
         return [selectedID]
     }
 
+    static func contextMenuDeletionIDs(clickedID: String, selectedIDs: Set<String>) -> Set<String> {
+        selectedIDs.contains(clickedID) ? selectedIDs : [clickedID]
+    }
+
     static func deletionPlan(selectedIDs: Set<String>, activeID: String?) -> EventDeletionPlan {
         EventDeletionPlan(
             ids: selectedIDs,

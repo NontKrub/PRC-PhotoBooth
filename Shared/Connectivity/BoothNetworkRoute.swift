@@ -165,6 +165,20 @@ public struct BoothNetworkRouteMachine: Equatable, Sendable {
         startWiFiIfAvailable(wifiAvailable, fallback: true)
     }
 
+    public mutating func manualPreferredLANRetry(
+        lanAvailable: Bool,
+        wifiAvailable: Bool,
+        boothIsIdle: Bool
+    ) -> BoothNetworkRouteCommand {
+        guard preference == .lan,
+              case .fallbackWiFi = state,
+              lanAvailable,
+              wifiAvailable,
+              boothIsIdle else { return .none }
+        state = .connectingLAN
+        return .startLAN
+    }
+
     public mutating func lanPathChanged(
         isAvailable: Bool,
         wifiAvailable: Bool,

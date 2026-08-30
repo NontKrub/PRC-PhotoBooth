@@ -117,6 +117,10 @@ public final class MultipeerService: NSObject, BoothTransport {
         // transport lifecycle compatible with NetworkBoothTransport.
     }
 
+    public func restart() {
+        resetPeer()
+    }
+
     private func resetPeer() {
         stopDiscovery()
         clearConnectionState()

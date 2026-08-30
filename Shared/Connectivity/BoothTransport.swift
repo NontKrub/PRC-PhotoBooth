@@ -235,9 +235,17 @@ public protocol BoothTransport: AnyObject {
     var onPreviewFrame: (@MainActor (Data) -> Void)? { get set }
 
     func start()
+    func restart()
     func sendControl(_ message: Message)
     func sendPreviewFrame(_ jpegData: Data)
     func disconnect()
+}
+
+public extension BoothTransport {
+    func restart() {
+        disconnect()
+        start()
+    }
 }
 
 public enum BoothTransportChannel: UInt8, Codable, Sendable {
