@@ -170,7 +170,12 @@ public struct BoothPairingQRCodePayload: Codable, Sendable, Equatable {
               let data = Data(base64URLString: String(string.dropFirst(prefix.count))) else {
             throw BoothPairingError.invalidQRPayload
         }
-        let payload = try JSONDecoder().decode(Self.self, from: data)
+        let payload: Self
+        do {
+            payload = try JSONDecoder().decode(Self.self, from: data)
+        } catch {
+            throw BoothPairingError.invalidQRPayload
+        }
         guard payload.schemaVersion == currentSchemaVersion else {
             throw BoothPairingError.unsupportedQRSchema
         }
@@ -179,6 +184,10 @@ public struct BoothPairingQRCodePayload: Codable, Sendable, Equatable {
 
     public func validate(now: Date = Date(), expectedMacID: String? = nil) throws {
         guard schemaVersion == Self.currentSchemaVersion else { throw BoothPairingError.unsupportedQRSchema }
+        guard !macDeviceID.isEmpty,
+              !macDeviceName.isEmpty,
+              !pairingSessionID.isEmpty,
+              !oneTimeToken.isEmpty else { throw BoothPairingError.invalidQRPayload }
         guard now < expiresAt else { throw BoothPairingError.expired }
         if let expectedMacID, expectedMacID != macDeviceID {
             throw BoothPairingError.wrongDevice
@@ -196,6 +205,10 @@ public enum BoothPairingAttemptResult: Equatable, Sendable {
 public struct BoothPairingSession: Sendable, Equatable {
     public static let lifetime: TimeInterval = 120
     public static let maximumPINAttempts = 5
+
+    public static func isValidPIN(_ candidate: String) -> Bool {
+        candidate.utf8.count == 6 && candidate.utf8.allSatisfy { $0 >= 48 && $0 <= 57 }
+    }
 
     public let info: BoothPairingSessionInfo
     public let pin: String
@@ -260,7 +273,7 @@ public struct BoothPairingSession: Sendable, Equatable {
             isConsumed = true
             return .locked
         }
-        guard candidate == pin else {
+        guard Self.isValidPIN(candidate), candidate == pin else {
             failedPINAttempts += 1
             if failedPINAttempts >= Self.maximumPINAttempts {
                 isConsumed = true
@@ -321,7 +334,12 @@ public struct BoothAuthChallenge: Codable, Sendable, Equatable {
     }
 
     public func isFresh(at now: Date = Date()) -> Bool {
-        now >= issuedAt.addingTimeInterval(-1) && now.timeIntervalSince(issuedAt) <= Self.lifetime
+        !id.isEmpty &&
+        nonce.count == 32 &&
+        !challengerDeviceID.isEmpty &&
+        !responderDeviceID.isEmpty &&
+        now >= issuedAt &&
+        now.timeIntervalSince(issuedAt) <= Self.lifetime
     }
 }
 
@@ -366,12 +384,18 @@ public enum BoothPairingCrypto {
         secret: Data,
         now: Date = Date()
     ) -> Bool {
-        guard challenge.isFresh(at: now),
+        guard secret.count == 32,
+              challenge.isFresh(at: now),
               challenge.responderDeviceID == expectedResponderDeviceID,
               proof.challengeID == challenge.id,
-              proof.responderDeviceID == expectedResponderDeviceID else { return false }
-        let expected = makeProof(for: challenge, responderDeviceID: expectedResponderDeviceID, secret: secret)
-        return proof.proof == expected.proof
+              proof.responderDeviceID == expectedResponderDeviceID,
+              proof.proof.count == SHA256.Digest.byteCount else { return false }
+        let key = SymmetricKey(data: secret)
+        return HMAC<SHA256>.isValidAuthenticationCode(
+            proof.proof,
+            authenticating: canonicalChallengeData(challenge, responderDeviceID: expectedResponderDeviceID),
+            using: key
+        )
     }
 
     private static func canonicalChallengeData(
@@ -430,6 +454,7 @@ public enum BoothPairingError: LocalizedError, Equatable {
     case unpaired
     case notSelected
     case authenticationFailed
+    case invalidSecret
     case keychain(OSStatus)
 
     public var errorDescription: String? {
@@ -446,6 +471,7 @@ public enum BoothPairingError: LocalizedError, Equatable {
         case .unpaired: return "This device is not paired."
         case .notSelected: return "This Mac is configured for another iPad. Select this iPad in Mac Settings first."
         case .authenticationFailed: return "Authentication failed."
+        case .invalidSecret: return "The pairing secret is invalid."
         case .keychain(let status): return "Keychain error (\(status))."
         }
     }
@@ -532,11 +558,12 @@ final class BoothTrustedPeerStore {
     }
 
     func trust(_ peer: TrustedBoothPeer, secret: Data) throws {
+        guard secret.count == 32 else { throw BoothPairingError.invalidSecret }
+        try saveSecret(secret, peerID: peer.id)
         var peers = trustedPeers
         if let index = peers.firstIndex(where: { $0.id == peer.id }) { peers[index] = peer }
         else { peers.append(peer) }
         trustedPeers = peers
-        try saveSecret(secret, peerID: peer.id)
     }
 
     func updateLastSeen(peerID: String, name: String, date: Date = Date()) {
@@ -562,7 +589,10 @@ final class BoothTrustedPeerStore {
 
     func forget(peerID: String) {
         trustedPeers.removeAll { $0.id == peerID }
-        if preferredPeerID == peerID { preferredPeerID = nil }
+        if preferredPeerID == peerID {
+            preferredPeerID = nil
+            autoReconnect = false
+        }
         deleteSecret(peerID: peerID)
     }
 
@@ -584,6 +614,7 @@ final class BoothTrustedPeerStore {
         if status == errSecSuccess { return }
         guard status == errSecItemNotFound else { throw BoothPairingError.keychain(status) }
         var add = query
+        add[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
         add[kSecValueData as String] = secret
         let addStatus = SecItemAdd(add as CFDictionary, nil)
         guard addStatus == errSecSuccess else { throw BoothPairingError.keychain(addStatus) }

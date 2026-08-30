@@ -81,7 +81,7 @@ struct IdleView: View {
             }
         }
         .onTapGesture {
-            if case .connected = vm.multipeer.connectionStatus.state {
+            if vm.isConnectionReady {
                 vm.customerTappedToBegin()
             }
         }

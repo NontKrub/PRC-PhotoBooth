@@ -291,7 +291,16 @@ final class BoothPreflightService {
 
     private func printerTestResult(_ context: BoothPreflightContext, now: Date) -> PreflightCheckResult {
         guard let test = context.printerTestResult else { return result(.printerTest, "Printer test", "Not run during this application launch.", .notRun, .recommended, now) }
-        return result(.printerTest, "Printer test", test.message, test.isSuccess ? .passed : .failed, .recommended, test.date)
+        let status: PreflightCheckStatus
+        switch test.outcome {
+        case .submitted:
+            status = .passed
+        case .cancelled:
+            status = .skipped
+        case nil:
+            status = test.isSuccess ? .passed : .failed
+        }
+        return result(.printerTest, "Printer test", test.message, status, .recommended, test.date)
     }
 
     private func calculateReadiness(from results: [PreflightCheckResult]) -> BoothReadinessStatus {

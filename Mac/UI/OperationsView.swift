@@ -79,7 +79,7 @@ enum OperationsStatusLogic {
             return OperationsSectionStatus(summary: "Unavailable", severity: .failure)
         }
         if let result = lastTestResult {
-            if result.message == "Print dialog cancelled." {
+            if result.outcome == .cancelled {
                 return OperationsSectionStatus(summary: "Test cancelled", severity: .normal)
             }
             if !result.isSuccess {
@@ -487,9 +487,14 @@ struct OperationsView: View {
                 Text("System default: \(NSPrintInfo.shared.printer.name)")
                     .font(.caption).foregroundStyle(.secondary)
                 if let result = coordinator.printer.lastTestResult {
-                    Label(result.message, systemImage: result.isSuccess ? "checkmark.circle" : "xmark.circle")
+                    let cancelled = result.outcome == .cancelled
+                    let resultColor: Color = cancelled ? .secondary : result.isSuccess ? .green : .red
+                    Label(
+                        result.message,
+                        systemImage: cancelled ? "minus.circle" : result.isSuccess ? "checkmark.circle" : "xmark.circle"
+                    )
                         .font(.caption)
-                        .foregroundStyle(result.isSuccess ? .green : .red)
+                        .foregroundStyle(resultColor)
                 } else {
                     Text("Printer test: Not run this launch.").font(.caption).foregroundStyle(.secondary)
                 }
@@ -498,6 +503,7 @@ struct OperationsView: View {
                         Task { _ = try? await coordinator.printer.printTestPage(); await coordinator.runSafePreflight() }
                     }
                     .buttonStyle(.bordered)
+                    .accessibilityIdentifier("Print Test Page")
                     Button("Open System Print Settings…") {
                         _ = SystemSettingsRouter.open(.printersAndScanners)
                     }
@@ -642,9 +648,9 @@ struct OperationsView: View {
 
     private var readinessTitle: String {
         switch coordinator.preflight.readiness {
-        case .ready: return operatorString("Ready", locale: locale)
-        case .readyWithWarnings: return operatorString("Ready with Warnings", locale: locale)
-        case .notReady: return operatorString("Not Ready", locale: locale)
+        case .ready: return operatorString("READY FOR EVENT", locale: locale)
+        case .readyWithWarnings: return operatorString("READY WITH WARNINGS", locale: locale)
+        case .notReady: return operatorString("NOT READY", locale: locale)
         case .checking: return operatorString("Checking…", locale: locale)
         }
     }

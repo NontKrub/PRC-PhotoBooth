@@ -1,4 +1,24 @@
-# PRC PhotoBooth v1.3 TODO
+# Current release: v1.4.2 — Stability, Printing, Connectivity & Pairing
+
+This is the active checklist. Historical v1.3/v1.4 notes remain below and are not release instructions.
+
+- [x] Fix printer cancellation outcome and preflight mapping; cancellation is skipped, not passed or failed.
+- [x] Remove misleading Actual Size mode and retain native macOS print-panel controls.
+- [x] Treat unknown disk space as warning/unknown; make Operations refresh task cancellation-aware.
+- [x] Add explicit manual LAN retry, two-second discovery grace, conservative idle recovery, and focused route tests.
+- [x] Persist device identity/name; store trusted metadata in preferences and pairing secrets in Keychain.
+- [x] Add protocol-v3 pairing/auth messages, six-digit PIN, two-minute expiry, attempt limit, QR payload, HMAC reconnect, forget, and selected-peer policy.
+- [x] Add Mac/iPad pairing settings, QR scanner permission/error paths, accessibility identifiers, and localized visible strings.
+- [x] Update CI triggers, Release artifacts, generic device compile, stable runner lane, README, and current release plan.
+- [x] Run final full Mac and iPad automated matrix; Mac tests 337/337 and iPad tests 4/4 passed; Mac/iPad Debug and Release builds plus generic iOS Release compile passed.
+- [x] Run final Ponytail review; removed one unused discovery helper, then reran the final gates.
+- [ ] Run Computer Use Mac/iPad GUI matrix; record blocked window/camera/network cases honestly.
+- [ ] Run physical Ethernet, PIN/QR, printer, camera, and long-run gates.
+- [ ] Mark release-ready only after all non-hardware blockers pass.
+
+---
+
+# Historical: PRC PhotoBooth v1.3 TODO
 
 ## Current reliability/network/GIF task
 

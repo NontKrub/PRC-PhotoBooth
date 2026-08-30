@@ -102,6 +102,14 @@ struct iPadConnectionSettingsView: View {
                 if preferred == nil && status.peerID != preferredID {
                     Label("Preferred Mac unavailable", systemImage: "exclamationmark.triangle")
                         .foregroundStyle(.orange)
+                    HStack {
+                        Button("Retry") { vm.refreshNearbyMacs() }
+                            .accessibilityIdentifier("Retry Preferred Mac")
+                        Button("Choose Another Mac") {
+                            transport?.selectPreferredPeer(nil)
+                        }
+                        .accessibilityIdentifier("Choose Another Mac")
+                    }
                 }
                 if let transport {
                     Toggle("Automatically reconnect to selected Mac", isOn: Binding(
@@ -166,21 +174,28 @@ struct iPadConnectionSettingsView: View {
                             }
                         }
 
-                        HStack {
-                            Text(peer.isTrusted ? "Trusted" : "Not Paired")
+                        if peer.protocolVersion != BoothTransportHello.currentProtocolVersion {
+                            Text("Version incompatible")
                                 .font(.caption)
-                                .foregroundStyle(peer.isTrusted ? .green : .orange)
-                            Spacer()
-                            if peer.isTrusted {
-                                Button("Connect") { vm.connect(to: peer.id) }
-                                    .disabled(!vm.canChangeConnection || status.peerID == peer.id && status.isPeerAuthenticated)
-                                    .accessibilityIdentifier("Connect Mac")
-                            } else {
-                                Button("Pair") {
-                                    selectedPeerForPIN = peer.id
-                                    showPINEntry = true
+                                .foregroundStyle(.orange)
+                        } else {
+                            HStack {
+                                Text(peer.isTrusted ? "Trusted" : "Not Paired")
+                                    .font(.caption)
+                                    .foregroundStyle(peer.isTrusted ? .green : .orange)
+                                Spacer()
+                                if peer.isTrusted {
+                                    Button("Connect") { vm.connect(to: peer.id) }
+                                        .disabled(!vm.canChangeConnection || status.peerID == peer.id && status.isPeerAuthenticated)
+                                        .accessibilityIdentifier("Connect Mac")
+                                } else {
+                                    Button("Pair") {
+                                        selectedPeerForPIN = peer.id
+                                        showPINEntry = true
+                                    }
+                                    .disabled(!vm.canChangeConnection)
+                                    .accessibilityIdentifier("Pair Mac")
                                 }
-                                .disabled(!vm.canChangeConnection)
                             }
                         }
                     }
@@ -275,8 +290,8 @@ private struct PairingPINEntryView: View {
                 }
                 TextField("6-digit PIN", text: $pin)
                     .keyboardType(.numberPad)
-                    .onChange(of: pin) { _, value in
-                        pin = String(value.filter(\.isNumber).prefix(6))
+                    .onChange(of: pin) { value in
+                        pin = String(value.filter { $0 >= "0" && $0 <= "9" }.prefix(6))
                     }
                     .accessibilityIdentifier("Pairing PIN Entry")
 

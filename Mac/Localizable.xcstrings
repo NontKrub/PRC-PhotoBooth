@@ -1043,6 +1043,12 @@
     "Cancel" : {
       "extractionState" : "manual",
       "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Cancel"
+          }
+        },
         "th" : {
           "stringUnit" : {
             "state" : "translated",
@@ -1423,6 +1429,12 @@
     "Connect" : {
       "extractionState" : "manual",
       "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Connect"
+          }
+        },
         "th" : {
           "stringUnit" : {
             "state" : "translated",
@@ -1868,6 +1880,12 @@
     "Disconnect" : {
       "extractionState" : "manual",
       "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Disconnect"
+          }
+        },
         "th" : {
           "stringUnit" : {
             "state" : "translated",
@@ -1890,6 +1908,12 @@
     "Done" : {
       "extractionState" : "manual",
       "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Done"
+          }
+        },
         "th" : {
           "stringUnit" : {
             "state" : "translated",
@@ -4299,6 +4323,12 @@
     "Print Test Page" : {
       "extractionState" : "manual",
       "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Print Test Page"
+          }
+        },
         "th" : {
           "stringUnit" : {
             "state" : "translated",
@@ -4601,6 +4631,12 @@
     "Refresh" : {
       "extractionState" : "manual",
       "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Refresh"
+          }
+        },
         "th" : {
           "stringUnit" : {
             "state" : "translated",
@@ -4831,6 +4867,12 @@
     "Retry" : {
       "extractionState" : "manual",
       "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Retry"
+          }
+        },
         "th" : {
           "stringUnit" : {
             "state" : "translated",
@@ -4842,6 +4884,12 @@
     "Retry LAN Now" : {
       "extractionState" : "manual",
       "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Retry LAN Now"
+          }
+        },
         "th" : {
           "stringUnit" : {
             "state" : "translated",
@@ -6227,6 +6275,234 @@
             "value" : "Z%1$@"
           }
         }
+      }
+    },
+    "Authentication" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Authentication" } },
+        "th" : { "stringUnit" : { "state" : "translated", "value" : "การยืนยันตัวตน" } }
+      }
+    },
+    "Cancel Pairing" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Cancel Pairing" } },
+        "th" : { "stringUnit" : { "state" : "translated", "value" : "ยกเลิกการจับคู่" } }
+      }
+    },
+    "Connected iPad" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Connected iPad" } },
+        "th" : { "stringUnit" : { "state" : "translated", "value" : "iPad ที่เชื่อมต่อ" } }
+      }
+    },
+    "Connecting or authenticating…" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Connecting or authenticating…" } },
+        "th" : { "stringUnit" : { "state" : "translated", "value" : "กำลังเชื่อมต่อหรือยืนยันตัวตน…" } }
+      }
+    },
+    "Current route" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Current route" } },
+        "th" : { "stringUnit" : { "state" : "translated", "value" : "เส้นทางปัจจุบัน" } }
+      }
+    },
+    "Device Name" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Device Name" } },
+        "th" : { "stringUnit" : { "state" : "translated", "value" : "ชื่ออุปกรณ์" } }
+      }
+    },
+    "Expires in" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Expires in" } },
+        "th" : { "stringUnit" : { "state" : "translated", "value" : "หมดอายุใน" } }
+      }
+    },
+    "Forget All Paired iPads" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Forget All Paired iPads" } },
+        "th" : { "stringUnit" : { "state" : "translated", "value" : "ลืม iPad ที่จับคู่ทั้งหมด" } }
+      }
+    },
+    "Last Test" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Last Test" } },
+        "th" : { "stringUnit" : { "state" : "translated", "value" : "การทดสอบล่าสุด" } }
+      }
+    },
+    "Last seen: Never" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Last seen: Never" } },
+        "th" : { "stringUnit" : { "state" : "translated", "value" : "ยังไม่เคยพบ" } }
+      }
+    },
+    "Last seen: %@" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Last seen: %1$@" } },
+        "th" : { "stringUnit" : { "state" : "translated", "value" : "พบล่าสุด: %1$@" } }
+      }
+    },
+    "Pair New iPad" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Pair New iPad" } },
+        "th" : { "stringUnit" : { "state" : "translated", "value" : "จับคู่ iPad ใหม่" } }
+      }
+    },
+    "Pairing PIN" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Pairing PIN" } },
+        "th" : { "stringUnit" : { "state" : "translated", "value" : "PIN สำหรับจับคู่" } }
+      }
+    },
+    "Pairing QR" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Pairing QR" } },
+        "th" : { "stringUnit" : { "state" : "translated", "value" : "QR สำหรับจับคู่" } }
+      }
+    },
+    "Pairing code expired" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Pairing code expired" } },
+        "th" : { "stringUnit" : { "state" : "translated", "value" : "รหัสจับคู่หมดอายุ" } }
+      }
+    },
+    "QR code unavailable" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "QR code unavailable" } },
+        "th" : { "stringUnit" : { "state" : "translated", "value" : "QR ใช้งานไม่ได้" } }
+      }
+    },
+    "Round trip" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Round trip" } },
+        "th" : { "stringUnit" : { "state" : "translated", "value" : "เวลาไปกลับ" } }
+      }
+    },
+    "Save Device Name" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Save Device Name" } },
+        "th" : { "stringUnit" : { "state" : "translated", "value" : "บันทึกชื่ออุปกรณ์" } }
+      }
+    },
+    "Selected" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Selected" } },
+        "th" : { "stringUnit" : { "state" : "translated", "value" : "เลือกอยู่" } }
+      }
+    },
+    "Test Connection" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Test Connection" } },
+        "th" : { "stringUnit" : { "state" : "translated", "value" : "ทดสอบการเชื่อมต่อ" } }
+      }
+    },
+    "Testing Connection…" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Testing Connection…" } },
+        "th" : { "stringUnit" : { "state" : "translated", "value" : "กำลังทดสอบการเชื่อมต่อ…" } }
+      }
+    },
+    "This Mac" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "This Mac" } },
+        "th" : { "stringUnit" : { "state" : "translated", "value" : "Mac เครื่องนี้" } }
+      }
+    },
+    "Use This iPad" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Use This iPad" } },
+        "th" : { "stringUnit" : { "state" : "translated", "value" : "ใช้ iPad นี้" } }
+      }
+    },
+    "Trusted" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Trusted" } },
+        "th" : { "stringUnit" : { "state" : "translated", "value" : "เชื่อถือ" } }
+      }
+    },
+    "Preferred iPad" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Preferred iPad" } },
+        "th" : { "stringUnit" : { "state" : "translated", "value" : "iPad ที่เลือก" } }
+      }
+    },
+    "No trusted iPads" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "No trusted iPads" } },
+        "th" : { "stringUnit" : { "state" : "translated", "value" : "ไม่มี iPad ที่เชื่อถือ" } }
+      }
+    },
+    "No authenticated iPad connected." : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "No authenticated iPad connected." } },
+        "th" : { "stringUnit" : { "state" : "translated", "value" : "ไม่มี iPad ที่ยืนยันตัวตนเชื่อมต่ออยู่" } }
+      }
+    },
+    "This iPad must be paired again before it can reconnect." : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "This iPad must be paired again before it can reconnect." } },
+        "th" : { "stringUnit" : { "state" : "translated", "value" : "ต้องจับคู่ iPad เครื่องนี้ใหม่ก่อนเชื่อมต่ออีกครั้ง" } }
+      }
+    },
+    "All trusted iPads and their pairing secrets will be removed from this Mac." : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "All trusted iPads and their pairing secrets will be removed from this Mac." } },
+        "th" : { "stringUnit" : { "state" : "translated", "value" : "iPad ที่เชื่อถือและรหัสลับการจับคู่ทั้งหมดจะถูกลบออกจาก Mac เครื่องนี้" } }
+      }
+    },
+    "System Printer" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "System Printer" } },
+        "th" : { "stringUnit" : { "state" : "translated", "value" : "เครื่องพิมพ์ระบบ" } }
+      }
+    },
+    "LAN is unavailable. Wi-Fi fallback is active." : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "LAN is unavailable. Wi-Fi fallback is active." } },
+        "th" : { "stringUnit" : { "state" : "translated", "value" : "LAN ไม่พร้อมใช้งาน กำลังใช้ Wi-Fi สำรอง" } }
+      }
+    },
+    "Ethernet has not been confirmed by the system. Retry performs a direct wired connection attempt." : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Ethernet has not been confirmed by the system. Retry performs a direct wired connection attempt." } },
+        "th" : { "stringUnit" : { "state" : "translated", "value" : "ระบบยังไม่ยืนยัน Ethernet การลองใหม่จะพยายามเชื่อมต่อแบบใช้สายโดยตรง" } }
+      }
+    },
+    "Ethernet is available. Retry the preferred wired connection now." : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Ethernet is available. Retry the preferred wired connection now." } },
+        "th" : { "stringUnit" : { "state" : "translated", "value" : "Ethernet พร้อมใช้งาน ลองเชื่อมต่อแบบใช้สายที่เลือกอีกครั้งตอนนี้" } }
+      }
+    },
+    "Tests the selected iPad, current route, control handshake, and preview channel." : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Tests the selected iPad, current route, control handshake, and preview channel." } },
+        "th" : { "stringUnit" : { "state" : "translated", "value" : "ทดสอบ iPad ที่เลือก เส้นทางปัจจุบัน การจับมือช่องควบคุม และช่องภาพตัวอย่าง" } }
+      }
+    },
+    "Forget" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Forget" } },
+        "th" : { "stringUnit" : { "state" : "translated", "value" : "ลืม" } }
+      }
+    },
+    "None" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "None" } },
+        "th" : { "stringUnit" : { "state" : "translated", "value" : "ไม่มี" } }
+      }
+    },
+    "Authentication failed" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Authentication failed" } },
+        "th" : { "stringUnit" : { "state" : "translated", "value" : "การยืนยันตัวตนล้มเหลว" } }
+      }
+    },
+    "Pairing expired" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Pairing expired" } },
+        "th" : { "stringUnit" : { "state" : "translated", "value" : "การจับคู่หมดอายุ" } }
       }
     },
     "ไทย" : {

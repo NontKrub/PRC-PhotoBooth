@@ -1,4 +1,31 @@
-# PRC PhotoBooth — v1.3 Reliability Hardening
+# PRC PhotoBooth — v1.4.2 Stability, Printing, Connectivity & Pairing
+
+> Current release work starts from `fix/v1.4.1-stability-print-connectivity` at reviewed head `e4bef7bac0c4f7f4e713dda1b39e5b471b874cdb`. v1.4.1 is not a separate release.
+
+## Current v1.4.2 ledger
+
+- [x] Version/config source of truth: Mac and iPad `1.4.2 (6)`, iPadOS 16.0, iPad-only target.
+- [x] Printer cancellation outcome, preflight skipped result, counter invariants, native panel flow, and Actual Size cleanup.
+- [x] Unknown disk-space warning and cancellation-aware Operations refresh.
+- [x] Manual LAN retry independent of a stale path-monitor sample; conservative automatic recovery retained.
+- [x] Two-second peer route-discovery grace and deterministic LAN/Wi-Fi route tests.
+- [x] Persistent installation identity, editable names, trusted metadata, Keychain secret storage, PIN session, QR payload, and HMAC reconnect model.
+- [x] Selected-peer filtering, preferred-device reconnect policy, wrong-peer rejection, preview identity binding, and protocol version 3 compatibility state.
+- [x] Mac/iPad connection settings, pairing QR scanner bridge, accessibility identifiers, and English/Thai catalog entries.
+- [x] CI push triggers, Xcode 27 lane, stable macOS lane, Release artifacts, and generic iOS device Release compile.
+- [x] Full local Debug/Release build matrix and complete automated suite after final edits: Mac tests 337/337; iPad tests 4/4; Mac/iPad Debug and Release builds plus generic iOS Release compile passed.
+- [x] Ponytail final-diff review and post-review test rerun; removed one unused discovery helper and kept the remaining pairing/transport paths scoped to the release requirements.
+- [ ] Computer Use Mac/iPad UI pass, including native print cancellation regression.
+- [ ] Real Mac↔iPad PIN/QR pairing and Ethernet/Wi-Fi fallback: pending physical/network-capable environment.
+- [ ] Physical printer, camera permission, QR scan, and long-run booth cycle gate.
+
+## Release blockers
+
+Do not mark this release ready while an automated build/test gate fails, an unknown peer can auto-connect, trust is not Keychain-backed, printer cancellation reports Passed, manual LAN retry is monitor-gated, or a production secret appears outside Keychain. GUI, camera, LAN, printer, and long-run items remain explicitly pending until exercised.
+
+---
+
+# Historical: PRC PhotoBooth — v1.3 Reliability Hardening
 
 > The PR #7 stabilization plan below is historical context. Current work is on `feature/v1.3-reliability-hardening`.
 

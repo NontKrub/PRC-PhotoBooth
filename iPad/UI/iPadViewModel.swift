@@ -48,6 +48,11 @@ final class iPadViewModel: ObservableObject {
     var networkTransport: NetworkBoothTransport? { multipeer as? NetworkBoothTransport }
     var connectionStatus: BoothConnectionStatus { multipeer.connectionStatus }
     var canChangeConnection: Bool { stateMachine.phase == .idle }
+    var isConnectionReady: Bool {
+        guard case .connected = connectionStatus.state else { return false }
+        guard networkTransport != nil else { return true }
+        return connectionStatus.isPeerAuthenticated && connectionStatus.isPreviewChannelConnected
+    }
 
     func renameDevice(_ name: String) {
         guard canChangeConnection else { return }

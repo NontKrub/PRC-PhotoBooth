@@ -88,6 +88,7 @@ struct MessageTests {
         for msg in messages {
             let encoded = try msg.encoded()
             let decoded = try Message.decoded(from: encoded)
+            #expect(decoded == msg)
             // Compare canonical JSON because Codable does not guarantee object-key order.
             let re = try JSONEncoder().encode(decoded)
             #expect(try canonicalJSON(encoded) == canonicalJSON(re))

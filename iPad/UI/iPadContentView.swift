@@ -2,6 +2,7 @@ import SwiftUI
 
 struct iPadContentView: View {
     @EnvironmentObject private var vm: iPadViewModel
+    @State private var showingConnectionSettings = false
 
     var body: some View {
         ZStack {
@@ -41,10 +42,36 @@ struct iPadContentView: View {
                         .foregroundStyle(.white.opacity(0.75))
                 }
             }
+
+            if vm.canChangeConnection {
+                VStack {
+                    HStack {
+                        Button {
+                            showingConnectionSettings = true
+                        } label: {
+                            Image(systemName: "gearshape.fill")
+                                .font(.title2)
+                                .frame(width: 44, height: 44)
+                                .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        .foregroundStyle(.white.opacity(0.85))
+                        .accessibilityLabel("Connection Settings")
+                        .accessibilityIdentifier("Connection Settings")
+                        Spacer()
+                    }
+                    Spacer()
+                }
+                .padding(.top, 12)
+                .padding(.leading, 12)
+            }
         }
         .statusBarHidden(true)
         .persistentSystemOverlays(.hidden)
         .environment(\.locale, Locale(identifier: vm.selectedLanguage.localeIdentifier))
+        .sheet(isPresented: $showingConnectionSettings) {
+            iPadConnectionSettingsView()
+        }
     }
 
     var processingIndicator: some View {

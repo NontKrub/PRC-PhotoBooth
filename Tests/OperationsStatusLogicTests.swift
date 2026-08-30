@@ -53,4 +53,18 @@ struct OperationsStatusLogicTests {
         #expect(OperationsStatusLogic.health(.unavailable).severity == .failure)
         #expect(OperationsStatusLogic.health(.degraded).severity == .warning)
     }
+
+    @Test("cancelled printer test is neutral, not a failure")
+    func cancelledPrinterTest() {
+        let result = PrinterTestResult(
+            date: .now,
+            printerName: "System Default",
+            isSuccess: false,
+            message: "Print dialog cancelled by operator.",
+            outcome: .cancelled
+        )
+        let status = OperationsStatusLogic.printer(.systemDefault, lastTestResult: result)
+        #expect(status.severity == .normal)
+        #expect(status.summary == "Test cancelled")
+    }
 }

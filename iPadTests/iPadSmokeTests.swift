@@ -97,4 +97,45 @@ struct iPadSmokeTests {
             #expect(host.viewIfLoaded != nil)
         }
     }
+
+    @Test("connection settings require authentication and stay locked during a session")
+    @MainActor
+    func connectionSettingsPolicy() {
+        let viewModel = iPadViewModel()
+        defer { viewModel.multipeer.disconnect() }
+
+        #expect(viewModel.canChangeConnection)
+        #expect(!viewModel.isConnectionReady)
+
+        viewModel.multipeer.connectionStatus.publish(
+            requestedNetwork: .lan,
+            state: .connected(peerName: "PRC-Booth-01"),
+            peerID: "mac-1",
+            peerDisplayName: "PRC-Booth-01",
+            routeState: .connectedLAN(peer: "PRC-Booth-01"),
+            effectiveNetwork: .lan,
+            isPreviewChannelConnected: true
+        )
+        viewModel.multipeer.connectionStatus.publishPairing(
+            trustedPeerIDs: ["mac-1"],
+            preferredPeerID: "mac-1",
+            updatePreferredPeer: true,
+            authenticated: false,
+            state: .authenticating(peerID: "mac-1")
+        )
+        #expect(!viewModel.isConnectionReady)
+
+        viewModel.multipeer.connectionStatus.publishPairing(
+            authenticated: true,
+            state: .authenticated(peerID: "mac-1")
+        )
+        #expect(viewModel.isConnectionReady)
+        viewModel.multipeer.connectionStatus.publishPreviewChannel(connected: false)
+        #expect(!viewModel.isConnectionReady)
+        viewModel.multipeer.connectionStatus.publishPreviewChannel(connected: true)
+        #expect(viewModel.isConnectionReady)
+
+        viewModel.stateMachine.startSession(config: EventConfig(photoCount: 1))
+        #expect(!viewModel.canChangeConnection)
+    }
 }

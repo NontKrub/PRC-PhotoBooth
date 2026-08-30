@@ -1,4 +1,4 @@
-import AVFoundation
+@preconcurrency import AVFoundation
 import SwiftUI
 import UIKit
 
@@ -8,16 +8,21 @@ struct PairingQRScannerView: View {
 
     @Environment(\.dismiss) private var dismiss
     @State private var authorizationStatus = AVCaptureDevice.authorizationStatus(for: .video)
+    @State private var cameraError: String?
 
     var body: some View {
         NavigationStack {
             Group {
                 switch authorizationStatus {
                 case .authorized:
-                    if AVCaptureDevice.default(for: .video) != nil {
+                    if let cameraError {
+                        unavailableView(message: cameraError)
+                    } else if AVCaptureDevice.default(for: .video) != nil {
                         PairingQRCameraView { value in
                             onScanned(value)
                             dismiss()
+                        } onUnavailable: { message in
+                            cameraError = message
                         }
                         .ignoresSafeArea(edges: .bottom)
                     } else {
@@ -53,7 +58,7 @@ struct PairingQRScannerView: View {
                 .font(.system(size: 52))
             Text(message)
                 .multilineTextAlignment(.center)
-            if authorizationStatus == .denied {
+            if authorizationStatus == .denied || authorizationStatus == .restricted {
                 Button("Open Settings") {
                     guard let url = URL(string: UIApplication.openSettingsURLString) else { return }
                     UIApplication.shared.open(url)
@@ -72,22 +77,25 @@ struct PairingQRScannerView: View {
 
 private struct PairingQRCameraView: UIViewControllerRepresentable {
     let onScanned: (String) -> Void
+    let onUnavailable: (String) -> Void
 
     func makeUIViewController(context: Context) -> PairingQRCameraViewController {
-        PairingQRCameraViewController(onScanned: onScanned)
+        PairingQRCameraViewController(onScanned: onScanned, onUnavailable: onUnavailable)
     }
 
     func updateUIViewController(_ uiViewController: PairingQRCameraViewController, context: Context) {}
 }
 
-private final class PairingQRCameraViewController: UIViewController, AVCaptureMetadataOutputObjectsDelegate {
+private final class PairingQRCameraViewController: UIViewController, @preconcurrency AVCaptureMetadataOutputObjectsDelegate {
     private let onScanned: (String) -> Void
+    private let onUnavailable: (String) -> Void
     private let session = AVCaptureSession()
     private var previewLayer: AVCaptureVideoPreviewLayer?
     private var didScan = false
 
-    init(onScanned: @escaping (String) -> Void) {
+    init(onScanned: @escaping (String) -> Void, onUnavailable: @escaping (String) -> Void) {
         self.onScanned = onScanned
+        self.onUnavailable = onUnavailable
         super.init(nibName: nil, bundle: nil)
     }
 
@@ -112,13 +120,21 @@ private final class PairingQRCameraViewController: UIViewController, AVCaptureMe
     }
 
     private func configureCapture() {
-        guard let camera = AVCaptureDevice.default(for: .video),
-              let input = try? AVCaptureDeviceInput(device: camera),
-              session.canAddInput(input) else { return }
+        guard let camera = AVCaptureDevice.default(for: .video) else {
+            onUnavailable("Camera is unavailable on this iPad.")
+            return
+        }
+        guard let input = try? AVCaptureDeviceInput(device: camera), session.canAddInput(input) else {
+            onUnavailable("The iPad camera could not be opened.")
+            return
+        }
         session.addInput(input)
 
         let output = AVCaptureMetadataOutput()
-        guard session.canAddOutput(output) else { return }
+        guard session.canAddOutput(output) else {
+            onUnavailable("QR scanning is unavailable on this iPad.")
+            return
+        }
         session.addOutput(output)
         output.setMetadataObjectsDelegate(self, queue: .main)
         output.metadataObjectTypes = [.qr]

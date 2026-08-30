@@ -38,28 +38,40 @@ public struct BoothPreviewDiagnostics: Equatable, Sendable {
 public struct EthernetProbeResult: Equatable, Sendable {
     public let interfaceAvailable: Bool
     public let peerDiscovered: Bool
+    public let identityMatched: Bool
+    public let trustedPairing: Bool
+    public let authenticated: Bool
     public let controlConnected: Bool
     public let handshakeSucceeded: Bool
     public let previewConnected: Bool
     public let duration: TimeInterval
     public let error: String?
+    public let roundTripLatency: TimeInterval?
 
     public init(
         interfaceAvailable: Bool,
         peerDiscovered: Bool,
+        identityMatched: Bool = false,
+        trustedPairing: Bool = false,
+        authenticated: Bool = false,
         controlConnected: Bool,
         handshakeSucceeded: Bool,
         previewConnected: Bool,
         duration: TimeInterval,
-        error: String?
+        error: String?,
+        roundTripLatency: TimeInterval? = nil
     ) {
         self.interfaceAvailable = interfaceAvailable
         self.peerDiscovered = peerDiscovered
+        self.identityMatched = identityMatched
+        self.trustedPairing = trustedPairing
+        self.authenticated = authenticated
         self.controlConnected = controlConnected
         self.handshakeSucceeded = handshakeSucceeded
         self.previewConnected = previewConnected
         self.duration = duration
         self.error = error
+        self.roundTripLatency = roundTripLatency
     }
 }
 

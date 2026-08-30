@@ -132,6 +132,10 @@ struct SettingsView: View {
     @State private var showCloudSSHSetup = false
     @State private var showResetPINConfirmation = false
     @State private var diagnosticsCopied = false
+    @State private var editedDeviceName = ""
+    @State private var showPairingSheet = false
+    @State private var peerToForget: TrustedBoothPeer?
+    @State private var showForgetAllPeers = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -156,8 +160,31 @@ struct SettingsView: View {
         .sheet(isPresented: $showCloudSSHSetup) {
             CloudSSHSetupView(setup: coordinator.cloudSSHSetup)
         }
+        .sheet(isPresented: $showPairingSheet) {
+            if let transport = coordinator.multipeer as? NetworkBoothTransport {
+                MacPairingSheet(transport: transport)
+            }
+        }
+        .confirmationDialog("Forget iPad?", item: $peerToForget) { peer in
+            Button("Forget " + peer.displayName, role: .destructive) {
+                (coordinator.multipeer as? NetworkBoothTransport)?.forgetPeer(peer.id)
+                peerToForget = nil
+            }
+            Button("Cancel", role: .cancel) { peerToForget = nil }
+        } message: { peer in
+            Text("This iPad must be paired again before it can reconnect.")
+        }
+        .confirmationDialog("Forget all paired iPads?", isPresented: $showForgetAllPeers) {
+            Button("Forget All", role: .destructive) {
+                (coordinator.multipeer as? NetworkBoothTransport)?.forgetAllPeers()
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("All trusted iPads and their pairing secrets will be removed from this Mac.")
+        }
         .task {
             coordinator.printer.refreshPrinters()
+            editedDeviceName = (coordinator.multipeer as? NetworkBoothTransport)?.deviceIdentity.displayName ?? "PRC Booth Mac"
         }
         .onChange(of: scenePhase) { _, newPhase in
             if newPhase == .active { coordinator.printer.refreshPrinters() }
@@ -244,7 +271,9 @@ struct SettingsView: View {
                 let status = connectionStatus
                 let presentation = BoothConnectionPresentationResolver.resolve(status)
                 let peers = status.connectedPeerNames
-                if presentation.controlConnected {
+                if let networkTransport = coordinator.multipeer as? NetworkBoothTransport {
+                    networkPeerControls(networkTransport, status: status)
+                } else if presentation.controlConnected {
                     VStack(alignment: .leading, spacing: 2) {
                         Label("Connected: \(status.peerDisplayName ?? "iPad")", systemImage: "ipad")
                         Text(presentation.effectiveTransport)
@@ -339,14 +368,15 @@ struct SettingsView: View {
                         coordinator.testEthernetConnection()
                     } label: {
                         Label(
-                            coordinator.ethernetTestInProgress ? "Checking Ethernet…" : "Check Ethernet Status",
+                            coordinator.ethernetTestInProgress ? "Testing Connection…" : "Test Connection",
                             systemImage: "cable.connector"
                         )
                     }
                     .buttonStyle(.bordered)
                     .disabled(coordinator.ethernetTestInProgress || coordinator.isCaptureSessionActive)
+                    .accessibilityIdentifier("Test Connection")
 
-                    Text("Current route verification only. Switch Connection to LAN for a full booth connection test.")
+                    Text("Tests the selected iPad, current route, control handshake, and preview channel.")
                         .font(.caption2)
                         .foregroundStyle(.secondary)
 
@@ -375,6 +405,7 @@ struct SettingsView: View {
                                 coordinator.isCaptureSessionActive
                                     || isRouteTransitioning(status)
                             )
+                            .accessibilityIdentifier("Retry LAN")
                         }
 
                         Button {
@@ -414,6 +445,119 @@ struct SettingsView: View {
         }
     }
 
+    @ViewBuilder
+    private func networkPeerControls(_ transport: NetworkBoothTransport, status: BoothConnectionStatus) -> some View {
+        let canChange = !coordinator.isCaptureSessionActive
+        VStack(alignment: .leading, spacing: 10) {
+            Text("This Mac")
+                .font(.subheadline.bold())
+            TextField("Device Name", text: $editedDeviceName)
+                .textFieldStyle(.roundedBorder)
+                .frame(maxWidth: 300)
+                .disabled(!canChange)
+                .onSubmit { transport.renameLocalDevice(editedDeviceName) }
+            Button("Save Device Name") {
+                transport.renameLocalDevice(editedDeviceName)
+            }
+            .buttonStyle(.bordered)
+            .disabled(!canChange || editedDeviceName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+
+            Divider()
+
+            Text("Connected iPad")
+                .font(.subheadline.bold())
+            if status.isPeerAuthenticated, let name = status.peerDisplayName {
+                Label(name, systemImage: "checkmark.circle.fill")
+                    .foregroundStyle(.green)
+                diagnosticRow("Authentication", "Trusted")
+                diagnosticRow("Current route", connectionRouteDescription(status))
+                if let latency = status.roundTripLatency {
+                    diagnosticRow("Round trip", String(Int(latency * 1000)) + " ms")
+                }
+                Button("Disconnect") {
+                    transport.disconnect()
+                }
+                .buttonStyle(.bordered)
+                .disabled(!canChange)
+                .accessibilityIdentifier("Disconnect iPad")
+            } else if case .connecting = status.state {
+                Label("Connecting or authenticating…", systemImage: "arrow.triangle.2.circlepath")
+                    .foregroundStyle(.orange)
+            } else {
+                Text("No authenticated iPad connected.")
+                    .foregroundStyle(.secondary)
+            }
+
+            Divider()
+
+            Text("Preferred iPad")
+                .font(.subheadline.bold())
+            if transport.trustedPeers.isEmpty {
+                Text("No trusted iPads")
+                    .foregroundStyle(.secondary)
+            } else {
+                Menu {
+                    Button("None") { transport.selectPreferredPeer(nil) }
+                    ForEach(transport.trustedPeers) { peer in
+                        Button {
+                            transport.selectPreferredPeer(peer.id)
+                        } label: {
+                            Label(peer.displayName, systemImage: peer.id == transport.preferredPeerID ? "checkmark" : "ipad")
+                        }
+                    }
+                } label: {
+                    LabeledContent("Preferred iPad", value: preferredPeerName(transport))
+                }
+                .disabled(!canChange)
+                .accessibilityIdentifier("Preferred iPad Picker")
+
+                ForEach(transport.trustedPeers) { peer in
+                    HStack {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(peer.displayName)
+                            Text(peer.lastSeenAt.map { "Last seen: \($0.formatted(date: .abbreviated, time: .shortened))" } ?? "Last seen: Never")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                        Spacer()
+                        if peer.id == transport.preferredPeerID {
+                            Label("Selected", systemImage: "checkmark.circle.fill")
+                                .font(.caption)
+                                .foregroundStyle(.green)
+                        } else {
+                            Button("Use This iPad") { transport.selectPreferredPeer(peer.id) }
+                                .disabled(!canChange)
+                        }
+                        Button("Forget", role: .destructive) { peerToForget = peer }
+                            .disabled(!canChange)
+                            .accessibilityIdentifier("Forget iPad")
+                    }
+                }
+            }
+
+            HStack {
+                Button("Pair New iPad") {
+                    if transport.startPairingSession() { showPairingSheet = true }
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(!canChange || status.isPeerAuthenticated)
+                .accessibilityIdentifier("Pair New iPad")
+
+                if !transport.trustedPeers.isEmpty {
+                    Button("Forget All Paired iPads", role: .destructive) {
+                        showForgetAllPeers = true
+                    }
+                    .disabled(!canChange)
+                }
+            }
+        }
+    }
+
+    private func preferredPeerName(_ transport: NetworkBoothTransport) -> String {
+        guard let preferredID = transport.preferredPeerID else { return "None" }
+        return transport.trustedPeers.first { $0.id == preferredID }?.displayName ?? "Unknown iPad"
+    }
+
     private func connectionRouteDescription(_ status: BoothConnectionStatus) -> String {
         BoothConnectionPresentationResolver.resolve(status).effectiveTransport
     }
@@ -422,9 +566,15 @@ struct SettingsView: View {
         VStack(alignment: .leading, spacing: 4) {
             diagnosticRow("Ethernet interface", result.interfaceAvailable ? "✓ Ready" : "✕ Unavailable")
             diagnosticRow("iPad discovery", result.peerDiscovered ? "✓ Ready" : "✕ Not found")
+            diagnosticRow("Device identity", result.identityMatched ? "✓ Matched" : "✕ Not matched")
+            diagnosticRow("Trusted pairing", result.trustedPairing ? "✓ Trusted" : "✕ Not paired")
+            diagnosticRow("Authentication", result.authenticated ? "✓ Authenticated" : "✕ Not authenticated")
             diagnosticRow("Control connection", result.controlConnected ? "✓ Ready" : "—")
             diagnosticRow("LAN handshake", result.handshakeSucceeded ? "✓ Ready" : "—")
             diagnosticRow("Preview channel", result.previewConnected ? "✓ Ready" : "—")
+            if let latency = result.roundTripLatency {
+                diagnosticRow("Round trip", String(Int(latency * 1000)) + " ms")
+            }
             diagnosticRow("Duration", String(format: "%.2f s", result.duration))
             if let error = result.error {
                 Text(error).font(.caption).foregroundStyle(.orange)
@@ -444,10 +594,16 @@ struct SettingsView: View {
             diagnosticRow("Ethernet path observation", pathObservationText(status.lanPathObservation))
             diagnosticRow("Wi-Fi path observation", pathObservationText(status.wifiPathObservation))
             diagnosticRow("Control channel", connectionStateText(status.state))
+            diagnosticRow("Authenticated", status.isPeerAuthenticated ? "Yes" : "No")
             diagnosticRow("Preview channel", status.isPreviewChannelConnected ? "Connected" : "Disconnected")
+            let preferred = (coordinator.multipeer as? NetworkBoothTransport).map(preferredPeerName) ?? "None"
+            diagnosticRow("Preferred peer", preferred)
             diagnosticRow("Peer", status.peerDisplayName ?? "None")
             diagnosticRow("LAN handshake", handshakeText(status.lanHandshake))
             diagnosticRow("Last network error", status.lastNetworkError ?? "None")
+            if let latency = status.roundTripLatency {
+                diagnosticRow("Round trip", String(Int(latency * 1000)) + " ms")
+            }
             diagnosticRow("Preview FPS", String(format: "%.1f", metrics.fps))
             diagnosticRow("Preview throughput", ByteCountFormatter.string(fromByteCount: Int64(metrics.bytesPerSecond), countStyle: .file) + "/s")
             diagnosticRow("Frames submitted", "\(metrics.framesSubmitted)")
@@ -666,15 +822,25 @@ struct SettingsView: View {
                     .font(.caption)
                     .foregroundStyle(printerStatusColor)
 
+                if let result = coordinator.printer.lastTestResult {
+                    let resultColor: Color = result.outcome == .cancelled ? .secondary : result.isSuccess ? .green : .red
+                    LabeledContent("Last Test") {
+                        Text(result.message)
+                            .foregroundStyle(resultColor)
+                            .multilineTextAlignment(.trailing)
+                    }
+                }
+
                 Toggle("Automatic Printing", isOn: $autoPrint)
                     .disabled(!printerIsConfigured)
                     .help("Prints the strip after required download jobs succeed.")
 
-                Button("Print Test…") {
+                Button("Print Test Page") {
                     Task { _ = try? await coordinator.printer.printTestPage() }
                 }
                 .buttonStyle(.bordered)
                 .disabled(coordinator.printer.isPrinting)
+                .accessibilityIdentifier("Print Test Page")
 
                 Divider()
 
@@ -698,13 +864,96 @@ struct SettingsView: View {
 
     private var printerStatusText: String {
         switch coordinator.printer.configuredPrinterStatus() {
-        case .systemDefault: return "System default: \(NSPrintInfo.shared.printer.name)"
-        case .unavailable(let name): return "System printer unavailable: \(name)"
+        case .systemDefault: return "System Printer: \(NSPrintInfo.shared.printer.name)"
+        case .unavailable(let name): return "System Printer unavailable: \(name)"
         }
     }
 
     private var printerStatusColor: Color {
         if case .unavailable = coordinator.printer.configuredPrinterStatus() { return .red }
         return .secondary
+    }
+}
+
+private struct MacPairingSheet: View {
+    let transport: NetworkBoothTransport
+
+    @Environment(\.dismiss) private var dismiss
+    @State private var now = Date()
+
+    var body: some View {
+        VStack(spacing: 16) {
+            Text("Pair New iPad")
+                .font(.title.bold())
+
+            if let session = transport.currentPairingSessionInfo {
+                let expired = session.expiresAt <= now
+                if expired {
+                    Label("Pairing code expired", systemImage: "clock.badge.exclamationmark")
+                        .foregroundStyle(.orange)
+                        .accessibilityIdentifier("Pairing expired")
+                } else {
+                    Text("Pairing PIN")
+                        .font(.headline)
+                    if let pin = transport.pairingPINForDisplay {
+                        Text(pin)
+                            .font(.system(size: 42, weight: .bold, design: .monospaced))
+                            .tracking(4)
+                            .accessibilityLabel("Pairing PIN " + pin)
+                            .accessibilityIdentifier("Pairing PIN Display")
+                    }
+
+                    HStack(spacing: 4) {
+                        Text("Expires in")
+                        Text(session.expiresAt, style: .timer)
+                    }
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+
+                    if let payload = transport.pairingQRCodePayload,
+                       let encoded = try? payload.encodedString(),
+                       let image = QRCodeGenerator.makeImage(
+                           payload: encoded,
+                           scale: 6,
+                           quietZoneModules: 4
+                       ) {
+                        Image(nsImage: NSImage(cgImage: image, size: NSSize(width: 260, height: 260)))
+                            .interpolation(.none)
+                            .accessibilityLabel("Pairing QR")
+                            .accessibilityIdentifier("Pairing QR")
+                    } else {
+                        Text("QR code unavailable")
+                            .foregroundStyle(.orange)
+                    }
+                }
+            } else {
+                Label("Pairing code expired", systemImage: "clock.badge.exclamationmark")
+                    .foregroundStyle(.orange)
+            }
+
+            Button("Cancel Pairing", role: .cancel) {
+                transport.cancelPairingSession()
+                dismiss()
+            }
+            .buttonStyle(.bordered)
+            .accessibilityIdentifier("Cancel Pairing")
+        }
+        .padding(28)
+        .frame(minWidth: 360, minHeight: 420)
+        .task {
+            while !Task.isCancelled {
+                do {
+                    try await Task.sleep(for: .seconds(1))
+                } catch {
+                    return
+                }
+                now = Date()
+            }
+        }
+        .onDisappear {
+            if transport.currentPairingSessionInfo != nil {
+                transport.cancelPairingSession()
+            }
+        }
     }
 }

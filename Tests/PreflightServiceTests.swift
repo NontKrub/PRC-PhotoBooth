@@ -182,6 +182,24 @@ func fullPreflightPrinterOutcomes() async {
     #expect(service.result(for: .printerTest)?.status == .failed)
 }
 
+@Test("a stored cancelled printer test remains skipped on safe checks")
+@MainActor
+func storedCancelledPrinterTestSkips() async {
+    let service = BoothPreflightService()
+    var base = context()
+    let cancelled = PrinterTestResult(
+        date: Date(),
+        printerName: "Canon",
+        isSuccess: false,
+        message: "Printer test cancelled by operator.",
+        outcome: .cancelled
+    )
+
+    base.printerTestResult = cancelled
+    await service.runSafeChecks(using: base)
+    #expect(service.result(for: .printerTest)?.status == .skipped)
+}
+
 }
 
 private enum TestPreflightError: LocalizedError {

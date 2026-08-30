@@ -33,6 +33,15 @@ struct BoothPairingTests {
         #expect(session.validatePIN(pin, now: now.addingTimeInterval(2)) == .locked)
     }
 
+    @Test("PIN validation accepts only six ASCII digits")
+    func pinFormat() {
+        #expect(BoothPairingSession.isValidPIN("482193"))
+        #expect(!BoothPairingSession.isValidPIN("48219"))
+        #expect(!BoothPairingSession.isValidPIN("4821930"))
+        #expect(!BoothPairingSession.isValidPIN("１２３４５６"))
+        #expect(!BoothPairingSession.isValidPIN("48219a"))
+    }
+
     @Test("invalid PIN is rejected and five attempts invalidate the session")
     func invalidPINRateLimit() throws {
         let now = Date(timeIntervalSince1970: 20_000)
@@ -87,6 +96,24 @@ struct BoothPairingTests {
         #expect(session.validateQRToken(payload.oneTimeToken, now: now) == .locked)
     }
 
+    @Test("malformed QR payloads return a pairing error")
+    func malformedQRPayload() throws {
+        #expect(throws: BoothPairingError.invalidQRPayload) {
+            try BoothPairingQRCodePayload.decode("prc-photobooth-pairing-v1:not-json")
+        }
+
+        let invalid = BoothPairingQRCodePayload(
+            macDeviceID: "",
+            macDeviceName: "PRC Booth Mac",
+            pairingSessionID: "session",
+            oneTimeToken: "token",
+            expiresAt: Date(timeIntervalSince1970: 40_100)
+        )
+        #expect(throws: BoothPairingError.invalidQRPayload) {
+            try invalid.validate(now: Date(timeIntervalSince1970: 40_000))
+        }
+    }
+
     @Test("trusted peer store persists metadata, preferred peer, and Keychain secret; forget removes all")
     func trustedPeerPersistenceAndForget() throws {
         let suite = "BoothPairingTests.trust.\(UUID().uuidString)"
@@ -112,6 +139,7 @@ struct BoothPairingTests {
         #expect(store.trustedPeers.isEmpty)
         #expect(store.preferredPeerID == nil)
         #expect(store.secret(for: peer.id) == nil)
+        #expect(!store.autoReconnect)
     }
 
     @Test("HMAC proof succeeds with the paired secret and rejects wrong secret, stale challenge, or device")
@@ -140,6 +168,8 @@ struct BoothPairingTests {
         #expect(!BoothPairingCrypto.verify(proof, for: first, expectedResponderDeviceID: "ipad", secret: otherSecret, now: now))
         #expect(!BoothPairingCrypto.verify(proof, for: first, expectedResponderDeviceID: "other", secret: secret, now: now))
         #expect(!BoothPairingCrypto.verify(proof, for: first, expectedResponderDeviceID: "ipad", secret: secret, now: now.addingTimeInterval(31)))
+        #expect(!BoothPairingCrypto.verify(proof, for: first, expectedResponderDeviceID: "ipad", secret: secret, now: now.addingTimeInterval(-1)))
+        #expect(!BoothPairingCrypto.verify(proof, for: first, expectedResponderDeviceID: "ipad", secret: Data([0x01]), now: now))
         #expect(proof.proof != secondProof.proof)
     }
 

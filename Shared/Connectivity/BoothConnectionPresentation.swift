@@ -7,12 +7,15 @@ public struct BoothConnectionPresentation: Equatable, Sendable {
     public let effectiveTransport: String
     public let fallbackText: String?
     public let controlConnected: Bool
+    public let authenticated: Bool
+    public let preferredPeerID: String?
     public let previewConnected: Bool
     public let lanHandshake: String
     public let ethernetAvailable: Bool
     public let wifiAvailable: Bool
     public let previewFPS: Double
     public let throughputBytesPerSecond: Double
+    public let roundTripLatency: TimeInterval?
 }
 
 @MainActor
@@ -59,12 +62,15 @@ public enum BoothConnectionPresentationResolver {
             effectiveTransport: effectiveTransport,
             fallbackText: fallbackText,
             controlConnected: controlConnected,
+            authenticated: status.isPeerAuthenticated,
+            preferredPeerID: status.preferredPeerID,
             previewConnected: status.isPreviewChannelConnected,
             lanHandshake: handshakeText(status.lanHandshake),
             ethernetAvailable: status.isLANPathAvailable,
             wifiAvailable: status.isWiFiPathAvailable,
             previewFPS: status.previewDiagnostics.fps,
-            throughputBytesPerSecond: status.previewDiagnostics.bytesPerSecond
+            throughputBytesPerSecond: status.previewDiagnostics.bytesPerSecond,
+            roundTripLatency: status.roundTripLatency
         )
     }
 

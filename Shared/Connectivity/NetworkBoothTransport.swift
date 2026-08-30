@@ -13,6 +13,7 @@ public final class NetworkBoothTransport: BoothTransport {
     static let routeDiscoveryGracePeriod: TimeInterval = 2.0
     private static let lanRecoveryStabilityPeriod: TimeInterval = 2
     private static let lanRecoveryCooldown: TimeInterval = 5
+    private static let pairingCapability = "pairing-v1"
     private static let previewIdentityCapability = "preview-identity"
     private static let heartbeatInterval: TimeInterval = 2
     private static let heartbeatTimeout: TimeInterval = 8
@@ -65,6 +66,7 @@ public final class NetworkBoothTransport: BoothTransport {
     private var peerHello: BoothTransportHello?
     private var peerAuthenticated = false
     private var pendingAuthChallenge: BoothAuthChallenge?
+    private var didInitiateAuthentication = false
     private var discoveredPeersByID: [String: BoothDiscoveredPeer] = [:]
     private var controlListener: NWListener?
     private var previewListener: NWListener?
@@ -165,6 +167,9 @@ public final class NetworkBoothTransport: BoothTransport {
     public func startPairingSession() -> Bool {
         guard role == .mac else { return false }
         do {
+            if !peerAuthenticated {
+                controlConnection?.cancel()
+            }
             currentPairingSession?.invalidate()
             currentPairingSession = try BoothPairingSession.make(macIdentity: localIdentity)
             if let expiresAt = currentPairingSession?.info.expiresAt {
@@ -182,17 +187,21 @@ public final class NetworkBoothTransport: BoothTransport {
     public func cancelPairingSession() {
         currentPairingSession?.invalidate()
         currentPairingSession = nil
+        if !peerAuthenticated {
+            controlConnection?.cancel()
+        }
         connectionStatus.publishPairing(state: .idle)
         refreshAdvertisedServices()
     }
 
     public func selectPreferredPeer(_ peerID: String?) {
+        guard peerID.map(trustedStore.trustedPeerIDs.contains) ?? true else { return }
         trustedStore.preferredPeerID = peerID
         if role == .iPad {
             targetPeerID = peerID
-            if peerID != nil { trustedStore.autoReconnect = true }
+            trustedStore.autoReconnect = peerID != nil
             restartDiscoveryForPeerSelection()
-        } else if let peerID, let currentPeerID = peerDeviceID, currentPeerID != peerID {
+        } else if let currentPeerID = peerDeviceID, currentPeerID != peerID {
             controlConnection?.cancel()
         }
         publishPairingStatus()
@@ -208,7 +217,22 @@ public final class NetworkBoothTransport: BoothTransport {
 
     public func pairWithPIN(peerID: String, pin: String) {
         guard role == .iPad else { return }
-        let sessionID = discoveredPeersByID[peerID]?.pairingSessionID ?? ""
+        guard BoothPairingSession.isValidPIN(pin) else {
+            connectionStatus.publishPairing(state: .failed(BoothPairingError.invalidPIN.localizedDescription))
+            return
+        }
+        guard let peer = discoveredPeersByID[peerID], peer.role == .mac else {
+            connectionStatus.publishPairing(state: .failed("The selected Mac was not found."))
+            return
+        }
+        guard peer.protocolVersion == BoothTransportHello.currentProtocolVersion else {
+            connectionStatus.publishPairing(state: .failed(BoothPairingError.incompatibleProtocol.localizedDescription))
+            return
+        }
+        guard let sessionID = peer.pairingSessionID, !sessionID.isEmpty else {
+            connectionStatus.publishPairing(state: .failed("Pairing session unavailable."))
+            return
+        }
         beginPairing(peerID: peerID, sessionID: sessionID, method: .pin(pin))
     }
 
@@ -311,9 +335,12 @@ public final class NetworkBoothTransport: BoothTransport {
 
     public func probeEthernet() async -> EthernetProbeResult {
         let startedAt = Date()
-        let interfaceAvailable = didReceiveLANPathUpdate && isLANPathAvailable
+        let interfaceAvailable = isLANPathAvailable || activeInterface == .wiredEthernet
         let usingLAN = activeInterface == .wiredEthernet
         let peerDiscovered = usingLAN && !peerName.isEmpty
+        let identityMatched = peerDiscovered && peerDeviceID == trustedStore.preferredPeerID
+        let trustedPairing = peerDeviceID.map(trustedStore.trustedPeerIDs.contains) ?? false
+        let authenticated = connectionStatus.isPeerAuthenticated
         let controlConnected = usingLAN && connectionState == .connected(peerName: peerName)
         let handshakeSucceeded = usingLAN && lanHandshakeState == .ready
         let previewConnected = usingLAN && connectionStatus.isPreviewChannelConnected
@@ -325,6 +352,12 @@ public final class NetworkBoothTransport: BoothTransport {
             error = "Current route verification only. Switch Connection to LAN for a full booth connection test."
         } else if !peerDiscovered {
             error = "No PRC PhotoBooth iPad found over Ethernet."
+        } else if !identityMatched {
+            error = "The discovered iPad does not match the selected preferred device."
+        } else if !trustedPairing {
+            error = "The preferred iPad is not paired with this Mac."
+        } else if !authenticated {
+            error = "Preferred iPad authentication is not ready."
         } else if !controlConnected || !handshakeSucceeded {
             error = "Ethernet control handshake is not ready."
         } else if !previewConnected {
@@ -336,11 +369,15 @@ public final class NetworkBoothTransport: BoothTransport {
         return EthernetProbeResult(
             interfaceAvailable: interfaceAvailable,
             peerDiscovered: peerDiscovered,
+            identityMatched: identityMatched,
+            trustedPairing: trustedPairing,
+            authenticated: authenticated,
             controlConnected: controlConnected,
             handshakeSucceeded: handshakeSucceeded,
             previewConnected: previewConnected,
             duration: Date().timeIntervalSince(startedAt),
-            error: error
+            error: error,
+            roundTripLatency: connectionStatus.roundTripLatency
         )
     }
 
@@ -709,12 +746,6 @@ public final class NetworkBoothTransport: BoothTransport {
         }
     }
 
-    private func advertisedNetworkPreference(from result: NWBrowser.Result) -> BoothNetworkPreference? {
-        guard case .bonjour(let txtRecord) = result.metadata,
-              let rawValue = txtRecord["network"] else { return nil }
-        return BoothNetworkPreference(rawValue: rawValue)
-    }
-
     private func storePendingRouteEndpoint(_ endpoint: NWEndpoint, for interface: BoothNetworkInterfacePolicy) {
         switch interface {
         case .wifi:
@@ -727,6 +758,7 @@ public final class NetworkBoothTransport: BoothTransport {
     private func scheduleRouteDiscoveryFallback() {
         guard routeDiscoveryFallbackTask == nil else { return }
         routeDiscoveryFallbackTask = Task { @MainActor [weak self] in
+            defer { self?.routeDiscoveryFallbackTask = nil }
             do {
                 try await Task.sleep(for: .seconds(Self.routeDiscoveryGracePeriod))
             } catch {
@@ -746,7 +778,6 @@ public final class NetworkBoothTransport: BoothTransport {
                 ? self.pendingWiFiRouteEndpoint
                 : self.pendingLANRouteEndpoint
             guard let endpoint else { return }
-            self.routeDiscoveryFallbackTask = nil
             self.connectDiscoveredRoute(
                 interface: pendingInterface,
                 endpoint: endpoint,
@@ -840,11 +871,23 @@ public final class NetworkBoothTransport: BoothTransport {
         previewFrames.reset()
         didReceiveHello = false
         peerAuthenticated = false
+        didInitiateAuthentication = false
         peerHello = nil
         pendingAuthChallenge = nil
         peerDeviceID = nil
         expectedPeerDeviceID = nil
-        connectionStatus.publishPairing(authenticated: false)
+        let pairingState: BoothPairingState
+        if let session = currentPairingSession, session.isActive() {
+            pairingState = .pairing(expiresAt: session.info.expiresAt)
+        } else if let pendingPairingRequest {
+            pairingState = .pairing(
+                expiresAt: discoveredPeersByID[pendingPairingRequest.targetMacDeviceID]?.pairingExpiresAt
+                    ?? Date().addingTimeInterval(BoothPairingSession.lifetime)
+            )
+        } else {
+            pairingState = .idle
+        }
+        connectionStatus.publishPairing(authenticated: false, state: pairingState)
         resetPreviewIdentity()
     }
 
@@ -1041,7 +1084,7 @@ public final class NetworkBoothTransport: BoothTransport {
     }
 
     private func accept(_ connection: NWConnection, channel: BoothTransportChannel) {
-        if role == .mac, channel == .control, peerAuthenticated, controlConnection != nil {
+        if role == .mac, channel == .control, controlConnection != nil {
             connection.cancel()
             return
         }
@@ -1054,7 +1097,7 @@ public final class NetworkBoothTransport: BoothTransport {
             controlConnection?.cancel()
             controlConnection = connection
             controlEndpointDescription = connection.endpoint.debugDescription
-            didReceiveHello = false
+            resetControlAuthentication()
             controlParser = BoothFrameParser()
         } else {
             previewFrames.reset()
@@ -1077,7 +1120,7 @@ public final class NetworkBoothTransport: BoothTransport {
             controlConnection?.cancel()
             controlConnection = NWConnection(to: endpoint, using: makeParameters(for: activeInterface))
             controlEndpointDescription = description
-            didReceiveHello = false
+            resetControlAuthentication()
             controlParser = BoothFrameParser()
             if let connection = controlConnection { configure(connection, channel: channel) }
         } else {
@@ -1203,12 +1246,20 @@ public final class NetworkBoothTransport: BoothTransport {
 
     private func handleHello(_ hello: BoothTransportHello) {
         let expectedRole: DeviceRole = role == .mac ? .iPad : .mac
+        guard !hello.deviceID.isEmpty, !hello.deviceName.isEmpty else {
+            rejectControlConnection("Invalid device identity.")
+            return
+        }
         guard hello.protocolVersion == BoothTransportHello.currentProtocolVersion else {
             rejectControlConnection(BoothPairingError.incompatibleProtocol.localizedDescription)
             return
         }
         guard hello.role == expectedRole else {
             rejectControlConnection(BoothPairingError.wrongRole.localizedDescription)
+            return
+        }
+        guard hello.capabilities.contains(Self.pairingCapability) else {
+            rejectControlConnection(BoothPairingError.incompatibleProtocol.localizedDescription)
             return
         }
 
@@ -1285,6 +1336,7 @@ public final class NetworkBoothTransport: BoothTransport {
               hello.role == .iPad,
               request.iPadIdentity.id == hello.deviceID,
               request.iPadIdentity.role == .iPad,
+              !request.iPadIdentity.displayName.isEmpty,
               request.targetMacDeviceID == localIdentity.id else {
             rejectControlConnection("Pairing request does not match this connection.")
             return
@@ -1293,7 +1345,7 @@ public final class NetworkBoothTransport: BoothTransport {
             sendPairingFailure("Pairing mode is not active.")
             return
         }
-        guard request.sessionID.isEmpty || request.sessionID == session.info.sessionID else {
+        guard request.sessionID == session.info.sessionID else {
             sendPairingFailure("Pairing session does not match.")
             return
         }
@@ -1338,6 +1390,8 @@ public final class NetworkBoothTransport: BoothTransport {
                 )
                 beginAuthentication(with: peer.id)
             } catch {
+                currentPairingSession = nil
+                refreshAdvertisedServices()
                 sendPairingFailure(error.localizedDescription)
             }
         case .rejected(let remainingAttempts):
@@ -1354,11 +1408,13 @@ public final class NetworkBoothTransport: BoothTransport {
             refreshAdvertisedServices()
             connectionStatus.publishPairing(state: .failed("Pairing code expired"))
             sendPairingFailure("Pairing code expired.")
+            rejectControlConnection("Pairing code expired.")
         case .locked:
             currentPairingSession = nil
             refreshAdvertisedServices()
             connectionStatus.publishPairing(state: .failed("Too many incorrect pairing PIN attempts."))
             sendPairingFailure("Too many incorrect pairing PIN attempts.")
+            rejectControlConnection("Too many incorrect pairing PIN attempts.")
         }
     }
 
@@ -1376,6 +1432,8 @@ public final class NetworkBoothTransport: BoothTransport {
               let macIdentity = result.macIdentity,
               macIdentity.role == .mac,
               let secret = result.sharedSecret,
+              secret.count == 32,
+              !macIdentity.displayName.isEmpty,
               macIdentity.id == targetPeerID else {
             let reason = result.reason ?? "Pairing rejected."
             pendingPairingRequest = nil
@@ -1404,7 +1462,8 @@ public final class NetworkBoothTransport: BoothTransport {
     }
 
     private func beginAuthentication(with peerID: String) {
-        guard let secret = trustedStore.secret(for: peerID) else {
+        guard !didInitiateAuthentication else { return }
+        guard trustedStore.secret(for: peerID) != nil else {
             rejectControlConnection("Authentication failed: pairing secret is unavailable.")
             return
         }
@@ -1413,10 +1472,10 @@ public final class NetworkBoothTransport: BoothTransport {
                 challengerDeviceID: localIdentity.id,
                 responderDeviceID: peerID
             )
+            didInitiateAuthentication = true
             pendingAuthChallenge = challenge
             connectionStatus.publishPairing(authenticated: false, state: .authenticating(peerID: peerID))
             send(.authChallenge(challenge: challenge), on: controlConnection, channel: .control)
-            _ = secret
         } catch {
             rejectControlConnection(error.localizedDescription)
         }
@@ -1437,7 +1496,7 @@ public final class NetworkBoothTransport: BoothTransport {
             secret: secret
         )
         send(.authProof(proof: proof), on: controlConnection, channel: .control)
-        if pendingAuthChallenge == nil { beginAuthentication(with: hello.deviceID) }
+        if !didInitiateAuthentication { beginAuthentication(with: hello.deviceID) }
     }
 
     private func handleAuthProof(_ proof: BoothAuthProof) {
@@ -1783,6 +1842,19 @@ public final class NetworkBoothTransport: BoothTransport {
         previewIdentityVerified = false
     }
 
+    private func resetControlAuthentication() {
+        didReceiveHello = false
+        peerAuthenticated = false
+        didInitiateAuthentication = false
+        pendingAuthChallenge = nil
+        peerHello = nil
+        peerDeviceID = nil
+        expectedPeerDeviceID = nil
+        peerName = ""
+        connectedPeerNames = []
+        connectionStatus.publishPairing(authenticated: false)
+    }
+
     private func scheduleReconnect() {
         guard shouldReconnect, reconnectTask == nil else { return }
         let delay = Self.reconnectDelays[min(reconnectAttempt, Self.reconnectDelays.count - 1)]
@@ -1815,9 +1887,11 @@ public final class NetworkBoothTransport: BoothTransport {
 
     private static func localDeviceName(for role: DeviceRole) -> String {
 #if os(iOS)
-        return UIDevice.current.name
+        let name = UIDevice.current.name.trimmingCharacters(in: .whitespacesAndNewlines)
+        return name.isEmpty ? "PRC Booth iPad" : name
 #else
-        return Host.current().localizedName ?? (role == .mac ? "PRC Mac" : "iPad")
+        let name = Host.current().localizedName?.trimmingCharacters(in: .whitespacesAndNewlines)
+        return name?.isEmpty == false ? name! : (role == .mac ? "PRC Booth Mac" : "PRC Booth iPad")
 #endif
     }
 }

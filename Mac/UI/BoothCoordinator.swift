@@ -795,8 +795,14 @@ final class BoothCoordinator {
 
     var isCustomerDisplayReady: Bool {
         if isExternalViewerActive { return true }
-        if case .connected = connectionStatus.state { return true }
-        return false
+        return isAuthenticatedIPadConnected && connectionStatus.isPreviewChannelConnected
+    }
+
+    private var isAuthenticatedIPadConnected: Bool {
+        guard case .connected = connectionStatus.state else { return false }
+        guard multipeer is NetworkBoothTransport else { return true }
+        return connectionStatus.isPeerAuthenticated
+            && connectionStatus.peerID == connectionStatus.preferredPeerID
     }
 
     func refreshExternalScreens() {
@@ -1071,10 +1077,7 @@ final class BoothCoordinator {
     private func makePreflightContext() async -> BoothPreflightContext {
         let serverStatus = await server.statusSnapshot()
         let serverHealthy = await localServerHealthCheck(status: serverStatus)
-        let ipadConnected: Bool = {
-            if case .connected = connectionStatus.state { return true }
-            return false
-        }()
+        let ipadConnected = isAuthenticatedIPadConnected
         let output = picturesOutputDir()
         let capacity = output.flatMap { try? $0.resourceValues(forKeys: [.volumeAvailableCapacityKey]).volumeAvailableCapacity }.map(Int64.init)
         let jobs = jobQueue.jobs
@@ -1172,7 +1175,7 @@ final class BoothCoordinator {
             previewPermissionGranted: cameraPermissionGranted,
             previewConnected: capture.isRunning,
             previewRequired: false,
-            customerDisplayReady: isCustomerDisplayReady,
+            customerDisplayReady: isAuthenticatedIPadConnected && connectionStatus.isPreviewChannelConnected,
             ipadConnected: ipadConnected,
             requestedNetwork: connectionStatus.requestedNetwork,
             effectiveNetwork: connectionStatus.effectiveNetwork,
@@ -2691,7 +2694,8 @@ final class BoothCoordinator {
     func healthSnapshot() async -> BoothHealthSnapshot {
         let serverStatus = await server.statusSnapshot()
         let queue = jobQueue.jobs
-        let connectedPeer: String? = connectionStatus.peerDisplayName
+        let displayReady = isCustomerDisplayReady
+        let connectedPeer: String? = displayReady ? connectionStatus.peerDisplayName : nil
         let serverHealth: BoothHealthStatus = switch serverStatus.state {
         case .ready: .healthy
         case .starting: .unknown
@@ -2712,7 +2716,7 @@ final class BoothCoordinator {
             updatedAt: Date(),
             status: overall,
             camera: camera,
-            customerDisplayConnected: connectedPeer != nil || isExternalViewerActive,
+            customerDisplayConnected: displayReady,
             customerDisplayPeer: connectedPeer,
             controlConnection: connectionLabel(connectionStatus.state),
             previewConnection: effectiveNetworkLabel,

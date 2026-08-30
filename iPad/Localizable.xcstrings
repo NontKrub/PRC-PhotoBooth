@@ -431,6 +431,306 @@
         }
       }
     },
+    "6-digit PIN" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "6-digit PIN" } },
+        "th" : { "stringUnit" : { "state" : "translated", "value" : "PIN 6 หลัก" } }
+      }
+    },
+    "Authentication" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Authentication" } },
+        "th" : { "stringUnit" : { "state" : "translated", "value" : "การยืนยันตัวตน" } }
+      }
+    },
+    "Automatically reconnect to selected Mac" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Automatically reconnect to selected Mac" } },
+        "th" : { "stringUnit" : { "state" : "translated", "value" : "เชื่อมต่อ Mac ที่เลือกโดยอัตโนมัติ" } }
+      }
+    },
+    "Camera access is required to scan pairing QR codes." : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Camera access is required to scan pairing QR codes." } },
+        "th" : { "stringUnit" : { "state" : "translated", "value" : "ต้องอนุญาตให้ใช้กล้องเพื่อสแกน QR สำหรับจับคู่" } }
+      }
+    },
+    "Camera access is unavailable." : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Camera access is unavailable." } },
+        "th" : { "stringUnit" : { "state" : "translated", "value" : "ไม่สามารถใช้กล้องได้" } }
+      }
+    },
+    "Camera is unavailable on this iPad." : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Camera is unavailable on this iPad." } },
+        "th" : { "stringUnit" : { "state" : "translated", "value" : "กล้องไม่พร้อมใช้งานบน iPad เครื่องนี้" } }
+      }
+    },
+    "Choose Another Mac" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Choose Another Mac" } },
+        "th" : { "stringUnit" : { "state" : "translated", "value" : "เลือก Mac เครื่องอื่น" } }
+      }
+    },
+    "Connection" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Connection" } },
+        "th" : { "stringUnit" : { "state" : "translated", "value" : "การเชื่อมต่อ" } }
+      }
+    },
+    "Connection Settings" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Connection Settings" } },
+        "th" : { "stringUnit" : { "state" : "translated", "value" : "การตั้งค่าการเชื่อมต่อ" } }
+      }
+    },
+    "Connected" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Connected" } },
+        "th" : { "stringUnit" : { "state" : "translated", "value" : "เชื่อมต่อแล้ว" } }
+      }
+    },
+    "Connected via Ethernet" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Connected via Ethernet" } },
+        "th" : { "stringUnit" : { "state" : "translated", "value" : "เชื่อมต่อผ่าน Ethernet" } }
+      }
+    },
+    "Connected via Wi-Fi" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Connected via Wi-Fi" } },
+        "th" : { "stringUnit" : { "state" : "translated", "value" : "เชื่อมต่อผ่าน Wi-Fi" } }
+      }
+    },
+    "Enter Pairing PIN" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Enter Pairing PIN" } },
+        "th" : { "stringUnit" : { "state" : "translated", "value" : "ป้อน PIN สำหรับจับคู่" } }
+      }
+    },
+    "Enter PIN Instead" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Enter PIN Instead" } },
+        "th" : { "stringUnit" : { "state" : "translated", "value" : "ป้อน PIN แทน" } }
+      }
+    },
+    "Forget Device" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Forget Device" } },
+        "th" : { "stringUnit" : { "state" : "translated", "value" : "ลืมอุปกรณ์" } }
+      }
+    },
+    "Forget Preferred Mac" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Forget Preferred Mac" } },
+        "th" : { "stringUnit" : { "state" : "translated", "value" : "ลืม Mac ที่เลือก" } }
+      }
+    },
+    "Mac Connection" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Mac Connection" } },
+        "th" : { "stringUnit" : { "state" : "translated", "value" : "การเชื่อมต่อ Mac" } }
+      }
+    },
+    "Nearby Macs" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Nearby Macs" } },
+        "th" : { "stringUnit" : { "state" : "translated", "value" : "Mac ใกล้เคียง" } }
+      }
+    },
+    "No Mac selected" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "No Mac selected" } },
+        "th" : { "stringUnit" : { "state" : "translated", "value" : "ยังไม่ได้เลือก Mac" } }
+      }
+    },
+    "Not Paired" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Not Paired" } },
+        "th" : { "stringUnit" : { "state" : "translated", "value" : "ยังไม่ได้จับคู่" } }
+      }
+    },
+    "Open Settings" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Open Settings" } },
+        "th" : { "stringUnit" : { "state" : "translated", "value" : "เปิดการตั้งค่า" } }
+      }
+    },
+    "Pair" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Pair" } },
+        "th" : { "stringUnit" : { "state" : "translated", "value" : "จับคู่" } }
+      }
+    },
+    "Paired" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Paired" } },
+        "th" : { "stringUnit" : { "state" : "translated", "value" : "จับคู่แล้ว" } }
+      }
+    },
+    "Pairing" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Pairing" } },
+        "th" : { "stringUnit" : { "state" : "translated", "value" : "กำลังจับคู่" } }
+      }
+    },
+    "Pairing Error" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Pairing Error" } },
+        "th" : { "stringUnit" : { "state" : "translated", "value" : "ข้อผิดพลาดการจับคู่" } }
+      }
+    },
+    "Preferred" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Preferred" } },
+        "th" : { "stringUnit" : { "state" : "translated", "value" : "ที่เลือก" } }
+      }
+    },
+    "Preferred Mac" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Preferred Mac" } },
+        "th" : { "stringUnit" : { "state" : "translated", "value" : "Mac ที่เลือก" } }
+      }
+    },
+    "Preferred Mac unavailable" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Preferred Mac unavailable" } },
+        "th" : { "stringUnit" : { "state" : "translated", "value" : "Mac ที่เลือกไม่พร้อมใช้งาน" } }
+      }
+    },
+    "QR scanning is unavailable on this iPad." : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "QR scanning is unavailable on this iPad." } },
+        "th" : { "stringUnit" : { "state" : "translated", "value" : "การสแกน QR ใช้งานไม่ได้บน iPad เครื่องนี้" } }
+      }
+    },
+    "Refresh" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Refresh" } },
+        "th" : { "stringUnit" : { "state" : "translated", "value" : "รีเฟรช" } }
+      }
+    },
+    "Requesting camera access…" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Requesting camera access…" } },
+        "th" : { "stringUnit" : { "state" : "translated", "value" : "กำลังขอสิทธิ์ใช้กล้อง…" } }
+      }
+    },
+    "Round trip" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Round trip" } },
+        "th" : { "stringUnit" : { "state" : "translated", "value" : "เวลาไปกลับ" } }
+      }
+    },
+    "Scan Pairing QR" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Scan Pairing QR" } },
+        "th" : { "stringUnit" : { "state" : "translated", "value" : "สแกน QR สำหรับจับคู่" } }
+      }
+    },
+    "Searching" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Searching" } },
+        "th" : { "stringUnit" : { "state" : "translated", "value" : "กำลังค้นหา" } }
+      }
+    },
+    "Save Device Name" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Save Device Name" } },
+        "th" : { "stringUnit" : { "state" : "translated", "value" : "บันทึกชื่ออุปกรณ์" } }
+      }
+    },
+    "The iPad camera could not be opened." : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "The iPad camera could not be opened." } },
+        "th" : { "stringUnit" : { "state" : "translated", "value" : "ไม่สามารถเปิดกล้อง iPad ได้" } }
+      }
+    },
+    "Trusted" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Trusted" } },
+        "th" : { "stringUnit" : { "state" : "translated", "value" : "เชื่อถือ" } }
+      }
+    },
+    "Version incompatible" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Version incompatible" } },
+        "th" : { "stringUnit" : { "state" : "translated", "value" : "เวอร์ชันไม่เข้ากัน" } }
+      }
+    },
+    "Wi-Fi fallback" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Wi-Fi fallback" } },
+        "th" : { "stringUnit" : { "state" : "translated", "value" : "สำรองด้วย Wi-Fi" } }
+      }
+    },
+    "This Mac must be paired again before it can reconnect." : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "This Mac must be paired again before it can reconnect." } },
+        "th" : { "stringUnit" : { "state" : "translated", "value" : "ต้องจับคู่ Mac เครื่องนี้ใหม่ก่อนเชื่อมต่ออีกครั้ง" } }
+      }
+    },
+    "This iPad" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "This iPad" } },
+        "th" : { "stringUnit" : { "state" : "translated", "value" : "iPad เครื่องนี้" } }
+      }
+    },
+    "Device Name" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Device Name" } },
+        "th" : { "stringUnit" : { "state" : "translated", "value" : "ชื่ออุปกรณ์" } }
+      }
+    },
+    "Retry" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Retry" } },
+        "th" : { "stringUnit" : { "state" : "translated", "value" : "ลองใหม่" } }
+      }
+    },
+    "Connect" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Connect" } },
+        "th" : { "stringUnit" : { "state" : "translated", "value" : "เชื่อมต่อ" } }
+      }
+    },
+    "Cancel" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Cancel" } },
+        "th" : { "stringUnit" : { "state" : "translated", "value" : "ยกเลิก" } }
+      }
+    },
+    "Done" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Done" } },
+        "th" : { "stringUnit" : { "state" : "translated", "value" : "เสร็จสิ้น" } }
+      }
+    },
+    "Forget" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Forget" } },
+        "th" : { "stringUnit" : { "state" : "translated", "value" : "ลืม" } }
+      }
+    },
+    "Pairing PIN" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Pairing PIN" } },
+        "th" : { "stringUnit" : { "state" : "translated", "value" : "PIN สำหรับจับคู่" } }
+      }
+    },
+    "Authentication failed" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Authentication failed" } },
+        "th" : { "stringUnit" : { "state" : "translated", "value" : "การยืนยันตัวตนล้มเหลว" } }
+      }
+    },
+    "Pairing expired" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Pairing expired" } },
+        "th" : { "stringUnit" : { "state" : "translated", "value" : "การจับคู่หมดอายุ" } }
+      }
+    },
     "You're up!" : {
       "localizations" : {
         "th" : {

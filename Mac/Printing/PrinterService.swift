@@ -18,6 +18,7 @@ struct PrinterTestResult: Sendable, Equatable {
     var printerName: String
     var isSuccess: Bool
     var message: String
+    var outcome: PrintSubmissionOutcome? = nil
 }
 
 enum PrinterDocument: Equatable, Sendable {
@@ -145,7 +146,8 @@ final class PrinterService {
                 date: date,
                 printerName: backend.defaultPrinterName() ?? "System Default",
                 isSuccess: true,
-                message: "Test print submitted."
+                message: "Test print submitted.",
+                outcome: .submitted
             )
             return .submitted
         } catch {
@@ -154,7 +156,8 @@ final class PrinterService {
                     date: date,
                     printerName: backend.defaultPrinterName() ?? "System Default",
                     isSuccess: false,
-                    message: "Print dialog cancelled by operator."
+                    message: "Print dialog cancelled by operator.",
+                    outcome: .cancelled
                 )
                 return .cancelled
             }
@@ -165,7 +168,8 @@ final class PrinterService {
                 date: date,
                 printerName: backend.defaultPrinterName() ?? "System Default",
                 isSuccess: false,
-                message: error.localizedDescription
+                message: error.localizedDescription,
+                outcome: nil
             )
             throw JobExecutionError.retryable(error.localizedDescription)
         }

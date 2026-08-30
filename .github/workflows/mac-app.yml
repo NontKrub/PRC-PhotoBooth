@@ -1,6 +1,11 @@
 name: PR App Builds
 
 on:
+  push:
+    branches:
+      - 'fix/**'
+      - 'feat/**'
+      - 'release/**'
   pull_request:
     types: [opened, synchronize, reopened]
   workflow_dispatch:
@@ -9,7 +14,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: pr-app-build-${{ github.event.pull_request.number || github.run_id }}
+  group: pr-app-build-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -85,7 +90,7 @@ jobs:
       - name: Package app
         id: package
         run: |
-          app_path="$RUNNER_TEMP/PRC-PhotoBooth-DerivedData/Build/Products/Debug/PRC-PhotoBooth-Mac.app"
+          app_path="$RUNNER_TEMP/PRC-PhotoBooth-DerivedData/Build/Products/Release/PRC-PhotoBooth-Mac.app"
           archive_path="$RUNNER_TEMP/PRC-PhotoBooth-Mac-${GITHUB_SHA:0:7}.zip"
 
           test -d "$app_path"
@@ -105,7 +110,7 @@ jobs:
           {
             echo "## Release artifacts"
             echo
-            echo "Unsigned Debug build packaged as \`PRC-PhotoBooth-Mac-${GITHUB_SHA:0:7}.zip\`."
+            echo "Unsigned Release build packaged as \`PRC-PhotoBooth-Mac-${GITHUB_SHA:0:7}.zip\`."
             echo "Download it from [this workflow run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})."
           } >> "$GITHUB_STEP_SUMMARY"
 
@@ -188,10 +193,22 @@ jobs:
             CODE_SIGNING_REQUIRED=NO \
             test
 
+      - name: Build iPad (Release, generic device)
+        run: |
+          xcodebuild \
+            -project PRC-PhotoBooth.xcodeproj \
+            -scheme PRC-PhotoBooth-iPad \
+            -configuration Release \
+            -destination "generic/platform=iOS" \
+            -derivedDataPath "$RUNNER_TEMP/PRC-PhotoBooth-iPad-Device-DerivedData" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            build
+
       - name: Package app
         id: package
         run: |
-          app_path="$RUNNER_TEMP/PRC-PhotoBooth-iPad-DerivedData/Build/Products/Debug-iphonesimulator/PRC-PhotoBooth-iPad.app"
+          app_path="$RUNNER_TEMP/PRC-PhotoBooth-iPad-DerivedData/Build/Products/Release-iphonesimulator/PRC-PhotoBooth-iPad.app"
           archive_path="$RUNNER_TEMP/PRC-PhotoBooth-iPad-Simulator-${GITHUB_SHA:0:7}.zip"
 
           test -d "$app_path"
@@ -211,6 +228,52 @@ jobs:
           {
             echo "## Release artifacts"
             echo
-            echo "Unsigned Debug Simulator build packaged as \`PRC-PhotoBooth-iPad-Simulator-${GITHUB_SHA:0:7}.zip\`."
+            echo "Unsigned Release Simulator build packaged as \`PRC-PhotoBooth-iPad-Simulator-${GITHUB_SHA:0:7}.zip\`."
             echo "Download it from [this workflow run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})."
           } >> "$GITHUB_STEP_SUMMARY"
+
+  build-stable-macos:
+    name: Stable macOS lane
+    runs-on: macos-15
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v5
+
+      - name: Show stable toolchain
+        run: |
+          set -euo pipefail
+          xcodebuild -version
+          swift --version
+
+      - name: Install XcodeGen
+        run: |
+          if ! command -v xcodegen >/dev/null 2>&1; then
+            brew install --formula xcodegen
+          fi
+
+      - name: Generate Xcode project
+        run: xcodegen generate
+
+      - name: Build macOS Release
+        run: |
+          xcodebuild \
+            -project PRC-PhotoBooth.xcodeproj \
+            -scheme PRC-PhotoBooth-Mac \
+            -configuration Release \
+            -destination "platform=macOS" \
+            -derivedDataPath "$RUNNER_TEMP/PRC-PhotoBooth-Stable-DerivedData" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            build
+
+      - name: Run Mac tests
+        run: |
+          xcodebuild \
+            -project PRC-PhotoBooth.xcodeproj \
+            -scheme PRC-PhotoBoothTests \
+            -destination "platform=macOS" \
+            -derivedDataPath "$RUNNER_TEMP/PRC-PhotoBooth-Stable-DerivedData" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            test
