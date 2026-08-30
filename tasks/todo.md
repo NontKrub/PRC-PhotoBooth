@@ -12,10 +12,10 @@ This is the active checklist. Historical v1.3/v1.4 notes remain below and are no
 - [x] Update CI triggers, Release artifacts, generic device compile, stable runner lane, README, and current release plan.
 - [x] Run final local Mac and iPad automated matrix; Mac tests 338/338 and iPad tests 4/4 passed; Mac/iPad Debug and Release builds plus generic iOS Release compile passed.
 - [x] Run focused pairing/protocol/printing/preflight/LAN tests: 79/79 passed.
-- [ ] GitHub Xcode 27 Mac lane passed.
-- [ ] GitHub Xcode 27 iPad lane passed.
-- [ ] GitHub stable macOS/Xcode 16.4 lane passed.
-- [ ] Run final Ponytail review and rerun affected gates.
+- [x] GitHub Xcode 27 Mac lane passed: run 33315413899 passed all build, test, packaging, and upload steps.
+- [x] GitHub Xcode 27 iPad lane passed: run 33315413899 passed all build, test, generic-device compile, packaging, and upload steps.
+- [x] GitHub stable macOS/Xcode 16.4 lane passed: run 33315413899 passed Release build and Mac tests.
+- [x] Run final Ponytail review and rerun affected gates; no unnecessary code or scope found.
 - [ ] Run Computer Use Mac/iPad GUI matrix; record blocked window/camera/network cases honestly.
 - [ ] Run physical Ethernet, PIN/QR, printer, camera, and long-run gates.
 - [ ] Mark release-ready only after all non-hardware blockers pass.
