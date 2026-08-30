@@ -229,12 +229,12 @@ struct NetworkRouteTests {
         #expect(route.state == .fallbackWiFi(peer: "iPad"))
     }
 
-    @Test("Manual LAN retry requires an available wired path")
-    func manualLANRetryRequiresLAN() {
+    @Test("Manual LAN retry ignores a false wired path-monitor sample")
+    func manualLANRetryIgnoresFalseMonitorState() {
         var route = fallbackLANRoute()
 
-        #expect(route.manualPreferredLANRetry(lanAvailable: false, wifiAvailable: true, boothIsIdle: true) == .none)
-        #expect(route.state == .fallbackWiFi(peer: "iPad"))
+        #expect(route.manualPreferredLANRetry(lanAvailable: false, wifiAvailable: true, boothIsIdle: true) == .startLAN)
+        #expect(route.state == .connectingLAN)
     }
 
     @Test("Manual LAN retry does not override Wi-Fi preference")
@@ -295,6 +295,12 @@ private func fallbackLANRoute() -> BoothNetworkRouteMachine {
 
 @Suite("iPad route discovery policy")
 struct RouteDiscoveryPolicyTests {
+    @Test("route discovery gives preferred Ethernet two seconds before fallback")
+    @MainActor
+    func routeDiscoveryGraceIsTwoSeconds() {
+        #expect(NetworkBoothTransport.routeDiscoveryGracePeriod == 2.0)
+    }
+
     @Test("LAN preference waits for LAN when Wi-Fi is discovered first")
     func lanPreferenceWaitsForLAN() {
         var selection = BoothRouteDiscoverySelection()

@@ -8,6 +8,11 @@ enum ConfiguredPrinterStatus: Sendable, Equatable {
     case unavailable(name: String)
 }
 
+enum PrintSubmissionOutcome: Sendable, Equatable {
+    case submitted
+    case cancelled
+}
+
 struct PrinterTestResult: Sendable, Equatable {
     var date: Date
     var printerName: String
@@ -23,13 +28,11 @@ enum PrinterDocument: Equatable, Sendable {
 enum PrintLayoutMode: String, CaseIterable, Equatable, Sendable {
     case fit
     case fill
-    case actualSize
 
     var title: String {
         switch self {
         case .fit: return "Fit to Page"
         case .fill: return "Fill Page"
-        case .actualSize: return "Actual Size"
         }
     }
 }
@@ -59,8 +62,6 @@ enum PrintLayoutGeometry {
                 printableBounds.width / imageSize.width,
                 printableBounds.height / imageSize.height
             )
-        case .actualSize:
-            scale = 1
         }
 
         let size = CGSize(width: imageSize.width * scale, height: imageSize.height * scale)
@@ -125,7 +126,7 @@ final class PrinterService {
         lastTestResult = nil
     }
 
-    func printTestPage() async throws {
+    func printTestPage() async throws -> PrintSubmissionOutcome {
         refreshPrinters()
         let date = Date()
         let request = PrinterPrintRequest(
@@ -146,15 +147,16 @@ final class PrinterService {
                 isSuccess: true,
                 message: "Test print submitted."
             )
+            return .submitted
         } catch {
             if case PrinterServiceError.cancelled = error {
                 lastTestResult = PrinterTestResult(
                     date: date,
                     printerName: backend.defaultPrinterName() ?? "System Default",
                     isSuccess: false,
-                    message: "Print dialog cancelled."
+                    message: "Print dialog cancelled by operator."
                 )
-                return
+                return .cancelled
             }
             printFailureCount += 1
             lastPrintAt = date

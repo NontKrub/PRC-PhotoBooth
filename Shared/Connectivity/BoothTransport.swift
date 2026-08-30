@@ -132,6 +132,30 @@ public final class BoothConnectionStatus {
     @Published
 #endif
     public private(set) var previewDiagnostics = BoothPreviewDiagnostics()
+#if os(iOS)
+    @Published
+#endif
+    public private(set) var discoveredPeers: [BoothDiscoveredPeer] = []
+#if os(iOS)
+    @Published
+#endif
+    public private(set) var trustedPeerIDs: Set<String> = []
+#if os(iOS)
+    @Published
+#endif
+    public private(set) var preferredPeerID: String?
+#if os(iOS)
+    @Published
+#endif
+    public private(set) var isPeerAuthenticated = false
+#if os(iOS)
+    @Published
+#endif
+    public private(set) var pairingState: BoothPairingState = .idle
+#if os(iOS)
+    @Published
+#endif
+    public private(set) var roundTripLatency: TimeInterval?
 
     public var isFallbackActive: Bool {
         if case .fallbackWiFi = routeState { return true }
@@ -203,7 +227,27 @@ public final class BoothConnectionStatus {
         previewDiagnostics = diagnostics
     }
 
+    public func publishPairing(
+        discoveredPeers: [BoothDiscoveredPeer]? = nil,
+        trustedPeerIDs: Set<String>? = nil,
+        preferredPeerID: String? = nil,
+        updatePreferredPeer: Bool = false,
+        authenticated: Bool? = nil,
+        state: BoothPairingState? = nil,
+        roundTripLatency: TimeInterval? = nil,
+        updateLatency: Bool = false
+    ) {
+        if let discoveredPeers { self.discoveredPeers = discoveredPeers }
+        if let trustedPeerIDs { self.trustedPeerIDs = trustedPeerIDs }
+        if updatePreferredPeer { self.preferredPeerID = preferredPeerID }
+        if let authenticated { isPeerAuthenticated = authenticated }
+        if let state { pairingState = state }
+        if updateLatency { self.roundTripLatency = roundTripLatency }
+    }
+
     public func publishDisconnected() {
+        isPeerAuthenticated = false
+        roundTripLatency = nil
         publish(
             requestedNetwork: requestedNetwork,
             state: .disconnected,

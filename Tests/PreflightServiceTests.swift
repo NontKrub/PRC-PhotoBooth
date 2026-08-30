@@ -151,6 +151,42 @@ struct PreflightServiceTests {
         #expect(service.result(for: .runtimePersistence)?.status == .failed)
         #expect(service.readiness == .notReady)
     }
+@Test("unknown disk space is a warning, not a fabricated low-space failure")
+@MainActor
+func unknownDiskSpaceWarns() async {
+    let service = BoothPreflightService()
+    await service.runSafeChecks(using: context(availableDiskBytes: nil))
+    #expect(service.result(for: .diskSpace)?.status == .warning)
+    #expect(service.result(for: .diskSpace)?.detail == "Available disk space could not be determined.")
+}
+
+@Test("full preflight maps printer submitted, cancelled, and backend failure")
+@MainActor
+func fullPreflightPrinterOutcomes() async {
+    let service = BoothPreflightService()
+    let base = context()
+
+    await service.runFullPreflight(using: base, runPrinterTest: true, cameraTest: {}, printerTest: { .submitted })
+    #expect(service.result(for: .printerTest)?.status == .passed)
+
+    await service.runFullPreflight(using: base, runPrinterTest: true, cameraTest: {}, printerTest: { .cancelled })
+    #expect(service.result(for: .printerTest)?.status == .skipped)
+    #expect(service.result(for: .printerTest)?.detail == "Printer test cancelled by operator.")
+
+    await service.runFullPreflight(
+        using: base,
+        runPrinterTest: true,
+        cameraTest: {},
+        printerTest: { throw TestPreflightError.printerOffline }
+    )
+    #expect(service.result(for: .printerTest)?.status == .failed)
+}
+
+}
+
+private enum TestPreflightError: LocalizedError {
+    case printerOffline
+    var errorDescription: String? { "Printer offline" }
 }
 
 private func context(

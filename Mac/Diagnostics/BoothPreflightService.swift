@@ -72,7 +72,7 @@ final class BoothPreflightService {
         using context: BoothPreflightContext,
         runPrinterTest: Bool,
         cameraTest: @escaping @MainActor () async throws -> Void,
-        printerTest: @escaping @MainActor () async throws -> Void
+        printerTest: @escaping @MainActor () async throws -> PrintSubmissionOutcome
     ) async {
         await runSafeChecks(using: context)
         if context.cameraConnected {
@@ -87,8 +87,12 @@ final class BoothPreflightService {
         if runPrinterTest {
             update(.printerTest, status: .running, detail: "Submitting printer test page…")
             do {
-                try await printerTest()
-                update(.printerTest, status: .passed, detail: "Test page submitted.")
+                switch try await printerTest() {
+                case .submitted:
+                    update(.printerTest, status: .passed, detail: "Test page submitted.")
+                case .cancelled:
+                    update(.printerTest, status: .skipped, detail: "Printer test cancelled by operator.")
+                }
             } catch {
                 update(.printerTest, status: .failed, detail: error.localizedDescription)
             }
@@ -227,7 +231,9 @@ final class BoothPreflightService {
     }
 
     private func diskResult(_ bytes: Int64?, now: Date) -> PreflightCheckResult {
-        let value = bytes ?? 0
+        guard let value = bytes else {
+            return result(.diskSpace, "Disk space", "Available disk space could not be determined.", .warning, .recommended, now)
+        }
         if value < 2_000_000_000 { return result(.diskSpace, "Disk space", "Less than 2 GB is available.", .failed, .required, now) }
         if value < 10_000_000_000 { return result(.diskSpace, "Disk space", "Between 2 GB and 10 GB is available.", .warning, .recommended, now) }
         return result(.diskSpace, "Disk space", "At least 10 GB is available.", .passed, .recommended, now)

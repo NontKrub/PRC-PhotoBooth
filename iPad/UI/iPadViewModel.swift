@@ -45,6 +45,40 @@ final class iPadViewModel: ObservableObject {
 
     private var observationCancellables = Set<AnyCancellable>()
 
+    var networkTransport: NetworkBoothTransport? { multipeer as? NetworkBoothTransport }
+    var connectionStatus: BoothConnectionStatus { multipeer.connectionStatus }
+    var canChangeConnection: Bool { stateMachine.phase == .idle }
+
+    func renameDevice(_ name: String) {
+        guard canChangeConnection else { return }
+        networkTransport?.renameLocalDevice(name)
+    }
+
+    func connect(to peerID: String) {
+        guard canChangeConnection else { return }
+        networkTransport?.connectToPeer(peerID)
+    }
+
+    func pair(peerID: String, pin: String) {
+        guard canChangeConnection else { return }
+        networkTransport?.pairWithPIN(peerID: peerID, pin: pin)
+    }
+
+    func pair(qrPayload: BoothPairingQRCodePayload) {
+        guard canChangeConnection else { return }
+        networkTransport?.pairWithQRCode(qrPayload)
+    }
+
+    func forget(peerID: String) {
+        guard canChangeConnection else { return }
+        networkTransport?.forgetPeer(peerID)
+    }
+
+    func refreshNearbyMacs() {
+        guard canChangeConnection else { return }
+        networkTransport?.restart()
+    }
+
     init() {
 #if DEBUG
         if ProcessInfo.processInfo.arguments.contains("--legacy-multipeer") {

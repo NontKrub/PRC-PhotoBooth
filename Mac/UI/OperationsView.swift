@@ -192,7 +192,12 @@ struct OperationsView: View {
             await refreshManifests()
             boothHealth = await coordinator.healthSnapshot()
             while !Task.isCancelled {
-                try? await Task.sleep(for: .seconds(2))
+                do {
+                    try await Task.sleep(for: .seconds(2))
+                } catch {
+                    return
+                }
+                guard !Task.isCancelled else { return }
                 await refreshServerStatus()
                 await refreshManifests()
                 boothHealth = await coordinator.healthSnapshot()
@@ -490,7 +495,7 @@ struct OperationsView: View {
                 }
                 HStack {
                     Button("Print Test Page") {
-                        Task { try? await coordinator.printer.printTestPage(); await coordinator.runSafePreflight() }
+                        Task { _ = try? await coordinator.printer.printTestPage(); await coordinator.runSafePreflight() }
                     }
                     .buttonStyle(.bordered)
                     Button("Open System Print Settings…") {

@@ -15,6 +15,30 @@ struct MessageTests {
             .hello(role: .mac),
             .hello(role: .iPad),
             .helloDetails(hello: BoothTransportHello(role: .mac, deviceID: "mac-test")),
+            .pairingRequest(request: BoothPairingRequest(
+                sessionID: "pairing-session",
+                targetMacDeviceID: "mac-test",
+                iPadIdentity: BoothDeviceIdentity(id: "ipad-test", displayName: "PRC-iPad-01", role: .iPad),
+                method: .pin("482193")
+            )),
+            .pairingResult(result: BoothPairingResult(
+                accepted: true,
+                macIdentity: BoothDeviceIdentity(id: "mac-test", displayName: "PRC-Booth-01", role: .mac),
+                sharedSecret: Data(repeating: 0x44, count: 32)
+            )),
+            .authChallenge(challenge: BoothAuthChallenge(
+                id: "challenge",
+                nonce: Data(repeating: 0x22, count: 32),
+                challengerDeviceID: "mac-test",
+                responderDeviceID: "ipad-test",
+                issuedAt: Date(timeIntervalSince1970: 1_700_000_000)
+            )),
+            .authProof(proof: BoothAuthProof(
+                challengeID: "challenge",
+                responderDeviceID: "ipad-test",
+                proof: Data(repeating: 0x33, count: 32)
+            )),
+            .connectionRejected(reason: "This iPad is not paired with this Mac."),
             .sessionSync(snapshot: SessionSyncSnapshot(
                 config: EventConfig(photoCount: 2),
                 sessionID: "session-test",
@@ -145,6 +169,15 @@ struct MessageTests {
         #expect(legacyHello.deviceName == "legacy-id")
         #expect(legacyHello.networkPreference == nil)
     }
+    @Test("v1.4.2 connection protocol is version 3 and legacy protocol 2 remains decodable but incompatible")
+    func protocolVersionMismatchIsVisible() throws {
+        #expect(BoothTransportHello.currentProtocolVersion == 3)
+        let legacy = Data(#"{"protocolVersion":2,"appVersion":"1.4.1","role":"iPad","deviceID":"legacy-id","capabilities":["control"]}"#.utf8)
+        let hello = try JSONDecoder().decode(BoothTransportHello.self, from: legacy)
+        #expect(hello.protocolVersion == 2)
+        #expect(hello.protocolVersion != BoothTransportHello.currentProtocolVersion)
+    }
+
 }
 
 private func canonicalJSON(_ data: Data) throws -> Data {

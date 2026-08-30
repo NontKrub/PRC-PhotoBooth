@@ -32,13 +32,14 @@ struct PrinterServiceTests {
         let backend = TestPrinterBackend(names: ["Canon"], defaultName: "Canon")
         let printer = PrinterService(backend: backend)
 
-        try await printer.printTestPage()
+        let outcome = try await printer.printTestPage()
+        #expect(outcome == .submitted)
         #expect(printer.lastTestResult?.isSuccess == true)
         #expect(backend.requests.last?.showsPrintDialog == true)
 
         backend.failNext(with: TestPrinterError.offline)
         do {
-            try await printer.printTestPage()
+            _ = try await printer.printTestPage()
             Issue.record("Expected test print failure")
         } catch {
             #expect(printer.lastTestResult?.isSuccess == false)
@@ -51,7 +52,7 @@ struct PrinterServiceTests {
         let backend = TestPrinterBackend(names: ["Canon", "Other"], defaultName: "Canon")
         let printer = PrinterService(backend: backend)
 
-        try await printer.printTestPage()
+        _ = try await printer.printTestPage()
         #expect(printer.lastTestResult != nil)
         printer.refreshPrinters()
         #expect(printer.lastTestResult != nil)
@@ -131,7 +132,7 @@ struct PrinterServiceTests {
         let backend = TestPrinterBackend(names: ["Canon"], defaultName: "Canon")
         let printer = PrinterService(backend: backend)
 
-        try await printer.printTestPage()
+        _ = try await printer.printTestPage()
 
         if case .testPage = backend.requests.last?.document {
             // Expected.
@@ -140,18 +141,22 @@ struct PrinterServiceTests {
         }
     }
 
-    @Test("cancelling the system panel is not a retryable print failure")
-    @MainActor
-    func cancellationIsHandled() async throws {
-        let backend = TestPrinterBackend(names: ["Canon"], defaultName: "Canon")
-        let printer = PrinterService(backend: backend)
-        backend.failNext(with: PrinterServiceError.cancelled)
+@Test("cancelling the system panel is not a retryable print failure")
+@MainActor
+func cancellationIsHandled() async throws {
+    let backend = TestPrinterBackend(names: ["Canon"], defaultName: "Canon")
+    let printer = PrinterService(backend: backend)
+    backend.failNext(with: PrinterServiceError.cancelled)
+    let successesBefore = printer.printSuccessCount
+    let failuresBefore = printer.printFailureCount
 
-        try await printer.printTestPage()
+    let outcome = try await printer.printTestPage()
 
-        #expect(printer.lastTestResult?.message == "Print dialog cancelled.")
-        #expect(printer.printFailureCount == 0)
-    }
+    #expect(outcome == .cancelled)
+    #expect(printer.lastTestResult?.message == "Print dialog cancelled by operator.")
+    #expect(printer.printFailureCount == failuresBefore)
+    #expect(printer.printSuccessCount == successesBefore)
+}
 }
 
 @MainActor

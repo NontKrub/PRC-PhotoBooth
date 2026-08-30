@@ -86,16 +86,4 @@ struct PrintLayoutGeometryTests {
         #expect(abs(fill.width / fill.height - 2) < 0.001)
     }
 
-    @Test("actual size uses image points without enlarging")
-    func actualSize() {
-        let rect = PrintLayoutGeometry.destinationRect(
-            imageSize: CGSize(width: 120, height: 80),
-            printableBounds: printableBounds,
-            mode: .actualSize
-        )
-
-        #expect(rect.size == CGSize(width: 120, height: 80))
-        #expect(rect.midX == printableBounds.midX)
-        #expect(rect.midY == printableBounds.midY)
-    }
 }

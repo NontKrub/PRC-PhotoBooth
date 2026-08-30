@@ -364,8 +364,7 @@ struct SettingsView: View {
 
                         if coordinator.multipeer is NetworkBoothTransport,
                            coordinator.requestedNetworkPreference == .lan,
-                           status.isFallbackActive,
-                           status.isLANPathAvailable {
+                           status.isFallbackActive {
                             Button {
                                 coordinator.retryLANNow()
                             } label: {
@@ -392,9 +391,10 @@ struct SettingsView: View {
 
                     if coordinator.multipeer is NetworkBoothTransport,
                        coordinator.requestedNetworkPreference == .lan,
-                       status.isFallbackActive,
-                       status.isLANPathAvailable {
-                        Text("Ethernet is available. Retry the preferred wired connection now.")
+                       status.isFallbackActive {
+                        Text(status.isLANPathAvailable
+                             ? "Ethernet is available. Retry the preferred wired connection now."
+                             : "Ethernet has not been confirmed by the system. Retry performs a direct wired connection attempt.")
                             .font(.caption2)
                             .foregroundStyle(.secondary)
                     }
@@ -671,7 +671,7 @@ struct SettingsView: View {
                     .help("Prints the strip after required download jobs succeed.")
 
                 Button("Print Test…") {
-                    Task { try? await coordinator.printer.printTestPage() }
+                    Task { _ = try? await coordinator.printer.printTestPage() }
                 }
                 .buttonStyle(.bordered)
                 .disabled(coordinator.printer.isPrinting)

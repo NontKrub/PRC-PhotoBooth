@@ -36,8 +36,8 @@ targets:
       path: Mac/Info.plist
       properties:
         CFBundleDisplayName: PRC PhotoBooth
-        CFBundleShortVersionString: "1.4.1"
-        CFBundleVersion: "5"
+        CFBundleShortVersionString: "1.4.2"
+        CFBundleVersion: "6"
         NSCameraUsageDescription: PRC PhotoBooth needs camera access to capture photos for the booth.
         NSMicrophoneUsageDescription: PRC PhotoBooth uses the microphone as part of the camera session.
         NSLocalNetworkUsageDescription: PRC PhotoBooth connects to the iPad over local network to stream the camera preview and sync session state.
@@ -113,9 +113,10 @@ targets:
       path: iPad/Info.plist
       properties:
         CFBundleDisplayName: PRC PhotoBooth
-        CFBundleShortVersionString: "1.4.1"
-        CFBundleVersion: "5"
+        CFBundleShortVersionString: "1.4.2"
+        CFBundleVersion: "6"
         NSLocalNetworkUsageDescription: PRC PhotoBooth connects to the operator Mac over local network for camera preview and session control.
+        NSCameraUsageDescription: PRC PhotoBooth uses the iPad camera to scan Mac pairing QR codes.
         NSBonjourServices:
           - _prc-control._tcp
           - _prc-preview._tcp
@@ -148,6 +149,7 @@ targets:
     dependencies:
       - sdk: MultipeerConnectivity.framework
       - sdk: Network.framework
+      - sdk: AVFoundation.framework
       - sdk: CoreImage.framework
       - sdk: CoreGraphics.framework
       - sdk: ImageIO.framework

@@ -1062,8 +1062,8 @@ final class BoothCoordinator {
                 _ = try await self.capture.captureDiagnosticStill()
             },
             printerTest: { [weak self] in
-                guard let self else { return }
-                try await self.printer.printTestPage()
+                guard let self else { throw CancellationError() }
+                return try await self.printer.printTestPage()
             }
         )
     }
