@@ -31,6 +31,16 @@
         }
       }
     },
+    "\"%@\" wants to connect to this Mac." : {
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "\"%1$@\" ต้องการเชื่อมต่อกับ Mac เครื่องนี้"
+          }
+        }
+      }
+    },
     "%@" : {
       "localizations" : {
         "th" : {
@@ -4134,6 +4144,16 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "ดัชนีถ่ายภาพอย่างน้อยหนึ่งรายการไม่มีช่องภาพที่ตรงกัน"
+          }
+        }
+      }
+    },
+    "Only continue if you recognize this iPad." : {
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "โปรดดำเนินการต่อเฉพาะเมื่อคุณรู้จัก iPad เครื่องนี้"
           }
         }
       }

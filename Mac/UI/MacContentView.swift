@@ -956,17 +956,8 @@ private struct MacPairingSheet: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
 
-                    if let payload = transport.pairingQRCodePayload,
-                       let encoded = try? payload.encodedString(),
-                       let image = QRCodeGenerator.makeImage(
-                           payload: encoded,
-                           scale: 6,
-                           quietZoneModules: 4
-                       ) {
-                        Image(nsImage: NSImage(cgImage: image, size: NSSize(width: 260, height: 260)))
-                            .interpolation(.none)
-                            .accessibilityLabel("Pairing QR")
-                            .accessibilityIdentifier("Pairing QR")
+                    if let payload = transport.pairingQRCodePayload {
+                        PairingQRCodeImage(payload: payload)
                     } else {
                         Text("QR code unavailable")
                             .foregroundStyle(.orange)
@@ -997,5 +988,43 @@ private struct MacPairingSheet: View {
             }
         }
         .interactiveDismissDisabled(transport.currentPairingSessionInfo != nil)
+    }
+}
+
+private struct PairingQRCodeImage: View {
+    let payload: BoothPairingQRCodePayload
+
+    @State private var image: NSImage?
+    @State private var generationFailed = false
+
+    var body: some View {
+        Group {
+            if let image {
+                Image(nsImage: image)
+                    .interpolation(.none)
+                    .accessibilityLabel("Pairing QR")
+                    .accessibilityIdentifier("Pairing QR")
+            } else if generationFailed {
+                Text("QR code unavailable")
+                    .foregroundStyle(.orange)
+            } else {
+                ProgressView()
+                    .frame(width: 260, height: 260)
+            }
+        }
+        .task(id: payload.pairingSessionID) {
+            image = nil
+            generationFailed = false
+            guard let encoded = try? payload.encodedString(),
+                  let cgImage = QRCodeGenerator.makeImage(
+                      payload: encoded,
+                      scale: 6,
+                      quietZoneModules: 4
+                  ) else {
+                generationFailed = true
+                return
+            }
+            image = NSImage(cgImage: cgImage, size: NSSize(width: 260, height: 260))
+        }
     }
 }
