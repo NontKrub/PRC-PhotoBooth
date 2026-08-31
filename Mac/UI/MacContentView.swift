@@ -11,7 +11,7 @@ struct MacContentView: View {
     @State private var pendingTab: Int? = nil
     @State private var isAdminUnlocked = false
     @State private var showCloudSSHSetup = false
-    @State private var showIncomingPairingSheet = false
+    @State private var showPairingSheet = false
     @AppStorage("operatorLanguage") private var operatorLanguage = OperatorLanguage.system.rawValue
 
     var body: some View {
@@ -50,7 +50,12 @@ struct MacContentView: View {
             if newPhase == .active { coordinator.printer.refreshPrinters() }
         }
         .onChange(of: connectionStatus.pairingState) { _, pairingState in
-            showIncomingPairingSheet = if case .incoming = pairingState { true } else { false }
+            switch pairingState {
+            case .pairing, .incoming:
+                showPairingSheet = true
+            default:
+                showPairingSheet = false
+            }
         }
         .sheet(isPresented: $showPINSetup) {
             PINGateView(mode: .setup) {
@@ -81,7 +86,7 @@ struct MacContentView: View {
         .sheet(isPresented: $showCloudSSHSetup) {
             CloudSSHSetupView(setup: coordinator.cloudSSHSetup)
         }
-        .sheet(isPresented: $showIncomingPairingSheet) {
+        .sheet(isPresented: $showPairingSheet) {
             if let transport = coordinator.multipeer as? NetworkBoothTransport {
                 MacPairingSheet(
                     transport: transport,
@@ -93,8 +98,11 @@ struct MacContentView: View {
             if coordinator.cloudSSHSetup.shouldPresentFirstRun {
                 showCloudSSHSetup = true
             }
-            if case .incoming = connectionStatus.pairingState {
-                showIncomingPairingSheet = true
+            switch connectionStatus.pairingState {
+            case .pairing, .incoming:
+                showPairingSheet = true
+            default:
+                break
             }
         }
     }
@@ -154,7 +162,6 @@ struct SettingsView: View {
     @State private var showResetPINConfirmation = false
     @State private var diagnosticsCopied = false
     @State private var editedDeviceName = ""
-    @State private var showPairingSheet = false
     @State private var peerToForget: TrustedBoothPeer?
     @State private var showForgetAllPeers = false
 
@@ -180,11 +187,6 @@ struct SettingsView: View {
         .navigationTitle("Settings")
         .sheet(isPresented: $showCloudSSHSetup) {
             CloudSSHSetupView(setup: coordinator.cloudSSHSetup)
-        }
-        .sheet(isPresented: $showPairingSheet) {
-            if let transport = coordinator.multipeer as? NetworkBoothTransport {
-                MacPairingSheet(transport: transport)
-            }
         }
         .confirmationDialog(
             "Forget iPad?",
@@ -566,7 +568,7 @@ struct SettingsView: View {
 
             HStack {
                 Button("Pair New iPad") {
-                    if transport.startPairingSession() { showPairingSheet = true }
+                    _ = transport.startPairingSession()
                 }
                 .buttonStyle(.borderedProminent)
                 .disabled(!canChange || status.isPeerAuthenticated)

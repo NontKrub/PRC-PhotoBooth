@@ -343,6 +343,10 @@ public struct BoothPairingSession: Sendable, Equatable {
         )
     }
 
+    static func isCurrentSession(_ scheduledSessionID: String, currentSessionID: String?) -> Bool {
+        currentSessionID == scheduledSessionID
+    }
+
     public var qrPayload: BoothPairingQRCodePayload {
         BoothPairingQRCodePayload(
             macDeviceID: info.macDeviceID,

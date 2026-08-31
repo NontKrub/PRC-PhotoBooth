@@ -64,6 +64,7 @@ public final class NetworkBoothTransport: BoothTransport {
     private var pendingPairingRequest: BoothPairingRequest?
     private var pendingPairingIntent: BoothPairingIntent?
     private var currentPairingSession: BoothPairingSession?
+    private var pairingExpiryTask: Task<Void, Never>?
     private var incomingPairingRequest: IncomingBoothPairingRequest?
     private var lastPairingIntentAt: [String: Date] = [:]
     private var pendingPairingFailure: String?
@@ -180,10 +181,11 @@ public final class NetworkBoothTransport: BoothTransport {
             if !keepingControlConnection, !peerAuthenticated {
                 controlConnection?.cancel()
             }
-            incomingPairingRequest = nil
+            clearPairingSession()
             pendingPairingFailure = nil
-            currentPairingSession?.invalidate()
-            currentPairingSession = try BoothPairingSession.make(macIdentity: localIdentity)
+            let session = try BoothPairingSession.make(macIdentity: localIdentity)
+            currentPairingSession = session
+            schedulePairingExpiry(for: session)
             if let expiresAt = currentPairingSession?.info.expiresAt {
                 connectionStatus.publishPairing(state: .pairing(expiresAt: expiresAt))
             }
@@ -197,17 +199,76 @@ public final class NetworkBoothTransport: BoothTransport {
     }
 
     public func cancelPairingSession() {
-        if incomingPairingRequest != nil {
-            sendPairingFailure("Pairing cancelled on Mac.")
+        let shouldNotify = incomingPairingRequest != nil
+        let connection = shouldNotify ? controlConnection : nil
+        clearPairingSession()
+        connectionStatus.publishPairing(state: .idle)
+        refreshAdvertisedServices()
+        if let connection {
+            sendThenClose(
+                .pairingResult(result: BoothPairingResult(
+                    accepted: false,
+                    reason: "Pairing cancelled on Mac."
+                )),
+                connection: connection,
+                reason: "Pairing cancelled on Mac."
+            )
+        } else if !peerAuthenticated {
+            controlConnection?.cancel()
         }
+    }
+
+    private func clearPairingSession() {
+        pairingExpiryTask?.cancel()
+        pairingExpiryTask = nil
         currentPairingSession?.invalidate()
         currentPairingSession = nil
         incomingPairingRequest = nil
-        if !peerAuthenticated {
-            controlConnection?.cancel()
+    }
+
+    private func schedulePairingExpiry(for session: BoothPairingSession) {
+        pairingExpiryTask?.cancel()
+        let sessionID = session.info.sessionID
+        let expiresAt = session.info.expiresAt
+        pairingExpiryTask = Task { @MainActor [weak self] in
+            do {
+                while !Task.isCancelled {
+                    let remaining = expiresAt.timeIntervalSinceNow
+                    if remaining <= 0 { break }
+                    try await Task.sleep(for: .seconds(remaining))
+                }
+            } catch {
+                return
+            }
+            guard let self,
+                  BoothPairingSession.isCurrentSession(
+                      sessionID,
+                      currentSessionID: self.currentPairingSession?.info.sessionID
+                  ) else { return }
+            self.pairingExpiryTask = nil
+            self.expirePairingSession(sessionID: sessionID)
         }
-        connectionStatus.publishPairing(state: .idle)
+    }
+
+    private func expirePairingSession(sessionID: String) {
+        guard BoothPairingSession.isCurrentSession(
+            sessionID,
+            currentSessionID: currentPairingSession?.info.sessionID
+        ) else { return }
+
+        let reason = BoothPairingError.expired.localizedDescription
+        let connection = peerAuthenticated ? nil : controlConnection
+        clearPairingSession()
+        pendingPairingFailure = reason
+        connectionStatus.publishPairing(state: .failed(reason))
         refreshAdvertisedServices()
+        if let connection {
+            sendThenClose(
+                .pairingResult(result: BoothPairingResult(accepted: false, reason: reason)),
+                connection: connection,
+                reason: reason
+            )
+        }
     }
 
     public func selectPreferredPeer(_ peerID: String?) {
@@ -340,6 +401,7 @@ public final class NetworkBoothTransport: BoothTransport {
         shouldReconnect = false
         cancelLANRecovery()
         cancelRouteDiscovery()
+        clearPairingSession()
         stopPathMonitors()
         tearDownActiveTransport()
         fallbackActive = false
@@ -1536,8 +1598,7 @@ public final class NetworkBoothTransport: BoothTransport {
                 try trustedStore.trust(peer, secret: secret)
                 trustedStore.preferredPeerID = peer.id
                 trustedStore.autoReconnect = true
-                currentPairingSession = nil
-                incomingPairingRequest = nil
+                clearPairingSession()
                 refreshAdvertisedServices()
                 publishPairingStatus()
                 send(
@@ -1551,8 +1612,7 @@ public final class NetworkBoothTransport: BoothTransport {
                 )
                 beginAuthentication(with: peer.id)
             } catch {
-                currentPairingSession = nil
-                incomingPairingRequest = nil
+                clearPairingSession()
                 refreshAdvertisedServices()
                 sendPairingFailure(error.localizedDescription)
             }
@@ -1566,19 +1626,21 @@ public final class NetworkBoothTransport: BoothTransport {
             }
             sendPairingFailure(reason)
         case .expired:
-            currentPairingSession = nil
-            incomingPairingRequest = nil
-            refreshAdvertisedServices()
-            connectionStatus.publishPairing(state: .failed("Pairing code expired"))
-            sendPairingFailure("Pairing code expired.")
-            rejectControlConnection("Pairing code expired.")
+            expirePairingSession(sessionID: session.info.sessionID)
         case .locked:
-            currentPairingSession = nil
-            incomingPairingRequest = nil
+            let reason = "Too many incorrect pairing PIN attempts."
+            let connection = peerAuthenticated ? nil : controlConnection
+            clearPairingSession()
+            pendingPairingFailure = reason
+            connectionStatus.publishPairing(state: .failed(reason))
             refreshAdvertisedServices()
-            connectionStatus.publishPairing(state: .failed("Too many incorrect pairing PIN attempts."))
-            sendPairingFailure("Too many incorrect pairing PIN attempts.")
-            rejectControlConnection("Too many incorrect pairing PIN attempts.")
+            if let connection {
+                sendThenClose(
+                    .pairingResult(result: BoothPairingResult(accepted: false, reason: reason)),
+                    connection: connection,
+                    reason: reason
+                )
+            }
         }
     }
 
@@ -1727,9 +1789,11 @@ public final class NetworkBoothTransport: BoothTransport {
             guard case .ready = state, let connection else { return }
             Task { @MainActor [weak self, weak connection] in
                 guard let self, let connection else { return }
-                self.send(.connectionRejected(reason: reason), on: connection, channel: .control)
-                do { try await Task.sleep(for: .milliseconds(100)) } catch { return }
-                connection.cancel()
+                self.sendThenClose(
+                    .connectionRejected(reason: reason),
+                    connection: connection,
+                    reason: reason
+                )
             }
         }
         connection.start(queue: .main)
@@ -1738,12 +1802,12 @@ public final class NetworkBoothTransport: BoothTransport {
     private func rejectControlConnection(_ reason: String) {
         lastNetworkError = reason
         connectionStatus.publishPairing(authenticated: false, state: .failed(reason))
-        send(.connectionRejected(reason: reason), on: controlConnection, channel: .control)
-        let connection = controlConnection
-        Task { @MainActor [weak self, weak connection] in
-            do { try await Task.sleep(for: .milliseconds(100)) } catch { return }
-            guard let self, let connection, self.isCurrent(connection, channel: .control) else { return }
-            self.connectionDidClose(connection, channel: .control, reason: reason)
+        if let connection = controlConnection {
+            sendThenClose(
+                .connectionRejected(reason: reason),
+                connection: connection,
+                reason: reason
+            )
         }
     }
 
@@ -1853,6 +1917,33 @@ public final class NetworkBoothTransport: BoothTransport {
               let frame = try? BoothFrameEncoder.encode(channel: channel, payload: payload) else { return }
         connection.send(content: frame, completion: .contentProcessed { error in
             if let error { print("[Network] send failed: \(error.localizedDescription)") }
+        })
+    }
+
+    private func sendThenClose(_ message: Message, connection: NWConnection, reason: String?) {
+        guard let payload = try? message.encoded(),
+              let frame = try? BoothFrameEncoder.encode(channel: .control, payload: payload) else {
+            connection.cancel()
+            if isCurrent(connection, channel: .control) {
+                connectionDidClose(connection, channel: .control, reason: reason)
+            }
+            return
+        }
+
+        connection.send(content: frame, completion: .contentProcessed { [weak self] error in
+            Task { @MainActor [weak self] in
+                guard let self else {
+                    connection.cancel()
+                    return
+                }
+                let closeReason = error?.localizedDescription ?? reason
+                guard self.isCurrent(connection, channel: .control) else {
+                    connection.cancel()
+                    return
+                }
+                connection.cancel()
+                self.connectionDidClose(connection, channel: .control, reason: closeReason)
+            }
         })
     }
 

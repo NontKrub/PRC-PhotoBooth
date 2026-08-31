@@ -178,6 +178,50 @@ struct BoothPairingTests {
         #expect(session.validatePIN(session.pin, now: now.addingTimeInterval(121)) == .expired)
     }
 
+    @Test("invalidating a pairing session rejects its PIN")
+    func invalidatedSessionCannotAcceptPIN() throws {
+        let now = Date(timeIntervalSince1970: 35_000)
+        var session = try BoothPairingSession.make(macIdentity: macIdentity, now: now)
+
+        session.invalidate()
+
+        #expect(!session.isActive(at: now))
+        #expect(session.validatePIN(session.pin, now: now) == .locked)
+    }
+
+    @Test("an old pairing expiry cannot match a newer session")
+    func pairingExpiryUsesSessionIDGeneration() {
+        #expect(BoothPairingSession.isCurrentSession("session-a", currentSessionID: "session-a"))
+        #expect(!BoothPairingSession.isCurrentSession("session-a", currentSessionID: "session-b"))
+        #expect(!BoothPairingSession.isCurrentSession("session-a", currentSessionID: nil))
+    }
+
+    @Test("manual Mac pairing starts without an incoming intent and cancels cleanly")
+    @MainActor
+    func manualPairingLifecycle() {
+        let status = BoothConnectionStatus(requestedNetwork: .wifi)
+        let transport = NetworkBoothTransport(
+            role: .mac,
+            networkPreference: .wifi,
+            connectionStatus: status
+        )
+
+        #expect(transport.startPairingSession())
+        #expect(transport.currentPairingSessionInfo != nil)
+        let isPairing: Bool
+        if case .pairing = status.pairingState {
+            isPairing = true
+        } else {
+            isPairing = false
+        }
+        #expect(isPairing)
+
+        transport.cancelPairingSession()
+
+        #expect(transport.currentPairingSessionInfo == nil)
+        #expect(status.pairingState == .idle)
+    }
+
     @Test("QR payload round trips and enforces schema, Mac ID, expiry, and one-time token")
     func qrPayloadValidation() throws {
         let now = Date(timeIntervalSince1970: 40_000)

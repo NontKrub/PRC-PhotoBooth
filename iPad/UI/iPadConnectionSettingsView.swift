@@ -39,14 +39,16 @@ struct iPadConnectionSettingsView: View {
             }
         }
         .onChange(of: status.pairingState) { pairingState in
-            guard let automaticPairingPeerID else { return }
             switch pairingState {
             case .pairing:
-                selectedPeerForPIN = automaticPairingPeerID
-                self.automaticPairingPeerID = nil
-                showPINEntry = true
+                if let automaticPairingPeerID {
+                    selectedPeerForPIN = automaticPairingPeerID
+                    self.automaticPairingPeerID = nil
+                    showPINEntry = true
+                }
             case .failed:
                 self.automaticPairingPeerID = nil
+                showPINEntry = false
             default:
                 break
             }

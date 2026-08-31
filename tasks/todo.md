@@ -10,11 +10,13 @@ This is the active checklist. Historical v1.3/v1.4 notes remain below and are no
 - [x] Add protocol-v3 pairing/auth messages, six-digit PIN, two-minute expiry, attempt limit, QR payload, HMAC reconnect, forget, and selected-peer policy.
 - [x] Add Mac/iPad pairing settings, QR scanner permission/error paths, accessibility identifiers, and localized visible strings.
 - [x] Update CI triggers, Release artifacts, generic device compile, stable runner lane, README, and current release plan.
-- [x] Run final local Mac and iPad automated matrix; Mac tests 338/338 and iPad tests 4/4 passed; Mac/iPad Debug and Release builds plus generic iOS Release compile passed.
-- [x] Run focused pairing/protocol/printing/preflight/LAN tests: 79/79 passed.
-- [x] GitHub Xcode 27 Mac lane passed: run 33315413899 passed all build, test, packaging, and upload steps.
-- [x] GitHub Xcode 27 iPad lane passed: run 33315413899 passed all build, test, generic-device compile, packaging, and upload steps.
-- [x] GitHub stable macOS/Xcode 16.4 lane passed: run 33315413899 passed Release build and Mac tests.
+- [x] Run final local Mac and iPad automated matrix; Mac tests 350/350 (54/54 suites) and iPad tests 4/4 (1/1 suite) passed; Mac/iPad Debug and Release builds plus generic iOS Release compile passed.
+- [x] Run focused pairing/protocol/LAN tests: 50/50 passed across 3/3 suites.
+- [x] Make pairing cancellation wait for the control-message send completion before closing.
+- [x] Automatically expire pairing sessions and clean stale transport/UI state after 120 seconds.
+- [x] Guard pairing expiry by session ID so an old expiry cannot terminate a newer session.
+- [x] Prevent duplicate Mac pairing-sheet presentation with one effective sheet owner.
+- [ ] Run the GitHub Actions PR App Builds workflow for the final commit and record its run ID.
 - [x] Run final Ponytail review and rerun affected gates; no unnecessary code or scope found.
 - [ ] Run Computer Use Mac/iPad GUI matrix; Mac Release app launched and Event Setup opened, but Settings focus/Forget-iPad flow was blocked by a Computer Use native-pipe failure; iPad, camera, and network cases remain untested.
 - [ ] Run physical Ethernet, PIN/QR, printer, camera, and long-run gates.
