@@ -10,14 +10,15 @@ This is the active checklist. Historical v1.3/v1.4 notes remain below and are no
 - [x] Add protocol-v3 pairing/auth messages, six-digit PIN, two-minute expiry, attempt limit, QR payload, HMAC reconnect, forget, and selected-peer policy.
 - [x] Add Mac/iPad pairing settings, QR scanner permission/error paths, accessibility identifiers, and localized visible strings.
 - [x] Update CI triggers, Release artifacts, generic device compile, stable runner lane, README, and current release plan.
-- [x] Record final implementation HEAD 1acc929df82b2f9b05c223e540e1f386444734a5 after project.yml regeneration.
-- [x] Run final local Mac and iPad automated matrix; Mac tests 350/350 (54/54 suites) and iPad tests 4/4 (1/1 suite) passed; Mac/iPad Debug and Release builds plus generic iOS Release compile passed.
-- [x] Run focused pairing/protocol/LAN tests: 50/50 passed across 3/3 suites.
+- [x] Record final implementation HEAD be1d96b24da6dc94ba1d244145cd38c08fa83299 after project.yml regeneration.
+- [x] Run final local Mac and iPad automated matrix; Mac tests 351/351 (54/54 suites) and iPad tests 4/4 (1/1 suite) passed; Mac/iPad Debug and Release builds plus generic iOS Release compile passed.
+- [x] Run focused pairing/protocol/LAN tests: 51/51 passed across 3/3 suites.
 - [x] Make pairing cancellation wait for the control-message send completion before closing.
 - [x] Automatically expire pairing sessions and clean stale transport/UI state after 120 seconds.
 - [x] Guard pairing expiry by session ID so an old expiry cannot terminate a newer session.
 - [x] Prevent duplicate Mac pairing-sheet presentation with one effective sheet owner.
-- [x] GitHub Actions PR App Builds passed for final implementation HEAD: run 33351045788; stable macOS, Mac, and iPad build/test/release/generic-device/package/artifact lanes passed.
+- [x] Keep pairing QR payload encoding stable across countdown redraws and preserve the active PIN until explicit cancel, success, or expiry.
+- [x] GitHub Actions PR App Builds passed for final implementation HEAD: run 33352736453; stable macOS, Mac, and iPad build/test/release/generic-device/package/artifact lanes passed.
 - [x] Run final Ponytail review and rerun affected gates; no unnecessary code or scope found.
 - [ ] Run Computer Use Mac/iPad GUI matrix; Mac Release app launched and Event Setup opened, but Settings focus/Forget-iPad flow was blocked by a Computer Use native-pipe failure; iPad, camera, and network cases remain untested.
 - [ ] Run physical Ethernet, PIN/QR, printer, camera, and long-run gates.
