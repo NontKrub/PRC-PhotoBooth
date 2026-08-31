@@ -255,7 +255,9 @@ public struct BoothPairingQRCodePayload: Codable, Sendable, Equatable {
     }
 
     public func encodedString() throws -> String {
-        let data = try JSONEncoder().encode(self)
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = .sortedKeys
+        let data = try encoder.encode(self)
         return Self.prefix + data.base64URLEncodedString()
     }
 

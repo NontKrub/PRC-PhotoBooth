@@ -254,6 +254,19 @@ struct BoothPairingTests {
         #expect(session.validateQRToken(payload.oneTimeToken, now: now) == .locked)
     }
 
+    @Test("QR payload encoding stays stable across pairing sheet redraws")
+    func qrPayloadEncodingIsStable() throws {
+        let payload = try BoothPairingSession.make(
+            macIdentity: macIdentity,
+            now: Date(timeIntervalSince1970: 40_000)
+        ).qrPayload
+        let encoded = try payload.encodedString()
+
+        for _ in 0..<20 {
+            #expect(try payload.encodedString() == encoded)
+        }
+    }
+
     @Test("malformed QR payloads return a pairing error")
     func malformedQRPayload() throws {
         #expect(throws: BoothPairingError.invalidQRPayload) {

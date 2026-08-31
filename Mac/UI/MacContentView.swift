@@ -996,10 +996,6 @@ private struct MacPairingSheet: View {
                 now = Date()
             }
         }
-        .onDisappear {
-            if transport.currentPairingSessionInfo != nil {
-                transport.cancelPairingSession()
-            }
-        }
+        .interactiveDismissDisabled(transport.currentPairingSessionInfo != nil)
     }
 }
