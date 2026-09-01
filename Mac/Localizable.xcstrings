@@ -32,6 +32,7 @@
       }
     },
     "\"%@\" wants to connect to this Mac." : {
+      "extractionState" : "stale",
       "localizations" : {
         "th" : {
           "stringUnit" : {
@@ -659,6 +660,16 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "จำนวนครั้ง: %1$@"
+          }
+        }
+      }
+    },
+    "Authenticating…" : {
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "กำลังยืนยันตัวตน…"
           }
         }
       }
@@ -3133,6 +3144,16 @@
         }
       }
     },
+    "Incoming iPad" : {
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "iPad ที่กำลังเชื่อมต่อ"
+          }
+        }
+      }
+    },
     "Incorrect PIN. Try again." : {
       "extractionState" : "manual",
       "localizations" : {
@@ -3934,6 +3955,16 @@
         }
       }
     },
+    "No pairing in progress" : {
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ไม่มีการจับคู่กำลังดำเนินอยู่"
+          }
+        }
+      }
+    },
     "No photo slots defined" : {
       "extractionState" : "manual",
       "localizations" : {
@@ -3989,6 +4020,7 @@
       }
     },
     "No trusted iPads" : {
+      "extractionState" : "stale",
       "localizations" : {
         "en" : {
           "stringUnit" : {
@@ -4000,6 +4032,16 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "ไม่มี iPad ที่เชื่อถือ"
+          }
+        }
+      }
+    },
+    "No trusted iPads. A pending incoming iPad remains untrusted until PIN or QR authentication succeeds." : {
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ไม่มี iPad ที่เชื่อถือได้ iPad ที่รอจับคู่จะยังไม่ถือว่าเชื่อถือได้จนกว่าการยืนยันด้วย PIN หรือ QR จะสำเร็จ"
           }
         }
       }
@@ -4149,6 +4191,7 @@
       }
     },
     "Only continue if you recognize this iPad." : {
+      "extractionState" : "stale",
       "localizations" : {
         "th" : {
           "stringUnit" : {
@@ -4338,6 +4381,36 @@
         }
       }
     },
+    "Paired iPads" : {
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "iPad ที่จับคู่แล้ว"
+          }
+        }
+      }
+    },
+    "Pairing" : {
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "กำลังจับคู่"
+          }
+        }
+      }
+    },
+    "Pairing accepted" : {
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ยอมรับการจับคู่แล้ว"
+          }
+        }
+      }
+    },
     "Pairing code expired" : {
       "extractionState" : "stale",
       "localizations" : {
@@ -4373,6 +4446,7 @@
       }
     },
     "Pairing PIN" : {
+      "extractionState" : "stale",
       "localizations" : {
         "en" : {
           "stringUnit" : {
@@ -4567,6 +4641,16 @@
         }
       }
     },
+    "PIN" : {
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "รหัส PIN"
+          }
+        }
+      }
+    },
     "PINs don't match. Start over." : {
       "extractionState" : "manual",
       "localizations" : {
@@ -4623,6 +4707,7 @@
       }
     },
     "Preferred iPad" : {
+      "extractionState" : "stale",
       "localizations" : {
         "en" : {
           "stringUnit" : {
@@ -6834,6 +6919,26 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "กำลังรอสตรีมภาพสด Sony PTP จากกล้อง…"
+          }
+        }
+      }
+    },
+    "Waiting for the selected Mac to provide a pairing session." : {
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "กำลังรอ Mac ที่เลือกส่งเซสชันการจับคู่"
+          }
+        }
+      }
+    },
+    "Waiting for verification" : {
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "กำลังรอการยืนยัน"
           }
         }
       }

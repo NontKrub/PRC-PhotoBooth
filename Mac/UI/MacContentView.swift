@@ -3,7 +3,6 @@ import AppKit
 
 struct MacContentView: View {
     @Environment(BoothCoordinator.self) private var coordinator
-    @Environment(BoothConnectionStatus.self) private var connectionStatus
     @Environment(\.scenePhase) private var scenePhase
     @State private var selectedTab = 0
     @State private var showPINSetup = false
@@ -11,7 +10,6 @@ struct MacContentView: View {
     @State private var pendingTab: Int? = nil
     @State private var isAdminUnlocked = false
     @State private var showCloudSSHSetup = false
-    @State private var showPairingSheet = false
     @AppStorage("operatorLanguage") private var operatorLanguage = OperatorLanguage.system.rawValue
 
     var body: some View {
@@ -49,14 +47,6 @@ struct MacContentView: View {
         .onChange(of: scenePhase) { _, newPhase in
             if newPhase == .active { coordinator.printer.refreshPrinters() }
         }
-        .onChange(of: connectionStatus.pairingState) { _, pairingState in
-            switch pairingState {
-            case .pairing, .incoming:
-                showPairingSheet = true
-            default:
-                showPairingSheet = false
-            }
-        }
         .sheet(isPresented: $showPINSetup) {
             PINGateView(mode: .setup) {
                 showPINSetup = false
@@ -86,23 +76,9 @@ struct MacContentView: View {
         .sheet(isPresented: $showCloudSSHSetup) {
             CloudSSHSetupView(setup: coordinator.cloudSSHSetup)
         }
-        .sheet(isPresented: $showPairingSheet) {
-            if let transport = coordinator.multipeer as? NetworkBoothTransport {
-                MacPairingSheet(
-                    transport: transport,
-                    incomingRequest: incomingPairingRequest
-                )
-            }
-        }
         .task {
             if coordinator.cloudSSHSetup.shouldPresentFirstRun {
                 showCloudSSHSetup = true
-            }
-            switch connectionStatus.pairingState {
-            case .pairing, .incoming:
-                showPairingSheet = true
-            default:
-                break
             }
         }
     }
@@ -113,11 +89,6 @@ struct MacContentView: View {
         case .english: return Locale(identifier: "en")
         case .thai: return Locale(identifier: "th")
         }
-    }
-
-    private var incomingPairingRequest: IncomingBoothPairingRequest? {
-        guard case .incoming(let request, _) = connectionStatus.pairingState else { return nil }
-        return request
     }
 
 }
@@ -495,6 +466,10 @@ struct SettingsView: View {
 
             Divider()
 
+            MacPairingPanel(transport: transport, status: status, canChange: canChange)
+
+            Divider()
+
             Text("Connected iPad")
                 .font(.subheadline.bold())
             if status.isPeerAuthenticated, let name = status.peerDisplayName {
@@ -521,10 +496,10 @@ struct SettingsView: View {
 
             Divider()
 
-            Text("Preferred iPad")
+            Text("Paired iPads")
                 .font(.subheadline.bold())
             if transport.trustedPeers.isEmpty {
-                Text("No trusted iPads")
+                Text("No trusted iPads. A pending incoming iPad remains untrusted until PIN or QR authentication succeeds.")
                     .foregroundStyle(.secondary)
             } else {
                 Menu {
@@ -563,23 +538,15 @@ struct SettingsView: View {
                             .disabled(!canChange)
                             .accessibilityIdentifier("Forget iPad")
                     }
+                    .accessibilityIdentifier("Trusted iPad")
                 }
             }
 
-            HStack {
-                Button("Pair New iPad") {
-                    _ = transport.startPairingSession()
+            if !transport.trustedPeers.isEmpty {
+                Button("Forget All Paired iPads", role: .destructive) {
+                    showForgetAllPeers = true
                 }
-                .buttonStyle(.borderedProminent)
-                .disabled(!canChange || status.isPeerAuthenticated)
-                .accessibilityIdentifier("Pair New iPad")
-
-                if !transport.trustedPeers.isEmpty {
-                    Button("Forget All Paired iPads", role: .destructive) {
-                        showForgetAllPeers = true
-                    }
-                    .disabled(!canChange)
-                }
+                .disabled(!canChange)
             }
         }
     }
@@ -626,6 +593,8 @@ struct SettingsView: View {
             diagnosticRow("Wi-Fi path observation", pathObservationText(status.wifiPathObservation))
             diagnosticRow("Control channel", connectionStateText(status.state))
             diagnosticRow("Authenticated", status.isPeerAuthenticated ? "Yes" : "No")
+            diagnosticRow("Pairing stage", status.pairingStage.rawValue)
+            diagnosticRow("Pairing peer", (coordinator.multipeer as? NetworkBoothTransport)?.pairingPeerDisplayName ?? "None")
             diagnosticRow("Preview channel", status.isPreviewChannelConnected ? "Connected" : "Disconnected")
             let preferred = (coordinator.multipeer as? NetworkBoothTransport).map(preferredPeerName) ?? "None"
             diagnosticRow("Preferred peer", preferred)
@@ -906,77 +875,19 @@ struct SettingsView: View {
     }
 }
 
-private struct MacPairingSheet: View {
+private struct MacPairingPanel: View {
     let transport: NetworkBoothTransport
-    let incomingRequest: IncomingBoothPairingRequest?
-
-    init(transport: NetworkBoothTransport, incomingRequest: IncomingBoothPairingRequest? = nil) {
-        self.transport = transport
-        self.incomingRequest = incomingRequest
-    }
-
-    @Environment(\.dismiss) private var dismiss
+    let status: BoothConnectionStatus
+    let canChange: Bool
     @State private var now = Date()
 
     var body: some View {
-        VStack(spacing: 16) {
-            Text(incomingRequest == nil ? "Pair New iPad" : "Connect New iPad")
-                .font(.title.bold())
-
-            if let incomingRequest {
-                Text("\"\(incomingRequest.iPadIdentity.displayName)\" wants to connect to this Mac.")
-                    .multilineTextAlignment(.center)
-                    .accessibilityIdentifier("Pairing Requesting iPad")
-                Text("Only continue if you recognize this iPad.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-
-            if let session = transport.currentPairingSessionInfo {
-                let expired = session.expiresAt <= now
-                if expired {
-                    Label("Pairing code expired", systemImage: "clock.badge.exclamationmark")
-                        .foregroundStyle(.orange)
-                        .accessibilityIdentifier("Pairing expired")
-                } else {
-                    Text(incomingRequest == nil ? "Pairing PIN" : "Pairing Code")
-                        .font(.headline)
-                    if let pin = transport.pairingPINForDisplay {
-                        Text(pin)
-                            .font(.system(size: 42, weight: .bold, design: .monospaced))
-                            .tracking(4)
-                            .accessibilityLabel("Pairing PIN " + pin)
-                            .accessibilityIdentifier("Pairing PIN Display")
-                    }
-
-                    HStack(spacing: 4) {
-                        Text("Expires in")
-                        Text(session.expiresAt, style: .timer)
-                    }
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-
-                    if let payload = transport.pairingQRCodePayload {
-                        PairingQRCodeImage(payload: payload)
-                    } else {
-                        Text("QR code unavailable")
-                            .foregroundStyle(.orange)
-                    }
-                }
-            } else {
-                Label("Pairing code expired", systemImage: "clock.badge.exclamationmark")
-                    .foregroundStyle(.orange)
-            }
-
-            Button("Cancel Pairing", role: .cancel) {
-                transport.cancelPairingSession()
-                dismiss()
-            }
-            .buttonStyle(.bordered)
-            .accessibilityIdentifier("Cancel Pairing")
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Pairing")
+                .font(.subheadline.bold())
+            pairingContent
         }
-        .padding(28)
-        .frame(minWidth: 360, minHeight: 420)
+        .accessibilityElement(children: .contain)
         .task {
             while !Task.isCancelled {
                 do {
@@ -987,7 +898,137 @@ private struct MacPairingSheet: View {
                 now = Date()
             }
         }
-        .interactiveDismissDisabled(transport.currentPairingSessionInfo != nil)
+    }
+
+    @ViewBuilder
+    private var pairingContent: some View {
+        switch status.pairingState {
+        case .idle:
+            Text("No pairing in progress")
+                .foregroundStyle(.secondary)
+                .accessibilityIdentifier("Pairing Status")
+            Button("Pair New iPad") {
+                _ = transport.startPairingSession()
+            }
+            .buttonStyle(.borderedProminent)
+            .disabled(!canChange || status.isPeerAuthenticated)
+            .accessibilityIdentifier("Pair New iPad")
+        case .waitingForMac(let peerID):
+            Text("Waiting for the selected Mac to provide a pairing session.")
+                .foregroundStyle(.secondary)
+                .accessibilityIdentifier("Pairing Status")
+            diagnosticRow("Target", peerID)
+        case .pairing:
+            Text("Pair New iPad")
+                .font(.headline)
+                .accessibilityIdentifier("Pairing Status")
+            pairingSessionDetails
+            cancelButton
+        case .incoming(let request, _):
+            Text("Incoming iPad")
+                .font(.headline)
+                .accessibilityIdentifier("Pairing Status")
+            Text(request.iPadIdentity.displayName)
+                .accessibilityIdentifier("Incoming iPad Name")
+            Text("Waiting for verification")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            pairingSessionDetails
+            cancelButton
+        case .authenticating(let peerID):
+            Text(transport.pairingPeerDisplayName ?? status.peerDisplayName ?? peerID)
+                .font(.headline)
+                .accessibilityIdentifier("Pairing Status")
+            Text("Pairing accepted")
+            Text("Authenticating…")
+                .foregroundStyle(.secondary)
+            if transport.pairingPeerID != nil { cancelButton }
+        case .authenticated(let peerID):
+            Text(transport.pairingPeerDisplayName ?? status.peerDisplayName ?? peerID)
+                .font(.headline)
+                .accessibilityIdentifier("Pairing Status")
+            Label("Trusted", systemImage: "checkmark.circle.fill")
+                .foregroundStyle(.green)
+            Text(status.isPeerAuthenticated ? "Connected" : "Trusted")
+                .foregroundStyle(.secondary)
+        case .failed(let reason):
+            if let name = transport.pairingPeerDisplayName {
+                Text(name)
+                    .font(.headline)
+                    .accessibilityIdentifier("Incoming iPad Name")
+            }
+            Label(reason, systemImage: "exclamationmark.triangle.fill")
+                .foregroundStyle(.orange)
+                .accessibilityIdentifier("Pairing Failure")
+            Button("Retry Pairing") {
+                _ = transport.startPairingSession()
+            }
+            .buttonStyle(.borderedProminent)
+            .disabled(!canChange || status.isPeerAuthenticated)
+            .accessibilityIdentifier("Retry Pairing")
+        }
+    }
+
+    @ViewBuilder
+    private var pairingSessionDetails: some View {
+        if let session = transport.currentPairingSessionInfo {
+            if session.expiresAt <= now {
+                Label("Pairing code expired", systemImage: "clock.badge.exclamationmark")
+                    .foregroundStyle(.orange)
+                    .accessibilityIdentifier("Pairing Expiry")
+            } else {
+                Text("PIN")
+                    .font(.headline)
+                if let pin = transport.pairingPINForDisplay {
+                    Text(pin)
+                        .font(.system(size: 32, weight: .bold, design: .monospaced))
+                        .tracking(4)
+                        .accessibilityLabel("Pairing PIN " + pin)
+                        .accessibilityIdentifier("Pairing PIN Display")
+                }
+
+                HStack(spacing: 4) {
+                    Text("Expires in")
+                    Text(session.expiresAt, style: .timer)
+                }
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .accessibilityIdentifier("Pairing Expiry")
+
+                if let payload = transport.pairingQRCodePayload {
+                    PairingQRCodeImage(payload: payload)
+                        .frame(maxWidth: 260, alignment: .leading)
+                } else {
+                    Text("QR code unavailable")
+                        .foregroundStyle(.orange)
+                }
+            }
+        } else if let expiresAt = transport.pairingExpiresAt {
+            HStack(spacing: 4) {
+                Text("Expires in")
+                Text(expiresAt, style: .timer)
+            }
+            .font(.caption)
+            .foregroundStyle(.secondary)
+            .accessibilityIdentifier("Pairing Expiry")
+        }
+    }
+
+    private var cancelButton: some View {
+        Button("Cancel Pairing", role: .cancel) {
+            transport.cancelPairingSession()
+        }
+        .buttonStyle(.bordered)
+        .accessibilityIdentifier("Cancel Pairing")
+    }
+
+    private func diagnosticRow(_ label: String, _ value: String) -> some View {
+        HStack {
+            Text(label).foregroundStyle(.secondary)
+            Spacer()
+            Text(value).textSelection(.enabled)
+        }
+        .font(.caption)
     }
 }
 

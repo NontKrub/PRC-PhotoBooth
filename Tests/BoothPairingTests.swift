@@ -156,6 +156,48 @@ struct BoothPairingTests {
         #expect(!BoothPairingSession.isValidPIN("48219a"))
     }
 
+    @Test("advertised pairing session is usable only while complete and unexpired")
+    func advertisedPairingSessionAvailability() {
+        let now = Date(timeIntervalSince1970: 25_000)
+        let active = BoothDiscoveredPeer(
+            id: "mac-1",
+            displayName: "PRC Booth Mac",
+            role: .mac,
+            appVersion: "1.4.2",
+            protocolVersion: BoothTransportHello.currentProtocolVersion,
+            networkPreference: .wifi,
+            availableInterfaces: [.wifi],
+            pairingSessionID: "session-1",
+            pairingExpiresAt: now.addingTimeInterval(1)
+        )
+        let expired = BoothDiscoveredPeer(
+            id: "mac-1",
+            displayName: "PRC Booth Mac",
+            role: .mac,
+            appVersion: "1.4.2",
+            protocolVersion: BoothTransportHello.currentProtocolVersion,
+            networkPreference: .wifi,
+            availableInterfaces: [.wifi],
+            pairingSessionID: "session-1",
+            pairingExpiresAt: now
+        )
+        let incomplete = BoothDiscoveredPeer(
+            id: "mac-1",
+            displayName: "PRC Booth Mac",
+            role: .mac,
+            appVersion: "1.4.2",
+            protocolVersion: BoothTransportHello.currentProtocolVersion,
+            networkPreference: .wifi,
+            availableInterfaces: [.wifi],
+            pairingSessionID: " ",
+            pairingExpiresAt: now.addingTimeInterval(1)
+        )
+
+        #expect(active.hasActivePairingSession(at: now))
+        #expect(!expired.hasActivePairingSession(at: now))
+        #expect(!incomplete.hasActivePairingSession(at: now))
+    }
+
     @Test("invalid PIN is rejected and five attempts invalidate the session")
     func invalidPINRateLimit() throws {
         let now = Date(timeIntervalSince1970: 20_000)
@@ -196,6 +238,132 @@ struct BoothPairingTests {
         #expect(!BoothPairingSession.isCurrentSession("session-a", currentSessionID: nil))
     }
 
+    @Test("pairing expiry and critical-send callbacks reject stale generations")
+    func stalePairingCallbacksAreIgnored() {
+        #expect(BoothPairingExpiryGate.accepts(
+            sessionID: "session-b",
+            generation: 2,
+            currentGeneration: 2,
+            currentSessionID: "session-b",
+            pendingSessionID: nil,
+            pendingResultSessionID: nil
+        ))
+        #expect(!BoothPairingExpiryGate.accepts(
+            sessionID: "session-a",
+            generation: 1,
+            currentGeneration: 2,
+            currentSessionID: "session-b",
+            pendingSessionID: nil,
+            pendingResultSessionID: nil
+        ))
+        #expect(!BoothPairingExpiryGate.accepts(
+            sessionID: "session-a",
+            generation: 2,
+            currentGeneration: 2,
+            currentSessionID: "session-b",
+            pendingSessionID: nil,
+            pendingResultSessionID: nil
+        ))
+        #expect(BoothPairingExpiryGate.accepts(
+            sessionID: "session-b",
+            generation: 2,
+            currentGeneration: 2,
+            currentSessionID: nil,
+            pendingSessionID: nil,
+            pendingResultSessionID: "session-b"
+        ))
+
+        let current = BoothPairingControlSendContext(
+            connectionGeneration: 4,
+            pairingGeneration: 8,
+            sessionID: "session-b"
+        )
+        #expect(BoothPairingControlSendGate.accepts(
+            current,
+            currentConnectionGeneration: 4,
+            currentPairingGeneration: 8,
+            currentSessionID: "session-b",
+            pendingSessionID: nil,
+            pendingResultSessionID: nil
+        ))
+        #expect(!BoothPairingControlSendGate.accepts(
+            current,
+            currentConnectionGeneration: 3,
+            currentPairingGeneration: 8,
+            currentSessionID: "session-b",
+            pendingSessionID: nil,
+            pendingResultSessionID: nil
+        ))
+        #expect(!BoothPairingControlSendGate.accepts(
+            current,
+            currentConnectionGeneration: 4,
+            currentPairingGeneration: 7,
+            currentSessionID: "session-b",
+            pendingSessionID: nil,
+            pendingResultSessionID: nil
+        ))
+        #expect(!BoothPairingControlSendGate.accepts(
+            current,
+            currentConnectionGeneration: 4,
+            currentPairingGeneration: 8,
+            currentSessionID: "session-a",
+            pendingSessionID: nil,
+            pendingResultSessionID: nil
+        ))
+        #expect(BoothPairingControlSendGate.accepts(
+            current,
+            currentConnectionGeneration: 4,
+            currentPairingGeneration: 8,
+            currentSessionID: nil,
+            pendingSessionID: nil,
+            pendingResultSessionID: "session-b"
+        ))
+    }
+
+    @Test("pairing result remains decodable when optional lifecycle fields are absent")
+    func pairingResultLegacyDecode() throws {
+        let legacy = Data(#"{"accepted":false,"reason":"Pairing rejected."}"#.utf8)
+        let result = try JSONDecoder().decode(BoothPairingResult.self, from: legacy)
+
+        #expect(!result.accepted)
+        #expect(!result.retryable)
+        #expect(result.pairingSessionID == nil)
+    }
+
+    @Test("pairing result session identity must match the active request when supplied")
+    func pairingResultSessionIdentity() {
+        let request = BoothPairingRequest(
+            sessionID: "session-a",
+            targetMacDeviceID: macIdentity.id,
+            iPadIdentity: BoothDeviceIdentity(id: "ipad-1", displayName: "PRC-iPad-01", role: .iPad),
+            method: .pin("123456")
+        )
+        let result = BoothPairingResult(
+            accepted: true,
+            macIdentity: macIdentity,
+            sharedSecret: Data(repeating: 0x22, count: 32),
+            pairingSessionID: "session-b"
+        )
+
+        #expect(!BoothPairingTrustPolicy.accepts(
+            result: result,
+            pendingPairingRequest: request,
+            targetPeerID: macIdentity.id,
+            expectedSessionID: request.sessionID
+        ))
+        #expect(BoothPairingTrustPolicy.accepts(
+            result: BoothPairingResult(
+                accepted: true,
+                macIdentity: macIdentity,
+                sharedSecret: Data(repeating: 0x22, count: 32),
+                pairingSessionID: request.sessionID
+            ),
+            pendingPairingRequest: request,
+            targetPeerID: macIdentity.id,
+            expectedSessionID: request.sessionID
+        ))
+    }
+
     @Test("manual Mac pairing starts without an incoming intent and cancels cleanly")
     @MainActor
     func manualPairingLifecycle() {
@@ -215,11 +383,13 @@ struct BoothPairingTests {
             isPairing = false
         }
         #expect(isPairing)
+        #expect(status.pairingStage == .discovering)
 
         transport.cancelPairingSession()
 
         #expect(transport.currentPairingSessionInfo == nil)
         #expect(status.pairingState == .idle)
+        #expect(status.pairingStage == .idle)
     }
 
     @Test("QR payload round trips and enforces schema, Mac ID, expiry, and one-time token")
@@ -342,6 +512,115 @@ struct BoothPairingTests {
         #expect(!BoothPairingCrypto.verify(proof, for: first, expectedResponderDeviceID: "ipad", secret: secret, now: now.addingTimeInterval(-1)))
         #expect(!BoothPairingCrypto.verify(proof, for: first, expectedResponderDeviceID: "ipad", secret: Data([0x01]), now: now))
         #expect(proof.proof != secondProof.proof)
+    }
+
+    @Test("HMAC transcript tolerates cross-runtime Date precision")
+    func hmacAuthenticationIgnoresWireDateRounding() {
+        let secret = Data(repeating: 0x33, count: 32)
+        let original = BoothAuthChallenge(
+            id: "physical-ipad-challenge",
+            nonce: Data(repeating: 0x44, count: 32),
+            challengerDeviceID: "mac",
+            responderDeviceID: "ipad",
+            issuedAt: Date(timeIntervalSince1970: 50_000.0004999)
+        )
+        let decodedOnOlderRuntime = BoothAuthChallenge(
+            id: original.id,
+            nonce: original.nonce,
+            challengerDeviceID: original.challengerDeviceID,
+            responderDeviceID: original.responderDeviceID,
+            issuedAt: Date(timeIntervalSince1970: 50_000.0005001)
+        )
+
+        let proof = BoothPairingCrypto.makeProof(
+            for: decodedOnOlderRuntime,
+            responderDeviceID: "ipad",
+            secret: secret
+        )
+
+        #expect(BoothPairingCrypto.verify(
+            proof,
+            for: original,
+            expectedResponderDeviceID: "ipad",
+            secret: secret,
+            now: original.issuedAt
+        ))
+        #expect(BoothPairingCrypto.transcriptIdentifier(
+            for: original,
+            responderDeviceID: "ipad"
+        ) == BoothPairingCrypto.transcriptIdentifier(
+            for: decodedOnOlderRuntime,
+            responderDeviceID: "ipad"
+        ))
+    }
+
+    @Test("Auth proof diagnostics distinguish transcript checks from HMAC mismatch")
+    func authProofVerificationDiagnostics() {
+        let now = Date(timeIntervalSince1970: 50_000)
+        let secret = Data(repeating: 0x66, count: 32)
+        let challenge = BoothAuthChallenge(
+            id: "diagnostic-challenge",
+            nonce: Data(repeating: 0x77, count: 32),
+            challengerDeviceID: "mac",
+            responderDeviceID: "ipad",
+            issuedAt: now
+        )
+        let proof = BoothPairingCrypto.makeProof(
+            for: challenge,
+            responderDeviceID: "ipad",
+            secret: secret
+        )
+
+        #expect(BoothPairingCrypto.verificationFailure(
+            proof,
+            for: challenge,
+            expectedResponderDeviceID: "ipad",
+            secret: secret,
+            now: now
+        ) == nil)
+        #expect(BoothPairingCrypto.verificationFailure(
+            proof,
+            for: challenge,
+            expectedResponderDeviceID: "ipad",
+            secret: Data(repeating: 0x88, count: 32),
+            now: now
+        ) == .hmacMismatch)
+        #expect(BoothPairingCrypto.verificationFailure(
+            proof,
+            for: challenge,
+            expectedResponderDeviceID: "other",
+            secret: secret,
+            now: now
+        ) == .wrongChallengeTarget)
+
+        let differentlyDescribedChallenge = BoothAuthChallenge(
+            id: challenge.id,
+            nonce: challenge.nonce,
+            challengerDeviceID: "different-mac-description",
+            responderDeviceID: "ipad",
+            issuedAt: challenge.issuedAt
+        )
+        #expect(BoothPairingCrypto.verify(
+            proof,
+            for: differentlyDescribedChallenge,
+            expectedResponderDeviceID: "ipad",
+            secret: secret,
+            now: now
+        ))
+    }
+
+    @Test("Auth challenge receiver validation does not require a synchronized clock")
+    func authChallengeStructureIsIndependentOfReceiverClock() {
+        let challenge = BoothAuthChallenge(
+            id: "isolated-lan-challenge",
+            nonce: Data(repeating: 0x55, count: 32),
+            challengerDeviceID: "mac",
+            responderDeviceID: "ipad",
+            issuedAt: Date(timeIntervalSince1970: 50_000)
+        )
+
+        #expect(challenge.isWellFormed)
+        #expect(!challenge.isFresh(at: Date(timeIntervalSince1970: 60_000)))
     }
 
     @Test("only the selected trusted peer is admitted and eligible for automatic reconnect")

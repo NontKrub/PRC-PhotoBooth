@@ -167,6 +167,10 @@ public final class BoothConnectionStatus {
 #if os(iOS)
     @Published
 #endif
+    public private(set) var pairingStage: BoothPairingStage = .idle
+#if os(iOS)
+    @Published
+#endif
     public private(set) var roundTripLatency: TimeInterval?
 
     public var isFallbackActive: Bool {
@@ -246,6 +250,7 @@ public final class BoothConnectionStatus {
         updatePreferredPeer: Bool = false,
         authenticated: Bool? = nil,
         state: BoothPairingState? = nil,
+        stage: BoothPairingStage? = nil,
         roundTripLatency: TimeInterval? = nil,
         updateLatency: Bool = false
     ) {
@@ -254,6 +259,7 @@ public final class BoothConnectionStatus {
         if updatePreferredPeer { self.preferredPeerID = preferredPeerID }
         if let authenticated { isPeerAuthenticated = authenticated }
         if let state { pairingState = state }
+        if let stage { pairingStage = stage }
         if updateLatency { self.roundTripLatency = roundTripLatency }
     }
 

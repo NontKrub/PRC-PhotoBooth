@@ -13,11 +13,73 @@
 - [x] Selected-peer filtering, preferred-device reconnect policy, wrong-peer rejection, preview identity binding, and protocol version 3 compatibility state.
 - [x] Mac/iPad connection settings, pairing QR scanner bridge, accessibility identifiers, and English/Thai catalog entries.
 - [x] CI push triggers, Xcode 27 lane, stable macOS lane, Release artifacts, and generic iOS device Release compile.
-- [x] Full local Debug/Release build matrix and complete automated suite after final edits: Mac tests 337/337; iPad tests 4/4; Mac/iPad Debug and Release builds plus generic iOS Release compile passed.
-- [x] Ponytail final-diff review and post-review test rerun; removed one unused discovery helper and kept the remaining pairing/transport paths scoped to the release requirements.
+- [x] Full local Debug/Release build matrix and complete automated suite after the pairing-regression fix: Mac tests 355/355 in 54/54 suites; iPad tests 4/4 in 1/1 suite; Mac/iPad Debug and Release builds plus generic iOS Release compile passed.
+- [x] Manual final-diff simplification review and post-review test rerun; the named Ponytail skill was not available in this environment, so its requested checks were performed explicitly and documented below.
 - [ ] Computer Use Mac/iPad UI pass, including native print cancellation regression.
 - [ ] Real Mac↔iPad PIN/QR pairing and Ethernet/Wi-Fi fallback: pending physical/network-capable environment.
 - [ ] Physical printer, camera permission, QR scan, and long-run booth cycle gate.
+
+## v1.4.2 pairing-regression follow-up — 2026-08-31
+
+Reviewed starting branch: `fix/v1.4.2-stability-pairing`
+Starting Git HEAD: `83941dd5c487cab51e6f10e711136ecbd17c8ecf`
+Final implementation HEAD: same uncommitted Git HEAD; no commit or push was requested. The pre-existing Xcode user-state change remains untouched.
+
+Baseline before edits: `xcodegen generate` passed; Mac clean build passed; the available iOS 26.5 `iPad (A16)` simulator clean build passed with an iOS 16.0 target; Mac tests passed at 351 tests in 54 suites. Physical reproduction was not available, so the handshake stages were confirmed by code tracing before implementation.
+
+Root causes fixed:
+
+- Mac pairing is now rendered by `MacPairingPanel` inside the Settings network page. The Operator window no longer owns a competing pairing sheet.
+- Pending/incoming iPads are presented separately from `trustedPeers`; trust is not stored until reciprocal HMAC authentication succeeds.
+- Pairing intent, session, request, result, auth challenge, and auth proof sends now use completion-aware control sends. Failures become visible state and reconnect/retry behavior.
+- iPad intent/session/request/provisional-result state has a local, session- and generation-guarded expiry task.
+- Centralized cleanup clears ephemeral pairing, auth, target, expiry, and connection state without deleting persistent trusted peers. Connection and pairing generations reject stale callbacks.
+- A rejected second peer and a Mac cancel/expiry received before PIN entry no longer disturb or strand the active pairing attempt.
+
+Affected implementation files:
+
+- `Shared/Connectivity/NetworkBoothTransport.swift`
+- `Shared/Connectivity/BoothPairing.swift`
+- `Shared/Connectivity/BoothTransport.swift`
+- `Mac/UI/MacContentView.swift`
+- `iPad/UI/iPadConnectionSettingsView.swift`
+- `Tests/BoothPairingTests.swift`
+- `Tests/MessageTests.swift`
+
+Verification ledger:
+
+- Mac Debug build: PASS.
+- Mac Release build: PASS.
+- iPad Debug build: PASS on the available iOS 26.5 `iPad (A16)` simulator; compiled target remains iOS 16.0.
+- iPad Release build: PASS on the available iOS 26.5 `iPad (A16)` simulator.
+- Generic iOS Release build with `CODE_SIGNING_ALLOWED=NO`: PASS; target triple `arm64-apple-ios16.0`.
+- Mac automated tests: PASS, 355 tests in 54 suites.
+- iPad automated tests: PASS, 4 tests in 1 suite.
+- Version/config audit: PASS, marketing version `1.4.2`, build `6`, iPad-only family `2`, iPad minimum `16.0`, macOS minimum unchanged at `15.0`, protocol `3`.
+- Caveman review: PASS; the underlying pairing state/transport lifecycle was repaired, with no secret/PIN/token/proof/nonce logging.
+- Ponytail review: named skill unavailable; equivalent manual review completed for duplicate owners/state, cleanup, dead paths, security, and scope.
+- Computer Test/Use: NOT RUN as a formal gate. The built Mac app launched, but host accessibility access/display capture was unavailable. The built iPad app installed/launched in the simulator and rendered its customer screen, but no touch/accessibility driver was available for the Settings pairing flow.
+- Physical iPad Wi-Fi pairing: PENDING; no physical iPad was available.
+- Physical Ethernet and Wi-Fi fallback: PENDING; no hardware/network-capable booth was available.
+
+Hardware-dependent items remain release blockers until exercised on the real Mac/iPad pair.
+
+## Pairing history comparison — 2026-09-01
+
+The reported GitHub window has no 30 October commits. The matching historical
+window is 30 August 2026, 22:00–23:59 (+07:00): `1963d6225cc749f2c9272fd803f6a6a18f0e2f86`
+and `234519ae37f4099bb683c373df91ee49344d5ae7`. That build used the
+Mac-started, Bonjour-advertised pairing session directly: iPad opened PIN entry
+and submitted its pairing request without first requiring a `pairingIntent`
+round trip. The subsequent `479ae6f28f379044634c33b433c9da8cb9edb704` change
+introduced the automatic iPad intent/session flow.
+
+The current implementation retains the intent flow when no Mac session is
+advertised, but restores the established direct PIN path when a discovered Mac
+advertises a complete, unexpired pairing session. Session ID, expiry, PIN, and
+HMAC validation remain Mac-authoritative. `BoothPairingTests` passed 21/21 and
+the iPad Debug simulator build passed. Physical verification remains pending:
+no physical iPad is attached to this development Mac.
 
 ## Release blockers
 

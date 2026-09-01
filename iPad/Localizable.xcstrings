@@ -478,6 +478,16 @@
         }
       }
     },
+    "Expires in" : {
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "หมดอายุใน"
+          }
+        }
+      }
+    },
     "Filter" : {
       "localizations" : {
         "th" : {

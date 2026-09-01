@@ -34,7 +34,8 @@ struct MessageTests {
             .pairingResult(result: BoothPairingResult(
                 accepted: true,
                 macIdentity: BoothDeviceIdentity(id: "mac-test", displayName: "PRC-Booth-01", role: .mac),
-                sharedSecret: Data(repeating: 0x44, count: 32)
+                sharedSecret: Data(repeating: 0x44, count: 32),
+                pairingSessionID: "pairing-session"
             )),
             .authChallenge(challenge: BoothAuthChallenge(
                 id: "challenge",

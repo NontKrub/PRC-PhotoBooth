@@ -28,6 +28,30 @@ public struct TrustedBoothPeer: Codable, Sendable, Equatable, Identifiable {
     }
 }
 
+/// Diagnostic stage for the secure pairing handshake.
+///
+/// This is deliberately separate from `BoothPairingState`: the latter is the
+/// user-facing lifecycle, while this records the exact transport step that
+/// last ran. It makes physical-device failures actionable without creating a
+/// second authoritative pairing state machine.
+public enum BoothPairingStage: String, Codable, Sendable, Equatable {
+    case idle
+    case discovering
+    case intentSent
+    case sessionReceived
+    case sessionSending
+    case sessionSent
+    case waitingForPIN
+    case requestSending
+    case requestSent
+    case trustSaving
+    case resultSending
+    case resultReceived
+    case authenticating
+    case authenticated
+    case failed
+}
+
 public struct BoothDiscoveredPeer: Identifiable, Equatable, Sendable {
     public let id: String
     public var displayName: String
@@ -65,6 +89,17 @@ public struct BoothDiscoveredPeer: Identifiable, Equatable, Sendable {
         self.pairingExpiresAt = pairingExpiresAt
         self.isTrusted = isTrusted
         self.isPreferred = isPreferred
+    }
+
+    /// A Bonjour-advertised session may be used for the direct, Mac-started
+    /// PIN flow. The Mac still validates the session and PIN on receipt.
+    public func hasActivePairingSession(at now: Date = Date()) -> Bool {
+        guard let pairingSessionID,
+              !pairingSessionID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              let pairingExpiresAt else {
+            return false
+        }
+        return pairingExpiresAt > now
     }
 }
 
@@ -174,7 +209,8 @@ public enum BoothPairingTrustPolicy {
     public static func accepts(
         result: BoothPairingResult,
         pendingPairingRequest: BoothPairingRequest?,
-        targetPeerID: String?
+        targetPeerID: String?,
+        expectedSessionID: String? = nil
     ) -> Bool {
         guard result.accepted,
               let pendingPairingRequest,
@@ -185,6 +221,9 @@ public enum BoothPairingTrustPolicy {
               !macIdentity.displayName.isEmpty,
               macIdentity.id == targetPeerID,
               pendingPairingRequest.targetMacDeviceID == macIdentity.id else { return false }
+        if let expectedSessionID {
+            guard result.pairingSessionID == expectedSessionID else { return false }
+        }
         return true
     }
 }
@@ -213,17 +252,44 @@ public struct BoothPairingResult: Codable, Sendable, Equatable {
     public let macIdentity: BoothDeviceIdentity?
     public let sharedSecret: Data?
     public let reason: String?
+    public let retryable: Bool
+    public let pairingSessionID: String?
 
     public init(
         accepted: Bool,
         macIdentity: BoothDeviceIdentity? = nil,
         sharedSecret: Data? = nil,
-        reason: String? = nil
+        reason: String? = nil,
+        retryable: Bool = false,
+        pairingSessionID: String? = nil
     ) {
         self.accepted = accepted
         self.macIdentity = macIdentity
         self.sharedSecret = sharedSecret
         self.reason = reason
+        self.retryable = retryable
+        self.pairingSessionID = pairingSessionID
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case accepted
+        case macIdentity
+        case sharedSecret
+        case reason
+        case retryable
+        case pairingSessionID
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        accepted = try container.decode(Bool.self, forKey: .accepted)
+        macIdentity = try container.decodeIfPresent(BoothDeviceIdentity.self, forKey: .macIdentity)
+        sharedSecret = try container.decodeIfPresent(Data.self, forKey: .sharedSecret)
+        reason = try container.decodeIfPresent(String.self, forKey: .reason)
+        // Both fields were added to protocol v3 after the initial secure-pairing
+        // build. Missing values remain safe defaults for an in-flight upgrade.
+        retryable = try container.decodeIfPresent(Bool.self, forKey: .retryable) ?? false
+        pairingSessionID = try container.decodeIfPresent(String.self, forKey: .pairingSessionID)
     }
 }
 
@@ -401,6 +467,53 @@ public struct BoothPairingSession: Sendable, Equatable {
     }
 }
 
+/// Context captured by a pairing-critical send completion.
+///
+/// NWConnection callbacks can arrive after a connection or pairing attempt
+/// has been replaced. The transport must validate all three values before a
+/// completion is allowed to mutate pairing state.
+struct BoothPairingControlSendContext: Equatable, Sendable {
+    let connectionGeneration: Int
+    let pairingGeneration: Int
+    let sessionID: String?
+}
+
+/// Generation gate for local expiry tasks. A task belongs to one pairing
+/// attempt even when its Task cancellation races a newly scheduled timer.
+struct BoothPairingExpiryGate {
+    static func accepts(
+        sessionID: String,
+        generation: Int,
+        currentGeneration: Int,
+        currentSessionID: String?,
+        pendingSessionID: String?,
+        pendingResultSessionID: String?
+    ) -> Bool {
+        guard generation == currentGeneration else { return false }
+        return sessionID == currentSessionID
+            || sessionID == pendingSessionID
+            || sessionID == pendingResultSessionID
+    }
+}
+
+enum BoothPairingControlSendGate {
+    static func accepts(
+        _ context: BoothPairingControlSendContext,
+        currentConnectionGeneration: Int,
+        currentPairingGeneration: Int,
+        currentSessionID: String?,
+        pendingSessionID: String?,
+        pendingResultSessionID: String?
+    ) -> Bool {
+        guard context.connectionGeneration == currentConnectionGeneration,
+              context.pairingGeneration == currentPairingGeneration else { return false }
+        guard let sessionID = context.sessionID else { return true }
+        return sessionID == currentSessionID
+            || sessionID == pendingSessionID
+            || sessionID == pendingResultSessionID
+    }
+}
+
 public struct BoothAuthChallenge: Codable, Sendable, Equatable {
     public static let lifetime: TimeInterval = 30
 
@@ -433,11 +546,15 @@ public struct BoothAuthChallenge: Codable, Sendable, Equatable {
         )
     }
 
-    public func isFresh(at now: Date = Date()) -> Bool {
+    public var isWellFormed: Bool {
         !id.isEmpty &&
         nonce.count == 32 &&
         !challengerDeviceID.isEmpty &&
-        !responderDeviceID.isEmpty &&
+        !responderDeviceID.isEmpty
+    }
+
+    public func isFresh(at now: Date = Date()) -> Bool {
+        isWellFormed &&
         now >= issuedAt &&
         now.timeIntervalSince(issuedAt) <= Self.lifetime
     }
@@ -452,6 +569,28 @@ public struct BoothAuthProof: Codable, Sendable, Equatable {
         self.challengeID = challengeID
         self.responderDeviceID = responderDeviceID
         self.proof = proof
+    }
+}
+
+enum BoothAuthProofVerificationFailure: String, Equatable, Sendable {
+    case invalidSecretLength
+    case expiredChallenge
+    case wrongChallengeTarget
+    case wrongChallengeID
+    case wrongResponder
+    case invalidProofLength
+    case hmacMismatch
+
+    var message: String {
+        switch self {
+        case .invalidSecretLength: return "pairing secret is invalid"
+        case .expiredChallenge: return "authentication challenge expired"
+        case .wrongChallengeTarget: return "challenge targets a different device"
+        case .wrongChallengeID: return "proof answers a different challenge"
+        case .wrongResponder: return "proof came from a different device"
+        case .invalidProofLength: return "proof format is invalid"
+        case .hmacMismatch: return "proof was created with a different pairing secret or transcript"
+        }
     }
 }
 
@@ -484,33 +623,65 @@ public enum BoothPairingCrypto {
         secret: Data,
         now: Date = Date()
     ) -> Bool {
-        guard secret.count == 32,
-              challenge.isFresh(at: now),
-              challenge.responderDeviceID == expectedResponderDeviceID,
-              proof.challengeID == challenge.id,
-              proof.responderDeviceID == expectedResponderDeviceID,
-              proof.proof.count == SHA256.Digest.byteCount else { return false }
+        verificationFailure(
+            proof,
+            for: challenge,
+            expectedResponderDeviceID: expectedResponderDeviceID,
+            secret: secret,
+            now: now
+        ) == nil
+    }
+
+    static func verificationFailure(
+        _ proof: BoothAuthProof,
+        for challenge: BoothAuthChallenge,
+        expectedResponderDeviceID: String,
+        secret: Data,
+        now: Date = Date()
+    ) -> BoothAuthProofVerificationFailure? {
+        guard secret.count == 32 else { return .invalidSecretLength }
+        guard challenge.isFresh(at: now) else { return .expiredChallenge }
+        guard challenge.responderDeviceID == expectedResponderDeviceID else { return .wrongChallengeTarget }
+        guard proof.challengeID == challenge.id else { return .wrongChallengeID }
+        guard proof.responderDeviceID == expectedResponderDeviceID else { return .wrongResponder }
+        guard proof.proof.count == SHA256.Digest.byteCount else { return .invalidProofLength }
         let key = SymmetricKey(data: secret)
-        return HMAC<SHA256>.isValidAuthenticationCode(
+        guard HMAC<SHA256>.isValidAuthenticationCode(
             proof.proof,
             authenticating: canonicalChallengeData(challenge, responderDeviceID: expectedResponderDeviceID),
             using: key
-        )
+        ) else { return .hmacMismatch }
+        return nil
+    }
+
+    /// A short, non-secret identifier for comparing the exact authentication
+    /// transcript across physical devices. It does not expose the nonce or key.
+    static func transcriptIdentifier(
+        for challenge: BoothAuthChallenge,
+        responderDeviceID: String
+    ) -> String {
+        SHA256.hash(
+            data: canonicalChallengeData(challenge, responderDeviceID: responderDeviceID)
+        ).prefix(6).map { String(format: "%02x", $0) }.joined()
     }
 
     private static func canonicalChallengeData(
         _ challenge: BoothAuthChallenge,
         responderDeviceID: String
     ) -> Data {
-        let milliseconds = Int64((challenge.issuedAt.timeIntervalSince1970 * 1000).rounded())
-        return Data([
-            challenge.id,
-            challenge.nonce.base64EncodedString(),
-            challenge.challengerDeviceID,
-            challenge.responderDeviceID,
-            responderDeviceID,
-            String(milliseconds)
-        ].joined(separator: "\n").utf8)
+        // The challenger retains the original challenge and validates every
+        // non-secret field before HMAC verification: challenge ID, expected
+        // responder identity, challenge identity, and local freshness. The
+        // HMAC therefore needs to cover only its unique, 256-bit nonce.
+        //
+        // Keeping this transcript binary avoids cross-runtime Foundation and
+        // String serialization differences on the iPadOS 16 physical target.
+        // The fixed label prevents this MAC from being reused by another
+        // protocol message that happens to contain the same bytes.
+        _ = responderDeviceID
+        var data = Data("PRC-PhotoBooth/auth-proof/v3\0".utf8)
+        data.append(challenge.nonce)
+        return data
     }
 }
 

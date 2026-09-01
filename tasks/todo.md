@@ -2,6 +2,23 @@
 
 This is the active checklist. Historical v1.3/v1.4 notes remain below and are not release instructions.
 
+## Pairing-regression follow-up — 2026-08-31
+
+This dated ledger supersedes earlier v1.4.2 pairing rows below. Reviewed branch: `fix/v1.4.2-stability-pairing`; starting and final uncommitted Git HEAD: `83941dd5c487cab51e6f10e711136ecbd17c8ecf`.
+
+- [x] Move pairing ownership into Mac Settings and separate incoming/pending devices from trusted/preferred devices.
+- [x] Make pairing/auth sends completion-aware; bind callbacks to connection generation, pairing generation, and session ID.
+- [x] Add iPad-authoritative expiry, bounded reconnect recovery, centralized ephemeral cleanup, and provisional trust until mutual HMAC authentication.
+- [x] Preserve protocol 3, secure PIN/QR, Keychain secrets, preferred-peer/wrong-peer policy, preview identity checks, and LAN/Wi-Fi route behavior.
+- [x] Add pairing-stage diagnostics and lifecycle/session-generation tests; final Mac suite 355/355 (54/54 suites).
+- [x] Final iPad test target 4/4 (1/1 suite); Mac Debug/Release, iPad Debug/Release, and generic iOS Release (`arm64-apple-ios16.0`, signing disabled) builds passed.
+- [x] Caveman root-cause and final reviews completed; named Ponytail skill was unavailable, so an equivalent manual simplification/security/scope review was completed.
+- [x] Compare the reported known-good GitHub window: no 30 October commits exist; the matching 30 August 22:51 (+07:00) build is `234519a`. Restore its direct Mac-started PIN path when Bonjour advertises a complete, unexpired session; retain intent pairing as the no-session fallback. Focused BoothPairingTests: 21/21 passed; iPad Debug simulator build passed.
+- [ ] Formal Computer Test/Use GUI matrix: built Mac app launch succeeded; host accessibility/display automation was unavailable. Built iPad app launched in the available iOS 26.5 simulator, but Settings interaction had no touch/accessibility driver.
+- [ ] Physical iPad Wi-Fi PIN/QR pairing, reconnect, timeout, interruption, and preview acceptance.
+- [ ] Physical Ethernet discovery/authentication, Wi-Fi fallback, and restoration acceptance.
+- [ ] Physical printer, camera permission, QR scan, and long-run booth cycle gates.
+
 - [x] Fix printer cancellation outcome and preflight mapping; cancellation is skipped, not passed or failed.
 - [x] Remove misleading Actual Size mode and retain native macOS print-panel controls.
 - [x] Treat unknown disk space as warning/unknown; make Operations refresh task cancellation-aware.
@@ -10,17 +27,17 @@ This is the active checklist. Historical v1.3/v1.4 notes remain below and are no
 - [x] Add protocol-v3 pairing/auth messages, six-digit PIN, two-minute expiry, attempt limit, QR payload, HMAC reconnect, forget, and selected-peer policy.
 - [x] Add Mac/iPad pairing settings, QR scanner permission/error paths, accessibility identifiers, and localized visible strings.
 - [x] Update CI triggers, Release artifacts, generic device compile, stable runner lane, README, and current release plan.
-- [x] Record final implementation HEAD be1d96b24da6dc94ba1d244145cd38c08fa83299 after project.yml regeneration.
-- [x] Run final local Mac and iPad automated matrix; Mac tests 351/351 (54/54 suites) and iPad tests 4/4 (1/1 suite) passed; Mac/iPad Debug and Release builds plus generic iOS Release compile passed.
-- [x] Run focused pairing/protocol/LAN tests: 51/51 passed across 3/3 suites.
+- [x] Record reviewed starting/final uncommitted implementation HEAD 83941dd5c487cab51e6f10e711136ecbd17c8ecf; project.yml was regenerated without project-source changes.
+- [x] Run final local Mac and iPad automated matrix; Mac tests 355/355 (54/54 suites) and iPad tests 4/4 (1/1 suite) passed; Mac/iPad Debug and Release builds plus generic iOS Release compile passed.
+- [x] Run focused pairing/protocol/LAN tests: 67/67 passed across 5/5 suites.
 - [x] Make pairing cancellation wait for the control-message send completion before closing.
 - [x] Automatically expire pairing sessions and clean stale transport/UI state after 120 seconds.
 - [x] Guard pairing expiry by session ID so an old expiry cannot terminate a newer session.
 - [x] Prevent duplicate Mac pairing-sheet presentation with one effective sheet owner.
 - [x] Keep pairing QR payload encoding stable across countdown redraws and preserve the active PIN until explicit cancel, success, or expiry.
-- [x] GitHub Actions PR App Builds passed for final implementation HEAD: run 33352736453; stable macOS, Mac, and iPad build/test/release/generic-device/package/artifact lanes passed.
-- [x] Run final Ponytail review and rerun affected gates; no unnecessary code or scope found.
-- [ ] Run Computer Use Mac/iPad GUI matrix; Mac Release app launched and Event Setup opened, but Settings focus/Forget-iPad flow was blocked by a Computer Use native-pipe failure; iPad, camera, and network cases remain untested.
+- [ ] GitHub Actions PR App Builds: prior run 33352736453 covered the committed baseline; not rerun for this uncommitted pairing-regression fix.
+- [x] Run the equivalent final simplification/security/scope review and rerun affected gates; the named Ponytail skill was unavailable in this environment.
+- [ ] Run the formal Computer Use Mac/iPad GUI matrix; built-app launch checks ran, but host accessibility/display automation and an iPad touch driver were unavailable.
 - [ ] Run physical Ethernet, PIN/QR, printer, camera, and long-run gates.
 - [ ] Mark release-ready only after all non-hardware blockers pass.
 

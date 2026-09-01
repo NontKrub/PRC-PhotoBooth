@@ -9,6 +9,8 @@ struct iPadConnectionSettingsView: View {
     @State private var showQRScanner = false
     @State private var selectedPeerForPIN: String?
     @State private var automaticPairingPeerID: String?
+    @State private var lastPairingPeerID: String?
+    @State private var selectedPairingMacName: String?
     @State private var peerToForget: String?
     @State private var pairingError: String?
 
@@ -56,8 +58,10 @@ struct iPadConnectionSettingsView: View {
         .sheet(isPresented: $showPINEntry) {
             PairingPINEntryView(
                 peers: nearbyMacs,
-                initialPeerID: selectedPeerForPIN
+                initialPeerID: selectedPeerForPIN,
+                initialPeerName: selectedPairingMacName
             ) { peerID, pin in
+                lastPairingPeerID = peerID
                 vm.pair(peerID: peerID, pin: pin)
             }
         }
@@ -65,6 +69,7 @@ struct iPadConnectionSettingsView: View {
             PairingQRScannerView { rawValue in
                 do {
                     let payload = try BoothPairingQRCodePayload.decode(rawValue)
+                    lastPairingPeerID = payload.macDeviceID
                     vm.pair(qrPayload: payload)
                     pairingError = nil
                 } catch {
@@ -152,14 +157,51 @@ struct iPadConnectionSettingsView: View {
             if status.isPeerAuthenticated, let name = status.peerDisplayName {
                 Label(name, systemImage: "checkmark.circle.fill")
                     .foregroundStyle(.green)
+                    .accessibilityIdentifier("Connected Mac")
                 LabeledContent("Authentication", value: "Trusted")
                 LabeledContent("Connection", value: connectionLabel)
                 if let latency = status.roundTripLatency {
                     LabeledContent("Round trip", value: "\(Int(latency * 1000)) ms")
                 }
             } else {
-                Text(pairingStateText)
-                    .foregroundStyle(.secondary)
+                switch status.pairingState {
+                case .failed(let reason):
+                    Text(reason)
+                        .foregroundStyle(.orange)
+                        .accessibilityIdentifier("Pairing Failure")
+                    Button("Retry Pairing") { retryPairing() }
+                        .accessibilityIdentifier("Pairing Retry")
+                case .pairing(let expiresAt):
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(pairingStateText)
+                            .accessibilityIdentifier("Pairing Status")
+                        HStack(spacing: 4) {
+                            Text("Expires in")
+                            Text(expiresAt, style: .timer)
+                        }
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .accessibilityIdentifier("Pairing Expiry")
+                    }
+                case .waitingForMac:
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(pairingStateText)
+                            .accessibilityIdentifier("Pairing Status")
+                        if let expiresAt = transport?.pairingExpiresAt {
+                            HStack(spacing: 4) {
+                                Text("Expires in")
+                                Text(expiresAt, style: .timer)
+                            }
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .accessibilityIdentifier("Pairing Expiry")
+                        }
+                    }
+                default:
+                    Text(pairingStateText)
+                        .foregroundStyle(.secondary)
+                        .accessibilityIdentifier("Pairing Status")
+                }
             }
         }
     }
@@ -201,13 +243,15 @@ struct iPadConnectionSettingsView: View {
                                     .foregroundStyle(peer.isTrusted ? .green : .orange)
                                 Spacer()
                                 if peer.isTrusted {
-                                    Button("Connect") { vm.connect(to: peer.id) }
+                                    Button("Connect") {
+                                        lastPairingPeerID = peer.id
+                                        vm.connect(to: peer.id)
+                                    }
                                         .disabled(!vm.canChangeConnection || status.peerID == peer.id && status.isPeerAuthenticated)
                                         .accessibilityIdentifier("Connect Mac")
                                 } else {
                                     Button("Connect") {
-                                        automaticPairingPeerID = peer.id
-                                        vm.requestPairing(with: peer.id)
+                                        startPairing(with: peer.id)
                                     }
                                     .disabled(!vm.canChangeConnection)
                                     .accessibilityIdentifier("Connect Mac")
@@ -216,6 +260,7 @@ struct iPadConnectionSettingsView: View {
                         }
                     }
                     .padding(.vertical, 4)
+                    .accessibilityIdentifier("Nearby Mac")
                 }
             }
 
@@ -235,12 +280,15 @@ struct iPadConnectionSettingsView: View {
             .accessibilityIdentifier("Scan Pairing QR")
 
             Button {
-                selectedPeerForPIN = status.preferredPeerID ?? nearbyMacs.first?.id
+                selectedPeerForPIN = lastPairingPeerID
+                    ?? status.preferredPeerID
+                    ?? nearbyMacs.first?.id
+                selectedPairingMacName = nearbyMacs.first { $0.id == selectedPeerForPIN }?.displayName
                 showPINEntry = true
             } label: {
                 Label("Enter Pairing PIN", systemImage: "number.square")
             }
-            .disabled(!vm.canChangeConnection || nearbyMacs.isEmpty)
+            .disabled(!vm.canChangeConnection || (nearbyMacs.isEmpty && lastPairingPeerID == nil))
             .accessibilityIdentifier("Enter Pairing PIN")
         }
     }
@@ -265,6 +313,19 @@ struct iPadConnectionSettingsView: View {
         }
     }
 
+    private func retryPairing() {
+        guard let peerID = lastPairingPeerID
+                ?? nearbyMacs.first(where: { !$0.isTrusted })?.id else { return }
+        startPairing(with: peerID)
+    }
+
+    private func startPairing(with peerID: String) {
+        lastPairingPeerID = peerID
+        selectedPairingMacName = nearbyMacs.first { $0.id == peerID }?.displayName
+        automaticPairingPeerID = peerID
+        vm.requestPairing(with: peerID)
+    }
+
     private var connectionLabel: String {
         switch status.effectiveNetwork {
         case .lan: return "Connected via Ethernet"
@@ -284,6 +345,7 @@ struct iPadConnectionSettingsView: View {
 private struct PairingPINEntryView: View {
     let peers: [BoothDiscoveredPeer]
     let initialPeerID: String?
+    let initialPeerName: String?
     let onSubmit: (String, String) -> Void
 
     @Environment(\.dismiss) private var dismiss
@@ -293,10 +355,12 @@ private struct PairingPINEntryView: View {
     init(
         peers: [BoothDiscoveredPeer],
         initialPeerID: String?,
+        initialPeerName: String?,
         onSubmit: @escaping (String, String) -> Void
     ) {
         self.peers = peers
         self.initialPeerID = initialPeerID
+        self.initialPeerName = initialPeerName
         self.onSubmit = onSubmit
         _selectedPeerID = State(initialValue: initialPeerID ?? peers.first?.id)
     }
@@ -304,9 +368,13 @@ private struct PairingPINEntryView: View {
     var body: some View {
         NavigationStack {
             Form {
-                Picker("Mac", selection: $selectedPeerID) {
-                    ForEach(peers) { peer in
-                        Text(peer.displayName).tag(Optional(peer.id))
+                if peers.isEmpty, let initialPeerID {
+                    LabeledContent("Mac", value: initialPeerName ?? initialPeerID)
+                } else {
+                    Picker("Mac", selection: $selectedPeerID) {
+                        ForEach(peers) { peer in
+                            Text(peer.displayName).tag(Optional(peer.id))
+                        }
                     }
                 }
                 TextField("6-digit PIN", text: $pin)
@@ -317,11 +385,12 @@ private struct PairingPINEntryView: View {
                     .accessibilityIdentifier("Pairing PIN Entry")
 
                 Button("Pair") {
-                    guard let selectedPeerID else { return }
+                    guard let selectedPeerID = selectedPeerID ?? initialPeerID else { return }
                     onSubmit(selectedPeerID, pin)
                     dismiss()
                 }
-                .disabled(selectedPeerID == nil || pin.count != 6)
+                .disabled((selectedPeerID ?? initialPeerID) == nil || pin.count != 6)
+                .accessibilityIdentifier("Pairing Pair Button")
             }
             .navigationTitle("Enter Pairing PIN")
             .toolbar {
