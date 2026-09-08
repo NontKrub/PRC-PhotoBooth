@@ -565,6 +565,10 @@ final class iPadViewModel: ObservableObject {
         sessionPresentation?.prompts.first { $0.photoIndex == photoIndex }
     }
 
+    func captureFraming(for photoIndex: Int) -> CaptureFramingGeometry? {
+        CaptureFramingGeometry.framing(for: photoIndex, in: eventConfig)
+    }
+
     private func applyCatalogDefaults(preserveLanguage: Bool) {
         guard let catalog = experienceCatalog else { return }
         if selectedTemplateID == nil || !catalog.templates.contains(where: { $0.id == selectedTemplateID }) {
