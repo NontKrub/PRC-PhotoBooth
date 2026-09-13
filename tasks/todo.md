@@ -101,6 +101,14 @@ Execution ledger. Preserve earlier historical checklists below.
 - [ ] Device Hub GUI, physical iPad, Wi-Fi/router, hotspot, Ethernet, camera, QR, printer, and 3-hour soak gates remain unrun.
 - [ ] Release verdict: NOT READY.
 
+### Final event-readiness delivery amendment — 2026-09-14
+
+- [x] Delivery implementation committed as `30f1645`: protocol 6, asset-channel-v2, Mac-authoritative negotiation/session sync, bounded control and independent asset writers, dedicated asset route, encrypted binding, and recovery.
+- [x] Final automated matrix: Mac 387/387 in 55/55 suites; iPad 7/7 in 1/1 suite; Mac Debug/Release, iPad Debug/Release simulator, and unsigned generic iOS Release all PASS.
+- [x] `xcodegen generate` and `git diff --check` passed.
+- [ ] TSan, Instruments, packet capture, deterministic integration/12-second MainActor stall/10k writer stress, 500 network/capture/print session soak, Device Hub GUI, physical network/camera/QR/printer, app-relaunch, and 3-hour soak gates remain unrun.
+- [ ] Release verdict: NOT READY.
+
 # Historical: PRC PhotoBooth v1.3 TODO
 
 ## Current reliability/network/GIF task

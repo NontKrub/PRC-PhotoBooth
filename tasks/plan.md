@@ -220,6 +220,38 @@ Known ceilings that keep the release verdict below event-ready:
 
 Release verdict: `NOT READY`.
 
+## Final event-readiness delivery amendment — 2026-09-14
+
+This amendment supersedes the older continuation above where it conflicts.
+Delivery implementation commit: `30f1645`.
+
+Implemented software gates:
+
+- Protocol 6 and `asset-channel-v2`; incompatible peers receive the exact update-both-apps error.
+- Mac-authoritative secure negotiation with bounded 5s generation-aware timeout and deferred early hello.
+- One FIFO 256-message/4 MiB control writer, encrypted heartbeat path, and independent bounded asset writer.
+- Bonjour `_prc-asset._tcp`, direct Ethernet port 58502, encrypted asset channel binding, dependent-channel invalidation, asset-only recovery, and bounded missing-asset requests.
+- Mac-authoritative customerFinished/idle sync, transient request cleanup, and validated session-scoped asset recovery.
+- Local-wireless route remains unconstrained; direct Ethernet remains `.lan` only; legacy heartbeat no longer uses a run-loop timer.
+
+Automated evidence on this tree:
+
+- `xcodegen generate`: PASS.
+- Mac tests: 387/387 in 55/55 suites.
+- iPad tests: 7/7 in 1/1 suite.
+- Mac Debug/Release: PASS.
+- iPad Debug/Release simulator: PASS.
+- Unsigned generic iOS Release: PASS, `arm64-apple-ios16.0`.
+- `git diff --check`: PASS.
+
+Not run / release blockers:
+
+- No TSan, Instruments, packet capture, deterministic 12s MainActor-stall proof, 10k writer stress, deterministic integration harness, 500 network/capture/print session soak, Device Hub GUI, physical Wi-Fi/hotspot/Ethernet/camera/QR/printer, app-relaunch matrix, or 3-hour physical soak.
+- `NetworkBoothTransport` and asset receive still have MainActor ownership/processing ceilings; preview writer progression remains on the facade.
+- Native TLS/PSK compatibility on minimum targets remains unproven; Remote Operator stays default-off with the existing HTTP boundary.
+
+Release verdict: `NOT READY`.
+
 # Historical: PRC PhotoBooth — v1.3 Reliability Hardening
 
 > The PR #7 stabilization plan below is historical context. Current work is on `feature/v1.3-reliability-hardening`.
