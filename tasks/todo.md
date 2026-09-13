@@ -57,6 +57,37 @@ This dated ledger supersedes earlier v1.4.2 pairing rows below. Reviewed branch:
 
 ---
 
+## v1.4.2 Large Event Stability & Security Hardening — 2026-09-13
+
+Execution ledger. Preserve earlier historical checklists below.
+
+- [x] Record branch, local SHA, fetched remote divergence, dirty files, toolchain, and baseline build/test evidence.
+- [x] Record XcodeGen source-of-truth and no-branch-switch/no-reset constraints.
+- [x] Add bounded transport transition/send/reconnect diagnostics with secret redaction tests.
+- [x] Isolate Network.framework I/O, parsing, heartbeat, reconnect, and preview coalescing from MainActor; retain the MainActor publication facade.
+- [x] Remove `.wifi` physical-interface restriction while retaining direct Ethernet semantics.
+- [x] Add deterministic `.waiting`, viability, better-path, stale-generation, and one-reconnect-task policy coverage.
+- [x] Add iPad active/background/foreground recovery and idle-timer behavior without deleting authoritative session state.
+- [x] Make critical control-send outcomes explicit; reject oversize/encoding/network failures loudly and trigger safe resync.
+- [x] Prove payload boundary remains safe or split large assets without raising the frame ceiling arbitrarily.
+- [x] Complete security review of pairing; no long-term trust secret is serialized or transmitted.
+- [ ] Implement native secure pairing/operational confidentiality only if macOS 15/iPadOS 16 compatibility is proven; app-layer v4 ECDH/HKDF/HMAC plus mandatory SAS is complete, but native TLS/PSK is blocked by the local SDK API surface and remains a release blocker.
+- [x] Disable Remote Operator by default; prevent unauthenticated `/operator` token disclosure; add request/resource bounds and headers.
+- [x] Fix critical queue fairness and isolate safe render/disk work from transport/UI.
+- [x] Extend existing preflight, diagnostics export, connection UI, reconnect overlay, localization, and accessibility coverage.
+- [ ] Add deterministic DEBUG soak/failure-injection coverage without production-only state forks.
+- [x] Run final automated matrix and report Device Hub/physical gates separately.
+- [x] Do not mark release `READY` while physical hotspot, Ethernet, pairing, printer, camera, and soak gates remain unrun.
+
+### Final evidence — 2026-09-13
+
+- [x] Mac automated tests: 375 tests in 55 suites passed.
+- [x] iPad smoke tests: 7 tests in 1 suite passed on the available iOS simulator.
+- [x] Mac Debug/Release, iPad Debug/Release simulator, and unsigned `iphoneos` Release builds passed after the authenticated SAS update.
+- [x] `git diff --check` passed; XcodeGen source-of-truth remained `project.yml`.
+- [ ] TSan, deterministic soak/failure injection, Computer Use GUI flow, and physical Wi-Fi/hotspot, Ethernet, camera, QR-scan, printer, and long-run gates remain unrun.
+- [ ] Release readiness: NOT READY until the operational TLS/PSK decision and physical matrix are closed.
+
 # Historical: PRC PhotoBooth v1.3 TODO
 
 ## Current reliability/network/GIF task

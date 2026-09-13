@@ -172,6 +172,18 @@ public final class BoothConnectionStatus {
     @Published
 #endif
     public private(set) var roundTripLatency: TimeInterval?
+#if os(iOS)
+    @Published
+#endif
+    public private(set) var lastControlActivityAt: Date?
+#if os(iOS)
+    @Published
+#endif
+    public private(set) var isReconnectInProgress = false
+#if os(iOS)
+    @Published
+#endif
+    public private(set) var reconnectAttempt = 0
 
     public var isFallbackActive: Bool {
         if case .fallbackWiFi = routeState { return true }
@@ -243,6 +255,15 @@ public final class BoothConnectionStatus {
         previewDiagnostics = diagnostics
     }
 
+    public func publishControlActivity(at date: Date = Date()) {
+        lastControlActivityAt = date
+    }
+
+    public func publishReconnectState(inProgress: Bool, attempt: Int = 0) {
+        isReconnectInProgress = inProgress
+        reconnectAttempt = max(0, attempt)
+    }
+
     public func publishPairing(
         discoveredPeers: [BoothDiscoveredPeer]? = nil,
         trustedPeerIDs: Set<String>? = nil,
@@ -266,6 +287,8 @@ public final class BoothConnectionStatus {
     public func publishDisconnected() {
         isPeerAuthenticated = false
         roundTripLatency = nil
+        isReconnectInProgress = false
+        reconnectAttempt = 0
         publish(
             requestedNetwork: requestedNetwork,
             state: .disconnected,
@@ -284,6 +307,65 @@ public final class BoothConnectionStatus {
 extension BoothConnectionStatus: ObservableObject {}
 #endif
 
+public enum BoothControlSendOutcome: Equatable, Sendable {
+    case sent
+    case noConnection
+    case rejectedOversize
+    case encodingFailed
+    case networkSendFailed
+}
+
+public enum BoothTransportDiagnosticKind: String, Codable, Sendable {
+    case transportDiscoveryStarted
+    case transportConnecting
+    case transportReady
+    case transportWaiting
+    case transportDisconnected
+    case transportReconnectScheduled
+    case transportReconnectSucceeded
+    case heartbeatTimedOut
+    case routeChanged
+    case controlSendFailed
+    case controlPayloadRejected
+    case previewDisconnected
+    case previewReconnected
+    case sessionSyncSent
+    case sessionSyncFailed
+    case ipadAppForegrounded
+    case ipadAppBackgrounded
+}
+
+public struct BoothTransportDiagnosticEvent: Codable, Sendable, Equatable {
+    public let kind: BoothTransportDiagnosticKind
+    public let timestamp: Date
+    public let channel: String?
+    public let route: String?
+    public let attempt: Int?
+    public let byteCount: Int?
+    public let duration: TimeInterval?
+    public let reason: String?
+
+    public init(
+        kind: BoothTransportDiagnosticKind,
+        timestamp: Date = Date(),
+        channel: String? = nil,
+        route: String? = nil,
+        attempt: Int? = nil,
+        byteCount: Int? = nil,
+        duration: TimeInterval? = nil,
+        reason: String? = nil
+    ) {
+        self.kind = kind
+        self.timestamp = timestamp
+        self.channel = channel
+        self.route = route
+        self.attempt = attempt
+        self.byteCount = byteCount
+        self.duration = duration
+        self.reason = reason
+    }
+}
+
 @MainActor
 public protocol BoothTransport: AnyObject {
     var connectionState: BoothConnectionState { get }
@@ -295,10 +377,12 @@ public protocol BoothTransport: AnyObject {
     var role: DeviceRole { get }
     var onControlMessage: (@MainActor (Message) -> Void)? { get set }
     var onPreviewFrame: (@MainActor (Data) -> Void)? { get set }
+    var onTransportEvent: (@MainActor (BoothTransportDiagnosticEvent) -> Void)? { get set }
 
     func start()
     func restart()
-    func sendControl(_ message: Message)
+    @discardableResult
+    func sendControl(_ message: Message) -> BoothControlSendOutcome
     func sendPreviewFrame(_ jpegData: Data)
     func disconnect()
 }
@@ -362,6 +446,34 @@ struct BoothTransportCallbackGate: Sendable {
     }
 }
 
+/// Queue-confined monotonic heartbeat state. The unchecked marker is limited
+/// to this small value object; callers must access it only on the transport
+/// queue, where the timer and receive callback are serialized.
+final class BoothTransportHeartbeatState: @unchecked Sendable {
+    private var lastActivity = DispatchTime.now().uptimeNanoseconds
+    private var timeoutReported = false
+
+    func markActivity() {
+        lastActivity = DispatchTime.now().uptimeNanoseconds
+        timeoutReported = false
+    }
+
+    func shouldReportTimeout(after timeout: TimeInterval) -> Bool {
+        let now = DispatchTime.now().uptimeNanoseconds
+        let elapsed = now >= lastActivity
+            ? Double(now - lastActivity) / 1_000_000_000
+            : 0
+        guard elapsed >= timeout, !timeoutReported else { return false }
+        timeoutReported = true
+        return true
+    }
+
+    func reset() {
+        lastActivity = DispatchTime.now().uptimeNanoseconds
+        timeoutReported = false
+    }
+}
+
 public struct BoothNetworkFrame: Equatable, Sendable {
     public let channel: BoothTransportChannel
     public let payload: Data
@@ -377,6 +489,7 @@ public enum BoothFrameError: Error, Equatable, Sendable {
     case unsupportedVersion(UInt8)
     case unknownChannel(UInt8)
     case oversizedPayload(Int)
+    case invalidMessage
 }
 
 public struct BoothFrameParser: Sendable {
@@ -441,5 +554,53 @@ public enum BoothFrameEncoder {
         withUnsafeBytes(of: &length) { frame.append(contentsOf: $0) }
         frame.append(payload)
         return frame
+    }
+}
+
+enum BoothDecodedTransportFrame: Sendable {
+    case control(Message)
+    case heartbeat
+    case previewHello(Data)
+    case preview(Data)
+}
+
+/// Network callbacks own this decoder on the transport serial queue. Keeping
+/// framing and JSON decoding here prevents a burst of preview/control bytes
+/// from making the MainActor do parser work before it can render UI.
+final class BoothTransportFrameDecoder: @unchecked Sendable {
+    private var controlParser = BoothFrameParser()
+    private var previewParser = BoothFrameParser()
+
+    func reset(_ channel: BoothTransportChannel) {
+        switch channel {
+        case .control: controlParser = BoothFrameParser()
+        case .preview: previewParser = BoothFrameParser()
+        case .asset, .heartbeat: break
+        }
+    }
+
+    func decode(
+        _ data: Data,
+        channel: BoothTransportChannel
+    ) throws -> [BoothDecodedTransportFrame] {
+        let parsed = try channel == .control
+            ? controlParser.append(data)
+            : previewParser.append(data)
+        return try parsed.compactMap { frame in
+            guard frame.channel == channel || frame.channel == .heartbeat else { return nil }
+            switch frame.channel {
+            case .control:
+                guard let message = try? Message.decoded(from: frame.payload) else {
+                    throw BoothFrameError.invalidMessage
+                }
+                return .control(message)
+            case .heartbeat:
+                return channel == .preview ? .previewHello(frame.payload) : .heartbeat
+            case .preview:
+                return .preview(frame.payload)
+            case .asset:
+                return nil
+            }
+        }
     }
 }

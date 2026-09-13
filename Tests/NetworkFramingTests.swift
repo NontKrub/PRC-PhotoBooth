@@ -95,4 +95,16 @@ struct NetworkFramingTests {
             try parser.append(header)
         }
     }
+
+    @Test("monotonic heartbeat reports a timeout once until activity")
+    func heartbeatTimeoutIsEdgeTriggered() {
+        let state = BoothTransportHeartbeatState()
+
+        #expect(!state.shouldReportTimeout(after: 60))
+        #expect(state.shouldReportTimeout(after: 0))
+        #expect(!state.shouldReportTimeout(after: 0))
+
+        state.markActivity()
+        #expect(state.shouldReportTimeout(after: 0))
+    }
 }

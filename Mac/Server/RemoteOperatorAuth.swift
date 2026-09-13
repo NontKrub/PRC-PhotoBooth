@@ -9,8 +9,19 @@ final class RemoteOperatorAuth {
 
     private var pairingToken: ExpiringToken?
     private var operatorTokens: [String: ExpiringToken] = [:]
+    private(set) var isEnabled = false
+
+    func enable() {
+        isEnabled = true
+    }
+
+    func disable() {
+        isEnabled = false
+        revokeAll()
+    }
 
     func pairingTokenValue() -> String {
+        guard isEnabled else { return "" }
         if let pairingToken, pairingToken.expiresAt > Date() { return pairingToken.value }
         let token = Self.randomToken()
         pairingToken = ExpiringToken(value: token, expiresAt: Date().addingTimeInterval(600))
@@ -18,7 +29,8 @@ final class RemoteOperatorAuth {
     }
 
     func pair(_ token: String) -> String? {
-        guard let pairingToken,
+        guard isEnabled,
+              let pairingToken,
               pairingToken.expiresAt > Date(),
               token == pairingToken.value else { return nil }
         self.pairingToken = nil
@@ -28,7 +40,8 @@ final class RemoteOperatorAuth {
     }
 
     func isValidOperatorToken(_ token: String?) -> Bool {
-        guard let token,
+        guard isEnabled,
+              let token,
               let stored = operatorTokens[token],
               stored.expiresAt > Date() else {
             purgeExpired()

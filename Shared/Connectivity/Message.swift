@@ -93,7 +93,7 @@ public enum CaptureRecoveryAction: Codable, Sendable, Equatable {
 }
 
 public struct BoothTransportHello: Codable, Sendable, Equatable {
-    public static let currentProtocolVersion = 3
+    public static let currentProtocolVersion = 4
 
     public var protocolVersion: Int
     public var appVersion: String
@@ -108,7 +108,7 @@ public struct BoothTransportHello: Codable, Sendable, Equatable {
         appVersion: String = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "dev",
         deviceID: String = UUID().uuidString,
         deviceName: String? = nil,
-        capabilities: [String] = ["control", "preview", "state-sync", "preview-identity", "pairing-v1"],
+        capabilities: [String] = ["control", "preview", "state-sync", "preview-identity", "pairing-v2"],
         networkPreference: BoothNetworkPreference? = .wifi
     ) {
         self.protocolVersion = Self.currentProtocolVersion
@@ -199,6 +199,7 @@ public enum Message: Codable, Sendable, Equatable {
     case pairingSessionAvailable(session: BoothPairingSessionInfo)
     case pairingRequest(request: BoothPairingRequest)
     case pairingResult(result: BoothPairingResult)
+    case pairingVerificationConfirmed(sessionID: String, proof: Data)
     case authChallenge(challenge: BoothAuthChallenge)
     case authProof(proof: BoothAuthProof)
     case connectionRejected(reason: String)

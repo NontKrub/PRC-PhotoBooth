@@ -1,4 +1,5 @@
 import Foundation
+import CryptoKit
 import Testing
 
 @testable import PRC_PhotoBooth_Mac
@@ -93,18 +94,95 @@ struct BoothPairingTests {
         ) == .startSession)
     }
 
+    @Test("PIN pairing verification code is deterministic for both peers and transcript-bound")
+    func pairingVerificationCode() throws {
+        let macKey = Curve25519.KeyAgreement.PrivateKey()
+        let iPadKey = Curve25519.KeyAgreement.PrivateKey()
+        let transcript = BoothPairingCrypto.pairingTranscript(
+            sessionID: "pairing-session",
+            macDeviceID: "mac-1",
+            iPadDeviceID: "ipad-1",
+            method: .pin,
+            macEphemeralPublicKey: macKey.publicKey.rawRepresentation,
+            iPadEphemeralPublicKey: iPadKey.publicKey.rawRepresentation
+        )
+        let macSecret = try BoothPairingCrypto.derivePairingSecret(
+            privateKeyData: macKey.rawRepresentation,
+            peerPublicKeyData: iPadKey.publicKey.rawRepresentation,
+            code: "482193",
+            transcript: transcript
+        )
+        let iPadSecret = try BoothPairingCrypto.derivePairingSecret(
+            privateKeyData: iPadKey.rawRepresentation,
+            peerPublicKeyData: macKey.publicKey.rawRepresentation,
+            code: "482193",
+            transcript: transcript
+        )
+        let macCode = BoothPairingCrypto.makeVerificationCode(secret: macSecret, transcript: transcript)
+        let iPadCode = BoothPairingCrypto.makeVerificationCode(secret: iPadSecret, transcript: transcript)
+
+        #expect(macSecret == iPadSecret)
+        #expect(macCode == iPadCode)
+        #expect(macCode.utf8.count == 6)
+        #expect(macCode.utf8.allSatisfy { $0 >= 48 && $0 <= 57 })
+        #expect(macCode != BoothPairingCrypto.makeVerificationCode(
+            secret: macSecret,
+            transcript: Data(transcript.dropLast())
+        ))
+    }
+
+    @Test("SAS confirmation proof requires the paired secret and transcript")
+    func verificationConfirmationProofIsAuthenticated() {
+        let secret = Data(repeating: 0x51, count: 32)
+        let transcript = Data("pairing-transcript".utf8)
+        let proof = BoothPairingCrypto.makeVerificationConfirmationProof(
+            secret: secret,
+            transcript: transcript,
+            role: .mac
+        )
+
+        #expect(proof.count == 32)
+        #expect(BoothPairingCrypto.constantTimeEqual(
+            proof,
+            BoothPairingCrypto.makeVerificationConfirmationProof(
+                secret: secret,
+                transcript: transcript,
+                role: .mac
+            )
+        ))
+        #expect(!BoothPairingCrypto.constantTimeEqual(
+            proof,
+            BoothPairingCrypto.makeVerificationConfirmationProof(
+                secret: Data(repeating: 0x52, count: 32),
+                transcript: transcript,
+                role: .mac
+            )
+        ))
+        #expect(!BoothPairingCrypto.constantTimeEqual(
+            proof,
+            BoothPairingCrypto.makeVerificationConfirmationProof(
+                secret: secret,
+                transcript: Data("different-transcript".utf8),
+                role: .mac
+            )
+        ))
+    }
+
     @Test("pairing intent alone cannot create trust before a PIN or QR request")
     func pairingResultTrustGate() {
         let result = BoothPairingResult(
             accepted: true,
             macIdentity: macIdentity,
-            sharedSecret: Data(repeating: 0x11, count: 32)
+            macEphemeralPublicKey: Data(repeating: 0x11, count: 32),
+            keyAgreementProof: Data(repeating: 0x12, count: 32)
         )
         let request = BoothPairingRequest(
             sessionID: "session",
             targetMacDeviceID: macIdentity.id,
             iPadIdentity: BoothDeviceIdentity(id: "ipad-1", displayName: "PRC-iPad-01", role: .iPad),
-            method: .pin("123456")
+            method: .pin,
+            iPadEphemeralPublicKey: Data(repeating: 0x13, count: 32),
+            admissionProof: Data(repeating: 0x14, count: 32)
         )
 
         #expect(!BoothPairingTrustPolicy.accepts(
@@ -336,13 +414,16 @@ struct BoothPairingTests {
             sessionID: "session-a",
             targetMacDeviceID: macIdentity.id,
             iPadIdentity: BoothDeviceIdentity(id: "ipad-1", displayName: "PRC-iPad-01", role: .iPad),
-            method: .pin("123456")
+            method: .pin,
+            iPadEphemeralPublicKey: Data(repeating: 0x13, count: 32),
+            admissionProof: Data(repeating: 0x14, count: 32)
         )
         let result = BoothPairingResult(
             accepted: true,
             macIdentity: macIdentity,
-            sharedSecret: Data(repeating: 0x22, count: 32),
-            pairingSessionID: "session-b"
+            pairingSessionID: "session-b",
+            macEphemeralPublicKey: Data(repeating: 0x22, count: 32),
+            keyAgreementProof: Data(repeating: 0x23, count: 32)
         )
 
         #expect(!BoothPairingTrustPolicy.accepts(
@@ -355,8 +436,9 @@ struct BoothPairingTests {
             result: BoothPairingResult(
                 accepted: true,
                 macIdentity: macIdentity,
-                sharedSecret: Data(repeating: 0x22, count: 32),
-                pairingSessionID: request.sessionID
+                pairingSessionID: request.sessionID,
+                macEphemeralPublicKey: Data(repeating: 0x22, count: 32),
+                keyAgreementProof: Data(repeating: 0x23, count: 32)
             ),
             pendingPairingRequest: request,
             targetPeerID: macIdentity.id,
@@ -440,7 +522,7 @@ struct BoothPairingTests {
     @Test("malformed QR payloads return a pairing error")
     func malformedQRPayload() throws {
         #expect(throws: BoothPairingError.invalidQRPayload) {
-            try BoothPairingQRCodePayload.decode("prc-photobooth-pairing-v1:not-json")
+            try BoothPairingQRCodePayload.decode("prc-photobooth-pairing-v2:not-json")
         }
 
         let invalid = BoothPairingQRCodePayload(

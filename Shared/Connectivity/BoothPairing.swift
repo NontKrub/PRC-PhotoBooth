@@ -47,6 +47,7 @@ public enum BoothPairingStage: String, Codable, Sendable, Equatable {
     case trustSaving
     case resultSending
     case resultReceived
+    case verificationPending
     case authenticating
     case authenticated
     case failed
@@ -62,6 +63,7 @@ public struct BoothDiscoveredPeer: Identifiable, Equatable, Sendable {
     public var availableInterfaces: Set<BoothNetworkInterfacePolicy>
     public var pairingSessionID: String?
     public var pairingExpiresAt: Date?
+    public var pairingMacEphemeralPublicKey: Data?
     public var isTrusted: Bool
     public var isPreferred: Bool
 
@@ -75,6 +77,7 @@ public struct BoothDiscoveredPeer: Identifiable, Equatable, Sendable {
         availableInterfaces: Set<BoothNetworkInterfacePolicy>,
         pairingSessionID: String? = nil,
         pairingExpiresAt: Date? = nil,
+        pairingMacEphemeralPublicKey: Data? = nil,
         isTrusted: Bool = false,
         isPreferred: Bool = false
     ) {
@@ -87,6 +90,7 @@ public struct BoothDiscoveredPeer: Identifiable, Equatable, Sendable {
         self.availableInterfaces = availableInterfaces
         self.pairingSessionID = pairingSessionID
         self.pairingExpiresAt = pairingExpiresAt
+        self.pairingMacEphemeralPublicKey = pairingMacEphemeralPublicKey
         self.isTrusted = isTrusted
         self.isPreferred = isPreferred
     }
@@ -113,9 +117,9 @@ public enum BoothPairingState: Equatable, Sendable {
     case failed(String)
 }
 
-public enum BoothPairingMethod: Codable, Sendable, Equatable {
-    case pin(String)
-    case qrToken(String)
+public enum BoothPairingMethod: String, Codable, Sendable, Equatable {
+    case pin
+    case qrToken
 }
 
 public struct BoothPairingSessionInfo: Codable, Sendable, Equatable {
@@ -123,12 +127,33 @@ public struct BoothPairingSessionInfo: Codable, Sendable, Equatable {
     public let macDeviceID: String
     public let macDeviceName: String
     public let expiresAt: Date
+    public let macEphemeralPublicKey: Data
 
-    public init(sessionID: String, macDeviceID: String, macDeviceName: String, expiresAt: Date) {
+    public init(
+        sessionID: String,
+        macDeviceID: String,
+        macDeviceName: String,
+        expiresAt: Date,
+        macEphemeralPublicKey: Data = Data()
+    ) {
         self.sessionID = sessionID
         self.macDeviceID = macDeviceID
         self.macDeviceName = macDeviceName
         self.expiresAt = expiresAt
+        self.macEphemeralPublicKey = macEphemeralPublicKey
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case sessionID, macDeviceID, macDeviceName, expiresAt, macEphemeralPublicKey
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        sessionID = try container.decode(String.self, forKey: .sessionID)
+        macDeviceID = try container.decode(String.self, forKey: .macDeviceID)
+        macDeviceName = try container.decode(String.self, forKey: .macDeviceName)
+        expiresAt = try container.decode(Date.self, forKey: .expiresAt)
+        macEphemeralPublicKey = try container.decodeIfPresent(Data.self, forKey: .macEphemeralPublicKey) ?? Data()
     }
 }
 
@@ -216,8 +241,11 @@ public enum BoothPairingTrustPolicy {
               let pendingPairingRequest,
               let macIdentity = result.macIdentity,
               macIdentity.role == .mac,
-              let secret = result.sharedSecret,
-              secret.count == 32,
+              result.sharedSecret == nil,
+              pendingPairingRequest.iPadEphemeralPublicKey.count == 32,
+              pendingPairingRequest.admissionProof.count == SHA256.Digest.byteCount,
+              result.macEphemeralPublicKey?.count == 32,
+              result.keyAgreementProof?.count == SHA256.Digest.byteCount,
               !macIdentity.displayName.isEmpty,
               macIdentity.id == targetPeerID,
               pendingPairingRequest.targetMacDeviceID == macIdentity.id else { return false }
@@ -233,17 +261,23 @@ public struct BoothPairingRequest: Codable, Sendable, Equatable {
     public let targetMacDeviceID: String
     public let iPadIdentity: BoothDeviceIdentity
     public let method: BoothPairingMethod
+    public let iPadEphemeralPublicKey: Data
+    public let admissionProof: Data
 
     public init(
         sessionID: String,
         targetMacDeviceID: String,
         iPadIdentity: BoothDeviceIdentity,
-        method: BoothPairingMethod
+        method: BoothPairingMethod,
+        iPadEphemeralPublicKey: Data = Data(),
+        admissionProof: Data = Data()
     ) {
         self.sessionID = sessionID
         self.targetMacDeviceID = targetMacDeviceID
         self.iPadIdentity = iPadIdentity
         self.method = method
+        self.iPadEphemeralPublicKey = iPadEphemeralPublicKey
+        self.admissionProof = admissionProof
     }
 }
 
@@ -254,6 +288,8 @@ public struct BoothPairingResult: Codable, Sendable, Equatable {
     public let reason: String?
     public let retryable: Bool
     public let pairingSessionID: String?
+    public let macEphemeralPublicKey: Data?
+    public let keyAgreementProof: Data?
 
     public init(
         accepted: Bool,
@@ -261,7 +297,9 @@ public struct BoothPairingResult: Codable, Sendable, Equatable {
         sharedSecret: Data? = nil,
         reason: String? = nil,
         retryable: Bool = false,
-        pairingSessionID: String? = nil
+        pairingSessionID: String? = nil,
+        macEphemeralPublicKey: Data? = nil,
+        keyAgreementProof: Data? = nil
     ) {
         self.accepted = accepted
         self.macIdentity = macIdentity
@@ -269,33 +307,51 @@ public struct BoothPairingResult: Codable, Sendable, Equatable {
         self.reason = reason
         self.retryable = retryable
         self.pairingSessionID = pairingSessionID
+        self.macEphemeralPublicKey = macEphemeralPublicKey
+        self.keyAgreementProof = keyAgreementProof
     }
 
     private enum CodingKeys: String, CodingKey {
         case accepted
         case macIdentity
-        case sharedSecret
         case reason
         case retryable
         case pairingSessionID
+        case macEphemeralPublicKey
+        case keyAgreementProof
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(accepted, forKey: .accepted)
+        try container.encodeIfPresent(macIdentity, forKey: .macIdentity)
+        try container.encodeIfPresent(reason, forKey: .reason)
+        try container.encode(retryable, forKey: .retryable)
+        try container.encodeIfPresent(pairingSessionID, forKey: .pairingSessionID)
+        try container.encodeIfPresent(macEphemeralPublicKey, forKey: .macEphemeralPublicKey)
+        try container.encodeIfPresent(keyAgreementProof, forKey: .keyAgreementProof)
+        // sharedSecret is intentionally never encoded. It remains an optional
+        // source-compatibility field for callers that have not migrated yet.
     }
 
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         accepted = try container.decode(Bool.self, forKey: .accepted)
         macIdentity = try container.decodeIfPresent(BoothDeviceIdentity.self, forKey: .macIdentity)
-        sharedSecret = try container.decodeIfPresent(Data.self, forKey: .sharedSecret)
+        // Ignore the legacy field entirely so a v3 wire secret cannot enter
+        // the trusted-pairing path through decoding.
+        sharedSecret = nil
         reason = try container.decodeIfPresent(String.self, forKey: .reason)
-        // Both fields were added to protocol v3 after the initial secure-pairing
-        // build. Missing values remain safe defaults for an in-flight upgrade.
         retryable = try container.decodeIfPresent(Bool.self, forKey: .retryable) ?? false
         pairingSessionID = try container.decodeIfPresent(String.self, forKey: .pairingSessionID)
+        macEphemeralPublicKey = try container.decodeIfPresent(Data.self, forKey: .macEphemeralPublicKey)
+        keyAgreementProof = try container.decodeIfPresent(Data.self, forKey: .keyAgreementProof)
     }
 }
 
 public struct BoothPairingQRCodePayload: Codable, Sendable, Equatable {
-    public static let currentSchemaVersion = 1
-    private static let prefix = "prc-photobooth-pairing-v1:"
+    public static let currentSchemaVersion = 2
+    private static let prefix = "prc-photobooth-pairing-v2:"
 
     public let schemaVersion: Int
     public let macDeviceID: String
@@ -303,6 +359,7 @@ public struct BoothPairingQRCodePayload: Codable, Sendable, Equatable {
     public let pairingSessionID: String
     public let oneTimeToken: String
     public let expiresAt: Date
+    public let macEphemeralPublicKey: Data
 
     public init(
         schemaVersion: Int = currentSchemaVersion,
@@ -310,7 +367,8 @@ public struct BoothPairingQRCodePayload: Codable, Sendable, Equatable {
         macDeviceName: String,
         pairingSessionID: String,
         oneTimeToken: String,
-        expiresAt: Date
+        expiresAt: Date,
+        macEphemeralPublicKey: Data = Data()
     ) {
         self.schemaVersion = schemaVersion
         self.macDeviceID = macDeviceID
@@ -318,6 +376,7 @@ public struct BoothPairingQRCodePayload: Codable, Sendable, Equatable {
         self.pairingSessionID = pairingSessionID
         self.oneTimeToken = oneTimeToken
         self.expiresAt = expiresAt
+        self.macEphemeralPublicKey = macEphemeralPublicKey
     }
 
     public func encodedString() throws -> String {
@@ -349,7 +408,8 @@ public struct BoothPairingQRCodePayload: Codable, Sendable, Equatable {
         guard !macDeviceID.isEmpty,
               !macDeviceName.isEmpty,
               !pairingSessionID.isEmpty,
-              !oneTimeToken.isEmpty else { throw BoothPairingError.invalidQRPayload }
+              !oneTimeToken.isEmpty,
+              macEphemeralPublicKey.count == 32 else { throw BoothPairingError.invalidQRPayload }
         guard now < expiresAt else { throw BoothPairingError.expired }
         if let expectedMacID, expectedMacID != macDeviceID {
             throw BoothPairingError.wrongDevice
@@ -375,6 +435,7 @@ public struct BoothPairingSession: Sendable, Equatable {
     public let info: BoothPairingSessionInfo
     public let pin: String
     public let qrToken: String
+    private let ephemeralPrivateKeyData: Data
     public private(set) var failedPINAttempts: Int
     public private(set) var isConsumed: Bool
 
@@ -383,13 +444,15 @@ public struct BoothPairingSession: Sendable, Equatable {
         pin: String,
         qrToken: String,
         failedPINAttempts: Int = 0,
-        isConsumed: Bool = false
+        isConsumed: Bool = false,
+        ephemeralPrivateKeyData: Data = Data()
     ) {
         self.info = info
         self.pin = pin
         self.qrToken = qrToken
         self.failedPINAttempts = failedPINAttempts
         self.isConsumed = isConsumed
+        self.ephemeralPrivateKeyData = ephemeralPrivateKeyData
     }
 
     public static func make(macIdentity: BoothDeviceIdentity, now: Date = Date()) throws -> BoothPairingSession {
@@ -397,6 +460,7 @@ public struct BoothPairingSession: Sendable, Equatable {
         let pinValue = Int.random(in: 0...999_999, using: &generator)
         let pin = String(format: "%06d", pinValue)
         let token = try secureRandomData(count: 32).base64URLEncodedString()
+        let ephemeralKey = Curve25519.KeyAgreement.PrivateKey()
         let sessionID = UUID().uuidString
         let expiresAt = now.addingTimeInterval(lifetime)
         return BoothPairingSession(
@@ -404,10 +468,12 @@ public struct BoothPairingSession: Sendable, Equatable {
                 sessionID: sessionID,
                 macDeviceID: macIdentity.id,
                 macDeviceName: macIdentity.displayName,
-                expiresAt: expiresAt
+                expiresAt: expiresAt,
+                macEphemeralPublicKey: ephemeralKey.publicKey.rawRepresentation
             ),
             pin: pin,
-            qrToken: token
+            qrToken: token,
+            ephemeralPrivateKeyData: ephemeralKey.rawRepresentation
         )
     }
 
@@ -421,8 +487,52 @@ public struct BoothPairingSession: Sendable, Equatable {
             macDeviceName: info.macDeviceName,
             pairingSessionID: info.sessionID,
             oneTimeToken: qrToken,
-            expiresAt: info.expiresAt
+            expiresAt: info.expiresAt,
+            macEphemeralPublicKey: info.macEphemeralPublicKey
         )
+    }
+
+    func deriveSecret(
+        iPadEphemeralPublicKey: Data,
+        method: BoothPairingMethod,
+        transcript: Data
+    ) throws -> Data {
+        let code = method == .pin ? pin : qrToken
+        return try BoothPairingCrypto.derivePairingSecret(
+            privateKeyData: ephemeralPrivateKeyData,
+            peerPublicKeyData: iPadEphemeralPublicKey,
+            code: code,
+            transcript: transcript
+        )
+    }
+
+    mutating func validateAdmissionProof(
+        _ proof: Data,
+        method: BoothPairingMethod,
+        transcript: Data,
+        now: Date = Date()
+    ) -> BoothPairingAttemptResult {
+        guard !isConsumed else { return .locked }
+        guard now < info.expiresAt else {
+            isConsumed = true
+            return .expired
+        }
+        guard failedPINAttempts < Self.maximumPINAttempts else {
+            isConsumed = true
+            return .locked
+        }
+        let code = method == .pin ? pin : qrToken
+        let expected = BoothPairingCrypto.makeAdmissionProof(code: code, transcript: transcript)
+        guard BoothPairingCrypto.constantTimeEqual(expected, proof) else {
+            failedPINAttempts += 1
+            if failedPINAttempts >= Self.maximumPINAttempts {
+                isConsumed = true
+                return .locked
+            }
+            return .rejected(remainingAttempts: Self.maximumPINAttempts - failedPINAttempts)
+        }
+        isConsumed = true
+        return .accepted
     }
 
     public func isActive(at now: Date = Date()) -> Bool {
@@ -599,6 +709,94 @@ public enum BoothPairingCrypto {
         try secureRandomData(count: 32)
     }
 
+    public static func pairingTranscript(
+        sessionID: String,
+        macDeviceID: String,
+        iPadDeviceID: String,
+        method: BoothPairingMethod,
+        macEphemeralPublicKey: Data,
+        iPadEphemeralPublicKey: Data
+    ) -> Data {
+        var transcript = Data("PRC-PhotoBooth/pairing-v2\0".utf8)
+        appendField(sessionID, to: &transcript)
+        appendField(macDeviceID, to: &transcript)
+        appendField(iPadDeviceID, to: &transcript)
+        appendField(method.rawValue, to: &transcript)
+        appendField(macEphemeralPublicKey, to: &transcript)
+        appendField(iPadEphemeralPublicKey, to: &transcript)
+        return transcript
+    }
+
+    public static func makeAdmissionProof(code: String, transcript: Data) -> Data {
+        Data(HMAC<SHA256>.authenticationCode(
+            for: transcript,
+            using: SymmetricKey(data: Data(code.utf8))
+        ))
+    }
+
+    public static func derivePairingSecret(
+        privateKeyData: Data,
+        peerPublicKeyData: Data,
+        code: String,
+        transcript: Data
+    ) throws -> Data {
+        guard privateKeyData.count == 32, peerPublicKeyData.count == 32 else {
+            throw BoothPairingError.invalidSecret
+        }
+        let privateKey = try Curve25519.KeyAgreement.PrivateKey(rawRepresentation: privateKeyData)
+        let peerPublicKey = try Curve25519.KeyAgreement.PublicKey(rawRepresentation: peerPublicKeyData)
+        let sharedSecret = try privateKey.sharedSecretFromKeyAgreement(with: peerPublicKey)
+        let salt = SHA256.hash(data: Data(code.utf8))
+        let derived = sharedSecret.hkdfDerivedSymmetricKey(
+            using: SHA256.self,
+            salt: Data(salt),
+            sharedInfo: transcript,
+            outputByteCount: 32
+        )
+        return derived.withUnsafeBytes { Data($0) }
+    }
+
+    public static func makeKeyAgreementProof(secret: Data, transcript: Data, role: DeviceRole) -> Data {
+        var message = Data("PRC-PhotoBooth/pairing-confirm/v2\0".utf8)
+        appendField(role.rawValue, to: &message)
+        message.append(transcript)
+        return Data(HMAC<SHA256>.authenticationCode(for: message, using: SymmetricKey(data: secret)))
+    }
+
+    public static func makeVerificationConfirmationProof(
+        secret: Data,
+        transcript: Data,
+        role: DeviceRole
+    ) -> Data {
+        var message = Data("PRC-PhotoBooth/pairing-sas-confirm/v1\0".utf8)
+        appendField(role.rawValue, to: &message)
+        message.append(transcript)
+        return Data(HMAC<SHA256>.authenticationCode(for: message, using: SymmetricKey(data: secret)))
+    }
+
+    /// A human-verifiable short authentication string. It is derived locally
+    /// from the authenticated transcript and is never sent over the wire.
+    public static func makeVerificationCode(secret: Data, transcript: Data) -> String {
+        var message = Data("PRC-PhotoBooth/pairing-sas/v1\0".utf8)
+        message.append(transcript)
+        let digest = HMAC<SHA256>.authenticationCode(
+            for: message,
+            using: SymmetricKey(data: secret)
+        )
+        let value = digest.prefix(4).reduce(UInt32(0)) { partial, byte in
+            (partial << 8) | UInt32(byte)
+        }
+        let decimal = String(value % 1_000_000)
+        return String(repeating: "0", count: max(0, 6 - decimal.utf8.count)) + decimal
+    }
+
+    public static func constantTimeEqual(_ lhs: Data, _ rhs: Data) -> Bool {
+        guard lhs.count == rhs.count else { return false }
+        var result: UInt8 = 0
+        for (left, right) in zip(lhs, rhs) { result |= left ^ right }
+        return result == 0
+    }
+
     public static func makeProof(
         for challenge: BoothAuthChallenge,
         responderDeviceID: String,
@@ -682,6 +880,16 @@ public enum BoothPairingCrypto {
         var data = Data("PRC-PhotoBooth/auth-proof/v3\0".utf8)
         data.append(challenge.nonce)
         return data
+    }
+
+    private static func appendField(_ value: String, to data: inout Data) {
+        appendField(Data(value.utf8), to: &data)
+    }
+
+    private static func appendField(_ value: Data, to data: inout Data) {
+        var length = UInt32(value.count).bigEndian
+        withUnsafeBytes(of: &length) { data.append(contentsOf: $0) }
+        data.append(value)
     }
 }
 
@@ -912,7 +1120,7 @@ private func secureRandomData(count: Int) throws -> Data {
     return data
 }
 
-private extension Data {
+extension Data {
     func base64URLEncodedString() -> String {
         base64EncodedString()
             .replacingOccurrences(of: "+", with: "-")

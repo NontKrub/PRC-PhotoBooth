@@ -87,6 +87,65 @@ Do not mark this release ready while an automated build/test gate fails, an unkn
 
 ---
 
+## v1.4.2 Large Event Stability & Security Hardening — 2026-09-13
+
+Mission: keep Mac-to-iPad booth control healthy during sustained physical-event workload while preserving iPadOS 16, macOS 15, Swift 6, XcodeGen, versioned Keychain-backed trust, and the existing transport abstraction. The secure pairing wire is protocol v4.
+
+Execution baseline:
+
+- Branch: `fix/v1.4.2-stability-pairing`
+- Local start SHA: `cd7464397c0d57214000ba3428c844bc3d5fe55f`
+- Fetched remote branch: `a3c55a208de45c77ac89b65717739940237ae3a7` (local branch behind three commits; no integration performed)
+- Dirty files existed before this work, including pairing/transport/UI/localization, generated Xcode project/user state, task ledgers, and capture-framing files. Preserve them unless a later change is explicitly in scope.
+- Baseline `xcodegen generate`: PASS.
+- Baseline builds: Mac Debug/Release PASS; iPad Debug/Release PASS on Device Hub iPad Pro 13-inch (M5), iOS 27.0; generic iOS Release PASS.
+- Baseline tests: Mac `365/365` in `55` suites PASS; iPad `7/7` PASS. Existing compiler/test warnings and LMDB `MDB_MAP_FULL` diagnostics remain recorded, not treated as product failures.
+- Physical and GUI gates: not run; no physical iPad, printer, camera, Ethernet adapter, hotspot, or reliable host accessibility driver available.
+
+Architecture decisions:
+
+- Extend `NetworkBoothTransport` and `BoothConnectionStatus`; do not create a parallel control transport or pairing store.
+- Keep UI/status publication on MainActor, but confine socket callbacks, frame parsing, heartbeat timing, reconnect policy, and preview coalescing to a dedicated serial transport executor unless current SDK annotations prove an actor is safe.
+- Local Network mode (`.wifi`) means unconstrained local connectivity, including Wi-Fi, hotspot, router LAN, Mac Ethernet uplink, and peer-to-peer. Direct Ethernet (`.lan`) remains wired-only.
+- Use protocol v4 for the secure pairing wire; the app-layer Curve25519/HKDF/HMAC path is compatible with the targets, while operational channel confidentiality remains blocked until a native TLS/PSK path is proven. Never transmit a long-term secret or invent cryptography.
+- Keep Remote Operator disabled by default and never reveal its pairing token from unauthenticated `/operator`.
+- Prefer deterministic pure policy tests and existing test suites over a production DEBUG-only state fork.
+
+Ordered slices:
+
+1. Observability contract: extend `OperationsEventStore`, diagnostics models/export, and redaction tests for transport transitions, send failures, reconnects, route/path, and queue health.
+2. Transport executor: move Network.framework callbacks/starts, receive parsing, heartbeat timestamps, reconnect scheduling, and preview coalescing off MainActor; retain immutable MainActor publication and ordered writes.
+3. Route/recovery policy: remove `.wifi` physical-interface restriction, add path labels, bounded `.waiting`/viability recovery, and stale-generation tests.
+4. Lifecycle/control reliability: handle iPad scene phase and idle timer, preserve authoritative Mac state, make critical sends explicit, and test resync after uncertain delivery.
+5. Pairing/security gate: audit the bootstrap, reject raw long-term-secret serialization, and use the versioned native Curve25519/HKDF/SAS path only where SDK compatibility is proven; document the native TLS/PSK blocker and retain private-network restriction until operational confidentiality is closed.
+6. Remote Operator/server: safe-by-default operator routing, token non-disclosure, one-time auth/revoke behavior, request deadline, connection bound, slow-client protection, and security headers.
+7. Queue/finalization: choose oldest runnable critical work across sessions, keep optional GIF/cloud work bounded, and isolate safe CPU/disk work from transport/UI.
+8. Preflight/UI: extend existing readiness/diagnostics and affected Mac/iPad connection states with accurate route/auth/control/preview status, accessibility identifiers, and complete English/Thai copy.
+9. Soak/QA: add deterministic failure-injection seams and DEBUG-only accelerated workload hooks; run automation after each slice, then report Device Hub and physical gates separately.
+
+Checkpoint criteria:
+
+- After slices 1–3: transport tests, route tests, framing/pairing/message tests, Mac/iPad builds pass; no production Network.framework object starts on `.main`.
+- After slices 4–6: lifecycle, control, pairing, operator-auth, HTTP parser/server tests and both app builds pass; no secret appears in logs or unauthenticated operator responses.
+- After slices 7–9: queue/render/server/preflight/UI tests and final build matrix pass; remaining physical gates are explicitly `BLOCKED-HARDWARE` unless exercised.
+
+Release risks:
+
+- Network.framework Sendable/API availability may block an actor implementation; use a serial executor or stop at a documented compatibility boundary rather than scatter `@unchecked Sendable`.
+- Native TLS PSK behavior on iPadOS 16 may not support the proposed bootstrap; do not replace it with homemade encryption.
+- Generated project/user-state and localization files may be dirty from prior work; never stage or overwrite them for convenience.
+- Local builds cannot prove hotspot, Ethernet, camera, printer, accessibility, thermal, or multi-hour behavior.
+
+## Final execution status — 2026-09-13
+
+Implemented and verified: bounded redacted transport diagnostics; serial Network.framework I/O/parser/heartbeat/reconnect/preview work behind the existing MainActor facade; unconstrained `.wifi` route semantics with direct Ethernet preserved; bounded recovery and iPad lifecycle handling; explicit critical send outcomes; v4 secure pairing with ephemeral Curve25519/HKDF/HMAC, transcript-bound SAS, and HMAC-authenticated Mac confirmation; default-off Remote Operator with bounded HTTP handling and security headers; cross-session critical queue fairness; bounded worker execution for image/GIF/thumbnail work; extended preflight/diagnostics/UI/localization/accessibility.
+
+Automated final gates: Mac 375 tests in 55 suites; iPad 7 tests in 1 suite; Mac Debug/Release; iPad Debug/Release simulator; unsigned `iphoneos` Release; all passed. `git diff --check` passed.
+
+Remaining release blockers: native operational TLS/PSK is not available in the local macOS 15/iPadOS 16 Network.framework headers and no homemade replacement was added; TSan/soak are not run; Computer Use GUI and all physical Wi-Fi/hotspot, Ethernet, camera, QR-scan, printer, and multi-hour gates remain unavailable. Release verdict: NOT READY.
+
+Operational confidentiality boundary: the current residual-risk deployment assumes a private, operator-controlled venue LAN with Remote Operator disabled unless explicitly enabled. The app-layer pairing handshake authenticates the selected Mac/iPad and requires matching SAS confirmation, but Network.framework control/preview payloads are not encrypted against a malicious same-LAN observer or active MITM. Native TLS/PSK support must be proven on the minimum targets before treating that threat as closed; homemade encryption is intentionally out of scope.
+
 # Historical: PRC PhotoBooth — v1.3 Reliability Hardening
 
 > The PR #7 stabilization plan below is historical context. Current work is on `feature/v1.3-reliability-hardening`.

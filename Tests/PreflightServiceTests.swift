@@ -45,6 +45,44 @@ struct PreflightServiceTests {
         #expect(service.result(for: .networkRoute)?.status == .warning)
     }
 
+    @Test("preflight reports authenticated channels freshness reconnect state and queue backlog")
+    @MainActor
+    func transportAndQueueHealth() async {
+        let service = BoothPreflightService()
+        var base = context(
+            ipadConnected: true,
+            effectiveNetwork: .wifi
+        )
+        base.controlChannelConnected = true
+        base.ipadPreviewChannelConnected = true
+        base.lastControlActivityAt = Date()
+        base.queuePendingCount = 2
+        base.queueRunningCount = 1
+        base.queueRetryingCount = 1
+        base.queueFailedCount = 1
+        base.oldestCriticalJobAge = 17
+
+        await service.runSafeChecks(using: base)
+
+        #expect(service.result(for: .authentication)?.status == .passed)
+        #expect(service.result(for: .controlChannel)?.status == .passed)
+        #expect(service.result(for: .previewChannel)?.status == .passed)
+        #expect(service.result(for: .networkFreshness)?.status == .passed)
+        #expect(service.result(for: .reconnectState)?.status == .passed)
+        #expect(service.result(for: .queueHealth)?.detail.contains("pending=2") == true)
+        #expect(service.result(for: .queueHealth)?.detail.contains("oldest critical job=17s") == true)
+
+        base.reconnectInProgress = true
+        base.reconnectAttempt = 2
+        await service.runSafeChecks(using: base)
+        #expect(service.result(for: .reconnectState)?.status == .warning)
+
+        base.reconnectInProgress = false
+        base.lastControlActivityAt = Date().addingTimeInterval(-9)
+        await service.runSafeChecks(using: base)
+        #expect(service.result(for: .networkFreshness)?.status == .failed)
+    }
+
     @Test("disk thresholds are reported")
     @MainActor
     func diskThresholds() async {

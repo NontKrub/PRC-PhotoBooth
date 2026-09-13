@@ -154,7 +154,32 @@ struct iPadConnectionSettingsView: View {
     @ViewBuilder
     private var connectedMacSection: some View {
         Section("Connected") {
-            if status.isPeerAuthenticated, let name = status.peerDisplayName {
+            if status.pairingStage == .verificationPending,
+               let code = transport?.pairingVerificationCodeForDisplay,
+               let name = status.peerDisplayName ?? transport?.pairingPeerDisplayName {
+                Label(name, systemImage: "checkmark.shield")
+                    .foregroundStyle(.orange)
+                    .accessibilityIdentifier("Pairing Verification Mac")
+                Text("Verify connection")
+                    .font(.headline)
+                    .accessibilityIdentifier("Pairing Verification Status")
+                Text("Confirm that this code matches the one shown on the Mac:")
+                    .foregroundStyle(.secondary)
+                Text(code)
+                    .font(.system(size: 32, weight: .bold, design: .monospaced))
+                    .tracking(4)
+                    .accessibilityLabel("Verification code " + code)
+                    .accessibilityIdentifier("Pairing Verification Code")
+                Text("Ask the operator to tap Codes Match on the Mac.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            } else if case .connected = status.state, let name = status.peerDisplayName, !status.isPeerAuthenticated {
+                Label(name, systemImage: "arrow.triangle.2.circlepath")
+                    .foregroundStyle(.orange)
+                    .accessibilityIdentifier("Connecting Mac")
+                LabeledContent("Authentication", value: "Authenticating")
+                LabeledContent("Connection", value: connectionLabel)
+            } else if case .connected = status.state, status.isPeerAuthenticated, let name = status.peerDisplayName {
                 Label(name, systemImage: "checkmark.circle.fill")
                     .foregroundStyle(.green)
                     .accessibilityIdentifier("Connected Mac")
@@ -327,6 +352,8 @@ struct iPadConnectionSettingsView: View {
     }
 
     private var connectionLabel: String {
+        if case .connecting = status.state { return "Reconnecting" }
+        if case .disconnected = status.state { return "Disconnected" }
         switch status.effectiveNetwork {
         case .lan: return "Connected via Ethernet"
         case .wifi: return status.isFallbackActive ? "Wi-Fi fallback" : "Connected via Wi-Fi"

@@ -85,6 +85,11 @@ struct IdleView: View {
                 vm.customerTappedToBegin()
             }
         }
+        .accessibilityAction(.default) {
+            if vm.isConnectionReady {
+                vm.customerTappedToBegin()
+            }
+        }
         .onAppear { pulse = true }
     }
 

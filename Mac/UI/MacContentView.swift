@@ -939,9 +939,27 @@ private struct MacPairingPanel: View {
             Text(transport.pairingPeerDisplayName ?? status.peerDisplayName ?? peerID)
                 .font(.headline)
                 .accessibilityIdentifier("Pairing Status")
-            Text("Pairing accepted")
-            Text("Authenticating…")
-                .foregroundStyle(.secondary)
+            if let code = transport.pairingVerificationCodeForDisplay,
+               !transport.isPairingVerificationConfirmed {
+                Text("Verify connection")
+                    .font(.headline)
+                Text("Confirm this code is also shown on the iPad:")
+                    .foregroundStyle(.secondary)
+                Text(code)
+                    .font(.system(size: 32, weight: .bold, design: .monospaced))
+                    .tracking(4)
+                    .accessibilityLabel("Verification code " + code)
+                    .accessibilityIdentifier("Pairing Verification Code")
+                Button("Codes Match") {
+                    transport.confirmPairingVerification()
+                }
+                .buttonStyle(.borderedProminent)
+                .accessibilityIdentifier("Codes Match")
+            } else {
+                Text("Pairing accepted")
+                Text("Authenticating…")
+                    .foregroundStyle(.secondary)
+            }
             if transport.pairingPeerID != nil { cancelButton }
         case .authenticated(let peerID):
             Text(transport.pairingPeerDisplayName ?? status.peerDisplayName ?? peerID)

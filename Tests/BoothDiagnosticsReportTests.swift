@@ -17,13 +17,20 @@ struct BoothDiagnosticsReportTests {
             "Fallback: LAN unavailable",
             "Control channel: Connected",
             "Preview channel: Connected",
+            "Authentication: Not authenticated",
             "FPS: 29.8",
             "Throughput: 2.4 MB/s",
             "Default status: System Default",
             "Print requests: 3",
+            "Reconnects: 0",
+            "Heartbeat timeouts: 0",
+            "Control send failures: 0",
+            "Oldest critical job: None",
             "Readiness: Ready with warnings",
             "Failures: Camera permission",
-            "Warnings: Disk space"
+            "Warnings: Disk space",
+            "Recent operations",
+            "None"
         ] {
             #expect(report.contains(line))
         }
@@ -63,6 +70,30 @@ struct BoothDiagnosticsReportTests {
         #expect(!report.contains("diagnostic-test-value"))
         #expect(!report.contains("secret-value"))
         #expect(report.contains("[redacted]"))
+    }
+
+    @Test("event history remains compatible and redacts transport credentials")
+    func eventHistoryIsBackwardCompatibleAndRedacted() async throws {
+        let fileURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("PRC-operations-\(UUID().uuidString).json")
+        defer { try? FileManager.default.removeItem(at: fileURL) }
+        let legacyTimestamp = ISO8601DateFormatter().string(from: Date())
+        let legacy = Data(#"[{"id":"legacy","kind":"sessionStarted","timestamp":"\#(legacyTimestamp)","sessionID":null,"photoIndex":null,"duration":null,"reason":null}]"#.utf8)
+        try legacy.write(to: fileURL)
+
+        let store = OperationsEventStore(fileURL: fileURL)
+        #expect((await store.load()).count == 1)
+        await store.record(
+            .controlSendFailed,
+            reason: "Authorization: Bearer do-not-export",
+            channel: "control",
+            route: "wifi"
+        )
+
+        let events = await store.load()
+        #expect(events.last?.reason == "[redacted]")
+        #expect(events.last?.channel == "control")
+        #expect(events.last?.route == "wifi")
     }
 
     private func snapshot() -> BoothDiagnosticsReport.Snapshot {

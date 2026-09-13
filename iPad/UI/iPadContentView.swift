@@ -43,6 +43,22 @@ struct iPadContentView: View {
                 }
             }
 
+            if vm.shouldShowReconnectOverlay {
+                Color.black.opacity(0.82).ignoresSafeArea()
+                VStack(spacing: 16) {
+                    ProgressView()
+                        .tint(.white)
+                        .scaleEffect(1.25)
+                    Text("Reconnecting…")
+                        .font(.title2.bold())
+                        .foregroundStyle(.white)
+                    Text("Please wait for staff.")
+                        .foregroundStyle(.white.opacity(0.75))
+                }
+                .accessibilityElement(children: .combine)
+                .accessibilityLabel("Reconnecting. Please wait for staff.")
+            }
+
             if vm.canChangeConnection {
                 VStack {
                     HStack {

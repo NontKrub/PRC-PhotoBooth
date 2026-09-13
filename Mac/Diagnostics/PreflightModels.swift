@@ -51,7 +51,12 @@ enum PreflightCheckID: String, Sendable, CaseIterable, Identifiable {
     case wifiPath
     case lanPath
     case ipadTransport
+    case authentication
+    case controlChannel
+    case previewChannel
     case networkRoute
+    case networkFreshness
+    case reconnectState
     case outputFolder
     case diskSpace
     case localDownloadServer
@@ -101,6 +106,11 @@ struct BoothPreflightContext: Sendable {
     var previewRequired: Bool
     var customerDisplayReady: Bool
     var ipadConnected: Bool
+    var controlChannelConnected: Bool
+    var ipadPreviewChannelConnected: Bool
+    var lastControlActivityAt: Date?
+    var reconnectInProgress: Bool
+    var reconnectAttempt: Int
     var requestedNetwork: BoothNetworkPreference
     var effectiveNetwork: BoothEffectiveNetworkTransport
     var wifiPathAvailable: Bool
@@ -117,6 +127,11 @@ struct BoothPreflightContext: Sendable {
     var unfinishedCaptureSession: Bool
     var requiredJobFailed: Bool
     var optionalJobPendingOrFailed: Bool
+    var queuePendingCount: Int
+    var queueRunningCount: Int
+    var queueRetryingCount: Int
+    var queueFailedCount: Int
+    var oldestCriticalJobAge: TimeInterval?
     var cloudUploadEnabled: Bool
     var cloudSetupComplete: Bool
     var cloudConnectivityPassed: Bool
@@ -143,6 +158,11 @@ struct BoothPreflightContext: Sendable {
         previewRequired: Bool = false,
         customerDisplayReady: Bool = false,
         ipadConnected: Bool = false,
+        controlChannelConnected: Bool = false,
+        ipadPreviewChannelConnected: Bool = false,
+        lastControlActivityAt: Date? = nil,
+        reconnectInProgress: Bool = false,
+        reconnectAttempt: Int = 0,
         requestedNetwork: BoothNetworkPreference = .wifi,
         effectiveNetwork: BoothEffectiveNetworkTransport = .unavailable,
         wifiPathAvailable: Bool = false,
@@ -159,6 +179,11 @@ struct BoothPreflightContext: Sendable {
         unfinishedCaptureSession: Bool = false,
         requiredJobFailed: Bool = false,
         optionalJobPendingOrFailed: Bool = false,
+        queuePendingCount: Int = 0,
+        queueRunningCount: Int = 0,
+        queueRetryingCount: Int = 0,
+        queueFailedCount: Int = 0,
+        oldestCriticalJobAge: TimeInterval? = nil,
         cloudUploadEnabled: Bool = false,
         cloudSetupComplete: Bool = false,
         cloudConnectivityPassed: Bool = false,
@@ -184,6 +209,11 @@ struct BoothPreflightContext: Sendable {
         self.previewRequired = previewRequired
         self.customerDisplayReady = customerDisplayReady
         self.ipadConnected = ipadConnected
+        self.controlChannelConnected = controlChannelConnected
+        self.ipadPreviewChannelConnected = ipadPreviewChannelConnected
+        self.lastControlActivityAt = lastControlActivityAt
+        self.reconnectInProgress = reconnectInProgress
+        self.reconnectAttempt = reconnectAttempt
         self.requestedNetwork = requestedNetwork
         self.effectiveNetwork = effectiveNetwork
         self.wifiPathAvailable = wifiPathAvailable
@@ -200,6 +230,11 @@ struct BoothPreflightContext: Sendable {
         self.unfinishedCaptureSession = unfinishedCaptureSession
         self.requiredJobFailed = requiredJobFailed
         self.optionalJobPendingOrFailed = optionalJobPendingOrFailed
+        self.queuePendingCount = queuePendingCount
+        self.queueRunningCount = queueRunningCount
+        self.queueRetryingCount = queueRetryingCount
+        self.queueFailedCount = queueFailedCount
+        self.oldestCriticalJobAge = oldestCriticalJobAge
         self.cloudUploadEnabled = cloudUploadEnabled
         self.cloudSetupComplete = cloudSetupComplete
         self.cloudConnectivityPassed = cloudConnectivityPassed

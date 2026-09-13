@@ -1,5 +1,6 @@
 import Testing
 import Foundation
+import CryptoKit
 @testable import PRC_PhotoBooth_Mac
 
 @Suite("Message Codable")
@@ -23,20 +24,28 @@ struct MessageTests {
                 sessionID: "pairing-session",
                 macDeviceID: "mac-test",
                 macDeviceName: "PRC-Booth-01",
-                expiresAt: Date(timeIntervalSince1970: 1_700_000_120)
+                expiresAt: Date(timeIntervalSince1970: 1_700_000_120),
+                macEphemeralPublicKey: Data(repeating: 0x10, count: 32)
             )),
             .pairingRequest(request: BoothPairingRequest(
                 sessionID: "pairing-session",
                 targetMacDeviceID: "mac-test",
                 iPadIdentity: BoothDeviceIdentity(id: "ipad-test", displayName: "PRC-iPad-01", role: .iPad),
-                method: .pin("482193")
+                method: .pin,
+                iPadEphemeralPublicKey: Data(repeating: 0x11, count: 32),
+                admissionProof: Data(repeating: 0x12, count: 32)
             )),
             .pairingResult(result: BoothPairingResult(
                 accepted: true,
                 macIdentity: BoothDeviceIdentity(id: "mac-test", displayName: "PRC-Booth-01", role: .mac),
-                sharedSecret: Data(repeating: 0x44, count: 32),
-                pairingSessionID: "pairing-session"
+                pairingSessionID: "pairing-session",
+                macEphemeralPublicKey: Data(repeating: 0x10, count: 32),
+                keyAgreementProof: Data(repeating: 0x13, count: 32)
             )),
+            .pairingVerificationConfirmed(
+                sessionID: "pairing-session",
+                proof: Data(repeating: 0x14, count: 32)
+            ),
             .authChallenge(challenge: BoothAuthChallenge(
                 id: "challenge",
                 nonce: Data(repeating: 0x22, count: 32),
@@ -181,13 +190,63 @@ struct MessageTests {
         #expect(legacyHello.deviceName == "legacy-id")
         #expect(legacyHello.networkPreference == nil)
     }
-    @Test("v1.4.2 connection protocol is version 3 and legacy protocol 2 remains decodable but incompatible")
+    @Test("v1.4.2 connection protocol is version 4 and legacy protocol 2 remains decodable but incompatible")
     func protocolVersionMismatchIsVisible() throws {
-        #expect(BoothTransportHello.currentProtocolVersion == 3)
+        #expect(BoothTransportHello.currentProtocolVersion == 4)
         let legacy = Data(#"{"protocolVersion":2,"appVersion":"1.4.1","role":"iPad","deviceID":"legacy-id","capabilities":["control"]}"#.utf8)
         let hello = try JSONDecoder().decode(BoothTransportHello.self, from: legacy)
         #expect(hello.protocolVersion == 2)
         #expect(hello.protocolVersion != BoothTransportHello.currentProtocolVersion)
+    }
+
+    @Test("pairing result never serializes a raw shared secret")
+    func pairingResultDoesNotSerializeRawSharedSecret() throws {
+        let result = BoothPairingResult(
+            accepted: true,
+            macIdentity: BoothDeviceIdentity(id: "mac", displayName: "Mac", role: .mac),
+            sharedSecret: Data(repeating: 0xAB, count: 32),
+            pairingSessionID: "session",
+            macEphemeralPublicKey: Data(repeating: 0x01, count: 32),
+            keyAgreementProof: Data(repeating: 0x02, count: 32)
+        )
+        let encoded = try JSONEncoder().encode(result)
+        #expect(!String(decoding: encoded, as: UTF8.self).contains("sharedSecret"))
+        #expect(try JSONDecoder().decode(BoothPairingResult.self, from: encoded).sharedSecret == nil)
+    }
+
+    @Test("ephemeral key agreement is symmetric and transcript-bound")
+    func ephemeralKeyAgreement() throws {
+        let mac = Curve25519.KeyAgreement.PrivateKey()
+        let iPad = Curve25519.KeyAgreement.PrivateKey()
+        let transcript = BoothPairingCrypto.pairingTranscript(
+            sessionID: "session",
+            macDeviceID: "mac",
+            iPadDeviceID: "ipad",
+            method: .pin,
+            macEphemeralPublicKey: mac.publicKey.rawRepresentation,
+            iPadEphemeralPublicKey: iPad.publicKey.rawRepresentation
+        )
+        let first = try BoothPairingCrypto.derivePairingSecret(
+            privateKeyData: mac.rawRepresentation,
+            peerPublicKeyData: iPad.publicKey.rawRepresentation,
+            code: "482193",
+            transcript: transcript
+        )
+        let second = try BoothPairingCrypto.derivePairingSecret(
+            privateKeyData: iPad.rawRepresentation,
+            peerPublicKeyData: mac.publicKey.rawRepresentation,
+            code: "482193",
+            transcript: transcript
+        )
+        #expect(first == second)
+        #expect(first.count == 32)
+        let wrongCode = try BoothPairingCrypto.derivePairingSecret(
+            privateKeyData: iPad.rawRepresentation,
+            peerPublicKeyData: mac.publicKey.rawRepresentation,
+            code: "482194",
+            transcript: transcript
+        )
+        #expect(first != wrongCode)
     }
 
 }

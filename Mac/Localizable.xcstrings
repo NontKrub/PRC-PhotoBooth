@@ -4411,6 +4411,36 @@
         }
       }
     },
+    "Codes Match" : {
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "รหัสตรงกัน"
+          }
+        }
+      }
+    },
+    "Confirm this code is also shown on the iPad:" : {
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ยืนยันว่ารหัสนี้แสดงบน iPad ด้วย:"
+          }
+        }
+      }
+    },
+    "Verify connection" : {
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ยืนยันการเชื่อมต่อ"
+          }
+        }
+      }
+    },
     "Pairing code expired" : {
       "extractionState" : "stale",
       "localizations" : {

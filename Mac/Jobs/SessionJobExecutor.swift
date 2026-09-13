@@ -14,7 +14,6 @@ final class SessionJobExecutor: SessionJobExecuting {
     private let filterPipeline: PhotoFilterPipeline
     private let experienceStore: EventExperienceStore
     private let galleryStore: EventGalleryStore
-    private let galleryThumbnailGenerator = GalleryThumbnailGenerator()
 
     init(
         manifestStore: SessionManifestStore,
@@ -67,65 +66,56 @@ final class SessionJobExecutor: SessionJobExecuting {
     }
 
     private func renderStrip(_ manifest: SessionManifest) async throws {
-        let images: [Int: CGImage]
-        do {
-            images = try workspace.loadAcceptedImages(manifest: manifest)
-        } catch {
-            throw JobExecutionError.permanent(error.localizedDescription)
-        }
-        for index in 0..<manifest.eventConfig.photoCount {
-            guard images[index] != nil else {
-                throw JobExecutionError.permanent("Accepted photograph is missing for index \(index).")
-            }
-        }
-
-        let filteredImages: [Int: CGImage]
-        do {
-            let source = (0..<manifest.eventConfig.photoCount).compactMap { images[$0] }
-            let filtered = try await filterPipeline.apply(manifest.eventConfig.selectedFilterID, to: source)
-            filteredImages = Dictionary(uniqueKeysWithValues: zip(0..<filtered.count, filtered))
-        } catch {
-            throw JobExecutionError.permanent("Could not apply \(manifest.eventConfig.selectedFilterID.rawValue) filter: \(error.localizedDescription)")
-        }
-
         let directory = sessionDirectory(for: manifest)
-        let frame = try loadImage(
-            named: manifest.frameSnapshotFileName,
-            label: "Frame",
-            in: directory
-        )
-        let foreground = try loadImage(
-            named: manifest.foregroundOverlaySnapshotFileName,
-            label: "Foreground overlay",
-            in: directory
-        )
-        let compositor = Compositor(
-            config: manifest.eventConfig,
-            framePNG: frame,
-            foregroundOverlayPNG: foreground
-        )
-        let strip: CGImage
+        let qrPayload = try qrPayload(for: manifest)
+        let workspace = workspace
+        let filterPipeline = filterPipeline
+        let eventConfig = manifest.eventConfig
+        let frameName = manifest.frameSnapshotFileName
+        let foregroundName = manifest.foregroundOverlaySnapshotFileName
         do {
-            let qrPayload: String?
-            if manifest.eventConfig.qrCodeElements.isEmpty {
-                qrPayload = nil
-            } else {
-                qrPayload = try SessionQRCodePayloadResolver.resolve(
-                    token: manifest.downloadToken,
-                    localBaseURL: "http://\(LocalWebServer.lanIPAddress() ?? "localhost"):\(server.port)",
-                    publicBaseURL: manifest.cloudDelivery?.publicBaseURL
-                        ?? defaults.string(forKey: "publicBaseURL"),
-                    cloudUploadEnabled: manifest.cloudDelivery != nil
-                        || defaults.bool(forKey: "cloudUploadEnabled")
+            try await Task.detached(priority: .userInitiated) {
+                let images = try workspace.loadAcceptedImages(manifest: manifest)
+                for index in 0..<eventConfig.photoCount {
+                    guard images[index] != nil else {
+                        throw JobExecutionError.permanent("Accepted photograph is missing for index \(index).")
+                    }
+                }
+
+                let filtered: [CGImage]
+                do {
+                    let source = (0..<eventConfig.photoCount).compactMap { images[$0] }
+                    filtered = try await filterPipeline.apply(eventConfig.selectedFilterID, to: source)
+                } catch {
+                    throw JobExecutionError.permanent("Could not apply \(eventConfig.selectedFilterID.rawValue) filter: \(error.localizedDescription)")
+                }
+                let filteredImages = Dictionary(uniqueKeysWithValues: zip(0..<filtered.count, filtered))
+                let frame = try Self.loadImage(named: frameName, label: "Frame", in: directory)
+                let foreground = try Self.loadImage(
+                    named: foregroundName,
+                    label: "Foreground overlay",
+                    in: directory
                 )
-            }
-            strip = try compositor.render(images: filteredImages, qrPayload: qrPayload)
+                let strip = try Compositor(
+                    config: eventConfig,
+                    framePNG: frame,
+                    foregroundOverlayPNG: foreground
+                ).render(images: filteredImages, qrPayload: qrPayload)
+                try Self.savePNGAtomically(
+                    strip,
+                    compositor: Compositor(config: eventConfig, framePNG: nil),
+                    to: directory.appendingPathComponent("strip.png")
+                )
+            }.value
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch let error as JobExecutionError {
+            throw error
         } catch {
             throw JobExecutionError.permanent(error.localizedDescription)
         }
 
         do {
-            try savePNGAtomically(strip, compositor: compositor, to: directory.appendingPathComponent("strip.png"))
             var updated = manifest
             updated.stripFileName = "strip.png"
             try await manifestStore.save(updated)
@@ -137,6 +127,8 @@ final class SessionJobExecutor: SessionJobExecuting {
                 stripPath: "\(manifest.relativeDirectoryPath)/strip.png",
                 gifPath: nil
             )
+        } catch is CancellationError {
+            throw CancellationError()
         } catch {
             throw JobExecutionError.permanent(error.localizedDescription)
         }
@@ -171,7 +163,15 @@ final class SessionJobExecutor: SessionJobExecuting {
             throw JobExecutionError.permanent("Gallery configuration could not load: \(error.localizedDescription)")
         }
         guard document.gallery.mode != .disabled else { return }
-        _ = try galleryThumbnailGenerator.generate(manifest: manifest)
+        do {
+            _ = try await Task.detached(priority: .utility) {
+                try GalleryThumbnailGenerator().generate(manifest: manifest)
+            }.value
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch {
+            throw JobExecutionError.permanent(error.localizedDescription)
+        }
         try await galleryStore.upsertSession(manifest: manifest, configuration: document.gallery)
     }
 
@@ -187,41 +187,40 @@ final class SessionJobExecutor: SessionJobExecuting {
         let temporary = directory.appendingPathComponent(".booth-\(UUID().uuidString).gif")
         defer { try? FileManager.default.removeItem(at: temporary) }
         do {
-            let acceptedImages = try workspace.loadAcceptedImages(manifest: manifest)
-            let frame = try loadImage(named: manifest.frameSnapshotFileName, label: "Frame", in: directory)
-            let foreground = try loadImage(
-                named: manifest.foregroundOverlaySnapshotFileName,
-                label: "Foreground overlay",
-                in: directory
-            )
-            let compositor = Compositor(
-                config: manifest.eventConfig,
-                framePNG: frame,
-                foregroundOverlayPNG: foreground
-            )
             let qrPayload = try qrPayload(for: manifest)
             let preset = manifest.eventConfig.gifQualityPreset
-            let didRender = try await TemplateGIFRenderer(
-                compositor: compositor,
-                filterPipeline: filterPipeline,
-                sampler: GIFFrameSampler(targetFramesPerShot: preset.frameCount),
-                encoder: GIFEncoder(preset: preset)
-            ).render(
-                manifest: manifest,
-                acceptedImages: acceptedImages,
-                directory: directory,
-                qrPayload: qrPayload,
-                to: temporary
-            )
+            let workspace = workspace
+            let filterPipeline = filterPipeline
+            let didRender = try await Task.detached(priority: .userInitiated) {
+                let acceptedImages = try workspace.loadAcceptedImages(manifest: manifest)
+                let frame = try Self.loadImage(named: manifest.frameSnapshotFileName, label: "Frame", in: directory)
+                let foreground = try Self.loadImage(
+                    named: manifest.foregroundOverlaySnapshotFileName,
+                    label: "Foreground overlay",
+                    in: directory
+                )
+                let didRender = try await TemplateGIFRenderer(
+                    compositor: Compositor(
+                        config: manifest.eventConfig,
+                        framePNG: frame,
+                        foregroundOverlayPNG: foreground
+                    ),
+                    filterPipeline: filterPipeline,
+                    sampler: GIFFrameSampler(targetFramesPerShot: preset.frameCount),
+                    encoder: GIFEncoder(preset: preset)
+                ).render(
+                    manifest: manifest,
+                    acceptedImages: acceptedImages,
+                    directory: directory,
+                    qrPayload: qrPayload,
+                    to: temporary
+                )
+                guard didRender else { return false }
+                _ = try Self.validatedFileByteCount(at: temporary)
+                try Self.replaceFile(at: destination, with: temporary)
+                return true
+            }.value
             guard didRender else { return }
-            let attributes = try? FileManager.default.attributesOfItem(atPath: temporary.path)
-            let byteCount = (attributes?[.size] as? NSNumber)?.int64Value ?? 0
-            guard byteCount > 0,
-                  let source = CGImageSourceCreateWithURL(temporary as CFURL, nil),
-                  CGImageSourceGetCount(source) > 0 else {
-                throw JobExecutionError.permanent("GIF output was empty or invalid.")
-            }
-            try replaceFile(at: destination, with: temporary)
             var updated = try await manifestStore.load(sessionID: manifest.id)
             updated.gifFileName = "booth.gif"
             try await manifestStore.save(updated)
@@ -274,7 +273,7 @@ final class SessionJobExecutor: SessionJobExecuting {
         URL(fileURLWithPath: manifest.absoluteDirectoryPath, isDirectory: true).standardizedFileURL
     }
 
-    private func loadImage(named name: String?, label: String, in directory: URL) throws -> CGImage? {
+    nonisolated private static func loadImage(named name: String?, label: String, in directory: URL) throws -> CGImage? {
         guard let name else { return nil }
         let url = directory.appendingPathComponent(name).standardizedFileURL
         guard url.path.hasPrefix(directory.path + "/"),
@@ -294,18 +293,29 @@ final class SessionJobExecutor: SessionJobExecuting {
         )
     }
 
-    private func savePNGAtomically(_ image: CGImage, compositor: Compositor, to url: URL) throws {
+    nonisolated private static func savePNGAtomically(_ image: CGImage, compositor: Compositor, to url: URL) throws {
         let temporary = url.deletingLastPathComponent().appendingPathComponent(".strip-\(UUID().uuidString).png")
         defer { try? FileManager.default.removeItem(at: temporary) }
         try compositor.savePNG(image, to: temporary)
         try replaceFile(at: url, with: temporary)
     }
 
-    private func replaceFile(at destination: URL, with temporary: URL) throws {
+    nonisolated private static func replaceFile(at destination: URL, with temporary: URL) throws {
         if FileManager.default.fileExists(atPath: destination.path) {
             _ = try FileManager.default.replaceItemAt(destination, withItemAt: temporary)
         } else {
             try FileManager.default.moveItem(at: temporary, to: destination)
         }
+    }
+
+    nonisolated private static func validatedFileByteCount(at url: URL) throws -> Int64 {
+        let attributes = try FileManager.default.attributesOfItem(atPath: url.path)
+        let byteCount = (attributes[.size] as? NSNumber)?.int64Value ?? 0
+        guard byteCount > 0,
+              let source = CGImageSourceCreateWithURL(url as CFURL, nil),
+              CGImageSourceGetCount(source) > 0 else {
+            throw JobExecutionError.permanent("GIF output was empty or invalid.")
+        }
+        return byteCount
     }
 }

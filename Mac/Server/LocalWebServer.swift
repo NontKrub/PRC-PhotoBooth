@@ -14,7 +14,7 @@ struct LocalWebServerStatus: Sendable, Equatable {
 }
 
 struct OperatorWebHandlers: Sendable {
-    var pairingURL: @MainActor @Sendable () -> String
+    var isEnabled: @MainActor @Sendable () -> Bool
     var pair: @MainActor @Sendable (String) -> String?
     var authorize: @MainActor @Sendable (String) -> Bool
     var status: @MainActor @Sendable () async -> BoothHealthSnapshot
@@ -23,12 +23,24 @@ struct OperatorWebHandlers: Sendable {
 }
 
 actor LocalWebServer {
+    private static let maximumActiveConnections = 48
+    private static let requestTimeoutNanoseconds: UInt64 = 10_000_000_000
+    private static let fileChunkTimeoutNanoseconds: UInt64 = 15_000_000_000
+    private static let securityHeaders = [
+        "Cache-Control": "no-store",
+        "Referrer-Policy": "no-referrer",
+        "X-Content-Type-Options": "nosniff",
+        "Content-Security-Policy": "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; img-src 'self' data:; base-uri 'none'; frame-ancestors 'none'"
+    ]
+
     private var listener: NWListener?
     let port: UInt16
     private var sessionRoutes: [String: SessionRouteRegistration] = [:]
     private var galleryRoutes: [String: EventGalleryRouteRegistration] = [:]
     private var operatorHandlers: OperatorWebHandlers?
     private var activePort: UInt16?
+    private var activeConnectionCount = 0
+    private let ioQueue = DispatchQueue(label: "PRC-PhotoBooth.LocalWebServer", qos: .utility, attributes: .concurrent)
 
     private var state: LocalWebServerState = .stopped
 
@@ -127,7 +139,7 @@ actor LocalWebServer {
             listener.newConnectionHandler = { [weak self] connection in
                 Task { await self?.handle(connection) }
             }
-            listener.start(queue: .global(qos: .utility))
+            listener.start(queue: ioQueue)
             self.listener = listener
         } catch {
             state = .failed(message: error.localizedDescription)
@@ -160,52 +172,98 @@ actor LocalWebServer {
     }
 
     private func handle(_ connection: NWConnection) async {
+        guard activeConnectionCount < Self.maximumActiveConnections else {
+            connection.start(queue: ioQueue)
+            _ = await send(connection, data: secured(busy()).httpData, timeoutNanoseconds: Self.fileChunkTimeoutNanoseconds)
+            connection.cancel()
+            return
+        }
+        activeConnectionCount += 1
+        defer { activeConnectionCount -= 1 }
         defer { connection.cancel() }
-        connection.start(queue: .global(qos: .utility))
+        connection.start(queue: ioQueue)
         var parser = HTTPServerRequestParser()
         var request: HTTPServerRequest?
+        let deadline = DispatchTime.now().uptimeNanoseconds + Self.requestTimeoutNanoseconds
         do {
-            while request == nil, let data = await receive(from: connection) {
+            while request == nil, let data = await receive(from: connection, deadline: deadline) {
                 request = try parser.append(data)
             }
         } catch {
-            _ = await send(connection, data: errorResponse(for: error).httpData)
+            _ = await send(connection, data: secured(errorResponse(for: error)).httpData, timeoutNanoseconds: Self.fileChunkTimeoutNanoseconds)
             return
         }
         guard let request else {
-            _ = await send(connection, data: errorResponse(for: HTTPServerRequestError.malformed).httpData)
+            _ = await send(connection, data: secured(errorResponse(for: HTTPServerRequestError.malformed)).httpData, timeoutNanoseconds: Self.fileChunkTimeoutNanoseconds)
             return
         }
         switch await route(for: request) {
         case .response(let response):
-            _ = await send(connection, data: response.httpData)
+            _ = await send(connection, data: secured(response).httpData, timeoutNanoseconds: Self.fileChunkTimeoutNanoseconds)
         case .file(let response):
             await send(connection, file: response)
         }
     }
 
-    private func receive(from connection: NWConnection) async -> Data? {
-        await withCheckedContinuation { continuation in
-            connection.receive(minimumIncompleteLength: 1, maximumLength: 64 * 1024) { data, _, isComplete, error in
-                guard error == nil, let data, !data.isEmpty else {
-                    continuation.resume(returning: nil)
-                    return
+    private func receive(from connection: NWConnection, deadline: UInt64) async -> Data? {
+        let now = DispatchTime.now().uptimeNanoseconds
+        guard deadline > now else {
+            connection.cancel()
+            return nil
+        }
+        let remaining = deadline - now
+        return await withTaskGroup(of: Data?.self) { group in
+            group.addTask {
+                await withCheckedContinuation { continuation in
+                    connection.receive(minimumIncompleteLength: 1, maximumLength: 64 * 1024) { data, _, _, error in
+                        guard error == nil, let data, !data.isEmpty else {
+                            continuation.resume(returning: nil)
+                            return
+                        }
+                        continuation.resume(returning: data)
+                    }
                 }
-                continuation.resume(returning: data)
             }
+            group.addTask {
+                try? await Task.sleep(nanoseconds: remaining)
+                guard !Task.isCancelled else { return nil }
+                connection.cancel()
+                return nil
+            }
+            let result = await group.next() ?? nil
+            group.cancelAll()
+            return result
         }
     }
 
-    private func send(_ connection: NWConnection, data: Data) async -> Bool {
-        await withCheckedContinuation { (continuation: CheckedContinuation<Bool, Never>) in
-            connection.send(content: data, completion: .contentProcessed { error in
-                continuation.resume(returning: error == nil)
-            })
+    private func send(
+        _ connection: NWConnection,
+        data: Data,
+        timeoutNanoseconds: UInt64
+    ) async -> Bool {
+        await withTaskGroup(of: Bool.self) { group in
+            group.addTask {
+                await withCheckedContinuation { (continuation: CheckedContinuation<Bool, Never>) in
+                    connection.send(content: data, completion: .contentProcessed { error in
+                        continuation.resume(returning: error == nil)
+                    })
+                }
+            }
+            group.addTask {
+                try? await Task.sleep(nanoseconds: timeoutNanoseconds)
+                guard !Task.isCancelled else { return false }
+                connection.cancel()
+                return false
+            }
+            let result = await group.next() ?? false
+            group.cancelAll()
+            return result
         }
     }
 
     private func send(_ connection: NWConnection, file response: LocalDownloadFileResponse) async {
-        guard await send(connection, data: response.httpHeaderData) else { return }
+        let response = secured(response)
+        guard await send(connection, data: response.httpHeaderData, timeoutNanoseconds: Self.fileChunkTimeoutNanoseconds) else { return }
         let chunkSize = 128 * 1024
         var bytesSent: Int64 = 0
         do {
@@ -216,7 +274,7 @@ actor LocalWebServer {
                 guard let chunk = try handle.read(upToCount: min(chunkSize, Int(remaining))), !chunk.isEmpty else {
                     return
                 }
-                guard await send(connection, data: chunk) else { return }
+                guard await send(connection, data: chunk, timeoutNanoseconds: Self.fileChunkTimeoutNanoseconds) else { return }
                 bytesSent += Int64(chunk.count)
             }
         } catch {
@@ -235,9 +293,10 @@ actor LocalWebServer {
 
     private func operatorResponse(for request: HTTPServerRequest) async -> LocalDownloadResponse {
         guard let handlers = operatorHandlers else { return notFound() }
+        guard await handlers.isEnabled() else { return notFound() }
         let path = request.path.split(separator: "?", maxSplits: 1, omittingEmptySubsequences: false).first.map(String.init) ?? request.path
         if request.method == "GET", (path == "/operator/" || path == "/operator") {
-            return operatorLanding(pairingURL: await handlers.pairingURL())
+            return operatorLanding()
         }
         if request.method == "GET", path.hasPrefix("/operator/pair/") {
             let token = String(path.dropFirst("/operator/pair/".count))
@@ -299,13 +358,12 @@ actor LocalWebServer {
         )
     }
 
-    private func operatorLanding(pairingURL: String) -> LocalDownloadResponse {
-        let escaped = pairingURL.htmlEscaped
+    private func operatorLanding() -> LocalDownloadResponse {
         let html = """
         <!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><title>PRC PhotoBooth Operator</title></head>
         <body style="font-family:-apple-system,sans-serif;background:#101010;color:#fff;padding:2rem;max-width:42rem;margin:auto">
-        <h1>PRC PHOTOBOOTH</h1><p>Pairing link is generated on the Mac Operations screen.</p>
-        <p><a style="color:#fff" href="\(escaped)">Open pairing link</a></p></body></html>
+        <h1>PRC PHOTOBOOTH</h1><p>Pairing links are generated explicitly from the Mac Operations screen.</p>
+        <p>This page never contains a pairing credential.</p></body></html>
         """
         return htmlResponse(html)
     }
@@ -323,7 +381,7 @@ actor LocalWebServer {
     }
 
     private func htmlResponse(_ html: String) -> LocalDownloadResponse {
-        LocalDownloadResponse(statusCode: 200, reason: "OK", contentType: "text/html; charset=utf-8", headers: ["Cache-Control": "no-store"], body: Data(html.utf8))
+        LocalDownloadResponse(statusCode: 200, reason: "OK", contentType: "text/html; charset=utf-8", headers: Self.securityHeaders, body: Data(html.utf8))
     }
 
     private func errorResponse(for error: Error) -> LocalDownloadResponse {
@@ -333,6 +391,21 @@ actor LocalWebServer {
         }
     }
 
+    private func busy() -> LocalDownloadResponse { LocalDownloadResponse(statusCode: 503, reason: "Service Unavailable", contentType: "text/plain; charset=utf-8", headers: ["Retry-After": "1"], body: Data("Server busy".utf8)) }
+    private func secured(_ response: LocalDownloadResponse) -> LocalDownloadResponse {
+        var response = response
+        for (name, value) in Self.securityHeaders where response.headers[name] == nil {
+            response.headers[name] = value
+        }
+        return response
+    }
+    private func secured(_ response: LocalDownloadFileResponse) -> LocalDownloadFileResponse {
+        var response = response
+        for (name, value) in Self.securityHeaders where response.headers[name] == nil {
+            response.headers[name] = value
+        }
+        return response
+    }
     private func badRequest() -> LocalDownloadResponse { LocalDownloadResponse(statusCode: 400, reason: "Bad Request", contentType: "text/plain; charset=utf-8", headers: [:], body: Data("Bad request".utf8)) }
     private func unauthorized() -> LocalDownloadResponse { LocalDownloadResponse(statusCode: 401, reason: "Unauthorized", contentType: "text/plain; charset=utf-8", headers: ["WWW-Authenticate": "Bearer"], body: Data("Unauthorized".utf8)) }
     private func methodNotAllowed() -> LocalDownloadResponse { LocalDownloadResponse(statusCode: 405, reason: "Method Not Allowed", contentType: "text/plain; charset=utf-8", headers: ["Allow": "GET, POST"], body: Data("Method not allowed".utf8)) }

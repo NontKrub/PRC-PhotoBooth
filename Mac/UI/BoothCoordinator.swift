@@ -54,6 +54,8 @@ final class BoothCoordinator {
     let stateMachine: SessionStateMachine
     let server: LocalWebServer
     let operatorAuth: RemoteOperatorAuth
+    private(set) var isRemoteOperatorEnabled = false
+    private var eventActivity: NSObjectProtocol?
     let store: DataStore
     let cloudSSHSetup: CloudSSHSetupService
     let manifestStore: SessionManifestStore
@@ -70,6 +72,7 @@ final class BoothCoordinator {
 
     var activeEvent: BoothEvent? {
         didSet {
+            updateEventActivity()
             capture.captureRotationDegrees = activeEvent?.cameraRotationDegrees ?? 0
             if activeEvent == nil {
                 activeExperienceDocument = nil
@@ -279,7 +282,7 @@ final class BoothCoordinator {
                 serverURL = "http://\(ip):8585"
             }
             await server.configureOperatorHandlers(OperatorWebHandlers(
-                pairingURL: { [weak self] in self?.operatorPairingURL ?? "" },
+                isEnabled: { [weak self] in self?.operatorAuth.isEnabled ?? false },
                 pair: { [weak self] token in self?.operatorAuth.pair(token) },
                 authorize: { [weak self] token in self?.operatorAuth.isValidOperatorToken(token) ?? false },
                 status: { [weak self] in await self?.healthSnapshot() ?? .empty },
@@ -358,11 +361,22 @@ final class BoothCoordinator {
         }
     }
 
-    var operatorPairingURL: String {
+    var operatorPairingURL: String? {
+        guard operatorAuth.isEnabled else { return nil }
         let base = serverURL.isEmpty
             ? "http://\(LocalWebServer.lanIPAddress() ?? "localhost"):8585"
             : serverURL
         return "\(base)/operator/pair/\(operatorAuth.pairingTokenValue())"
+    }
+
+    func enableRemoteOperator() {
+        operatorAuth.enable()
+        isRemoteOperatorEnabled = true
+    }
+
+    func disableRemoteOperator() {
+        operatorAuth.disable()
+        isRemoteOperatorEnabled = false
     }
 
     var sharingStationURL: String? {
@@ -837,7 +851,26 @@ final class BoothCoordinator {
         multipeer.disconnect()
         capture.stop()
         jobQueue.stop()
+        endEventActivity()
         Task { await server.stop() }
+    }
+
+    private func updateEventActivity() {
+        guard activeEvent != nil else {
+            endEventActivity()
+            return
+        }
+        guard eventActivity == nil else { return }
+        eventActivity = ProcessInfo.processInfo.beginActivity(
+            options: .userInitiated,
+            reason: "PRC PhotoBooth active event"
+        )
+    }
+
+    private func endEventActivity() {
+        guard let eventActivity else { return }
+        ProcessInfo.processInfo.endActivity(eventActivity)
+        self.eventActivity = nil
     }
 
     func pauseBooth() {
@@ -949,52 +982,70 @@ final class BoothCoordinator {
     }
 
     func copyDiagnostics() {
-        let printerDefaultStatus: String = switch printer.configuredPrinterStatus() {
-        case .systemDefault: "System Default"
-        case .unavailable(let name): "Unavailable: \(name)"
-        }
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            let printerDefaultStatus: String = switch printer.configuredPrinterStatus() {
+            case .systemDefault: "System Default"
+            case .unavailable(let name): "Unavailable: \(name)"
+            }
 #if arch(arm64)
-        let architecture = "arm64"
+            let architecture = "arm64"
 #elseif arch(x86_64)
-        let architecture = "x86_64"
+            let architecture = "x86_64"
 #else
-        let architecture = "unknown"
+            let architecture = "unknown"
 #endif
-        let snapshot = BoothDiagnosticsReport.Snapshot(
-            appVersion: Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "Unknown",
-            appBuild: Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "Unknown",
-            macOS: ProcessInfo.processInfo.operatingSystemVersionString,
-            architecture: architecture,
-            generatedAt: Date(),
-            requestedNetwork: connectionStatus.requestedNetwork,
-            effectiveNetwork: connectionStatus.effectiveNetwork,
-            connectionState: connectionStatus.state,
-            fallbackReason: connectionStatus.isFallbackActive
-                ? connectionStatus.fallbackReason ?? "Active"
-                : nil,
-            peerName: connectionStatus.peerDisplayName,
-            ethernetPath: connectionStatus.lanPathObservation,
-            wifiPath: connectionStatus.wifiPathObservation,
-            lanHandshake: connectionStatus.lanHandshake,
-            controlConnected: {
-                if case .connected = connectionStatus.state { return true }
-                return false
-            }(),
-            previewConnected: connectionStatus.isPreviewChannelConnected,
-            lastNetworkError: connectionStatus.lastNetworkError,
-            previewDiagnostics: connectionStatus.previewDiagnostics,
-            printerDefaultStatus: printerDefaultStatus,
-            printerName: printerLabel,
-            lastPrinterTest: printer.lastTestResult,
-            printRequestCount: printer.printRequestCount,
-            printSuccessCount: printer.printSuccessCount,
-            printFailureCount: printer.printFailureCount,
-            lastPrintError: printer.lastPrintError,
-            preflightReadiness: preflight.readiness,
-            preflightResults: preflight.results
-        )
-        NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(BoothDiagnosticsReport.make(snapshot), forType: .string)
+            let jobs = jobQueue.jobs
+            let allEvents = await operationsEvents.load()
+            let criticalJobs = jobs.filter {
+                !$0.kind.isOptional && ($0.status == .pending || $0.status == .running || $0.status == .waitingRetry)
+            }
+            let snapshot = BoothDiagnosticsReport.Snapshot(
+                appVersion: Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "Unknown",
+                appBuild: Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "Unknown",
+                macOS: ProcessInfo.processInfo.operatingSystemVersionString,
+                architecture: architecture,
+                generatedAt: Date(),
+                requestedNetwork: connectionStatus.requestedNetwork,
+                effectiveNetwork: connectionStatus.effectiveNetwork,
+                connectionState: connectionStatus.state,
+                fallbackReason: connectionStatus.isFallbackActive
+                    ? connectionStatus.fallbackReason ?? "Active"
+                    : nil,
+                peerName: connectionStatus.peerDisplayName,
+                ethernetPath: connectionStatus.lanPathObservation,
+                wifiPath: connectionStatus.wifiPathObservation,
+                lanHandshake: connectionStatus.lanHandshake,
+                controlConnected: {
+                    if case .connected = connectionStatus.state { return true }
+                    return false
+                }(),
+                previewConnected: connectionStatus.isPreviewChannelConnected,
+                lastNetworkError: connectionStatus.lastNetworkError,
+                previewDiagnostics: connectionStatus.previewDiagnostics,
+                printerDefaultStatus: printerDefaultStatus,
+                printerName: printerLabel,
+                lastPrinterTest: printer.lastTestResult,
+                printRequestCount: printer.printRequestCount,
+                printSuccessCount: printer.printSuccessCount,
+                printFailureCount: printer.printFailureCount,
+                lastPrintError: printer.lastPrintError,
+                preflightReadiness: preflight.readiness,
+                preflightResults: preflight.results,
+                authenticated: connectionStatus.isPeerAuthenticated,
+                reconnectCount: allEvents.filter { $0.kind == .transportReconnectSucceeded }.count,
+                heartbeatTimeoutCount: allEvents.filter { $0.kind == .heartbeatTimedOut }.count,
+                controlSendFailureCount: allEvents.filter { $0.kind == .controlSendFailed || $0.kind == .controlPayloadRejected }.count,
+                queuePendingCount: jobs.filter { $0.status == .pending }.count,
+                queueRunningCount: jobs.filter { $0.status == .running }.count,
+                queueRetryingCount: jobs.filter { $0.status == .waitingRetry }.count,
+                queueFailedCount: jobs.filter { $0.status == .failed }.count,
+                oldestCriticalJobAge: criticalJobs.map { Date().timeIntervalSince($0.createdAt) }.max(),
+                recentEvents: Array(allEvents.suffix(50))
+            )
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString(BoothDiagnosticsReport.make(snapshot), forType: .string)
+        }
     }
 
     private func attemptPendingLANRecoveryIfIdle() {
@@ -1078,6 +1129,13 @@ final class BoothCoordinator {
         let output = picturesOutputDir()
         let capacity = output.flatMap { try? $0.resourceValues(forKeys: [.volumeAvailableCapacityKey]).volumeAvailableCapacity }.map(Int64.init)
         let jobs = jobQueue.jobs
+        let controlChannelConnected: Bool = {
+            guard case .connected = connectionStatus.state else { return false }
+            return multipeer is NetworkBoothTransport ? connectionStatus.isPeerAuthenticated : true
+        }()
+        let criticalJobs = jobs.filter {
+            !$0.kind.isOptional && ($0.status == .pending || $0.status == .running || $0.status == .waitingRetry)
+        }
         let requiredFailed = jobs.contains {
             !$0.kind.isOptional && $0.status == .failed
         }
@@ -1174,6 +1232,11 @@ final class BoothCoordinator {
             previewRequired: false,
             customerDisplayReady: isAuthenticatedIPadConnected && connectionStatus.isPreviewChannelConnected,
             ipadConnected: ipadConnected,
+            controlChannelConnected: controlChannelConnected,
+            ipadPreviewChannelConnected: connectionStatus.isPreviewChannelConnected,
+            lastControlActivityAt: connectionStatus.lastControlActivityAt,
+            reconnectInProgress: connectionStatus.isReconnectInProgress,
+            reconnectAttempt: connectionStatus.reconnectAttempt,
             requestedNetwork: connectionStatus.requestedNetwork,
             effectiveNetwork: connectionStatus.effectiveNetwork,
             wifiPathAvailable: connectionStatus.isWiFiPathAvailable,
@@ -1190,6 +1253,11 @@ final class BoothCoordinator {
             unfinishedCaptureSession: recoveryService.recoverableCaptureSession != nil,
             requiredJobFailed: requiredFailed || jobs.contains(where: { !$0.kind.isOptional && $0.status == .cancelled }),
             optionalJobPendingOrFailed: optionalPendingOrFailed,
+            queuePendingCount: jobs.filter { $0.status == .pending }.count,
+            queueRunningCount: jobs.filter { $0.status == .running }.count,
+            queueRetryingCount: jobs.filter { $0.status == .waitingRetry }.count,
+            queueFailedCount: jobs.filter { $0.status == .failed }.count,
+            oldestCriticalJobAge: criticalJobs.map { max(0, Date().timeIntervalSince($0.createdAt)) }.max(),
             cloudUploadEnabled: cloudUploadEnabled,
             cloudSetupComplete: cloudSetupComplete,
             cloudConnectivityPassed: cloudConnectivityPassed,
@@ -2542,6 +2610,22 @@ final class BoothCoordinator {
         multipeer.onControlMessage = { [weak self] msg in
             self?.handleMessage(msg)
         }
+        multipeer.onTransportEvent = { [weak self] event in
+            self?.recordTransportEvent(event)
+        }
+    }
+
+    private func recordTransportEvent(_ event: BoothTransportDiagnosticEvent) {
+        guard let kind = OperationsEventKind(rawValue: event.kind.rawValue) else { return }
+        recordOperation(
+            kind,
+            duration: event.duration,
+            reason: event.reason,
+            channel: event.channel,
+            route: event.route,
+            attempt: event.attempt,
+            byteCount: event.byteCount
+        )
     }
 
     private func handleMessage(_ msg: Message) {
@@ -2704,9 +2788,13 @@ final class BoothCoordinator {
         }.map(Int64.init)
         let camera = cameraHealthSnapshot
         let hasRequiredFailure = queue.contains { !$0.kind.isOptional && $0.status == .failed }
-        let overall: BoothHealthStatus = camera.connected && serverHealth == .healthy && !hasRequiredFailure
+        let connectionHealthy = displayReady
+        let overall: BoothHealthStatus = camera.connected
+            && serverHealth == .healthy
+            && connectionHealthy
+            && !hasRequiredFailure
             ? .healthy
-            : camera.connected || serverHealth == .healthy ? .degraded : .unavailable
+            : camera.connected || serverHealth == .healthy || connectionHealthy ? .degraded : .unavailable
         let deliverySessionID = currentSession?.id ?? lastCompletedSessionID
         let deliveryJobs = deliverySessionID.map { sessionID in queue.filter { $0.sessionID == sessionID } } ?? []
         return BoothHealthSnapshot(
@@ -2772,9 +2860,25 @@ final class BoothCoordinator {
         sessionID: String? = nil,
         photoIndex: Int? = nil,
         duration: Double? = nil,
-        reason: String? = nil
+        reason: String? = nil,
+        channel: String? = nil,
+        route: String? = nil,
+        attempt: Int? = nil,
+        byteCount: Int? = nil
     ) {
-        Task { await operationsEvents.record(kind, sessionID: sessionID, photoIndex: photoIndex, duration: duration, reason: reason) }
+        Task {
+            await operationsEvents.record(
+                kind,
+                sessionID: sessionID,
+                photoIndex: photoIndex,
+                duration: duration,
+                reason: reason,
+                channel: channel,
+                route: route,
+                attempt: attempt,
+                byteCount: byteCount
+            )
+        }
     }
 
     func setEventFolder(_ url: URL) {
