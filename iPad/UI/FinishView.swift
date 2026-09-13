@@ -68,14 +68,29 @@ struct FinishAndQRView: View {
 
                 // Next Session button
                 Button(action: { vm.customerDone() }) {
-                    Text("Next session")
-                        .font(.system(size: 17, weight: .bold))
-                        .foregroundStyle(.black)
-                        .frame(width: 220, height: 58)
-                        .background(Color.white, in: RoundedRectangle(cornerRadius: 16))
+                    HStack(spacing: 10) {
+                        if vm.finishRequestPending { ProgressView().tint(.black) }
+                        Text(vm.finishRequestPending ? "Waiting for booth" : "Next session")
+                            .font(.system(size: 17, weight: .bold))
+                    }
+                    .foregroundStyle(.black)
+                    .frame(width: 220, height: 58)
+                    .background(Color.white, in: RoundedRectangle(cornerRadius: 16))
                 }
                 .buttonStyle(.plain)
-                .padding(.bottom, 56)
+                .disabled(vm.finishRequestPending)
+                .opacity(vm.finishRequestPending ? 0.65 : 1)
+                .accessibilityLabel("Next session")
+                .accessibilityHint(vm.finishRequestPending ? "Waiting for the booth to confirm" : "Start a new photo session")
+                .padding(.bottom, 12)
+                if let error = vm.sessionRequestError {
+                    Text(error)
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundStyle(.white.opacity(0.75))
+                        .multilineTextAlignment(.center)
+                        .frame(maxWidth: 280)
+                        .padding(.bottom, 12)
+                }
             }
         }
         .onAppear { qrImage = generateQRCode(from: qrPayload) }

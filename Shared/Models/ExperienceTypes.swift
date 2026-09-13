@@ -289,13 +289,46 @@ public struct SessionPromptPresentation: Codable, Sendable, Equatable {
     public var title: String
     public var subtitle: String
     public var imageData: Data?
+    public var imageAsset: BoothAssetReference?
 
-    public init(promptID: String, photoIndex: Int, title: String, subtitle: String, imageData: Data?) {
+    public init(
+        promptID: String,
+        photoIndex: Int,
+        title: String,
+        subtitle: String,
+        imageData: Data? = nil,
+        imageAsset: BoothAssetReference? = nil
+    ) {
         self.promptID = promptID
         self.photoIndex = photoIndex
         self.title = title
         self.subtitle = subtitle
         self.imageData = imageData
+        self.imageAsset = imageAsset
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case promptID, photoIndex, title, subtitle, imageData, imageAsset
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        promptID = try container.decode(String.self, forKey: .promptID)
+        photoIndex = try container.decode(Int.self, forKey: .photoIndex)
+        title = try container.decode(String.self, forKey: .title)
+        subtitle = try container.decode(String.self, forKey: .subtitle)
+        imageData = try container.decodeIfPresent(Data.self, forKey: .imageData)
+        imageAsset = try container.decodeIfPresent(BoothAssetReference.self, forKey: .imageAsset)
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(promptID, forKey: .promptID)
+        try container.encode(photoIndex, forKey: .photoIndex)
+        try container.encode(title, forKey: .title)
+        try container.encode(subtitle, forKey: .subtitle)
+        // Prompt pixels travel on the authenticated asset channel, never in control JSON.
+        try container.encodeIfPresent(imageAsset, forKey: .imageAsset)
     }
 }
 

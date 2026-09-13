@@ -331,6 +331,13 @@ public enum BoothTransportDiagnosticKind: String, Codable, Sendable {
     case previewReconnected
     case sessionSyncSent
     case sessionSyncFailed
+    case criticalSendQueued
+    case criticalSendCompleted
+    case assetSent
+    case assetRejected
+    case secureChannelEstablished
+    case secureChannelFailed
+    case routeViabilityChanged
     case ipadAppForegrounded
     case ipadAppBackgrounded
 }
@@ -377,17 +384,36 @@ public protocol BoothTransport: AnyObject {
     var role: DeviceRole { get }
     var onControlMessage: (@MainActor (Message) -> Void)? { get set }
     var onPreviewFrame: (@MainActor (Data) -> Void)? { get set }
+    var onAssetChunk: (@MainActor (BoothAssetChunk) -> Void)? { get set }
     var onTransportEvent: (@MainActor (BoothTransportDiagnosticEvent) -> Void)? { get set }
 
     func start()
     func restart()
     @discardableResult
     func sendControl(_ message: Message) -> BoothControlSendOutcome
+    func sendControl(
+        _ message: Message,
+        completion: @escaping @MainActor (BoothControlSendOutcome) -> Void
+    )
+    @discardableResult
+    func sendAsset(_ chunk: BoothAssetChunk) -> BoothControlSendOutcome
     func sendPreviewFrame(_ jpegData: Data)
     func disconnect()
 }
 
 public extension BoothTransport {
+    func sendControl(
+        _ message: Message,
+        completion: @escaping @MainActor (BoothControlSendOutcome) -> Void
+    ) {
+        completion(sendControl(message))
+    }
+
+    @discardableResult
+    func sendAsset(_ chunk: BoothAssetChunk) -> BoothControlSendOutcome {
+        .networkSendFailed
+    }
+
     func restart() {
         disconnect()
         start()
@@ -495,6 +521,8 @@ public enum BoothFrameError: Error, Equatable, Sendable {
 public struct BoothFrameParser: Sendable {
     public static let protocolVersion: UInt8 = 1
     public static let maximumPayloadLength = 2 * 1024 * 1024
+    public static let targetControlPayloadLength = 128 * 1024
+    public static let maximumControlPayloadLength = 256 * 1024
 
     private static let headerLength = 8
     private var buffer = Data()
@@ -549,6 +577,9 @@ public enum BoothFrameEncoder {
         guard payload.count <= BoothFrameParser.maximumPayloadLength else {
             throw BoothFrameError.oversizedPayload(payload.count)
         }
+        guard channel != .control || payload.count <= BoothFrameParser.maximumControlPayloadLength else {
+            throw BoothFrameError.oversizedPayload(payload.count)
+        }
         var frame = Data([0x50, 0x52, BoothFrameParser.protocolVersion, channel.rawValue])
         var length = UInt32(payload.count).bigEndian
         withUnsafeBytes(of: &length) { frame.append(contentsOf: $0) }
@@ -559,6 +590,7 @@ public enum BoothFrameEncoder {
 
 enum BoothDecodedTransportFrame: Sendable {
     case control(Message)
+    case asset(BoothAssetChunk)
     case heartbeat
     case previewHello(Data)
     case preview(Data)
@@ -581,25 +613,47 @@ final class BoothTransportFrameDecoder: @unchecked Sendable {
 
     func decode(
         _ data: Data,
-        channel: BoothTransportChannel
+        channel: BoothTransportChannel,
+        secureChannel: BoothSecureChannel? = nil
     ) throws -> [BoothDecodedTransportFrame] {
         let parsed = try channel == .control
             ? controlParser.append(data)
             : previewParser.append(data)
         return try parsed.compactMap { frame in
-            guard frame.channel == channel || frame.channel == .heartbeat else { return nil }
+            guard frame.channel == channel
+                || (channel == .control && frame.channel == .asset)
+                || frame.channel == .heartbeat else { return nil }
             switch frame.channel {
             case .control:
-                guard let message = try? Message.decoded(from: frame.payload) else {
+                let payload: Data
+                if let secureChannel, secureChannel.isConfigured,
+                   let bootstrap = try? Message.decoded(from: frame.payload),
+                   bootstrap.isSecureChannelBootstrap {
+                    payload = frame.payload
+                } else if let secureChannel, secureChannel.isConfigured {
+                    payload = try secureChannel.open(frame.payload, channel: .control)
+                } else {
+                    payload = frame.payload
+                }
+                guard let message = try? Message.decoded(from: payload) else {
                     throw BoothFrameError.invalidMessage
                 }
                 return .control(message)
+            case .asset:
+                let payload: Data
+                if let secureChannel, secureChannel.isConfigured {
+                    payload = try secureChannel.open(frame.payload, channel: .asset)
+                } else {
+                    payload = frame.payload
+                }
+                return .asset(try BoothAssetTransfer.decode(payload))
             case .heartbeat:
                 return channel == .preview ? .previewHello(frame.payload) : .heartbeat
             case .preview:
+                if let secureChannel, secureChannel.isConfigured {
+                    return .preview(try secureChannel.open(frame.payload, channel: .preview))
+                }
                 return .preview(frame.payload)
-            case .asset:
-                return nil
             }
         }
     }

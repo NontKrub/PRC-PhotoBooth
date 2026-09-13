@@ -64,6 +64,7 @@ public final class MultipeerService: NSObject, BoothTransport {
     // packets are disposable and coalesced so they cannot starve controls.
     public var onControlMessage: (@MainActor (Message) -> Void)?
     public var onPreviewFrame:   (@MainActor (Data) -> Void)?
+    public var onAssetChunk: (@MainActor (BoothAssetChunk) -> Void)?
     public var onTransportEvent: (@MainActor (BoothTransportDiagnosticEvent) -> Void)?
 
     public var requestedNetworkPreference: BoothNetworkPreference {
@@ -319,6 +320,21 @@ public final class MultipeerService: NSObject, BoothTransport {
         }
     }
 
+    @discardableResult
+    public func sendAsset(_ chunk: BoothAssetChunk) -> BoothControlSendOutcome {
+        guard let session = _session else { return .noConnection }
+        let targets = targetPeers(from: session)
+        guard !targets.isEmpty else { return .noConnection }
+        do {
+            let payload = try BoothAssetTransfer.encode(chunk).packedAsAsset()
+            try session.send(payload, toPeers: targets, with: .reliable)
+            return .sent
+        } catch {
+            print("[MPC] asset send error: \(error)")
+            return .networkSendFailed
+        }
+    }
+
     public func sendPreviewFrame(_ jpegData: Data) {
         guard let session = _session else { return }
         let targets = targetPeers(from: session)
@@ -551,6 +567,13 @@ extension MultipeerService: MCSessionDelegate {
                 guard let self,
                       self.connectionAttemptID == attemptID else { return }
                 self.enqueuePreviewFrame(payload, from: peerName)
+            }
+        case .asset:
+            guard let chunk = try? BoothAssetTransfer.decode(payload) else { return }
+            Task { @MainActor [weak self] in
+                guard let self,
+                      self.connectionAttemptID == attemptID else { return }
+                self.onAssetChunk?(chunk)
             }
         }
     }

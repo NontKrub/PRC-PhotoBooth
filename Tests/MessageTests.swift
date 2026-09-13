@@ -85,6 +85,18 @@ struct MessageTests {
             .sessionStart(context: nil),
             .beginCountdown(context: context, descriptor: countdown),
             .shotCaptured(context: context, index: 0, thumbnailData: Data([0x01, 0x02])),
+            .shotCapturedAsset(
+                context: context,
+                index: 0,
+                asset: BoothAssetReference(
+                    assetID: "review-session-test-0",
+                    sessionID: context.sessionID,
+                    revision: "review-v1",
+                    kind: .reviewImage,
+                    byteCount: 32,
+                    sha256: Data(repeating: 0x44, count: 32)
+                )
+            ),
             .captureRecovery(
                 context: context,
                 photoIndex: 1,
@@ -102,6 +114,8 @@ struct MessageTests {
             .reviewDecision(context: context, action: .keep),
             .reviewDecision(context: context, action: .retake),
             .sessionFinished(context: context, qrPayload: "http://192.168.1.1:8585/s/abc", stripThumbData: nil, gifThumbData: nil),
+            .sessionFinishedAssets(context: context, qrPayload: "http://192.168.1.1:8585/s/abc", stripAsset: nil, gifAsset: nil),
+            .customerFinished(context: context),
             .operatorOverride(context: context, action: .cancelSession),
             .heartbeat,
         ]
@@ -143,6 +157,32 @@ struct MessageTests {
         #expect(gate.accept(SessionMessageContext(sessionID: "B", sequence: 3)) == false)
         let accepted = gate.accept(SessionMessageContext(sessionID: "B", sequence: 5))
         #expect(accepted)
+    }
+
+    @Test("session gate accepts a deterministic 500-message soak")
+    func sessionGateSoak() {
+        var gate = SessionMessageGate(currentSessionID: "soak", latestAcceptedSequence: 0)
+        for sequence in 1...500 {
+            let accepted = gate.accept(SessionMessageContext(sessionID: "soak", sequence: UInt64(sequence)))
+            #expect(accepted)
+        }
+        #expect(gate.latestAcceptedSequence == 500)
+    }
+
+    @Test("session sync keeps binary assets off the control payload")
+    func sessionSyncOmitsBinaryAssets() throws {
+        let encoded = try JSONEncoder().encode(SessionSyncSnapshot(
+            config: EventConfig(photoCount: 1),
+            sessionID: "session-test",
+            phase: .review(photoIndex: 0),
+            presentation: nil,
+            reviewThumbnailData: Data(repeating: 1, count: 100_000),
+            isMirrored: false,
+            keptShots: [0: Data(repeating: 2, count: 100_000)]
+        ))
+        let json = String(decoding: encoded, as: UTF8.self)
+        #expect(!json.contains("reviewThumbnailData"))
+        #expect(!json.contains("keptShots"))
     }
 
     @Test("connection status clears identity and peer list together")
@@ -190,9 +230,9 @@ struct MessageTests {
         #expect(legacyHello.deviceName == "legacy-id")
         #expect(legacyHello.networkPreference == nil)
     }
-    @Test("v1.4.2 connection protocol is version 4 and legacy protocol 2 remains decodable but incompatible")
+    @Test("v1.4.2 connection protocol is version 5 and legacy protocol 2 remains decodable but incompatible")
     func protocolVersionMismatchIsVisible() throws {
-        #expect(BoothTransportHello.currentProtocolVersion == 4)
+        #expect(BoothTransportHello.currentProtocolVersion == 5)
         let legacy = Data(#"{"protocolVersion":2,"appVersion":"1.4.1","role":"iPad","deviceID":"legacy-id","capabilities":["control"]}"#.utf8)
         let hello = try JSONDecoder().decode(BoothTransportHello.self, from: legacy)
         #expect(hello.protocolVersion == 2)
@@ -247,6 +287,125 @@ struct MessageTests {
             transcript: transcript
         )
         #expect(first != wrongCode)
+    }
+
+    @Test("operational secure channel is directional, bound, and replay resistant")
+    func secureChannel() throws {
+        let secret = Data(repeating: 0xA5, count: 32)
+        let macHello = BoothSecureChannelHello(
+            sessionID: "secure-session",
+            challenge: Data(repeating: 0x01, count: 32),
+            senderRole: .mac,
+            senderDeviceID: "mac",
+            receiverDeviceID: "ipad"
+        )
+        let iPadHello = BoothSecureChannelHello(
+            sessionID: "secure-session",
+            challenge: Data(repeating: 0x02, count: 32),
+            senderRole: .iPad,
+            senderDeviceID: "ipad",
+            receiverDeviceID: "mac"
+        )
+        let mac = BoothSecureChannel()
+        let iPad = BoothSecureChannel()
+        try mac.configure(secret: secret, localHello: macHello, peerHello: iPadHello)
+        try iPad.configure(secret: secret, localHello: iPadHello, peerHello: macHello)
+
+        let controlEnvelope = try mac.protect(Data("control".utf8), channel: .control)
+        #expect(try iPad.open(controlEnvelope, channel: .control) == Data("control".utf8))
+        #expect(throws: BoothSecureChannelError.replayedCounter) {
+            _ = try iPad.open(controlEnvelope, channel: .control)
+        }
+
+        let previewEnvelope = try mac.protect(Data("preview".utf8), channel: .preview)
+        #expect(try iPad.open(previewEnvelope, channel: .preview) == Data("preview".utf8))
+        #expect(throws: BoothSecureChannelError.wrongChannel) {
+            _ = try iPad.open(previewEnvelope, channel: .control)
+        }
+
+        var tampered = try mac.protect(Data("tampered".utf8), channel: .control)
+        tampered[tampered.count - 1] ^= 0x01
+        #expect(throws: BoothSecureChannelError.authenticationFailed) {
+            _ = try iPad.open(tampered, channel: .control)
+        }
+    }
+
+    @Test("asset chunks round-trip out of order and reject tampering")
+    func assetTransfer() throws {
+        let data = Data(repeating: 0x41, count: 500_000)
+        let reference = BoothAssetReference(
+            assetID: "review-1",
+            sessionID: "session-1",
+            revision: "7",
+            kind: .reviewImage,
+            byteCount: data.count,
+            sha256: Data(SHA256.hash(data: data))
+        )
+        let chunks = try BoothAssetTransfer.chunks(data: data, reference: reference)
+        #expect(chunks.count == 3)
+        var assembler = BoothAssetAssembler()
+        var completed: (BoothAssetReference, Data)?
+        for chunk in chunks.reversed() {
+            completed = try assembler.append(try BoothAssetTransfer.decode(BoothAssetTransfer.encode(chunk))) ?? completed
+        }
+        #expect(completed?.0 == reference)
+        #expect(completed?.1 == data)
+
+        var tampered = chunks[0]
+        tampered = BoothAssetChunk(
+            metadata: tampered.metadata,
+            data: Data(repeating: 0x42, count: tampered.data.count)
+        )
+        var rejectingAssembler = BoothAssetAssembler()
+        for chunk in chunks.dropFirst() {
+            _ = try rejectingAssembler.append(chunk)
+        }
+        #expect(throws: BoothAssetTransferError.hashMismatch) {
+            _ = try rejectingAssembler.append(tampered)
+        }
+    }
+
+    @Test("asset assembly enforces concurrent memory bounds")
+    func assetAssemblyLimits() throws {
+        var assembler = BoothAssetAssembler()
+        for index in 0..<BoothAssetTransfer.maximumConcurrentAssets {
+            let data = Data(repeating: UInt8(index), count: BoothAssetTransfer.maximumChunkBytes + 1)
+            let reference = BoothAssetReference(
+                assetID: "asset-\(index)",
+                revision: "1",
+                kind: .reviewImage,
+                byteCount: data.count,
+                sha256: Data(SHA256.hash(data: data))
+            )
+            _ = try assembler.append(try #require(BoothAssetTransfer.chunks(data: data, reference: reference).first))
+        }
+        let overflow = Data([0xFF])
+        let reference = BoothAssetReference(
+            assetID: "asset-overflow",
+            revision: "1",
+            kind: .reviewImage,
+            byteCount: overflow.count,
+            sha256: Data(SHA256.hash(data: overflow))
+        )
+        #expect(throws: BoothAssetTransferError.tooManyConcurrentAssets) {
+            _ = try assembler.append(try #require(BoothAssetTransfer.chunks(data: overflow, reference: reference).first))
+        }
+    }
+
+    @Test("control payload has a normal target and a hard ceiling")
+    func controlPayloadBudget() throws {
+        #expect(BoothFrameParser.targetControlPayloadLength == 128 * 1024)
+        let allowed = try BoothFrameEncoder.encode(
+            channel: .control,
+            payload: Data(repeating: 0x00, count: BoothFrameParser.maximumControlPayloadLength)
+        )
+        #expect(!allowed.isEmpty)
+        #expect(throws: BoothFrameError.oversizedPayload(BoothFrameParser.maximumControlPayloadLength + 1)) {
+            _ = try BoothFrameEncoder.encode(
+                channel: .control,
+                payload: Data(repeating: 0x00, count: BoothFrameParser.maximumControlPayloadLength + 1)
+            )
+        }
     }
 
 }

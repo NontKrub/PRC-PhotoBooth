@@ -159,6 +159,19 @@ public final class SessionStateMachine {
         phase = .countdown(photoIndex: photoIndex, secondsRemaining: config.countdownSeconds)
     }
 
+    public func retakeFailedCapture(photoIndex: Int) {
+        guard case .captureRecovery(let currentIndex, _) = phase,
+              currentIndex == photoIndex,
+              isCurrentPhoto(photoIndex) else { return }
+        keptShots.removeValue(forKey: photoIndex)
+        reviewImageData = nil
+        acceptedPhotoIndices.remove(photoIndex)
+        deferredPhotoIndices.remove(photoIndex)
+        nextPhotoIndex = photoIndex
+        countdownDeadline = nil
+        phase = .countdown(photoIndex: photoIndex, secondsRemaining: config.countdownSeconds)
+    }
+
     @discardableResult
     public func continueAfterCaptureFailure(photoIndex: Int) -> Int? {
         guard case .captureRecovery(let current, _) = phase, current == photoIndex else { return nil }

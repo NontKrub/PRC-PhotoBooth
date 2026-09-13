@@ -20,6 +20,6 @@ struct iPadApp: App {
     }
 
     private func applyScenePolicy(_ phase: ScenePhase) {
-        UIApplication.shared.isIdleTimerDisabled = phase == .active && viewModel.isBoothSessionActive
+        UIApplication.shared.isIdleTimerDisabled = phase == .active
     }
 }

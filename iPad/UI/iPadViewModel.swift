@@ -22,6 +22,7 @@ final class iPadViewModel: ObservableObject {
     @Published private(set) var isSessionRequestPending = false
     @Published private(set) var reviewDecisionPending = false
     @Published private(set) var recoveryActionPending = false
+    @Published private(set) var finishRequestPending = false
     @Published var sessionRequestError: String?
     @Published var stripThumbImage: CGImage?
     @Published var isMirrored = false
@@ -38,9 +39,15 @@ final class iPadViewModel: ObservableObject {
     private var previewFramesDisplayed = 0
 #endif
     private var sessionRequestTimeoutTask: Task<Void, Never>?
+    private var reviewDecisionTimeoutTask: Task<Void, Never>?
+    private var recoveryActionTimeoutTask: Task<Void, Never>?
+    private var finishRequestTimeoutTask: Task<Void, Never>?
     private var countdownTask: Task<Void, Never>?
     private var connectionRecoveryTask: Task<Void, Never>?
     private var sessionMessageGate = SessionMessageGate()
+    private var assetAssembler = BoothAssetAssembler()
+    private var receivedAssets: [String: Data] = [:]
+    private var reviewAssetIndices: [String: Int] = [:]
 #if DEBUG
     @Published private(set) var demoKioskMode = false
 #endif
@@ -64,7 +71,12 @@ final class iPadViewModel: ObservableObject {
     var isConnectionReady: Bool {
         guard case .connected = connectionStatus.state else { return false }
         guard networkTransport != nil else { return true }
-        return connectionStatus.isPeerAuthenticated && connectionStatus.isPreviewChannelConnected
+        let isFresh = connectionStatus.lastControlActivityAt.map {
+            Date().timeIntervalSince($0) < 10
+        } ?? false
+        return connectionStatus.isPeerAuthenticated
+            && connectionStatus.isPreviewChannelConnected
+            && isFresh
     }
 
     func renameDevice(_ name: String) {
@@ -103,6 +115,11 @@ final class iPadViewModel: ObservableObject {
     }
 
     func handleScenePhase(_ phase: ScenePhase) {
+        if phase != .active {
+            latestPreviewImage = nil
+            pendingPreviewJPEG = nil
+            lastPreviewFrameAt = nil
+        }
         guard phase == .active, !isConnectionReady, connectionRecoveryTask == nil else { return }
         connectionRecoveryTask = Task { @MainActor [weak self] in
             guard let self else { return }
@@ -146,6 +163,9 @@ final class iPadViewModel: ObservableObject {
     private func setupHandlers() {
         multipeer.onControlMessage = { [weak self] msg in
             self?.handleMessage(msg)
+        }
+        multipeer.onAssetChunk = { [weak self] chunk in
+            self?.handleAssetChunk(chunk)
         }
         multipeer.onPreviewFrame = { [weak self] jpegData in
             guard let self else { return }
@@ -240,11 +260,13 @@ final class iPadViewModel: ObservableObject {
             guard let context,
                   acceptSessionChange(context, message: "sessionStart") else { break }
             cancelCountdown()
+            clearSessionMedia()
             isSessionRequestPending = false
             reviewDecisionPending = false
             recoveryActionPending = false
+            finishRequestPending = false
             sessionRequestTimeoutTask?.cancel()
-            stateMachine.startSession(config: eventConfig)
+            stateMachine.startSession(config: eventConfig, sessionID: context.sessionID)
 
         case .sessionRequestRejected(let reason):
             cancelCountdown()
@@ -258,24 +280,24 @@ final class iPadViewModel: ObservableObject {
         case .sessionPrepared(let config, let presentation, let context):
             guard acceptSessionChange(context, message: "sessionPrepared") else { break }
             cancelCountdown()
+            clearSessionMedia()
             isSessionRequestPending = false
             reviewDecisionPending = false
             recoveryActionPending = false
+            finishRequestPending = false
             sessionRequestTimeoutTask?.cancel()
             eventConfig = config
             stateMachine.startSession(config: config, sessionID: presentation.sessionID)
             sessionPresentation = presentation
             selectedLanguage = presentation.language
-            promptImages = presentation.prompts.reduce(into: [String: CGImage]()) { result, prompt in
-                if let data = prompt.imageData, let image = Self.cgImage(from: data) {
-                    result[prompt.promptID] = image
-                }
-            }
+            installPresentationImages(presentation)
 
         case .beginCountdown(let context, let descriptor):
             guard accept(context, message: "beginCountdown") else { break }
             recoveryActionPending = false
             reviewDecisionPending = false
+            recoveryActionTimeoutTask?.cancel()
+            reviewDecisionTimeoutTask?.cancel()
             stateMachine.applyAuthoritativePhase(
                 .countdown(photoIndex: descriptor.photoIndex, secondsRemaining: max(0, Int(ceil(descriptor.captureAt.timeIntervalSinceNow)))),
                 countdownDeadline: descriptor.captureAt
@@ -295,10 +317,22 @@ final class iPadViewModel: ObservableObject {
                 reviewImageData: thumbData
             )
 
+        case .shotCapturedAsset(let context, let index, let asset):
+            guard accept(context, message: "shotCapturedAsset") else { break }
+            cancelCountdown()
+            recoveryActionPending = false
+            reviewDecisionPending = false
+            reviewAssetIndices[asset.assetID] = index
+            stateMachine.applyAuthoritativePhase(.captured(photoIndex: index))
+            if let data = receivedAssets[asset.assetID] {
+                installReviewAsset(asset, photoIndex: index, data: data)
+            }
+
         case .captureRecovery(let context, let index, let failure):
             guard accept(context, message: "captureRecovery") else { break }
             cancelCountdown()
             recoveryActionPending = false
+            recoveryActionTimeoutTask?.cancel()
             reviewDecisionPending = false
             stateMachine.applyAuthoritativePhase(.captureRecovery(photoIndex: index, failure: failure))
 
@@ -310,6 +344,7 @@ final class iPadViewModel: ObservableObject {
                 : .retake(photoIndex: idx)
             guard CustomerDisplayWorkflow.canApply(customerAction, in: stateMachine.phase) else { break }
             reviewDecisionPending = false
+            reviewDecisionTimeoutTask?.cancel()
             switch action {
             case .keep: stateMachine.keepShot(photoIndex: idx)
             case .retake: stateMachine.retakeShot(photoIndex: idx)
@@ -320,7 +355,22 @@ final class iPadViewModel: ObservableObject {
             cancelCountdown()
             recoveryActionPending = false
             reviewDecisionPending = false
-            if let data = stripData { stripThumbImage = Self.cgImage(from: data) }
+            finishRequestPending = false
+            finishRequestTimeoutTask?.cancel()
+            stripThumbImage = stripData.flatMap(Self.cgImage(from:))
+            stateMachine.applyAuthoritativePhase(.finished(qrPayload: qr))
+
+        case .sessionFinishedAssets(let context, let qr, let stripAsset, _):
+            guard accept(context, message: "sessionFinishedAssets") else { break }
+            cancelCountdown()
+            recoveryActionPending = false
+            reviewDecisionPending = false
+            finishRequestPending = false
+            finishRequestTimeoutTask?.cancel()
+            stripThumbImage = nil
+            if let stripAsset, let data = receivedAssets[stripAsset.assetID] {
+                stripThumbImage = Self.cgImage(from: data)
+            }
             stateMachine.applyAuthoritativePhase(.finished(qrPayload: qr))
 
         case .operatorOverride(let context, let action):
@@ -336,32 +386,132 @@ final class iPadViewModel: ObservableObject {
         }
     }
 
+    private func clearSessionMedia() {
+        previewDecodeTask?.cancel()
+        pendingPreviewJPEG = nil
+        lastPreviewFrameAt = nil
+        latestPreviewImage = nil
+        sessionPresentation = nil
+        promptImages = [:]
+        stripThumbImage = nil
+        receivedAssets = [:]
+        reviewAssetIndices = [:]
+        assetAssembler = BoothAssetAssembler()
+        reviewDecisionTimeoutTask?.cancel()
+        recoveryActionTimeoutTask?.cancel()
+    }
+
+    private func installPresentationImages(_ presentation: SessionPresentation) {
+        promptImages = presentation.prompts.reduce(into: [String: CGImage]()) { result, prompt in
+            if let data = prompt.imageData, let image = Self.cgImage(from: data) {
+                result[prompt.promptID] = image
+            }
+            if let asset = prompt.imageAsset,
+               let data = receivedAssets[asset.assetID],
+               let image = Self.cgImage(from: data) {
+                result[prompt.promptID] = image
+            }
+        }
+    }
+
+    private func handleAssetChunk(_ chunk: BoothAssetChunk) {
+        let activeSessionID = sessionMessageGate.currentSessionID
+        guard chunk.metadata.sessionID == nil || chunk.metadata.sessionID == activeSessionID else { return }
+        do {
+            guard let (reference, data) = try assetAssembler.append(chunk) else { return }
+            receivedAssets[reference.assetID] = data
+            switch reference.kind {
+            case .templatePreview:
+                if let image = Self.cgImage(from: data) { experienceAssets[reference.assetID] = image }
+            case .promptImage:
+                if let presentation = sessionPresentation { installPresentationImages(presentation) }
+            case .reviewImage:
+                if let index = reviewAssetIndices[reference.assetID] {
+                    installReviewAsset(reference, photoIndex: index, data: data)
+                }
+            case .stripThumbnail:
+                guard reference.sessionID == activeSessionID,
+                      case .finished = stateMachine.phase else { break }
+                stripThumbImage = Self.cgImage(from: data)
+            case .gifThumbnail:
+                break
+            }
+        } catch {
+            receivedAssets.removeValue(forKey: chunk.metadata.assetID)
+            sessionRequestError = "An asset could not be received. Please reconnect."
+        }
+    }
+
+    private func installReviewAsset(
+        _ reference: BoothAssetReference,
+        photoIndex: Int,
+        data: Data
+    ) {
+        guard reference.sessionID == sessionMessageGate.currentSessionID,
+              let currentSessionID = sessionMessageGate.currentSessionID else { return }
+        let phase: BoothPhase
+        switch stateMachine.phase {
+        case .captured(let index) where index == photoIndex,
+             .review(let index) where index == photoIndex:
+            phase = .review(photoIndex: photoIndex)
+        default:
+            return
+        }
+        var keptShots = stateMachine.keptShots
+        keptShots[photoIndex] = ReviewImageEncoder.thumbnailData(from: data) ?? data
+        stateMachine.applyAuthoritativeSnapshot(
+            sessionID: currentSessionID,
+            config: eventConfig,
+            phase: phase,
+            keptShots: keptShots,
+            reviewImageData: data,
+            nextPhotoIndex: stateMachine.nextPhotoIndex,
+            countdownDeadline: nil,
+            acceptedPhotoIndices: stateMachine.acceptedPhotoIndices,
+            deferredPhotoIndices: stateMachine.deferredPhotoIndices
+        )
+    }
+
     private func applySessionSync(_ snapshot: SessionSyncSnapshot) {
+        let previousSessionID = sessionMessageGate.currentSessionID
+        if previousSessionID != snapshot.sessionID || snapshot.sessionID == nil {
+            clearSessionMedia()
+        }
         cancelCountdown()
         sessionMessageGate.synchronize(sessionID: snapshot.sessionID, sequence: snapshot.sequence)
         eventConfig = snapshot.config
         stateMachine.config = snapshot.config
         selectedLanguage = snapshot.presentation?.language ?? snapshot.config.customerLanguage
         sessionPresentation = snapshot.presentation
-        promptImages = snapshot.presentation?.prompts.reduce(into: [String: CGImage]()) { result, prompt in
-            if let data = prompt.imageData, let image = Self.cgImage(from: data) {
-                result[prompt.promptID] = image
-            }
-        } ?? [:]
+        if let presentation = snapshot.presentation { installPresentationImages(presentation) }
         isMirrored = snapshot.isMirrored
         isBoothPaused = snapshot.isBoothPaused
         recoveryActionPending = false
         reviewDecisionPending = false
+        finishRequestPending = false
+        finishRequestTimeoutTask?.cancel()
         guard let sessionID = snapshot.sessionID else {
             stateMachine.reset()
             return
         }
         var keptShots = snapshot.keptShots
         var reviewImageData: Data?
-        if case .review(let index) = snapshot.phase,
-           let data = snapshot.reviewThumbnailData {
-            reviewImageData = data
-            keptShots[index] = ReviewImageEncoder.thumbnailData(from: data) ?? data
+        if case .review(let index) = snapshot.phase {
+            if let reviewAsset = snapshot.reviewAsset {
+                reviewAssetIndices[reviewAsset.assetID] = index
+                if let data = receivedAssets[reviewAsset.assetID] {
+                    reviewImageData = data
+                    keptShots[index] = ReviewImageEncoder.thumbnailData(from: data) ?? data
+                }
+            } else if let data = snapshot.reviewThumbnailData {
+                reviewImageData = data
+                keptShots[index] = ReviewImageEncoder.thumbnailData(from: data) ?? data
+            }
+        }
+        for (index, reference) in snapshot.keptShotAssets {
+            if let data = receivedAssets[reference.assetID] {
+                keptShots[index] = ReviewImageEncoder.thumbnailData(from: data) ?? data
+            }
         }
         stateMachine.applyAuthoritativeSnapshot(
             sessionID: sessionID,
@@ -374,9 +524,20 @@ final class iPadViewModel: ObservableObject {
             acceptedPhotoIndices: Set(snapshot.acceptedPhotoIndices),
             deferredPhotoIndices: Set(snapshot.deferredPhotoIndices)
         )
-        if case .finished = snapshot.phase,
-           let data = snapshot.stripThumbnailData {
-            stripThumbImage = Self.cgImage(from: data)
+        if case .finished = snapshot.phase {
+            stripThumbImage = nil
+            if let stripAsset = snapshot.stripAsset,
+               let data = receivedAssets[stripAsset.assetID] {
+                stripThumbImage = Self.cgImage(from: data)
+            } else if let data = snapshot.stripThumbnailData {
+                stripThumbImage = Self.cgImage(from: data)
+            }
+        }
+        if let presentation = snapshot.presentation { installPresentationImages(presentation) }
+        if let reviewAsset = snapshot.reviewAsset,
+           let index = reviewAssetIndices[reviewAsset.assetID],
+           let data = receivedAssets[reviewAsset.assetID] {
+            installReviewAsset(reviewAsset, photoIndex: index, data: data)
         }
         if let countdown = snapshot.countdown {
             runCountdown(countdown)
@@ -497,7 +658,12 @@ final class iPadViewModel: ObservableObject {
 #endif
         guard let catalog = experienceCatalog else {
             isSessionRequestPending = true
-            multipeer.sendControl(.sessionStart(context: nil))
+            multipeer.sendControl(.sessionStart(context: nil)) { [weak self] outcome in
+                guard let self, outcome != .sent else { return }
+                self.isSessionRequestPending = false
+                self.sessionRequestError = "The booth is not connected. Please try again."
+            }
+            armSessionRequestTimeout()
             return
         }
         guard let templateID = selectedTemplateID,
@@ -514,7 +680,15 @@ final class iPadViewModel: ObservableObject {
         )
         isSessionRequestPending = true
         sessionRequestError = nil
-        multipeer.sendControl(.customerSessionRequest(selection: selection))
+        multipeer.sendControl(.customerSessionRequest(selection: selection)) { [weak self] outcome in
+            guard let self, outcome != .sent else { return }
+            self.isSessionRequestPending = false
+            self.sessionRequestError = "The booth is not connected. Please try again."
+        }
+        armSessionRequestTimeout()
+    }
+
+    private func armSessionRequestTimeout() {
         sessionRequestTimeoutTask?.cancel()
         sessionRequestTimeoutTask = Task { @MainActor [weak self] in
             try? await Task.sleep(for: .seconds(8))
@@ -620,8 +794,19 @@ final class iPadViewModel: ObservableObject {
         guard let context = currentSessionMessageContext else { return }
         reviewDecisionPending = true
         cancelCountdown()
-        multipeer.sendControl(.reviewDecision(context: context, action: .keep))
-        stateMachine.keepShot(photoIndex: photoIndex)
+        multipeer.sendControl(.reviewDecision(context: context, action: .keep)) { [weak self] outcome in
+            guard let self, outcome != .sent else { return }
+            self.reviewDecisionPending = false
+            self.sessionRequestError = "The booth did not receive that choice. Please try again."
+        }
+        guard reviewDecisionPending else { return }
+        reviewDecisionTimeoutTask?.cancel()
+        reviewDecisionTimeoutTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .seconds(8))
+            guard let self, self.reviewDecisionPending else { return }
+            self.reviewDecisionPending = false
+            self.sessionRequestError = "The booth did not confirm that choice. Please try again."
+        }
     }
 
     func customerRetake(photoIndex: Int) {
@@ -637,8 +822,19 @@ final class iPadViewModel: ObservableObject {
         guard let context = currentSessionMessageContext else { return }
         reviewDecisionPending = true
         cancelCountdown()
-        multipeer.sendControl(.reviewDecision(context: context, action: .retake))
-        stateMachine.retakeShot(photoIndex: photoIndex)
+        multipeer.sendControl(.reviewDecision(context: context, action: .retake)) { [weak self] outcome in
+            guard let self, outcome != .sent else { return }
+            self.reviewDecisionPending = false
+            self.sessionRequestError = "The booth did not receive that choice. Please try again."
+        }
+        guard reviewDecisionPending else { return }
+        reviewDecisionTimeoutTask?.cancel()
+        reviewDecisionTimeoutTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .seconds(8))
+            guard let self, self.reviewDecisionPending else { return }
+            self.reviewDecisionPending = false
+            self.sessionRequestError = "The booth did not confirm that choice. Please try again."
+        }
     }
 
     func customerRetryReceive(photoIndex: Int) {
@@ -669,15 +865,40 @@ final class iPadViewModel: ObservableObject {
         guard CustomerDisplayWorkflow.canApply(customerAction, in: stateMachine.phase) else { return }
         guard let context = currentSessionMessageContext else { return }
         recoveryActionPending = true
-        multipeer.sendControl(.captureRecoveryAction(context: context, action: action))
+        multipeer.sendControl(.captureRecoveryAction(context: context, action: action)) { [weak self] outcome in
+            guard let self, outcome != .sent else { return }
+            self.recoveryActionPending = false
+            self.sessionRequestError = "The booth did not receive that recovery choice. Please try again."
+        }
+        guard recoveryActionPending else { return }
+        recoveryActionTimeoutTask?.cancel()
+        recoveryActionTimeoutTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .seconds(8))
+            guard let self, self.recoveryActionPending else { return }
+            self.recoveryActionPending = false
+            self.sessionRequestError = "The booth did not confirm that recovery choice. Please try again."
+        }
     }
 
     func customerDone() {
-        guard CustomerDisplayWorkflow.canApply(.back, in: stateMachine.phase) else { return }
+        guard !finishRequestPending, case .finished = stateMachine.phase,
+              let context = currentSessionMessageContext else { return }
         cancelCountdown()
-        recoveryActionPending = false
-        reviewDecisionPending = false
-        stateMachine.reset()
+        finishRequestPending = true
+        sessionRequestError = nil
+        multipeer.sendControl(.customerFinished(context: context)) { [weak self] outcome in
+            guard let self, outcome != .sent else { return }
+            self.finishRequestPending = false
+            self.sessionRequestError = "The booth did not receive the next-session request. Please try again."
+        }
+        guard finishRequestPending else { return }
+        finishRequestTimeoutTask?.cancel()
+        finishRequestTimeoutTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .seconds(8))
+            guard let self, self.finishRequestPending else { return }
+            self.finishRequestPending = false
+            self.sessionRequestError = "The booth did not confirm the next session. Please try again."
+        }
     }
 
 #if DEBUG

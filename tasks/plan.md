@@ -146,6 +146,80 @@ Remaining release blockers: native operational TLS/PSK is not available in the l
 
 Operational confidentiality boundary: the current residual-risk deployment assumes a private, operator-controlled venue LAN with Remote Operator disabled unless explicitly enabled. The app-layer pairing handshake authenticates the selected Mac/iPad and requires matching SAS confirmation, but Network.framework control/preview payloads are not encrypted against a malicious same-LAN observer or active MITM. Native TLS/PSK support must be proven on the minimum targets before treating that threat as closed; homemade encryption is intentionally out of scope.
 
+## Final event hardening continuation — 2026-09-13
+
+This amendment records the current implementation and supersedes older v1.4.2
+notes where they conflict. The generated Xcode project and local Xcode user
+state remained untouched for delivery; `project.yml` remains the source of
+truth.
+
+Implemented software slices:
+
+- Protocol v5 is required by both apps. The authenticated operational channel
+  uses a transcript-bound CryptoKit ChaChaPoly secure channel with directional
+  control/preview/asset keys, role-bound associated data, monotonic counters,
+  and replay rejection.
+- Control messages now carry bounded metadata and asset references. Asset
+  chunks are independently framed, hashed, size-limited, out-of-order safe,
+  and bounded to 16 concurrent assemblies and 32 MiB buffered data.
+- Mac completion is authoritative for session rollover. The iPad sends
+  `customerFinished`, waits for the Mac's idle sync, and no longer locally
+  invents completion or shows stale session media.
+- Critical sends expose completion outcomes; route/path/viability and
+  redacted send/reconnect diagnostics are persisted through the existing
+  Operations event path.
+- iPad active/background handling, idle-timer policy, request deadlines,
+  review/recovery state cleanup, and capture-recovery retake behavior are
+  covered in the existing architecture.
+
+Final automated evidence:
+
+- Mac tests: 383 tests in 55 suites passed with `xcodebuild ... PRC-PhotoBoothTests ... test`.
+- iPad tests: 7 tests in 1 suite passed with `xcodebuild ... PRC-PhotoBooth-iPadTests ... test`.
+- Mac Debug and Release builds passed.
+- iPad Debug and Release simulated-device builds passed.
+- Unsigned generic iPad Release compile passed for `arm64-apple-ios16.0`.
+- Focused Message/Capture Recovery run: 19 tests in 2 suites passed.
+- `git diff --check` passed.
+
+### Required failure matrix
+
+| Issue | Root cause / owner / files | Software evidence | Physical or integration evidence | Final status |
+|---|---|---|---|---|
+| P0-SESSION-NEXT | iPad previously reset locally; owner `BoothCoordinator` + `iPadViewModel` + `Message.swift`. | Authoritative `customerFinished`/idle-sync path; 500 state-machine rollover test; full Mac/iPad tests. | Three real sequential customers and reconnect rollover not run. | SOFTWARE PASS; event workflow pending |
+| P0-TRANSPORT-MAINACTOR | Network transport facade and lifecycle still belong to `@MainActor`; parser/callback work uses `transportQueue`. Owner `NetworkBoothTransport.swift`. | Mac/iPad builds and transport/framing suites pass. | No 12-second MainActor stall test, TSan, or Instruments trace. | PARTIAL; known P0 ceiling |
+| P0-HEARTBEAT-RACE | Queue-confined monotonic heartbeat state was added, but close/lifecycle publication still crosses the MainActor facade. Owner `NetworkBoothTransport.swift`. | Heartbeat/framing tests and full Mac suite pass. | Stale-timeout race under a stalled UI and generation integration test not run. | PARTIAL |
+| P0-PAYLOAD-BUDGET | Binary media had been embedded in control messages. Owner `Message.swift`, `BoothTransport.swift`, `ExperienceTypes.swift`. | 128 KiB target / 256 KiB hard control ceiling, asset encode/reassembly tests, 383-test suite. | Live workload/frame capture not run. | SOFTWARE PASS |
+| P1-IPAD-IDLE-TIMER | Idle timer policy was not tied to the kiosk's active lifecycle. Owner `iPadApp.swift`. | Source/build and iPad smoke suite pass. | Physical idle-screen test not run. | SOFTWARE PASS |
+| P1-FOREGROUND-STALE | Preview/state could remain trusted after suspension. Owner `iPadViewModel.swift`. | Active/background cleanup and freshness checks compile and pass smoke tests. | Physical background/foreground reconnect not run. | SOFTWARE PASS; device pending |
+| P1-PATH-AUTHORITY | Monitor samples were treated as route truth. Owner `NetworkBoothTransport.swift`. | Actual connection path, viability, waiting recovery, and route tests pass. | Wi-Fi/hotspot/Ethernet flapping not run. | SOFTWARE PASS; network pending |
+| P1-STRIP-PRIVACY | Finished media was retained across session boundaries. Owner `BoothCoordinator.swift` + `iPadViewModel.swift`. | Session-scoped asset references and cleanup are implemented; full suite passes. | Dedicated stale-customer media integration/privacy test and physical workflow not run. | IMPLEMENTED; dedicated gate pending |
+| P1-SYNC-TRANSIENT-STATE | Authoritative sync did not clear pending customer UI state. Owner `iPadViewModel.swift`. | Sync now clears pending requests, preview, asset assembler, and old maps; iPad tests pass. | Reconnect during each customer phase not run. | SOFTWARE PASS |
+| P1-START-TIMEOUT | Customer start could wait indefinitely on an uncertain send. Owner `iPadViewModel.swift` + `BoothCoordinator.swift`. | Completion callbacks and bounded request timeout paths compile; full suite passes. | Network fault-injection run not available. | IMPLEMENTED; fault injection pending |
+| P1-CRITICAL-SEND | State transitions could precede transport completion. Owner `BoothTransport.swift`, `NetworkBoothTransport.swift`, `BoothCoordinator.swift`. | Completion-aware session preparation and authoritative review decisions; send diagnostics; full builds/tests. | End-to-end delayed-send integration not run. | SOFTWARE PASS; integration pending |
+| P1-DIRECT-LAN-SCOPE | Fixed direct-Ethernet probing could leak into Local Network mode. Owner `NetworkBoothTransport.swift` + route policy. | Preference/path tests and direct-LAN guard pass. | Direct Ethernet and hotspot matrix not run. | SOFTWARE PASS; network pending |
+| P1-PREVIEW-MAINACTOR | Preview decode/coalescing risked blocking UI work. Owner `NetworkBoothTransport.swift` + `iPadViewModel.swift`. | Coalescing/transport changes compile and existing preview tests pass. | 30 FPS physical preview and MainActor stall trace not run. | PARTIAL |
+| P1-PHYSICAL-ROUTE-DIAGNOSTICS | Operators lacked actual route/viability evidence. Owner transport diagnostics + Operations store. | Redacted route/viability/send diagnostics compile and persist. | Physical route evidence not available. | SOFTWARE PASS; physical pending |
+| SEC-OPERATIONAL-CONFIDENTIALITY | Pairing authentication did not protect operational payloads. Owner `BoothPairing.swift` + transport. | CryptoKit AEAD, directional keys, transcript binding, counter/replay tests pass; no raw secret serialization. | No packet capture or active-MITM test. | SOFTWARE PASS; live security validation pending |
+| SEC-REMOTE-OPERATOR | Remote Operator exposure required safe defaults and bounded HTTP behavior. Owner existing operator server/auth. | Existing HTTP/security regression tests remain green; default-off behavior preserved. | No live server audit. | SOFTWARE PASS |
+| SEC-PAIRING-REGRESSION | Pairing needed v5 rejection and secure-channel regression coverage. Owner pairing/transport/message. | v5 compatibility, ephemeral agreement, SAS/secure-channel, and pairing tests pass. | Real PIN/QR/wrong-device pairing not run. | SOFTWARE PASS; physical pending |
+| PERF-QUEUE-FAIRNESS | Optional rendering/cloud work could starve required finalization. Owner existing session queue. | Queue fairness and cancellation tests pass in the 383-test suite. | No multi-hour production queue load. | SOFTWARE PASS |
+| PERF-RENDER-MAINACTOR | Render/thumbnail work needed isolation from UI/transport. Owner existing render pipeline. | Existing compositor/queue tests and Release builds pass. | Instruments/Time Profiler not run. | PARTIAL |
+| QA-SOAK | A deterministic 500-message check was not equivalent to 500 full sessions. Owner state/session tests. | Added 500 sequential one-photo state-machine sessions plus existing 500-message gate. | No 500 network/capture/print/render sessions. | PARTIAL |
+| QA-PHYSICAL | Camera, printer, routes, Device Hub GUI, and physical soak require equipment. | Automated software matrix is green. | No physical iPad Pro 9.7, router, hotspot, Ethernet, camera, printer, GUI, or 3-hour soak. | NOT RUN |
+
+Known ceilings that keep the release verdict below event-ready:
+
+- `NetworkBoothTransport` remains a MainActor-owned facade/lifecycle around
+  its serial transport executor; the required MainActor-stall proof is absent.
+- Asset chunks currently use the authenticated control `NWConnection` with a
+  logical asset channel. A dedicated asset TCP service/port and independent
+  head-of-line proof were not added.
+- No TSan, Instruments, live packet capture, or physical/network matrix was
+  available in this environment.
+
+Release verdict: `NOT READY`.
+
 # Historical: PRC PhotoBooth — v1.3 Reliability Hardening
 
 > The PR #7 stabilization plan below is historical context. Current work is on `feature/v1.3-reliability-hardening`.

@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 
 public enum CaptureFailureReason: String, Codable, Sendable, Equatable {
@@ -93,7 +94,7 @@ public enum CaptureRecoveryAction: Codable, Sendable, Equatable {
 }
 
 public struct BoothTransportHello: Codable, Sendable, Equatable {
-    public static let currentProtocolVersion = 4
+    public static let currentProtocolVersion = 5
 
     public var protocolVersion: Int
     public var appVersion: String
@@ -108,7 +109,15 @@ public struct BoothTransportHello: Codable, Sendable, Equatable {
         appVersion: String = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "dev",
         deviceID: String = UUID().uuidString,
         deviceName: String? = nil,
-        capabilities: [String] = ["control", "preview", "state-sync", "preview-identity", "pairing-v2"],
+        capabilities: [String] = [
+            "control",
+            "preview",
+            "state-sync",
+            "preview-identity",
+            "pairing-v2",
+            "secure-channel-v1",
+            "asset-channel-v1"
+        ],
         networkPreference: BoothNetworkPreference? = .wifi
     ) {
         self.protocolVersion = Self.currentProtocolVersion
@@ -142,6 +151,313 @@ public struct BoothTransportHello: Codable, Sendable, Equatable {
     }
 }
 
+public enum BoothAssetKind: String, Codable, Sendable, Equatable {
+    case templatePreview
+    case promptImage
+    case reviewImage
+    case stripThumbnail
+    case gifThumbnail
+}
+
+public struct BoothAssetReference: Codable, Sendable, Equatable, Hashable {
+    public let assetID: String
+    public let sessionID: String?
+    public let revision: String
+    public let kind: BoothAssetKind
+    public let byteCount: Int
+    public let sha256: Data
+
+    public init(
+        assetID: String,
+        sessionID: String? = nil,
+        revision: String,
+        kind: BoothAssetKind,
+        byteCount: Int,
+        sha256: Data
+    ) {
+        self.assetID = assetID
+        self.sessionID = sessionID
+        self.revision = revision
+        self.kind = kind
+        self.byteCount = byteCount
+        self.sha256 = sha256
+    }
+}
+
+public struct BoothAssetChunkMetadata: Codable, Sendable, Equatable, Hashable {
+    public let assetID: String
+    public let sessionID: String?
+    public let revision: String
+    public let kind: BoothAssetKind
+    public let index: Int
+    public let count: Int
+    public let totalBytes: Int
+    public let sha256: Data
+
+    public init(
+        assetID: String,
+        sessionID: String? = nil,
+        revision: String,
+        kind: BoothAssetKind,
+        index: Int,
+        count: Int,
+        totalBytes: Int,
+        sha256: Data
+    ) {
+        self.assetID = assetID
+        self.sessionID = sessionID
+        self.revision = revision
+        self.kind = kind
+        self.index = index
+        self.count = count
+        self.totalBytes = totalBytes
+        self.sha256 = sha256
+    }
+
+    public var reference: BoothAssetReference {
+        BoothAssetReference(
+            assetID: assetID,
+            sessionID: sessionID,
+            revision: revision,
+            kind: kind,
+            byteCount: totalBytes,
+            sha256: sha256
+        )
+    }
+}
+
+public struct BoothAssetChunk: Codable, Sendable, Equatable {
+    public let metadata: BoothAssetChunkMetadata
+    public let data: Data
+
+    public init(metadata: BoothAssetChunkMetadata, data: Data) {
+        self.metadata = metadata
+        self.data = data
+    }
+}
+
+public enum BoothAssetTransferError: Error, Equatable, Sendable {
+    case invalidMetadata
+    case malformedFrame
+    case metadataTooLarge(Int)
+    case chunkTooLarge(Int)
+    case assetTooLarge(Int)
+    case duplicateChunk
+    case inconsistentMetadata
+    case incompleteAsset
+    case hashMismatch
+    case tooManyConcurrentAssets
+    case bufferedAssetBytesExceeded
+}
+
+public enum BoothAssetTransfer {
+    public static let maximumChunkBytes = 256 * 1024
+    public static let maximumAssetBytes = 8 * 1024 * 1024
+    public static let maximumChunkCount = 128
+    public static let maximumConcurrentAssets = 16
+    public static let maximumBufferedAssetBytes = 32 * 1024 * 1024
+    private static let magic = Data([0x50, 0x52, 0x41, 0x31])
+
+    public static func chunks(
+        data: Data,
+        reference: BoothAssetReference,
+        chunkSize: Int = 192 * 1024
+    ) throws -> [BoothAssetChunk] {
+        guard valid(reference: reference), data.count == reference.byteCount else {
+            throw BoothAssetTransferError.invalidMetadata
+        }
+        guard data.count <= maximumAssetBytes else {
+            throw BoothAssetTransferError.assetTooLarge(data.count)
+        }
+        let size = min(max(1, chunkSize), maximumChunkBytes)
+        let count = max(1, (data.count + size - 1) / size)
+        guard count <= maximumChunkCount else { throw BoothAssetTransferError.assetTooLarge(data.count) }
+        return (0..<count).map { index in
+            let start = index * size
+            let end = min(data.count, start + size)
+            return BoothAssetChunk(
+                metadata: BoothAssetChunkMetadata(
+                    assetID: reference.assetID,
+                    sessionID: reference.sessionID,
+                    revision: reference.revision,
+                    kind: reference.kind,
+                    index: index,
+                    count: count,
+                    totalBytes: reference.byteCount,
+                    sha256: reference.sha256
+                ),
+                data: Data(data[start..<end])
+            )
+        }
+    }
+
+    public static func encode(_ chunk: BoothAssetChunk) throws -> Data {
+        guard valid(metadata: chunk.metadata),
+              !chunk.data.isEmpty,
+              chunk.data.count <= maximumChunkBytes else {
+            throw chunk.data.count > maximumChunkBytes
+                ? BoothAssetTransferError.chunkTooLarge(chunk.data.count)
+                : BoothAssetTransferError.invalidMetadata
+        }
+        let metadata = try JSONEncoder().encode(chunk.metadata)
+        guard metadata.count <= 8 * 1024 else {
+            throw BoothAssetTransferError.metadataTooLarge(metadata.count)
+        }
+        var result = magic
+        appendUInt32(UInt32(metadata.count), to: &result)
+        result.append(metadata)
+        result.append(chunk.data)
+        return result
+    }
+
+    public static func decode(_ data: Data) throws -> BoothAssetChunk {
+        guard data.count >= magic.count + 4,
+              data.prefix(magic.count) == magic else {
+            throw BoothAssetTransferError.malformedFrame
+        }
+        let metadataLength = try readUInt32(data, offset: magic.count)
+        guard metadataLength <= 8 * 1024 else {
+            throw BoothAssetTransferError.metadataTooLarge(Int(metadataLength))
+        }
+        let metadataStart = magic.count + 4
+        let metadataEnd = metadataStart + Int(metadataLength)
+        guard metadataEnd < data.count else { throw BoothAssetTransferError.malformedFrame }
+        let metadata = try JSONDecoder().decode(
+            BoothAssetChunkMetadata.self,
+            from: data[metadataStart..<metadataEnd]
+        )
+        let chunkData = Data(data[metadataEnd...])
+        guard chunkData.count <= maximumChunkBytes else {
+            throw BoothAssetTransferError.chunkTooLarge(chunkData.count)
+        }
+        guard valid(metadata: metadata), !chunkData.isEmpty else {
+            throw BoothAssetTransferError.invalidMetadata
+        }
+        return BoothAssetChunk(metadata: metadata, data: chunkData)
+    }
+
+    static func isValidForAssembly(_ chunk: BoothAssetChunk) -> Bool {
+        valid(metadata: chunk.metadata)
+            && !chunk.data.isEmpty
+            && chunk.data.count <= maximumChunkBytes
+            && chunk.data.count <= chunk.metadata.totalBytes
+    }
+
+    private static func valid(reference: BoothAssetReference) -> Bool {
+        reference.byteCount >= 0 && reference.byteCount <= maximumAssetBytes
+            && !reference.assetID.isEmpty && reference.assetID.count <= 128
+            && reference.revision.count <= 128
+            && reference.sha256.count == SHA256.Digest.byteCount
+    }
+
+    private static func valid(metadata: BoothAssetChunkMetadata) -> Bool {
+        valid(reference: metadata.reference)
+            && metadata.count > 0 && metadata.count <= maximumChunkCount
+            && metadata.index >= 0 && metadata.index < metadata.count
+            && metadata.totalBytes > 0
+            && metadata.totalBytes <= maximumAssetBytes
+    }
+
+    private static func appendUInt32(_ value: UInt32, to data: inout Data) {
+        var bigEndian = value.bigEndian
+        withUnsafeBytes(of: &bigEndian) { data.append(contentsOf: $0) }
+    }
+
+    private static func readUInt32(_ data: Data, offset: Int) throws -> UInt32 {
+        guard offset >= 0, data.count >= offset + 4 else {
+            throw BoothAssetTransferError.malformedFrame
+        }
+        return data[offset..<offset + 4].reduce(UInt32(0)) { ($0 << 8) | UInt32($1) }
+    }
+}
+
+public struct BoothAssetAssembler: Sendable {
+    private struct Assembly: Sendable {
+        let metadata: BoothAssetChunkMetadata
+        var chunks: [Int: Data]
+        var receivedBytes: Int
+    }
+
+    private var assemblies: [String: Assembly] = [:]
+    private var bufferedBytes = 0
+
+    public init() {}
+
+    public mutating func append(_ chunk: BoothAssetChunk) throws -> (BoothAssetReference, Data)? {
+        guard BoothAssetTransfer.isValidForAssembly(chunk) else {
+            throw BoothAssetTransferError.invalidMetadata
+        }
+        let key = [
+            chunk.metadata.assetID,
+            chunk.metadata.sessionID ?? "",
+            chunk.metadata.revision,
+            chunk.metadata.kind.rawValue
+        ].joined(separator: "\u{1f}")
+        if var assembly = assemblies[key] {
+            guard assembly.metadata.reference == chunk.metadata.reference,
+                  assembly.metadata.count == chunk.metadata.count else {
+                throw BoothAssetTransferError.inconsistentMetadata
+            }
+            if let existing = assembly.chunks[chunk.metadata.index] {
+                guard existing == chunk.data else { throw BoothAssetTransferError.duplicateChunk }
+                return nil
+            }
+            guard bufferedBytes + chunk.data.count <= BoothAssetTransfer.maximumBufferedAssetBytes else {
+                assemblies.removeValue(forKey: key)
+                bufferedBytes -= assembly.receivedBytes
+                throw BoothAssetTransferError.bufferedAssetBytesExceeded
+            }
+            assembly.chunks[chunk.metadata.index] = chunk.data
+            assembly.receivedBytes += chunk.data.count
+            bufferedBytes += chunk.data.count
+            guard assembly.receivedBytes <= chunk.metadata.totalBytes else {
+                assemblies.removeValue(forKey: key)
+                bufferedBytes -= assembly.receivedBytes
+                throw BoothAssetTransferError.inconsistentMetadata
+            }
+            assemblies[key] = assembly
+        } else {
+            guard assemblies.count < BoothAssetTransfer.maximumConcurrentAssets else {
+                throw BoothAssetTransferError.tooManyConcurrentAssets
+            }
+            guard bufferedBytes + chunk.data.count <= BoothAssetTransfer.maximumBufferedAssetBytes else {
+                throw BoothAssetTransferError.bufferedAssetBytesExceeded
+            }
+            assemblies[key] = Assembly(
+                metadata: chunk.metadata,
+                chunks: [chunk.metadata.index: chunk.data],
+                receivedBytes: chunk.data.count
+            )
+            bufferedBytes += chunk.data.count
+        }
+
+        guard let assembly = assemblies[key],
+              assembly.chunks.count == assembly.metadata.count else { return nil }
+        guard assembly.receivedBytes == assembly.metadata.totalBytes else {
+            assemblies.removeValue(forKey: key)
+            bufferedBytes -= assembly.receivedBytes
+            throw BoothAssetTransferError.incompleteAsset
+        }
+        var result = Data(capacity: assembly.metadata.totalBytes)
+        for index in 0..<assembly.metadata.count {
+            guard let chunkData = assembly.chunks[index] else {
+                assemblies.removeValue(forKey: key)
+                bufferedBytes -= assembly.receivedBytes
+                throw BoothAssetTransferError.incompleteAsset
+            }
+            result.append(chunkData)
+        }
+        guard Data(SHA256.hash(data: result)) == assembly.metadata.sha256 else {
+            assemblies.removeValue(forKey: key)
+            bufferedBytes -= assembly.receivedBytes
+            throw BoothAssetTransferError.hashMismatch
+        }
+        assemblies.removeValue(forKey: key)
+        bufferedBytes -= assembly.receivedBytes
+        return (assembly.metadata.reference, result)
+    }
+}
+
 public struct SessionSyncSnapshot: Codable, Sendable, Equatable {
     public var config: EventConfig
     public var sessionID: String?
@@ -154,6 +470,9 @@ public struct SessionSyncSnapshot: Codable, Sendable, Equatable {
     public var sequence: UInt64
     public var countdown: CountdownDescriptor?
     public var keptShots: [Int: Data]
+    public var reviewAsset: BoothAssetReference?
+    public var stripAsset: BoothAssetReference?
+    public var keptShotAssets: [Int: BoothAssetReference]
     public var acceptedPhotoIndices: [Int]
     public var deferredPhotoIndices: [Int]
     public var nextPhotoIndex: Int
@@ -170,6 +489,9 @@ public struct SessionSyncSnapshot: Codable, Sendable, Equatable {
         sequence: UInt64 = 0,
         countdown: CountdownDescriptor? = nil,
         keptShots: [Int: Data] = [:],
+        reviewAsset: BoothAssetReference? = nil,
+        stripAsset: BoothAssetReference? = nil,
+        keptShotAssets: [Int: BoothAssetReference] = [:],
         acceptedPhotoIndices: [Int] = [],
         deferredPhotoIndices: [Int] = [],
         nextPhotoIndex: Int = 0
@@ -185,9 +507,39 @@ public struct SessionSyncSnapshot: Codable, Sendable, Equatable {
         self.sequence = sequence
         self.countdown = countdown
         self.keptShots = keptShots
+        self.reviewAsset = reviewAsset
+        self.stripAsset = stripAsset
+        self.keptShotAssets = keptShotAssets
         self.acceptedPhotoIndices = acceptedPhotoIndices
         self.deferredPhotoIndices = deferredPhotoIndices
         self.nextPhotoIndex = nextPhotoIndex
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case config, sessionID, phase, presentation, reviewAsset, stripAsset
+        case keptShotAssets, isMirrored, isBoothPaused, sequence, countdown
+        case acceptedPhotoIndices, deferredPhotoIndices, nextPhotoIndex
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        config = try container.decode(EventConfig.self, forKey: .config)
+        sessionID = try container.decodeIfPresent(String.self, forKey: .sessionID)
+        phase = try container.decode(BoothPhase.self, forKey: .phase)
+        presentation = try container.decodeIfPresent(SessionPresentation.self, forKey: .presentation)
+        reviewThumbnailData = nil
+        stripThumbnailData = nil
+        keptShots = [:]
+        reviewAsset = try container.decodeIfPresent(BoothAssetReference.self, forKey: .reviewAsset)
+        stripAsset = try container.decodeIfPresent(BoothAssetReference.self, forKey: .stripAsset)
+        keptShotAssets = try container.decodeIfPresent([Int: BoothAssetReference].self, forKey: .keptShotAssets) ?? [:]
+        isMirrored = try container.decode(Bool.self, forKey: .isMirrored)
+        isBoothPaused = try container.decodeIfPresent(Bool.self, forKey: .isBoothPaused) ?? false
+        sequence = try container.decodeIfPresent(UInt64.self, forKey: .sequence) ?? 0
+        countdown = try container.decodeIfPresent(CountdownDescriptor.self, forKey: .countdown)
+        acceptedPhotoIndices = try container.decodeIfPresent([Int].self, forKey: .acceptedPhotoIndices) ?? []
+        deferredPhotoIndices = try container.decodeIfPresent([Int].self, forKey: .deferredPhotoIndices) ?? []
+        nextPhotoIndex = try container.decodeIfPresent(Int.self, forKey: .nextPhotoIndex) ?? 0
     }
 }
 
@@ -202,6 +554,8 @@ public enum Message: Codable, Sendable, Equatable {
     case pairingVerificationConfirmed(sessionID: String, proof: Data)
     case authChallenge(challenge: BoothAuthChallenge)
     case authProof(proof: BoothAuthProof)
+    case secureChannelHello(hello: BoothSecureChannelHello)
+    case secureChannelReady(sessionID: String, proof: Data)
     case connectionRejected(reason: String)
     case sessionSync(snapshot: SessionSyncSnapshot)
     case boothPaused(isPaused: Bool)
@@ -215,10 +569,13 @@ public enum Message: Codable, Sendable, Equatable {
     case sessionPrepared(config: EventConfig, presentation: SessionPresentation, context: SessionMessageContext)
     case beginCountdown(context: SessionMessageContext, descriptor: CountdownDescriptor)
     case shotCaptured(context: SessionMessageContext, index: Int, thumbnailData: Data)
+    case shotCapturedAsset(context: SessionMessageContext, index: Int, asset: BoothAssetReference)
     case captureRecovery(context: SessionMessageContext, photoIndex: Int, failure: CaptureFailureSummary)
     case captureRecoveryAction(context: SessionMessageContext, action: CaptureRecoveryAction)
     case reviewDecision(context: SessionMessageContext, action: ReviewAction)
     case sessionFinished(context: SessionMessageContext, qrPayload: String, stripThumbData: Data?, gifThumbData: Data?)
+    case sessionFinishedAssets(context: SessionMessageContext, qrPayload: String, stripAsset: BoothAssetReference?, gifAsset: BoothAssetReference?)
+    case customerFinished(context: SessionMessageContext)
     case operatorOverride(context: SessionMessageContext?, action: OperatorAction)
     case heartbeat
 }
@@ -228,6 +585,7 @@ public enum Message: Codable, Sendable, Equatable {
 enum PacketChannel: UInt8 {
     case control = 0x01
     case preview = 0x02
+    case asset = 0x03
 }
 
 extension Data {
@@ -239,6 +597,12 @@ extension Data {
 
     func packedAsPreview() -> Data {
         var out = Data([PacketChannel.preview.rawValue])
+        out.append(self)
+        return out
+    }
+
+    func packedAsAsset() -> Data {
+        var out = Data([PacketChannel.asset.rawValue])
         out.append(self)
         return out
     }
@@ -258,5 +622,14 @@ extension Message {
 
     static func decoded(from data: Data) throws -> Message {
         try JSONDecoder().decode(Message.self, from: data)
+    }
+
+    var isSecureChannelBootstrap: Bool {
+        switch self {
+        case .secureChannelHello, .secureChannelReady:
+            return true
+        default:
+            return false
+        }
     }
 }

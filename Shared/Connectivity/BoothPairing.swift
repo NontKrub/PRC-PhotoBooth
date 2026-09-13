@@ -682,6 +682,332 @@ public struct BoothAuthProof: Codable, Sendable, Equatable {
     }
 }
 
+public struct BoothSecureChannelHello: Codable, Sendable, Equatable {
+    public static let protocolVersion = 1
+
+    public let protocolVersion: Int
+    public let sessionID: String
+    public let challenge: Data
+    public let senderRole: DeviceRole
+    public let senderDeviceID: String
+    public let receiverDeviceID: String
+
+    public init(
+        sessionID: String,
+        challenge: Data,
+        senderRole: DeviceRole,
+        senderDeviceID: String,
+        receiverDeviceID: String
+    ) {
+        self.protocolVersion = Self.protocolVersion
+        self.sessionID = sessionID
+        self.challenge = challenge
+        self.senderRole = senderRole
+        self.senderDeviceID = senderDeviceID
+        self.receiverDeviceID = receiverDeviceID
+    }
+
+    public var isWellFormed: Bool {
+        protocolVersion == Self.protocolVersion
+            && !sessionID.isEmpty
+            && challenge.count == 32
+            && !senderDeviceID.isEmpty
+            && !receiverDeviceID.isEmpty
+            && (senderRole == .mac || senderRole == .iPad)
+    }
+}
+
+enum BoothSecureChannelError: Error, Equatable, Sendable {
+    case invalidSecret
+    case invalidHello
+    case notReady
+    case malformedEnvelope
+    case wrongChannel
+    case replayedCounter
+    case authenticationFailed
+    case counterExhausted
+}
+
+private struct BoothSecureChannelKeySet {
+    let sendKey: SymmetricKey
+    let receiveKey: SymmetricKey
+    let sendNoncePrefix: Data
+    let receiveNoncePrefix: Data
+}
+
+/// CryptoKit-only operational channel. Pairing/authentication remains the
+/// plaintext bootstrap; every control, preview, and asset payload after the
+/// fresh challenge exchange is sealed with a directional ChaChaPoly key.
+final class BoothSecureChannel: @unchecked Sendable {
+    private static let envelopeMagic = Data([0x53, 0x43])
+    private static let envelopeVersion: UInt8 = 1
+
+    private let lock = NSLock()
+    private var keySets: [UInt8: BoothSecureChannelKeySet] = [:]
+    private var sentCounters: [UInt8: UInt64] = [:]
+    private var receivedCounters: [UInt8: UInt64] = [:]
+    private var configuredSessionID: String?
+    private var localRole: DeviceRole?
+    private var peerRole: DeviceRole?
+    private var localDeviceID = ""
+    private var peerDeviceID = ""
+
+    var isReady: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return configuredSessionID != nil && !keySets.isEmpty
+    }
+
+    var isConfigured: Bool { isReady }
+
+    var sessionID: String? {
+        lock.lock()
+        defer { lock.unlock() }
+        return configuredSessionID
+    }
+
+    func configure(
+        secret: Data,
+        localHello: BoothSecureChannelHello,
+        peerHello: BoothSecureChannelHello
+    ) throws {
+        guard secret.count == 32,
+              localHello.isWellFormed,
+              peerHello.isWellFormed,
+              localHello.sessionID == peerHello.sessionID,
+              localHello.senderRole != peerHello.senderRole,
+              localHello.senderDeviceID == peerHello.receiverDeviceID,
+              localHello.receiverDeviceID == peerHello.senderDeviceID else {
+            throw BoothSecureChannelError.invalidHello
+        }
+
+        let macHello = localHello.senderRole == .mac ? localHello : peerHello
+        let iPadHello = localHello.senderRole == .iPad ? localHello : peerHello
+        let transcript = Self.transcript(macHello: macHello, iPadHello: iPadHello)
+        let salt = Data(SHA256.hash(data: Data("PRC-PhotoBooth/secure-channel-salt/v1\0".utf8)))
+        let root = HKDF<SHA256>.deriveKey(
+            inputKeyMaterial: SymmetricKey(data: secret),
+            salt: salt,
+            info: transcript,
+            outputByteCount: 32
+        )
+
+        var derived: [UInt8: BoothSecureChannelKeySet] = [:]
+        for channel in [BoothTransportChannel.control, .preview, .asset] {
+            let sendDirection = localHello.senderRole == .mac ? "mac-to-ipad" : "ipad-to-mac"
+            let receiveDirection = localHello.senderRole == .mac ? "ipad-to-mac" : "mac-to-ipad"
+            derived[channel.rawValue] = BoothSecureChannelKeySet(
+                sendKey: Self.derive(root: root, label: "key", channel: channel, direction: sendDirection),
+                receiveKey: Self.derive(root: root, label: "key", channel: channel, direction: receiveDirection),
+                sendNoncePrefix: Self.deriveBytes(root: root, label: "nonce", channel: channel, direction: sendDirection, count: 4),
+                receiveNoncePrefix: Self.deriveBytes(root: root, label: "nonce", channel: channel, direction: receiveDirection, count: 4)
+            )
+        }
+
+        lock.lock()
+        keySets = derived
+        sentCounters = [:]
+        receivedCounters = [:]
+        configuredSessionID = localHello.sessionID
+        localRole = localHello.senderRole
+        peerRole = peerHello.senderRole
+        localDeviceID = localHello.senderDeviceID
+        peerDeviceID = peerHello.senderDeviceID
+        lock.unlock()
+    }
+
+    func reset() {
+        lock.lock()
+        keySets = [:]
+        sentCounters = [:]
+        receivedCounters = [:]
+        configuredSessionID = nil
+        localRole = nil
+        peerRole = nil
+        localDeviceID = ""
+        peerDeviceID = ""
+        lock.unlock()
+    }
+
+    func protect(_ plaintext: Data, channel: BoothTransportChannel) throws -> Data {
+        lock.lock()
+        defer { lock.unlock() }
+        guard let keySet = keySets[channel.rawValue],
+              let sessionID = configuredSessionID,
+              let localRole,
+              let peerRole else { throw BoothSecureChannelError.notReady }
+        let previous = sentCounters[channel.rawValue] ?? 0
+        guard previous < UInt64.max else { throw BoothSecureChannelError.counterExhausted }
+        let counter = previous + 1
+        let nonce = try ChaChaPoly.Nonce(data: keySet.sendNoncePrefix + Self.bigEndian(counter))
+        let aad = Self.aad(
+            sessionID: sessionID,
+            channel: channel,
+            senderRole: localRole,
+            receiverRole: peerRole,
+            senderDeviceID: localDeviceID,
+            receiverDeviceID: peerDeviceID,
+            counter: counter
+        )
+        let sealed = try ChaChaPoly.seal(plaintext, using: keySet.sendKey, nonce: nonce, authenticating: aad)
+        sentCounters[channel.rawValue] = counter
+
+        var envelope = Self.envelopeMagic
+        envelope.append(Self.envelopeVersion)
+        envelope.append(channel.rawValue)
+        envelope.append(Self.bigEndian(counter))
+        envelope.append(sealed.ciphertext)
+        envelope.append(sealed.tag)
+        return envelope
+    }
+
+    func open(_ envelope: Data, channel: BoothTransportChannel) throws -> Data {
+        lock.lock()
+        defer { lock.unlock() }
+        let minimumLength = Self.envelopeMagic.count + 2 + 8 + 16
+        guard envelope.count >= minimumLength,
+              envelope.prefix(Self.envelopeMagic.count) == Self.envelopeMagic,
+              envelope[2] == Self.envelopeVersion else {
+            throw BoothSecureChannelError.malformedEnvelope
+        }
+        guard envelope[3] == channel.rawValue else {
+            throw BoothSecureChannelError.wrongChannel
+        }
+        guard let keySet = keySets[channel.rawValue],
+              let sessionID = configuredSessionID,
+              let localRole,
+              let peerRole else { throw BoothSecureChannelError.malformedEnvelope }
+
+        let counter = Self.readUInt64(envelope, offset: 4)
+        guard counter > (receivedCounters[channel.rawValue] ?? 0) else {
+            throw BoothSecureChannelError.replayedCounter
+        }
+        let ciphertextStart = 12
+        let tagStart = envelope.count - 16
+        let nonce = try ChaChaPoly.Nonce(data: keySet.receiveNoncePrefix + Self.bigEndian(counter))
+        let aad = Self.aad(
+            sessionID: sessionID,
+            channel: channel,
+            senderRole: peerRole,
+            receiverRole: localRole,
+            senderDeviceID: peerDeviceID,
+            receiverDeviceID: localDeviceID,
+            counter: counter
+        )
+        let sealed = try ChaChaPoly.SealedBox(
+            nonce: nonce,
+            ciphertext: Data(envelope[ciphertextStart..<tagStart]),
+            tag: Data(envelope[tagStart...])
+        )
+        do {
+            let plaintext = try ChaChaPoly.open(sealed, using: keySet.receiveKey, authenticating: aad)
+            receivedCounters[channel.rawValue] = counter
+            return plaintext
+        } catch {
+            throw BoothSecureChannelError.authenticationFailed
+        }
+    }
+
+    static func transcript(macHello: BoothSecureChannelHello, iPadHello: BoothSecureChannelHello) -> Data {
+        var result = Data("PRC-PhotoBooth/secure-channel/v1\0".utf8)
+        appendField(macHello.sessionID, to: &result)
+        appendField(macHello.senderDeviceID, to: &result)
+        appendField(iPadHello.senderDeviceID, to: &result)
+        appendField(macHello.challenge, to: &result)
+        appendField(iPadHello.challenge, to: &result)
+        return result
+    }
+
+    static func readyProof(
+        secret: Data,
+        macHello: BoothSecureChannelHello,
+        iPadHello: BoothSecureChannelHello,
+        senderRole: DeviceRole
+    ) -> Data {
+        var transcript = transcript(macHello: macHello, iPadHello: iPadHello)
+        transcript.append(Data(senderRole.rawValue.utf8))
+        return Data(HMAC<SHA256>.authenticationCode(
+            for: transcript,
+            using: SymmetricKey(data: secret)
+        ))
+    }
+
+    private static func derive(
+        root: SymmetricKey,
+        label: String,
+        channel: BoothTransportChannel,
+        direction: String
+    ) -> SymmetricKey {
+        SymmetricKey(data: deriveBytes(root: root, label: label, channel: channel, direction: direction, count: 32))
+    }
+
+    private static func deriveBytes(
+        root: SymmetricKey,
+        label: String,
+        channel: BoothTransportChannel,
+        direction: String,
+        count: Int
+    ) -> Data {
+        var info = Data("PRC-PhotoBooth/secure-channel/\(label)/v1\0".utf8)
+        appendField(channel.rawValue, to: &info)
+        appendField(direction, to: &info)
+        let key = HKDF<SHA256>.deriveKey(
+            inputKeyMaterial: root,
+            salt: Data(),
+            info: info,
+            outputByteCount: count
+        )
+        return key.withUnsafeBytes { Data($0) }
+    }
+
+    private static func aad(
+        sessionID: String,
+        channel: BoothTransportChannel,
+        senderRole: DeviceRole,
+        receiverRole: DeviceRole,
+        senderDeviceID: String,
+        receiverDeviceID: String,
+        counter: UInt64
+    ) -> Data {
+        var result = Data("PRC-PhotoBooth/secure-channel-aad/v1\0".utf8)
+        appendField(sessionID, to: &result)
+        appendField(channel.rawValue, to: &result)
+        appendField(senderRole.rawValue, to: &result)
+        appendField(receiverRole.rawValue, to: &result)
+        appendField(senderDeviceID, to: &result)
+        appendField(receiverDeviceID, to: &result)
+        appendField(counter, to: &result)
+        return result
+    }
+
+    private static func appendField(_ value: String, to data: inout Data) {
+        appendField(Data(value.utf8), to: &data)
+    }
+
+    private static func appendField(_ value: UInt8, to data: inout Data) {
+        data.append(value)
+    }
+
+    private static func appendField(_ value: UInt64, to data: inout Data) {
+        data.append(bigEndian(value))
+    }
+
+    private static func appendField(_ value: Data, to data: inout Data) {
+        var length = UInt32(value.count).bigEndian
+        withUnsafeBytes(of: &length) { data.append(contentsOf: $0) }
+        data.append(value)
+    }
+
+    private static func bigEndian(_ value: UInt64) -> Data {
+        var value = value.bigEndian
+        return withUnsafeBytes(of: &value) { Data($0) }
+    }
+
+    private static func readUInt64(_ data: Data, offset: Int) -> UInt64 {
+        data[offset..<offset + 8].reduce(UInt64(0)) { ($0 << 8) | UInt64($1) }
+    }
+}
+
 enum BoothAuthProofVerificationFailure: String, Equatable, Sendable {
     case invalidSecretLength
     case expiredChallenge
@@ -706,6 +1032,10 @@ enum BoothAuthProofVerificationFailure: String, Equatable, Sendable {
 
 public enum BoothPairingCrypto {
     public static func makeSharedSecret() throws -> Data {
+        try secureRandomData(count: 32)
+    }
+
+    public static func makeSecureChannelChallenge() throws -> Data {
         try secureRandomData(count: 32)
     }
 

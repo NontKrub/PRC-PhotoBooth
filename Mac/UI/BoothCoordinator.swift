@@ -7,6 +7,7 @@ import SwiftData
 import Observation
 import AVFoundation
 import Network
+import CryptoKit
 
 enum CameraSourceKind: String, CaseIterable, Identifiable {
     case avFoundation = "Built-in / USB / Continuity"
@@ -159,6 +160,11 @@ final class BoothCoordinator {
     private(set) var currentFilteredReviewImages: [Int: CGImage] = [:]
     private(set) var currentSessionPresentation: SessionPresentation?
     private var lastSessionPresentation: SessionPresentation?
+    private var finishedAwaitingCustomerAckSessionID: String?
+    private var sessionAssetReferences: [Int: BoothAssetReference] = [:]
+    private var stripAssetReference: BoothAssetReference?
+    private var pendingPromptAssets: [String: (reference: BoothAssetReference, data: Data)] = [:]
+    private var assetAssembler = BoothAssetAssembler()
     var externalSelection = CustomerSessionSelectionDraft()
 
     // MARK: - External display viewer
@@ -634,19 +640,70 @@ final class BoothCoordinator {
                     self.errorMessage = "Template preview unavailable: \(template.id)"
                     continue
                 }
-                guard data.count <= 350_000 else {
+                guard data.count <= BoothAssetTransfer.maximumAssetBytes else {
                     self.errorMessage = "Template preview is too large: \(template.id)"
                     continue
                 }
-                self.multipeer.sendControl(.eventExperienceAsset(packet: ExperienceAssetPacket(
-                    eventID: document.eventID,
-                    revision: document.revision,
+                let reference = self.makeAssetReference(
+                    data: data,
                     assetID: template.id,
-                    kind: .templatePreview,
-                    jpegData: data
-                )))
+                    sessionID: nil,
+                    revision: document.revision,
+                    kind: .templatePreview
+                )
+                _ = self.sendAsset(data: data, reference: reference)
             }
         }
+    }
+
+    private func makeAssetReference(
+        data: Data,
+        assetID: String,
+        sessionID: String?,
+        revision: String,
+        kind: BoothAssetKind
+    ) -> BoothAssetReference {
+        BoothAssetReference(
+            assetID: assetID,
+            sessionID: sessionID,
+            revision: revision,
+            kind: kind,
+            byteCount: data.count,
+            sha256: Data(SHA256.hash(data: data))
+        )
+    }
+
+    @discardableResult
+    private func sendAsset(data: Data, reference: BoothAssetReference) -> Bool {
+        guard let chunks = try? BoothAssetTransfer.chunks(data: data, reference: reference) else {
+            errorMessage = "Asset could not be prepared for transfer: \(reference.assetID)"
+            return false
+        }
+        var accepted = true
+        for chunk in chunks {
+            if multipeer.sendAsset(chunk) != .sent { accepted = false }
+        }
+        if !accepted {
+            errorMessage = "Asset transfer is unavailable: \(reference.assetID)"
+        }
+        return accepted
+    }
+
+    private func sendReviewAsset(
+        context: SessionMessageContext,
+        photoIndex: Int,
+        data: Data
+    ) {
+        let reference = makeAssetReference(
+            data: data,
+            assetID: "review-\(context.sessionID)-\(photoIndex)-\(context.sequence)",
+            sessionID: context.sessionID,
+            revision: "review-v1",
+            kind: .reviewImage
+        )
+        sessionAssetReferences[photoIndex] = reference
+        multipeer.sendControl(.shotCapturedAsset(context: context, index: photoIndex, asset: reference))
+        _ = sendAsset(data: data, reference: reference)
     }
 
     private func makeEventSnapshot(_ event: BoothEvent) -> BoothEventSnapshot {
@@ -746,12 +803,25 @@ final class BoothCoordinator {
         config: EventConfig,
         document: EventExperienceDocument
     ) async -> SessionPresentation {
+        pendingPromptAssets = [:]
         var prompts: [SessionPromptPresentation] = []
         for prompt in config.posePrompts {
             let imageData: Data?
+            var imageAsset: BoothAssetReference?
             if let assetID = prompt.assetID,
                let data = try? await experienceStore.readPromptImage(eventID: document.eventID, fileName: assetID) {
                 imageData = sessionPromptImageData(data)
+                if let imageData {
+                    let reference = makeAssetReference(
+                        data: imageData,
+                        assetID: "prompt-\(sessionID)-\(prompt.id)",
+                        sessionID: sessionID,
+                        revision: document.revision,
+                        kind: .promptImage
+                    )
+                    imageAsset = reference
+                    pendingPromptAssets[reference.assetID] = (reference, imageData)
+                }
             } else {
                 imageData = nil
             }
@@ -760,7 +830,8 @@ final class BoothCoordinator {
                 photoIndex: prompt.photoIndex,
                 title: prompt.title.value(for: config.customerLanguage),
                 subtitle: localizedOptional(prompt.subtitle, language: config.customerLanguage),
-                imageData: imageData
+                imageData: imageData,
+                imageAsset: imageAsset
             ))
         }
         return SessionPresentation(
@@ -1335,8 +1406,13 @@ final class BoothCoordinator {
             errorMessage = "The booth is paused by the operator."
             return
         }
-        guard currentSession == nil, let event = activeEvent else { return }
+        guard currentSession == nil,
+              finishedAwaitingCustomerAckSessionID == nil,
+              let event = activeEvent else { return }
         reviewDecisionPending = false
+        sessionAssetReferences = [:]
+        stripAssetReference = nil
+        assetAssembler = BoothAssetAssembler()
         guard recoveryService.recoverableCaptureSession == nil else {
             errorMessage = "Resume or discard the unfinished session in Operations."
             return
@@ -1482,14 +1558,27 @@ final class BoothCoordinator {
                       let preparedContext = nextSessionMessageContext() else {
                     throw NSError(domain: "PRCPhotoBooth.Session", code: 1, userInfo: [NSLocalizedDescriptionKey: "Session identity could not be issued."])
                 }
+                let sessionID = session.id
+                let promptAssets = Array(pendingPromptAssets.values)
                 multipeer.sendControl(.sessionStart(context: startContext))
                 multipeer.sendControl(.eventConfig(config: config))
                 multipeer.sendControl(.sessionPrepared(
                     config: config,
                     presentation: presentation,
                     context: preparedContext
-                ))
-                beginCountdown(photoIndex: 0)
+                )) { [weak self] outcome in
+                    guard let self else { return }
+                    guard outcome == .sent,
+                          self.currentSession?.id == sessionID,
+                          self.stateMachine.currentSessionID == sessionID else {
+                        self.errorMessage = "The iPad did not receive session setup. Reconnect before retrying."
+                        return
+                    }
+                    self.beginCountdown(photoIndex: 0)
+                    for asset in promptAssets {
+                        _ = self.sendAsset(data: asset.data, reference: asset.reference)
+                    }
+                }
             } catch {
                 if let createdDirectory { try? FileManager.default.removeItem(at: createdDirectory) }
                 store.deleteSession(session)
@@ -1577,9 +1666,7 @@ final class BoothCoordinator {
             )
             recordOperation(.captureSucceeded, sessionID: currentManifest?.id, photoIndex: photoIndex, duration: Date().timeIntervalSince(attempt.startedAt))
             currentCaptureAttempt = nil
-            if let context {
-                multipeer.sendControl(.shotCaptured(context: context, index: photoIndex, thumbnailData: reviewData))
-            }
+            if let context { sendReviewAsset(context: context, photoIndex: photoIndex, data: reviewData) }
             updateStripPreview()
         } catch {
             let summary = captureFailureSummary(photoIndex: photoIndex, error: error)
@@ -1733,9 +1820,6 @@ final class BoothCoordinator {
         guard !reviewDecisionPending,
               CustomerDisplayWorkflow.canApply(customerAction, in: stateMachine.phase) else { return }
         reviewDecisionPending = true
-        if let context = nextSessionMessageContext() {
-            multipeer.sendControl(.reviewDecision(context: context, action: action))
-        }
         switch action {
         case .keep:
             Task { @MainActor [weak self] in
@@ -1814,9 +1898,7 @@ final class BoothCoordinator {
             )
             recordOperation(.captureRecovered, sessionID: currentManifest?.id, photoIndex: photoIndex, duration: Date().timeIntervalSince(attempt.startedAt))
             currentCaptureAttempt = nil
-            if let context {
-                multipeer.sendControl(.shotCaptured(context: context, index: photoIndex, thumbnailData: reviewData))
-            }
+            if let context { sendReviewAsset(context: context, photoIndex: photoIndex, data: reviewData) }
             updateStripPreview()
         } catch {
             let summary = captureFailureSummary(photoIndex: photoIndex, error: error)
@@ -1872,7 +1954,7 @@ final class BoothCoordinator {
             )
             recordOperation(.captureRetried, sessionID: manifest.id, photoIndex: photoIndex)
             currentCaptureAttempt = nil
-            stateMachine.retakeShot(photoIndex: photoIndex)
+            stateMachine.retakeFailedCapture(photoIndex: photoIndex)
             beginCountdown(photoIndex: photoIndex)
         } catch {
             errorMessage = "Could not start retake: \(error.localizedDescription)"
@@ -2044,6 +2126,7 @@ final class BoothCoordinator {
             )
 
             stateMachine.keepShot(photoIndex: photoIndex)
+            sendAuthoritativeReviewDecision(.keep)
             if case .processing = stateMachine.phase {
                 await finalizeSession()
             } else if case .countdown(let next, _) = stateMachine.phase {
@@ -2054,12 +2137,19 @@ final class BoothCoordinator {
         }
     }
 
+    private func sendAuthoritativeReviewDecision(_ action: ReviewAction) {
+        guard let context = nextSessionMessageContext() else { return }
+        multipeer.sendControl(.reviewDecision(context: context, action: action))
+    }
+
     private func requestRetake(photoIndex: Int, source: RetakeSource) async {
         _ = source
         guard case .review(let currentIndex) = stateMachine.phase,
               currentIndex == photoIndex,
               var manifest = currentManifest else { return }
 
+        sessionAssetReferences.removeValue(forKey: photoIndex)
+        currentFilteredReviewImages.removeValue(forKey: photoIndex)
         let count = incrementRetakeCount(in: &retakeCounts, photoIndex: photoIndex)
         let previous = manifest.shots.first(where: { $0.photoIndex == photoIndex })
         upsertManifestShot(
@@ -2087,6 +2177,7 @@ final class BoothCoordinator {
                 )
             }
             stateMachine.retakeShot(photoIndex: photoIndex)
+            sendAuthoritativeReviewDecision(.retake)
             beginCountdown(photoIndex: photoIndex)
         } catch {
             retakeCounts[photoIndex] = max(0, count - 1)
@@ -2098,6 +2189,13 @@ final class BoothCoordinator {
         cancelCountdown()
         guard currentSession != nil, var manifest = currentManifest else {
             reviewDecisionPending = false
+            sessionAssetReferences = [:]
+            stripAssetReference = nil
+            pendingPromptAssets = [:]
+            currentStripPreview = nil
+            currentFilteredReviewImages = [:]
+            currentSessionPresentation = nil
+            lastSessionPresentation = nil
             stateMachine.reset()
             attemptPendingLANRecoveryIfIdle()
             return
@@ -2126,6 +2224,11 @@ final class BoothCoordinator {
         gifFrames = [:]
         currentCaptureAttempt = nil
         currentFilteredReviewImages = [:]
+        sessionAssetReferences = [:]
+        stripAssetReference = nil
+        pendingPromptAssets = [:]
+        assetAssembler = BoothAssetAssembler()
+        currentStripPreview = nil
         capture.resetStills()
         reviewDecisionPending = false
         stateMachine.reset()
@@ -2145,8 +2248,24 @@ final class BoothCoordinator {
         currentManifest = manifest
         currentManifestID = manifest.id
         currentSession = store.restoreSessionRecord(from: manifest)
-        currentSessionPresentation = (try? workspace.loadPresentationSnapshot(manifest: manifest))
+        var recoveredPresentation = (try? workspace.loadPresentationSnapshot(manifest: manifest))
             ?? presentation(for: manifest.eventConfig, sessionID: manifest.id)
+        pendingPromptAssets = [:]
+        recoveredPresentation.prompts = recoveredPresentation.prompts.map { prompt in
+            guard let data = prompt.imageData, !data.isEmpty else { return prompt }
+            let reference = makeAssetReference(
+                data: data,
+                assetID: "prompt-\(manifest.id)-\(prompt.promptID)",
+                sessionID: manifest.id,
+                revision: manifest.eventConfig.experienceRevision,
+                kind: .promptImage
+            )
+            pendingPromptAssets[reference.assetID] = (reference, data)
+            var prompt = prompt
+            prompt.imageAsset = reference
+            return prompt
+        }
+        currentSessionPresentation = recoveredPresentation
         lastSessionPresentation = currentSessionPresentation
         retakeCounts = manifest.shots.reduce(into: [:]) { result, shot in
             result[shot.photoIndex] = shot.retakeCount
@@ -2169,14 +2288,28 @@ final class BoothCoordinator {
             errorMessage = "Recovered session identity could not be synchronized."
             return
         }
+        let recoveredSessionID = manifest.id
+        let recoveredPhotoIndex = manifest.nextPhotoIndex
+        let promptAssets = Array(pendingPromptAssets.values)
         multipeer.sendControl(.sessionStart(context: startContext))
         multipeer.sendControl(.eventConfig(config: manifest.eventConfig))
         multipeer.sendControl(.sessionPrepared(
             config: manifest.eventConfig,
             presentation: presentation,
             context: preparedContext
-        ))
-        beginCountdown(photoIndex: manifest.nextPhotoIndex)
+        )) { [weak self] outcome in
+            guard let self else { return }
+            guard outcome == .sent,
+                  self.currentSession?.id == recoveredSessionID,
+                  self.stateMachine.currentSessionID == recoveredSessionID else {
+                self.errorMessage = "The iPad did not receive recovered session setup. Reconnect before retrying."
+                return
+            }
+            self.beginCountdown(photoIndex: recoveredPhotoIndex)
+            for asset in promptAssets {
+                _ = self.sendAsset(data: asset.data, reference: asset.reference)
+            }
+        }
     }
 
     private func finishDiscardingRecoveredSession(_ manifest: SessionManifest) {
@@ -2398,14 +2531,27 @@ final class BoothCoordinator {
         let stripThumb = loadCGImage(from: directory.appendingPathComponent("strip.png"))
             .flatMap { jpegData(from: $0, quality: 0.4) }
         currentStripPreview = loadCGImage(from: directory.appendingPathComponent("strip.png"))
+        stripAssetReference = stripThumb.map {
+            makeAssetReference(
+                data: $0,
+                assetID: "strip-\(manifest.id)",
+                sessionID: manifest.id,
+                revision: "output-v1",
+                kind: .stripThumbnail
+            )
+        }
+        finishedAwaitingCustomerAckSessionID = manifest.id
         stateMachine.finishSession(qrPayload: qr)
         if let context = nextSessionMessageContext() {
-            multipeer.sendControl(.sessionFinished(
+            multipeer.sendControl(.sessionFinishedAssets(
                 context: context,
                 qrPayload: qr,
-                stripThumbData: stripThumb,
-                gifThumbData: nil
+                stripAsset: stripAssetReference,
+                gifAsset: nil
             ))
+            if let stripThumb, let stripAssetReference {
+                _ = sendAsset(data: stripThumb, reference: stripAssetReference)
+            }
         }
         if jobs.filter({ $0.kind == .renderGIF }).allSatisfy({
             $0.status == .succeeded || $0.status == .cancelled
@@ -2610,6 +2756,9 @@ final class BoothCoordinator {
         multipeer.onControlMessage = { [weak self] msg in
             self?.handleMessage(msg)
         }
+        multipeer.onAssetChunk = { [weak self] chunk in
+            self?.handleAssetChunk(chunk)
+        }
         multipeer.onTransportEvent = { [weak self] event in
             self?.recordTransportEvent(event)
         }
@@ -2656,7 +2805,66 @@ final class BoothCoordinator {
             }
         case .captureRecoveryAction(let context, let action):
             if acceptsClientSessionMessage(context) { handleCaptureRecoveryAction(action) }
+        case .customerFinished(let context):
+            handleCustomerFinished(context)
         default: break
+        }
+    }
+
+    private func handleAssetChunk(_ chunk: BoothAssetChunk) {
+        // The transport authenticates the peer; the session binding below keeps a
+        // delayed asset from a prior session out of the current display.
+        guard chunk.metadata.sessionID == nil
+                || chunk.metadata.sessionID == currentSession?.id
+                || chunk.metadata.sessionID == stateMachine.currentSessionID else { return }
+        do {
+            _ = try assetAssembler.append(chunk)
+        } catch {
+            errorMessage = "Received asset data was rejected."
+        }
+    }
+
+    private func handleCustomerFinished(_ context: SessionMessageContext) {
+        guard let sessionID = finishedAwaitingCustomerAckSessionID,
+              context.sessionID == sessionID,
+              context.sequence == sessionMessageSequence,
+              acceptsClientSessionMessage(context),
+              case .finished = stateMachine.phase else { return }
+        let idle = SessionSyncSnapshot(
+            config: stateMachine.config,
+            sessionID: nil,
+            phase: .idle,
+            presentation: nil,
+            isMirrored: capture.camera.isMirrored,
+            sequence: 0
+        )
+        multipeer.sendControl(.sessionSync(snapshot: idle)) { [weak self] outcome in
+            guard let self else { return }
+            guard outcome == .sent,
+                  self.finishedAwaitingCustomerAckSessionID == sessionID else {
+                self.errorMessage = "The next session acknowledgement could not be delivered."
+                return
+            }
+            self.finishedAwaitingCustomerAckSessionID = nil
+            self.currentManifest = nil
+            self.currentManifestID = nil
+            self.retakeCounts = [:]
+            self.gifFrames = [:]
+            self.currentCaptureAttempt = nil
+            self.currentCountdown = nil
+            self.currentStripPreview = nil
+            self.currentFilteredReviewImages = [:]
+            self.currentSessionPresentation = nil
+            self.lastSessionPresentation = nil
+            self.sessionAssetReferences = [:]
+            self.stripAssetReference = nil
+            self.pendingPromptAssets = [:]
+            self.assetAssembler = BoothAssetAssembler()
+            self.capture.resetStills()
+            self.reviewDecisionPending = false
+            self.stateMachine.reset()
+            self.sessionMessageSequence = 0
+            self.attemptPendingLANRecoveryIfIdle()
         }
     }
 
@@ -2686,27 +2894,25 @@ final class BoothCoordinator {
         case .readyToStart: currentSession?.id
         default: currentSession?.id ?? lastCompletedSessionID
         }
-        let reviewThumbnail: Data? = {
-            guard case .review(let index) = phase else { return nil }
-            return stateMachine.reviewImageData ?? stateMachine.keptShots[index]
-        }()
-        let stripThumbnail: Data? = {
-            guard case .finished = phase else { return nil }
-            return currentStripPreview.flatMap { jpegData(from: $0, quality: 0.4) }
-        }()
         let sequence = sessionID == nil ? 0 : (nextSessionMessageContext()?.sequence ?? 0)
         multipeer.sendControl(.sessionSync(snapshot: SessionSyncSnapshot(
             config: stateMachine.config,
             sessionID: sessionID,
             phase: phase,
             presentation: currentSessionPresentation ?? lastSessionPresentation,
-            reviewThumbnailData: reviewThumbnail,
-            stripThumbnailData: stripThumbnail,
             isMirrored: capture.camera.isMirrored,
             isBoothPaused: isBoothPaused,
             sequence: sequence,
             countdown: currentCountdown,
-            keptShots: stateMachine.keptShots,
+            reviewAsset: {
+                guard case .review(let index) = phase else { return nil }
+                return sessionAssetReferences[index]
+            }(),
+            stripAsset: {
+                guard case .finished = phase else { return nil }
+                return stripAssetReference
+            }(),
+            keptShotAssets: sessionAssetReferences,
             acceptedPhotoIndices: stateMachine.acceptedPhotoIndices.sorted(),
             deferredPhotoIndices: stateMachine.deferredPhotoIndices.sorted(),
             nextPhotoIndex: stateMachine.nextPhotoIndex

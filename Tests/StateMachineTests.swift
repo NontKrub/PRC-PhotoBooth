@@ -170,4 +170,25 @@ struct StateMachineTests {
 
         #expect(sm.phase == .processing)
     }
+
+    @Test("500 sequential one-photo sessions return to idle without state leakage")
+    func sequentialSessionSoak() {
+        let sm = SessionStateMachine()
+        let config = EventConfig(photoCount: 1, countdownSeconds: 1)
+
+        for index in 0..<500 {
+            sm.startSession(config: config, sessionID: "soak-\(index)")
+            sm.beginCountdown(photoIndex: 0)
+            sm.enterReview(photoIndex: 0, thumbnailData: Data([UInt8(index & 0xff)]))
+            sm.keepShot(photoIndex: 0)
+            sm.finishSession(qrPayload: "qr-\(index)")
+
+            #expect(sm.phase == .finished(qrPayload: "qr-\(index)"))
+            sm.reset()
+        }
+
+        #expect(sm.phase == .idle)
+        #expect(sm.currentSessionID.isEmpty)
+        #expect(sm.keptShots.isEmpty)
+    }
 }

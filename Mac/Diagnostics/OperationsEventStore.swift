@@ -13,6 +13,9 @@ enum OperationsEventKind: String, Codable, Sendable, CaseIterable {
     case transportReconnectSucceeded, heartbeatTimedOut, routeChanged
     case controlSendFailed, controlPayloadRejected
     case previewDisconnected, previewReconnected, sessionSyncSent, sessionSyncFailed
+    case criticalSendQueued, criticalSendCompleted
+    case assetSent, assetRejected, secureChannelEstablished, secureChannelFailed
+    case routeViabilityChanged
     case ipadAppForegrounded, ipadAppBackgrounded
 }
 

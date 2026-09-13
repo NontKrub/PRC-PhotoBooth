@@ -88,6 +88,19 @@ Execution ledger. Preserve earlier historical checklists below.
 - [ ] TSan, deterministic soak/failure injection, Computer Use GUI flow, and physical Wi-Fi/hotspot, Ethernet, camera, QR-scan, printer, and long-run gates remain unrun.
 - [ ] Release readiness: NOT READY until the operational TLS/PSK decision and physical matrix are closed.
 
+### Final event hardening continuation — 2026-09-13
+
+- [x] Replace local iPad session rollover with Mac-authoritative `customerFinished` acknowledgement and idle sync.
+- [x] Keep control payloads metadata-only; add bounded CryptoKit secure channel and bounded asset chunking/reassembly.
+- [x] Add completion-aware critical sends, route/viability diagnostics, iPad request deadlines, foreground freshness, and active-session idle-timer behavior.
+- [x] Add failed-capture retake coverage and a deterministic 500 sequential one-photo session state-machine soak.
+- [x] Mac tests: 383/383 in 55/55 suites; iPad tests: 7/7 in 1/1 suite.
+- [x] Mac Debug/Release, iPad Debug/Release simulator, and unsigned generic `iphoneos` Release compile passed; deployment target remains iOS 16.0.
+- [x] `git diff --check` passed.
+- [ ] MainActor 12-second stall proof, stale-heartbeat integration race, dedicated asset TCP channel, TSan, Instruments, live packet capture, and full network/capture/print failure injection remain unrun.
+- [ ] Device Hub GUI, physical iPad, Wi-Fi/router, hotspot, Ethernet, camera, QR, printer, and 3-hour soak gates remain unrun.
+- [ ] Release verdict: NOT READY.
+
 # Historical: PRC PhotoBooth v1.3 TODO
 
 ## Current reliability/network/GIF task
