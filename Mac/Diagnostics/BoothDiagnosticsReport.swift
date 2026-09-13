@@ -28,6 +28,16 @@ struct BoothDiagnosticsReport {
         var lastPrintError: String?
         var preflightReadiness: BoothReadinessStatus
         var preflightResults: [PreflightCheckResult]
+        var authenticated: Bool = false
+        var reconnectCount: Int = 0
+        var heartbeatTimeoutCount: Int = 0
+        var controlSendFailureCount: Int = 0
+        var queuePendingCount: Int = 0
+        var queueRunningCount: Int = 0
+        var queueRetryingCount: Int = 0
+        var queueFailedCount: Int = 0
+        var oldestCriticalJobAge: TimeInterval?
+        var recentEvents: [OperationsEvent] = []
     }
 
     static func make(_ snapshot: Snapshot) -> String {
@@ -60,6 +70,7 @@ struct BoothDiagnosticsReport {
             "LAN handshake: \(handshakeText(snapshot.lanHandshake))",
             "Control channel: \(snapshot.controlConnected ? "Connected" : "Disconnected")",
             "Preview channel: \(snapshot.previewConnected ? "Connected" : "Disconnected")",
+            "Authentication: \(snapshot.authenticated ? "Authenticated" : "Not authenticated")",
             "Last network error: \(safe(snapshot.lastNetworkError) ?? "None")",
             "",
             "Preview",
@@ -78,10 +89,25 @@ struct BoothDiagnosticsReport {
             "Failed: \(snapshot.printFailureCount)",
             "Last error: \(safe(snapshot.lastPrintError) ?? "None")",
             "",
+            "Stability",
+            "Reconnects: \(snapshot.reconnectCount)",
+            "Heartbeat timeouts: \(snapshot.heartbeatTimeoutCount)",
+            "Control send failures: \(snapshot.controlSendFailureCount)",
+            "",
+            "Queue summary",
+            "Pending: \(snapshot.queuePendingCount)",
+            "Running: \(snapshot.queueRunningCount)",
+            "Retrying: \(snapshot.queueRetryingCount)",
+            "Failed: \(snapshot.queueFailedCount)",
+            "Oldest critical job: \(ageText(snapshot.oldestCriticalJobAge))",
+            "",
             "Preflight",
             "Readiness: \(readinessText(snapshot.preflightReadiness))",
             "Failures: \(failures.isEmpty ? "None" : failures.joined(separator: ", "))",
-            "Warnings: \(warnings.isEmpty ? "None" : warnings.joined(separator: ", "))"
+            "Warnings: \(warnings.isEmpty ? "None" : warnings.joined(separator: ", "))",
+            "",
+            "Recent operations",
+            recentEventsText(snapshot.recentEvents)
         ].joined(separator: "\n")
     }
 
@@ -148,14 +174,24 @@ struct BoothDiagnosticsReport {
         return formatter.string(from: date)
     }
 
+    private static func ageText(_ age: TimeInterval?) -> String {
+        guard let age else { return "None" }
+        return String(format: "%.1fs", max(0, age))
+    }
+
+    private static func recentEventsText(_ events: [OperationsEvent]) -> String {
+        guard !events.isEmpty else { return "None" }
+        return events.map { event in
+            let details = [
+                safe(event.channel),
+                safe(event.route),
+                safe(event.reason)
+            ].compactMap { $0 }.joined(separator: " · ")
+            return "\(dateText(event.timestamp)) \(event.kind.rawValue)\(details.isEmpty ? "" : " — \(details)")"
+        }.joined(separator: "\n")
+    }
+
     private static func safe(_ value: String?) -> String? {
-        guard let value, !value.isEmpty else { return nil }
-        let normalized = value.lowercased()
-        let sensitiveWords = [
-            "token", "password", "secret", "private key", "credential",
-            "authorization", "bearer", "pin", "keychain"
-        ]
-        guard !sensitiveWords.contains(where: normalized.contains) else { return "[redacted]" }
-        return value.replacingOccurrences(of: "\n", with: " ")
+        OperationsEventRedactor.text(value)
     }
 }

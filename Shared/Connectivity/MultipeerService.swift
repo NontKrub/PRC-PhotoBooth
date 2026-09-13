@@ -64,6 +64,7 @@ public final class MultipeerService: NSObject, BoothTransport {
     // packets are disposable and coalesced so they cannot starve controls.
     public var onControlMessage: (@MainActor (Message) -> Void)?
     public var onPreviewFrame:   (@MainActor (Data) -> Void)?
+    public var onTransportEvent: (@MainActor (BoothTransportDiagnosticEvent) -> Void)?
 
     public var requestedNetworkPreference: BoothNetworkPreference {
         get { connectionStatus.requestedNetwork }
@@ -194,6 +195,7 @@ public final class MultipeerService: NSObject, BoothTransport {
         if cancelReconnect {
             reconnectTask?.cancel()
             reconnectTask = nil
+            connectionStatus.publishReconnectState(inProgress: false)
         }
 
         previewDeliveryTask?.cancel()
@@ -223,6 +225,7 @@ public final class MultipeerService: NSObject, BoothTransport {
 
         let delay = min(pow(2.0, Double(reconnectAttempt)), maxReconnectDelay)
         reconnectAttempt += 1
+        connectionStatus.publishReconnectState(inProgress: true, attempt: reconnectAttempt)
 
         print("[MPC] scheduling reconnect in \(delay)s")
         reconnectTask = Task { @MainActor [weak self] in
@@ -251,6 +254,7 @@ public final class MultipeerService: NSObject, BoothTransport {
         }
 
         lastHeartbeatReceived = Date()
+        connectionStatus.publishControlActivity(at: lastHeartbeatReceived)
         heartbeatTimer?.invalidate()
         heartbeatTimer = Timer.scheduledTimer(withTimeInterval: kHeartbeatInterval, repeats: true) { [weak self] _ in
             Task { @MainActor [weak self] in
@@ -300,14 +304,19 @@ public final class MultipeerService: NSObject, BoothTransport {
 
     // MARK: - Send
 
-    public func sendControl(_ message: Message) {
-        guard let session = _session else { return }
+    @discardableResult
+    public func sendControl(_ message: Message) -> BoothControlSendOutcome {
+        guard let session = _session else { return .noConnection }
         let targets = targetPeers(from: session)
-        guard !targets.isEmpty else { return }
+        guard !targets.isEmpty else { return .noConnection }
         do {
             let payload = try message.encoded().packedAsControl()
             try session.send(payload, toPeers: targets, with: .reliable)
-        } catch { print("[MPC] send error: \(error)") }
+            return .sent
+        } catch {
+            print("[MPC] send error: \(error)")
+            return .networkSendFailed
+        }
     }
 
     public func sendPreviewFrame(_ jpegData: Data) {
@@ -446,6 +455,7 @@ public final class MultipeerService: NSObject, BoothTransport {
         guard peerTracker.activePeer == peerName else { return }
         if case .heartbeat = message {
             lastHeartbeatReceived = Date()
+            connectionStatus.publishControlActivity(at: lastHeartbeatReceived)
             return
         }
         onControlMessage?(message)

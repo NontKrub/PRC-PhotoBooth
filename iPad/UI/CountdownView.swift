@@ -9,7 +9,10 @@ struct CountdownView: View {
 
     var body: some View {
         ZStack {
-            PreviewMirrorView().ignoresSafeArea()
+            PreviewMirrorView(
+                targetAspectRatio: vm.captureFraming(for: photoIndex)?.aspectRatio
+            )
+            .ignoresSafeArea()
             Color.black.opacity(0.25).ignoresSafeArea()
 
             VStack(spacing: 0) {

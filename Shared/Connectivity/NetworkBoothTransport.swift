@@ -1,4 +1,5 @@
 import Foundation
+import CryptoKit
 import Network
 #if os(iOS)
 import UIKit
@@ -10,13 +11,57 @@ public final class NetworkBoothTransport: BoothTransport {
     private static let reconnectDelays: [TimeInterval] = [0.5, 1, 2, 4, 5]
     private static let controlServiceType = "_prc-control._tcp"
     private static let previewServiceType = "_prc-preview._tcp"
+    // The documented direct Ethernet setup uses these addresses. Bonjour is
+    // still preferred, but iPadOS 16 Lightning adapters can have a working
+    // IP path without returning a constrained Bonjour result.
+    private static let directLANHost = NWEndpoint.Host("10.0.0.1")
+    private static let directLANControlPort = NWEndpoint.Port(rawValue: 58_500)!
+    private static let directLANPreviewPort = NWEndpoint.Port(rawValue: 58_501)!
     static let routeDiscoveryGracePeriod: TimeInterval = 2.0
     private static let lanRecoveryStabilityPeriod: TimeInterval = 2
     private static let lanRecoveryCooldown: TimeInterval = 5
-    private static let pairingCapability = "pairing-v1"
+    private static let pairingCapability = "pairing-v2"
     private static let previewIdentityCapability = "preview-identity"
     private static let heartbeatInterval: TimeInterval = 2
     private static let heartbeatTimeout: TimeInterval = 8
+    private static let transportQueueLabel = "PRC-PhotoBooth.Transport"
+
+    private struct PendingPairingCommit: Equatable, Sendable {
+        let sessionID: String
+        let method: BoothPairingMethod
+        let peer: TrustedBoothPeer
+        let macIdentity: BoothDeviceIdentity
+        let secret: Data
+        let expiresAt: Date
+        let transcript: Data
+        let macEphemeralPublicKey: Data
+        let keyAgreementProof: Data
+
+        var result: BoothPairingResult {
+            BoothPairingResult(
+                accepted: true,
+                macIdentity: macIdentity,
+                pairingSessionID: sessionID,
+                macEphemeralPublicKey: macEphemeralPublicKey,
+                keyAgreementProof: keyAgreementProof
+            )
+        }
+    }
+
+    private enum PairingControlSendError: Error {
+        case failed(String)
+
+        var message: String {
+            switch self {
+            case .failed(let message): return message
+            }
+        }
+    }
+
+    private struct AuthenticationSecret {
+        let data: Data
+        let source: String
+    }
 
     public let role: DeviceRole
     public let connectionStatus: BoothConnectionStatus
@@ -29,6 +74,7 @@ public final class NetworkBoothTransport: BoothTransport {
     }
     public var onControlMessage: (@MainActor (Message) -> Void)?
     public var onPreviewFrame: (@MainActor (Data) -> Void)?
+    public var onTransportEvent: (@MainActor (BoothTransportDiagnosticEvent) -> Void)?
 
     private var requestedPreference: BoothNetworkPreference
     private var routeMachine: BoothNetworkRouteMachine
@@ -63,11 +109,21 @@ public final class NetworkBoothTransport: BoothTransport {
     private var targetPeerID: String?
     private var pendingPairingRequest: BoothPairingRequest?
     private var pendingPairingIntent: BoothPairingIntent?
+    private var pendingPairingSessionID: String?
+    private var receivedPairingSession: BoothPairingSessionInfo?
     private var currentPairingSession: BoothPairingSession?
     private var pairingExpiryTask: Task<Void, Never>?
+    private var pairingExpirySessionID: String?
+    private var pairingExpiryAt: Date?
     private var incomingPairingRequest: IncomingBoothPairingRequest?
     private var lastPairingIntentAt: [String: Date] = [:]
     private var pendingPairingFailure: String?
+    private var pendingPairingCommit: PendingPairingCommit?
+    private var pendingPairingPrivateKeyData: Data?
+    private var pendingPairingCode: String?
+    private var pendingPairingVerificationCode: String?
+    private var didConfirmPairingVerification = false
+    private var deferredAuthChallenge: BoothAuthChallenge?
     private var peerHello: BoothTransportHello?
     private var peerAuthenticated = false
     private var pendingAuthChallenge: BoothAuthChallenge?
@@ -79,19 +135,27 @@ public final class NetworkBoothTransport: BoothTransport {
     private var previewBrowser: NWBrowser?
     private var wifiRouteDiscoveryBrowser: NWBrowser?
     private var lanRouteDiscoveryBrowser: NWBrowser?
+    // Some iPadOS 16 Lightning Ethernet adapters expose a usable IP path but
+    // do not return Bonjour results to a browser constrained to
+    // `.wiredEthernet`. This browser only discovers a LAN-advertised peer.
+    private var lanCompatibilityRouteDiscoveryBrowser: NWBrowser?
     private var routeDiscoverySelection = BoothRouteDiscoverySelection()
+    private var directLANPairingAttemptedSessionID: String?
     private var pendingWiFiRouteEndpoint: NWEndpoint?
     private var pendingLANRouteEndpoint: NWEndpoint?
     private var routeDiscoveryFallbackTask: Task<Void, Never>?
     private var routeDiscoveryGate = BoothRouteDiscoveryGenerationGate()
     private var callbackGate = BoothTransportCallbackGate()
     private var controlConnection: NWConnection?
+    private var controlConnectionGeneration = 0
+    private var pairingGeneration = 0
     private var previewConnection: NWConnection?
-    private var controlParser = BoothFrameParser()
-    private var previewParser = BoothFrameParser()
+    private let frameDecoder = BoothTransportFrameDecoder()
     private var previewFrames = LatestFrameCoalescer()
-    private var heartbeatTimer: Timer?
+    private var heartbeatSource: DispatchSourceTimer?
+    private let heartbeatState = BoothTransportHeartbeatState()
     private var lanHandshakeTask: Task<Void, Never>?
+    private var waitingRecoveryTasks: [UInt8: Task<Void, Never>] = [:]
     private var lastControlMessageAt = Date.distantPast
     private var reconnectTask: Task<Void, Never>?
     private var lanRecoveryTask: Task<Void, Never>?
@@ -120,6 +184,36 @@ public final class NetworkBoothTransport: BoothTransport {
     private var previewBytesSent = 0
     private var lanHandshakeState: BoothLANHandshakeState = .unknown
     private var lastNetworkError: String?
+    private var pairingStageValue: BoothPairingStage = .idle
+    private let transportQueue = DispatchQueue(
+        label: "PRC-PhotoBooth.Transport",
+        qos: .userInitiated
+    )
+
+    private func resetFrameDecoder(_ channel: BoothTransportChannel) {
+        let decoder = frameDecoder
+        transportQueue.async { decoder.reset(channel) }
+    }
+
+    private func emitTransportEvent(
+        _ kind: BoothTransportDiagnosticKind,
+        channel: BoothTransportChannel? = nil,
+        route: String? = nil,
+        attempt: Int? = nil,
+        byteCount: Int? = nil,
+        duration: TimeInterval? = nil,
+        reason: String? = nil
+    ) {
+        onTransportEvent?(BoothTransportDiagnosticEvent(
+            kind: kind,
+            channel: channel.map { String(describing: $0) },
+            route: route ?? activeInterface?.rawValue,
+            attempt: attempt,
+            byteCount: byteCount,
+            duration: duration,
+            reason: reason
+        ))
+    }
 
     public var canAttemptPreferredLANRecovery: @MainActor () -> Bool = { true }
     public var canAcceptIncomingPairing: @MainActor () -> Bool = { true }
@@ -149,6 +243,26 @@ public final class NetworkBoothTransport: BoothTransport {
     public var currentPairingSessionInfo: BoothPairingSessionInfo? { currentPairingSession?.info }
     public var pairingPINForDisplay: String? { currentPairingSession?.pin }
     public var pairingQRCodePayload: BoothPairingQRCodePayload? { currentPairingSession?.qrPayload }
+    public var pairingVerificationCodeForDisplay: String? { pendingPairingVerificationCode }
+    public var isPairingVerificationConfirmed: Bool { didConfirmPairingVerification }
+    public var pairingStage: BoothPairingStage { pairingStageValue }
+    public var pairingExpiresAt: Date? {
+        currentPairingSession?.info.expiresAt
+            ?? pendingPairingCommit?.expiresAt
+            ?? pairingExpiryAt
+    }
+    public var pairingPeerID: String? {
+        pendingPairingRequest?.iPadIdentity.id
+            ?? pendingPairingIntent?.iPadIdentity.id
+            ?? incomingPairingRequest?.iPadIdentity.id
+            ?? pendingPairingCommit?.peer.id
+    }
+    public var pairingPeerDisplayName: String? {
+        pendingPairingRequest?.iPadIdentity.displayName
+            ?? pendingPairingIntent?.iPadIdentity.displayName
+            ?? incomingPairingRequest?.iPadIdentity.displayName
+            ?? pendingPairingCommit?.peer.displayName
+    }
     public var automaticallyReconnectToPreferredPeer: Bool {
         get { trustedStore.autoReconnect }
         set {
@@ -179,57 +293,121 @@ public final class NetworkBoothTransport: BoothTransport {
         guard role == .mac else { return false }
         do {
             if !keepingControlConnection, !peerAuthenticated {
+                controlConnectionGeneration &+= 1
                 controlConnection?.cancel()
+                controlConnection = nil
+                controlEndpointDescription = nil
+                resetControlAuthentication()
             }
-            clearPairingSession()
-            pendingPairingFailure = nil
+            resetPairingState(clearTarget: true, clearPendingCommit: true, clearFailure: true)
             let session = try BoothPairingSession.make(macIdentity: localIdentity)
             currentPairingSession = session
             schedulePairingExpiry(for: session)
             if let expiresAt = currentPairingSession?.info.expiresAt {
-                connectionStatus.publishPairing(state: .pairing(expiresAt: expiresAt))
+                setPairingStage(.discovering, state: .pairing(expiresAt: expiresAt))
             }
             refreshAdvertisedServices()
             return true
         } catch {
             lastNetworkError = error.localizedDescription
-            connectionStatus.publishPairing(state: .failed(error.localizedDescription))
+            pendingPairingFailure = error.localizedDescription
+            setPairingStage(.failed, state: .failed(error.localizedDescription))
             return false
         }
     }
 
     public func cancelPairingSession() {
-        let shouldNotify = incomingPairingRequest != nil
-        let connection = shouldNotify ? controlConnection : nil
-        clearPairingSession()
-        connectionStatus.publishPairing(state: .idle)
+        let connection = !peerAuthenticated ? controlConnection : nil
+        let pairingSessionID = activePairingControlSessionID
+        resetPairingState(clearTarget: true, clearPendingCommit: true, clearFailure: true)
+        setPairingStage(.idle, state: .idle)
         refreshAdvertisedServices()
         if let connection {
+            let reason = role == .mac ? "Pairing cancelled on Mac." : "Pairing cancelled on iPad."
             sendThenClose(
                 .pairingResult(result: BoothPairingResult(
                     accepted: false,
-                    reason: "Pairing cancelled on Mac."
+                    reason: reason,
+                    pairingSessionID: pairingSessionID
                 )),
                 connection: connection,
-                reason: "Pairing cancelled on Mac."
+                reason: reason
             )
         } else if !peerAuthenticated {
             controlConnection?.cancel()
         }
     }
 
-    private func clearPairingSession() {
-        pairingExpiryTask?.cancel()
-        pairingExpiryTask = nil
+    /// Confirms the locally displayed SAS before PIN pairing can authenticate.
+    /// The code itself is derived independently on both devices and is never
+    /// transmitted.
+    public func confirmPairingVerification() {
+        guard role == .mac,
+              let commit = pendingPairingCommit,
+              commit.method == .pin,
+              pendingPairingVerificationCode != nil,
+              !didConfirmPairingVerification else { return }
+        didConfirmPairingVerification = true
+        guard pairingStageValue != .resultSending else { return }
+        sendPairingVerificationConfirmation(commit, on: controlConnection)
+    }
+
+    private func resetPairingState(
+        clearTarget: Bool,
+        clearPendingCommit: Bool,
+        clearFailure: Bool
+    ) {
+        pairingGeneration &+= 1
+        cancelPairingExpiry()
         currentPairingSession?.invalidate()
         currentPairingSession = nil
         incomingPairingRequest = nil
+        pendingPairingRequest = nil
+        pendingPairingIntent = nil
+        pendingPairingSessionID = nil
+        receivedPairingSession = nil
+        pendingPairingPrivateKeyData = nil
+        pendingPairingCode = nil
+        deferredAuthChallenge = nil
+        if !peerAuthenticated {
+            pendingAuthChallenge = nil
+            didInitiateAuthentication = false
+        }
+        if clearPendingCommit {
+            pendingPairingCommit = nil
+            pendingPairingVerificationCode = nil
+            didConfirmPairingVerification = false
+        }
+        if clearFailure { pendingPairingFailure = nil }
+        if clearTarget { targetPeerID = nil }
+    }
+
+    private func clearActivePairingSession() {
+        // Keep a provisional commit, if one was just created, so the result
+        // can be resent until reciprocal authentication succeeds.
+        resetPairingState(
+            clearTarget: false,
+            clearPendingCommit: false,
+            clearFailure: false
+        )
+    }
+
+    private func cancelPairingExpiry() {
+        pairingExpiryTask?.cancel()
+        pairingExpiryTask = nil
+        pairingExpirySessionID = nil
+        pairingExpiryAt = nil
     }
 
     private func schedulePairingExpiry(for session: BoothPairingSession) {
-        pairingExpiryTask?.cancel()
-        let sessionID = session.info.sessionID
-        let expiresAt = session.info.expiresAt
+        schedulePairingExpiry(sessionID: session.info.sessionID, expiresAt: session.info.expiresAt)
+    }
+
+    private func schedulePairingExpiry(sessionID: String, expiresAt: Date) {
+        cancelPairingExpiry()
+        pairingExpirySessionID = sessionID
+        pairingExpiryAt = expiresAt
+        let pairingGenerationAtStart = pairingGeneration
         pairingExpiryTask = Task { @MainActor [weak self] in
             do {
                 while !Task.isCancelled {
@@ -241,12 +419,28 @@ public final class NetworkBoothTransport: BoothTransport {
                 return
             }
             guard let self,
-                  BoothPairingSession.isCurrentSession(
-                      sessionID,
-                      currentSessionID: self.currentPairingSession?.info.sessionID
+                  self.pairingExpirySessionID == sessionID,
+                  BoothPairingExpiryGate.accepts(
+                      sessionID: sessionID,
+                      generation: pairingGenerationAtStart,
+                      currentGeneration: self.pairingGeneration,
+                      currentSessionID: self.currentPairingSession?.info.sessionID,
+                      pendingSessionID: self.pendingPairingSessionID,
+                      pendingResultSessionID: self.pendingPairingCommit?.sessionID
                   ) else { return }
             self.pairingExpiryTask = nil
-            self.expirePairingSession(sessionID: sessionID)
+            self.pairingExpirySessionID = nil
+            self.pairingExpiryAt = nil
+            if BoothPairingSession.isCurrentSession(
+                sessionID,
+                currentSessionID: self.currentPairingSession?.info.sessionID
+            ) {
+                self.expirePairingSession(sessionID: sessionID)
+            } else if self.pendingPairingCommit?.sessionID == sessionID {
+                self.expirePendingPairingCommit(sessionID: sessionID)
+            } else if self.pendingPairingSessionID == sessionID {
+                self.expirePendingPairingSession(sessionID: sessionID)
+            }
         }
     }
 
@@ -258,17 +452,60 @@ public final class NetworkBoothTransport: BoothTransport {
 
         let reason = BoothPairingError.expired.localizedDescription
         let connection = peerAuthenticated ? nil : controlConnection
-        clearPairingSession()
+        resetPairingState(clearTarget: true, clearPendingCommit: true, clearFailure: true)
         pendingPairingFailure = reason
-        connectionStatus.publishPairing(state: .failed(reason))
+        setPairingStage(.failed, state: .failed(reason))
         refreshAdvertisedServices()
         if let connection {
             sendThenClose(
-                .pairingResult(result: BoothPairingResult(accepted: false, reason: reason)),
+                .pairingResult(result: BoothPairingResult(
+                    accepted: false,
+                    reason: reason,
+                    pairingSessionID: sessionID
+                )),
                 connection: connection,
                 reason: reason
             )
         }
+    }
+
+    private func expirePendingPairingCommit(sessionID: String) {
+        guard pendingPairingCommit?.sessionID == sessionID else { return }
+        let reason = BoothPairingError.expired.localizedDescription
+        let connection = peerAuthenticated ? nil : controlConnection
+        resetPairingState(clearTarget: true, clearPendingCommit: true, clearFailure: true)
+        pendingPairingFailure = reason
+        setPairingStage(.failed, state: .failed(reason))
+        if let connection { connection.cancel() }
+    }
+
+    private func expirePendingPairingSession(sessionID: String) {
+        guard pendingPairingSessionID == sessionID else { return }
+        let reason = "Pairing timed out. Please try again."
+        let connection = peerAuthenticated ? nil : controlConnection
+        resetPairingState(clearTarget: true, clearPendingCommit: true, clearFailure: true)
+        pendingPairingFailure = reason
+        setPairingStage(.failed, state: .failed(reason))
+        if let connection { connection.cancel() }
+    }
+
+    private func failPairing(
+        _ reason: String,
+        clearTarget: Bool = true,
+        clearPendingCommit: Bool = true,
+        closeConnection: Bool = true
+    ) {
+        let connection = closeConnection && !peerAuthenticated ? controlConnection : nil
+        resetPairingState(
+            clearTarget: clearTarget,
+            clearPendingCommit: clearPendingCommit,
+            clearFailure: true
+        )
+        refreshAdvertisedServices()
+        pendingPairingFailure = reason
+        lastNetworkError = reason
+        setPairingStage(.failed, state: .failed(reason))
+        if let connection { connection.cancel() }
     }
 
     public func selectPreferredPeer(_ peerID: String?) {
@@ -286,55 +523,87 @@ public final class NetworkBoothTransport: BoothTransport {
 
     public func connectToPeer(_ peerID: String) {
         guard role == .iPad, trustedStore.trustedPeerIDs.contains(peerID) else { return }
+        resetPairingState(clearTarget: false, clearPendingCommit: true, clearFailure: true)
         pendingPairingIntent = nil
-        pendingPairingFailure = nil
         trustedStore.preferredPeerID = peerID
         targetPeerID = peerID
+        setPairingStage(.idle, state: .idle)
         restartDiscoveryForPeerSelection()
-        publishPairingStatus()
     }
 
     public func requestPairing(with peerID: String) {
         guard role == .iPad, !trustedStore.trustedPeerIDs.contains(peerID) else { return }
         guard let peer = discoveredPeersByID[peerID], peer.role == .mac else {
-            connectionStatus.publishPairing(state: .failed("The selected Mac was not found."))
+            let reason = "The selected Mac was not found."
+            pendingPairingFailure = reason
+            setPairingStage(.failed, state: .failed(reason))
             return
         }
         guard peer.protocolVersion == BoothTransportHello.currentProtocolVersion else {
-            connectionStatus.publishPairing(state: .failed(BoothPairingError.incompatibleProtocol.localizedDescription))
+            let reason = BoothPairingError.incompatibleProtocol.localizedDescription
+            pendingPairingFailure = reason
+            setPairingStage(.failed, state: .failed(reason))
             return
         }
 
+        resetPairingState(clearTarget: false, clearPendingCommit: true, clearFailure: true)
         pendingPairingRequest = nil
-        pendingPairingFailure = nil
         targetPeerID = peerID
         pendingPairingIntent = BoothPairingIntent(
             iPadIdentity: localIdentity,
             targetMacDeviceID: peerID
         )
-        connectionStatus.publishPairing(state: .waitingForMac(peerID: peerID))
+        let intentSessionID = "intent-\(UUID().uuidString)"
+        pendingPairingSessionID = intentSessionID
+        schedulePairingExpiry(
+            sessionID: intentSessionID,
+            expiresAt: Date().addingTimeInterval(BoothPairingSession.lifetime)
+        )
+        setPairingStage(.discovering, state: .waitingForMac(peerID: peerID))
         restartDiscoveryForPeerSelection()
     }
 
     public func pairWithPIN(peerID: String, pin: String) {
         guard role == .iPad else { return }
         guard BoothPairingSession.isValidPIN(pin) else {
-            connectionStatus.publishPairing(state: .failed(BoothPairingError.invalidPIN.localizedDescription))
+            let reason = BoothPairingError.invalidPIN.localizedDescription
+            pendingPairingFailure = reason
+            setPairingStage(.failed, state: .failed(reason))
             return
         }
-        guard let peer = discoveredPeersByID[peerID], peer.role == .mac else {
-            connectionStatus.publishPairing(state: .failed("The selected Mac was not found."))
+        let discoveredPeer = discoveredPeersByID[peerID]
+        if let discoveredPeer, discoveredPeer.role != .mac {
+            let reason = "The selected Mac was not found."
+            pendingPairingFailure = reason
+            setPairingStage(.failed, state: .failed(reason))
             return
         }
-        guard peer.protocolVersion == BoothTransportHello.currentProtocolVersion else {
-            connectionStatus.publishPairing(state: .failed(BoothPairingError.incompatibleProtocol.localizedDescription))
+        if let discoveredPeer,
+           discoveredPeer.protocolVersion != BoothTransportHello.currentProtocolVersion {
+            let reason = BoothPairingError.incompatibleProtocol.localizedDescription
+            pendingPairingFailure = reason
+            setPairingStage(.failed, state: .failed(reason))
             return
         }
-        guard let sessionID = peer.pairingSessionID, !sessionID.isEmpty else {
-            connectionStatus.publishPairing(state: .failed("Pairing session unavailable."))
+        let verifiedSession = receivedPairingSession.flatMap { session in
+            session.macDeviceID == peerID && session.expiresAt > Date() ? session : nil
+        }
+        guard let sessionID = discoveredPeer?.pairingSessionID ?? verifiedSession?.sessionID,
+              !sessionID.isEmpty else {
+            let reason = "Pairing session unavailable."
+            pendingPairingFailure = reason
+            setPairingStage(.failed, state: .failed(reason))
             return
         }
-        beginPairing(peerID: peerID, sessionID: sessionID, method: .pin(pin))
+        beginPairing(
+            peerID: peerID,
+            sessionID: sessionID,
+            method: .pin,
+            code: pin,
+            macEphemeralPublicKey: discoveredPeer?.pairingMacEphemeralPublicKey
+                ?? verifiedSession?.macEphemeralPublicKey,
+            expiresAt: discoveredPeer?.pairingExpiresAt ?? verifiedSession?.expiresAt
+        )
     }
 
     public func pairWithQRCode(_ payload: BoothPairingQRCodePayload) {
@@ -344,10 +613,15 @@ public final class NetworkBoothTransport: BoothTransport {
             beginPairing(
                 peerID: payload.macDeviceID,
                 sessionID: payload.pairingSessionID,
-                method: .qrToken(payload.oneTimeToken)
+                method: .qrToken,
+                code: payload.oneTimeToken,
+                macEphemeralPublicKey: payload.macEphemeralPublicKey,
+                expiresAt: payload.expiresAt
             )
         } catch {
-            connectionStatus.publishPairing(state: .failed(error.localizedDescription))
+            let reason = error.localizedDescription
+            pendingPairingFailure = reason
+            setPairingStage(.failed, state: .failed(reason))
         }
     }
 
@@ -355,25 +629,19 @@ public final class NetworkBoothTransport: BoothTransport {
         let wasCurrent = peerDeviceID == peerID
         trustedStore.forget(peerID: peerID)
         if targetPeerID == peerID {
-            targetPeerID = nil
-            pendingPairingRequest = nil
-            pendingPairingIntent = nil
-            pendingPairingFailure = nil
+            resetPairingState(clearTarget: true, clearPendingCommit: true, clearFailure: true)
         }
         if wasCurrent { controlConnection?.cancel() }
-        publishPairingStatus()
+        setPairingStage(.idle, state: .idle)
         if role == .iPad { restartDiscoveryForPeerSelection() }
     }
 
     public func forgetAllPeers() {
         trustedStore.forgetAll()
-        targetPeerID = nil
-        pendingPairingRequest = nil
-        pendingPairingIntent = nil
-        pendingPairingFailure = nil
+        resetPairingState(clearTarget: true, clearPendingCommit: true, clearFailure: true)
         peerAuthenticated = false
         controlConnection?.cancel()
-        publishPairingStatus()
+        setPairingStage(.idle, state: .idle)
         if role == .iPad { restartDiscoveryForPeerSelection() }
     }
 
@@ -381,6 +649,8 @@ public final class NetworkBoothTransport: BoothTransport {
         shouldReconnect = true
         cancelLANRecovery()
         reconnectAttempt = 0
+        connectionStatus.publishReconnectState(inProgress: false)
+        emitTransportEvent(.transportDiscoveryStarted, attempt: reconnectAttempt)
         routeMachine = BoothNetworkRouteMachine(preference: requestedPreference)
         startPathMonitors()
 
@@ -399,9 +669,16 @@ public final class NetworkBoothTransport: BoothTransport {
 
     public func disconnect() {
         shouldReconnect = false
+        connectionStatus.publishReconnectState(inProgress: false)
         cancelLANRecovery()
         cancelRouteDiscovery()
-        clearPairingSession()
+        let keepingTrustedTarget = targetPeerID.map(trustedStore.trustedPeerIDs.contains) ?? false
+        resetPairingState(
+            clearTarget: !keepingTrustedTarget,
+            clearPendingCommit: true,
+            clearFailure: true
+        )
+        setPairingStage(.idle, state: .idle)
         stopPathMonitors()
         tearDownActiveTransport()
         fallbackActive = false
@@ -431,7 +708,8 @@ public final class NetworkBoothTransport: BoothTransport {
         return true
     }
 
-    public func sendControl(_ message: Message) {
+    @discardableResult
+    public func sendControl(_ message: Message) -> BoothControlSendOutcome {
         send(message, on: controlConnection, channel: .control)
     }
 
@@ -497,9 +775,14 @@ public final class NetworkBoothTransport: BoothTransport {
 
     private func makeParameters(for interface: BoothNetworkInterfacePolicy) -> NWParameters {
         let parameters = NWParameters.tcp
-        parameters.requiredInterfaceType = switch interface {
-        case .wifi: .wifi
-        case .wiredEthernet: .wiredEthernet
+        switch interface {
+        case .wifi:
+            // "Wi-Fi" is the local-network preference, not a physical
+            // interface requirement. This allows router LAN, hotspot, and
+            // peer-to-peer paths to remain eligible.
+            parameters.includePeerToPeer = true
+        case .wiredEthernet:
+            parameters.requiredInterfaceType = .wiredEthernet
         }
         return parameters
     }
@@ -527,7 +810,10 @@ public final class NetworkBoothTransport: BoothTransport {
         lanMonitor.start(queue: DispatchQueue(label: "PRC-PhotoBooth.WiredEthernetPath"))
         lanPathMonitor = lanMonitor
 
-        let wifiMonitor = NWPathMonitor(requiredInterfaceType: .wifi)
+        // The Wi-Fi preference represents any usable local path. The
+        // connection's Bonjour/TCP result remains authoritative for the
+        // actual route; this monitor is only an availability hint.
+        let wifiMonitor = NWPathMonitor()
         wifiMonitor.pathUpdateHandler = { [weak self] path in
             Task { @MainActor [weak self] in
                 self?.handleWiFiPathUpdate(path.status == .satisfied)
@@ -576,6 +862,14 @@ public final class NetworkBoothTransport: BoothTransport {
             return
         }
         guard activeInterface == .wiredEthernet else { return }
+        // A direct, manually addressed Ethernet link commonly has no default
+        // route or DNS server. NWPathMonitor therefore reports it as
+        // unsatisfied even while 10.0.0.1 <-> 10.0.0.2 TCP is usable. The Mac
+        // owns the fixed listener for that configuration, so keep it alive;
+        // the accepted connection/hello remains the authoritative liveness
+        // signal. Without this guard the Mac silently replaced ports 58500/1
+        // with Wi-Fi listeners during physical iPad pairing.
+        if retainsManualLANListener { return }
         if case .connectingLAN = routeMachine.state {
             // Initial monitor samples can race route establishment.
             return
@@ -704,6 +998,11 @@ public final class NetworkBoothTransport: BoothTransport {
         lanHandshakeTask = nil
         lanHandshakeState = .timeout
         lastNetworkError = reason
+        if retainsManualLANListener {
+            connectionState = .disconnected
+            publishStatus()
+            return
+        }
         print("[NetworkRoute] LAN handshake timed out after \(Self.lanHandshakeTimeout)s")
         let command = routeMachine.lanHandshakeTimedOut(wifiAvailable: pathAvailable(.wifi))
         if command == .unavailable {
@@ -717,11 +1016,13 @@ public final class NetworkBoothTransport: BoothTransport {
     private func startTransport(
         using interface: BoothNetworkInterfacePolicy,
         fallback: Bool,
-        reason: String?,
-        discoveredControlBrowser: NWBrowser? = nil
+        reason: String?
     ) {
         guard shouldReconnect else { return }
-        cancelRouteDiscovery(keeping: discoveredControlBrowser)
+        // The selected route-discovery browser has already started. Cancel it
+        // before opening the connection; Network.framework does not support
+        // replacing browse handlers after start().
+        cancelRouteDiscovery()
         tearDownActiveTransport()
         activeInterface = interface
         fallbackActive = fallback
@@ -731,12 +1032,13 @@ public final class NetworkBoothTransport: BoothTransport {
         connectionState = role == .mac ? .disconnected : .connecting
         publishStatus()
 
-        if let discoveredControlBrowser {
-            controlBrowser = discoveredControlBrowser
-            configure(discoveredControlBrowser, channel: .control, interface: interface)
-        }
-
         print("[NetworkRoute] Starting \(interface == .wiredEthernet ? "LAN" : "Wi-Fi") transport")
+        emitTransportEvent(
+            .transportConnecting,
+            route: interface.rawValue,
+            attempt: reconnectAttempt,
+            reason: reason
+        )
         switch role {
         case .mac:
             startListener(channel: .control)
@@ -746,7 +1048,11 @@ public final class NetworkBoothTransport: BoothTransport {
             startBrowser(channel: .preview)
         }
 
-        if interface == .wiredEthernet {
+        // A Mac must keep its LAN listeners alive while waiting for an iPad.
+        // The handshake timeout belongs to the initiating iPad connection;
+        // applying it to an idle Mac made direct Ethernet fall back to Wi-Fi
+        // after five seconds, before pairing could begin.
+        if interface == .wiredEthernet, role == .iPad {
             lanHandshakeTask = Task { @MainActor [weak self] in
                 do {
                     try await Task.sleep(for: .seconds(Self.lanHandshakeTimeout))
@@ -770,23 +1076,65 @@ public final class NetworkBoothTransport: BoothTransport {
         connectionState = .connecting
         publishStatus()
         let generation = routeDiscoveryGate.begin()
+        if startDirectLANPairingFallbackIfNeeded() { return }
         startRouteDiscoveryBrowser(on: .wifi, generation: generation)
         startRouteDiscoveryBrowser(on: .wiredEthernet, generation: generation)
+        startRouteDiscoveryBrowser(
+            on: .wiredEthernet,
+            generation: generation,
+            parameters: .tcp,
+            isLANCompatibilityFallback: true
+        )
+    }
+
+    private func startDirectLANPairingFallbackIfNeeded() -> Bool {
+        guard let sessionID = activePairingControlSessionID,
+              sessionID != directLANPairingAttemptedSessionID,
+              targetPeerID != nil,
+              pendingPairingRequest != nil || pendingPairingIntent != nil else {
+            return false
+        }
+        // On iPadOS 16 with a direct Lightning Ethernet adapter, the link can
+        // pass IP traffic while Bonjour never returns a wired result. Do not
+        // make the fixed-address recovery path depend on that missing
+        // advertisement. The first hello and the pairing target ID still
+        // reject any endpoint that is not the selected Mac.
+        directLANPairingAttemptedSessionID = sessionID
+        print("[NetworkRoute] Starting direct LAN control fallback")
+        connectDiscoveredRoute(
+            interface: .wiredEthernet,
+            endpoint: directLANEndpoint(for: .control),
+            connectionParameters: makeParameters(for: .wiredEthernet)
+        )
+        return true
+    }
+
+    private func directLANEndpoint(for channel: BoothTransportChannel) -> NWEndpoint {
+        .hostPort(
+            host: Self.directLANHost,
+            port: channel == .control ? Self.directLANControlPort : Self.directLANPreviewPort
+        )
     }
 
     private func startRouteDiscoveryBrowser(
         on interface: BoothNetworkInterfacePolicy,
-        generation: Int
+        generation: Int,
+        parameters: NWParameters? = nil,
+        isLANCompatibilityFallback: Bool = false
     ) {
         let browser = NWBrowser(
             for: .bonjourWithTXTRecord(type: Self.controlServiceType, domain: nil),
-            using: makeParameters(for: interface)
+            using: parameters ?? makeParameters(for: interface)
         )
         browser.browseResultsChangedHandler = { [weak self, weak browser] results, _ in
             Task { @MainActor [weak self, weak browser] in
                 guard let self, let browser,
                       self.routeDiscoveryGate.accepts(generation),
-                      self.isCurrentRouteDiscoveryBrowser(browser, interface: interface) else { return }
+                      self.isCurrentRouteDiscoveryBrowser(
+                        browser,
+                        interface: interface,
+                        isLANCompatibilityFallback: isLANCompatibilityFallback
+                      ) else { return }
 
                 self.updateDiscoveredPeers(from: results, interface: interface)
                 for result in results {
@@ -795,11 +1143,16 @@ public final class NetworkBoothTransport: BoothTransport {
                           let targetPeerID = self.targetPeerID,
                           peer.id == targetPeerID else { continue }
                     guard peer.protocolVersion == BoothTransportHello.currentProtocolVersion else {
-                        self.connectionStatus.publishPairing(state: .failed(BoothPairingError.incompatibleProtocol.localizedDescription))
+                        let reason = BoothPairingError.incompatibleProtocol.localizedDescription
+                        self.pendingPairingFailure = reason
+                        self.setPairingStage(.failed, state: .failed(reason))
                         continue
                     }
 
                     let advertisedPreference = peer.networkPreference
+                    guard !isLANCompatibilityFallback || advertisedPreference == .lan else {
+                        continue
+                    }
                     if let advertisedPreference,
                        self.requestedPreference != advertisedPreference {
                         self.requestedPreference = advertisedPreference
@@ -824,8 +1177,7 @@ public final class NetworkBoothTransport: BoothTransport {
                         }
                         self.connectDiscoveredRoute(
                             interface: interface,
-                            endpoint: result.endpoint,
-                            browser: browser
+                            endpoint: result.endpoint
                         )
                         return
                     }
@@ -837,9 +1189,15 @@ public final class NetworkBoothTransport: BoothTransport {
             Task { @MainActor [weak self, weak browser] in
                 guard let self, let browser,
                       self.routeDiscoveryGate.accepts(generation),
-                      self.isCurrentRouteDiscoveryBrowser(browser, interface: interface) else { return }
+                      self.isCurrentRouteDiscoveryBrowser(
+                        browser,
+                        interface: interface,
+                        isLANCompatibilityFallback: isLANCompatibilityFallback
+                      ) else { return }
                 print("[NetworkRoute] \(interface.rawValue) discovery failed: \(error.localizedDescription)")
-                if interface == .wifi {
+                if isLANCompatibilityFallback {
+                    self.lanCompatibilityRouteDiscoveryBrowser = nil
+                } else if interface == .wifi {
                     self.wifiRouteDiscoveryBrowser = nil
                 } else {
                     self.lanRouteDiscoveryBrowser = nil
@@ -847,8 +1205,10 @@ public final class NetworkBoothTransport: BoothTransport {
                 self.scheduleReconnect()
             }
         }
-        browser.start(queue: .main)
-        if interface == .wifi {
+        browser.start(queue: transportQueue)
+        if isLANCompatibilityFallback {
+            lanCompatibilityRouteDiscoveryBrowser = browser
+        } else if interface == .wifi {
             wifiRouteDiscoveryBrowser = browser
         } else {
             lanRouteDiscoveryBrowser = browser
@@ -889,10 +1249,7 @@ public final class NetworkBoothTransport: BoothTransport {
             guard let endpoint else { return }
             self.connectDiscoveredRoute(
                 interface: pendingInterface,
-                endpoint: endpoint,
-                browser: pendingInterface == .wifi
-                    ? self.wifiRouteDiscoveryBrowser
-                    : self.lanRouteDiscoveryBrowser
+                endpoint: endpoint
             )
         }
     }
@@ -900,7 +1257,7 @@ public final class NetworkBoothTransport: BoothTransport {
     private func connectDiscoveredRoute(
         interface: BoothNetworkInterfacePolicy,
         endpoint: NWEndpoint,
-        browser: NWBrowser?
+        connectionParameters: NWParameters? = nil
     ) {
         routeDiscoveryFallbackTask?.cancel()
         routeDiscoveryFallbackTask = nil
@@ -915,20 +1272,21 @@ public final class NetworkBoothTransport: BoothTransport {
         startTransport(
             using: interface,
             fallback: interface == .wifi && requestedPreference == .lan,
-            reason: interface == .wifi && requestedPreference == .lan ? "LAN unavailable" : nil,
-            discoveredControlBrowser: browser
+            reason: interface == .wifi && requestedPreference == .lan ? "LAN unavailable" : nil
         )
-        connect(to: endpoint, channel: .control)
+        connect(to: endpoint, channel: .control, parameters: connectionParameters)
     }
 
-    private func cancelRouteDiscovery(keeping browser: NWBrowser? = nil) {
-        if wifiRouteDiscoveryBrowser !== browser { wifiRouteDiscoveryBrowser?.cancel() }
-        if lanRouteDiscoveryBrowser !== browser { lanRouteDiscoveryBrowser?.cancel() }
+    private func cancelRouteDiscovery() {
+        wifiRouteDiscoveryBrowser?.cancel()
+        lanRouteDiscoveryBrowser?.cancel()
+        lanCompatibilityRouteDiscoveryBrowser?.cancel()
         routeDiscoveryGate.invalidate()
         routeDiscoveryFallbackTask?.cancel()
         routeDiscoveryFallbackTask = nil
         wifiRouteDiscoveryBrowser = nil
         lanRouteDiscoveryBrowser = nil
+        lanCompatibilityRouteDiscoveryBrowser = nil
         pendingWiFiRouteEndpoint = nil
         pendingLANRouteEndpoint = nil
         routeDiscoverySelection.reset()
@@ -936,9 +1294,13 @@ public final class NetworkBoothTransport: BoothTransport {
 
     private func isCurrentRouteDiscoveryBrowser(
         _ browser: NWBrowser,
-        interface: BoothNetworkInterfacePolicy
+        interface: BoothNetworkInterfacePolicy,
+        isLANCompatibilityFallback: Bool = false
     ) -> Bool {
-        interface == .wifi
+        if isLANCompatibilityFallback {
+            return browser === lanCompatibilityRouteDiscoveryBrowser
+        }
+        return interface == .wifi
             ? browser === wifiRouteDiscoveryBrowser
             : browser === lanRouteDiscoveryBrowser
     }
@@ -950,8 +1312,9 @@ public final class NetworkBoothTransport: BoothTransport {
         reconnectTask = nil
         lanHandshakeTask?.cancel()
         lanHandshakeTask = nil
-        heartbeatTimer?.invalidate()
-        heartbeatTimer = nil
+        waitingRecoveryTasks.values.forEach { $0.cancel() }
+        waitingRecoveryTasks.removeAll()
+        stopHeartbeat()
         cancelTransportObjects()
         peerName = ""
         connectedPeerNames = []
@@ -961,6 +1324,7 @@ public final class NetworkBoothTransport: BoothTransport {
     }
 
     private func cancelTransportObjects() {
+        controlConnectionGeneration &+= 1
         controlBrowser?.cancel()
         previewBrowser?.cancel()
         controlBrowser = nil
@@ -975,18 +1339,22 @@ public final class NetworkBoothTransport: BoothTransport {
         previewConnection = nil
         controlEndpointDescription = nil
         previewEndpointDescription = nil
-        controlParser = BoothFrameParser()
-        previewParser = BoothFrameParser()
+        resetFrameDecoder(.control)
+        resetFrameDecoder(.preview)
         previewFrames.reset()
         didReceiveHello = false
         peerAuthenticated = false
         didInitiateAuthentication = false
         peerHello = nil
         pendingAuthChallenge = nil
+        deferredAuthChallenge = nil
         peerDeviceID = nil
         expectedPeerDeviceID = nil
         let pairingState: BoothPairingState
-        if let incomingPairingRequest,
+        if let pendingPairingFailure {
+            pairingState = .failed(pendingPairingFailure)
+            pairingStageValue = .failed
+        } else if let incomingPairingRequest,
            let session = currentPairingSession {
             pairingState = .incoming(
                 request: incomingPairingRequest,
@@ -994,6 +1362,8 @@ public final class NetworkBoothTransport: BoothTransport {
             )
         } else if let session = currentPairingSession, session.isActive() {
             pairingState = .pairing(expiresAt: session.info.expiresAt)
+        } else if let pendingPairingCommit {
+            pairingState = .authenticating(peerID: pendingPairingCommit.peer.id)
         } else if let pendingPairingRequest {
             pairingState = .pairing(
                 expiresAt: discoveredPeersByID[pendingPairingRequest.targetMacDeviceID]?.pairingExpiresAt
@@ -1001,12 +1371,11 @@ public final class NetworkBoothTransport: BoothTransport {
             )
         } else if let pendingPairingIntent {
             pairingState = .waitingForMac(peerID: pendingPairingIntent.targetMacDeviceID)
-        } else if let pendingPairingFailure {
-            pairingState = .failed(pendingPairingFailure)
         } else {
+            pairingStageValue = .idle
             pairingState = .idle
         }
-        connectionStatus.publishPairing(authenticated: false, state: pairingState)
+        publishPairingStatus(state: pairingState)
         resetPreviewIdentity()
     }
 
@@ -1022,6 +1391,7 @@ public final class NetworkBoothTransport: BoothTransport {
         if role == .mac, let session = currentPairingSession, session.isActive() {
             metadata["pairingSessionID"] = session.info.sessionID
             metadata["pairingExpiresAt"] = String(session.info.expiresAt.timeIntervalSince1970)
+            metadata["pairingMacKey"] = session.info.macEphemeralPublicKey.base64URLEncodedString()
         }
         return NWListener.Service(
             name: "PRC PhotoBooth \(channel == .control ? "Control" : "Preview") \(localIdentity.id)",
@@ -1045,6 +1415,7 @@ public final class NetworkBoothTransport: BoothTransport {
               let peerRole = DeviceRole(rawValue: roleRaw) else { return nil }
         let preferred = trustedStore.preferredPeerID
         let expiresAt = txtRecord["pairingExpiresAt"].flatMap(Double.init).map(Date.init(timeIntervalSince1970:))
+        let macEphemeralPublicKey = txtRecord["pairingMacKey"].flatMap(Data.init(base64URLString:))
         return BoothDiscoveredPeer(
             id: id,
             displayName: txtRecord["deviceName"] ?? id,
@@ -1055,6 +1426,7 @@ public final class NetworkBoothTransport: BoothTransport {
             availableInterfaces: [interface],
             pairingSessionID: txtRecord["pairingSessionID"],
             pairingExpiresAt: expiresAt,
+            pairingMacEphemeralPublicKey: macEphemeralPublicKey,
             isTrusted: trustedStore.trustedPeerIDs.contains(id),
             isPreferred: preferred == id
         )
@@ -1081,6 +1453,7 @@ public final class NetworkBoothTransport: BoothTransport {
                 existing.networkPreference = peer.networkPreference
                 existing.pairingSessionID = peer.pairingSessionID ?? existing.pairingSessionID
                 existing.pairingExpiresAt = peer.pairingExpiresAt ?? existing.pairingExpiresAt
+                existing.pairingMacEphemeralPublicKey = peer.pairingMacEphemeralPublicKey ?? existing.pairingMacEphemeralPublicKey
                 existing.isTrusted = peer.isTrusted
                 existing.isPreferred = peer.isPreferred
                 peer = existing
@@ -1096,7 +1469,14 @@ public final class NetworkBoothTransport: BoothTransport {
         if channel == .preview, previewListener != nil { return }
         let listener: NWListener
         do {
-            listener = try NWListener(using: makeParameters(for: activeInterface))
+            if activeInterface == .wiredEthernet {
+                let port = channel == .control
+                    ? Self.directLANControlPort
+                    : Self.directLANPreviewPort
+                listener = try NWListener(using: makeParameters(for: activeInterface), on: port)
+            } else {
+                listener = try NWListener(using: makeParameters(for: activeInterface))
+            }
         } catch {
             print("[Network] listener creation failed: \(error.localizedDescription)")
             if activeInterface == .wiredEthernet { handleLANHandshakeFailure(reason: error.localizedDescription) }
@@ -1131,7 +1511,7 @@ public final class NetworkBoothTransport: BoothTransport {
                 self.accept(connection, channel: channel)
             }
         }
-        listener.start(queue: .main)
+        listener.start(queue: transportQueue)
         if channel == .control { controlListener = listener } else { previewListener = listener }
     }
 
@@ -1145,7 +1525,7 @@ public final class NetworkBoothTransport: BoothTransport {
             using: makeParameters(for: activeInterface)
         )
         configure(browser, channel: channel, interface: activeInterface)
-        browser.start(queue: .main)
+        browser.start(queue: transportQueue)
         if channel == .control { controlBrowser = browser } else { previewBrowser = browser }
     }
 
@@ -1222,22 +1602,27 @@ public final class NetworkBoothTransport: BoothTransport {
         if channel == .control {
             resetPreviewConnection()
             controlConnection?.cancel()
+            controlConnectionGeneration &+= 1
             controlConnection = connection
             controlEndpointDescription = connection.endpoint.debugDescription
             resetControlAuthentication()
-            controlParser = BoothFrameParser()
+            resetFrameDecoder(.control)
         } else {
             previewFrames.reset()
             previewConnection?.cancel()
             previewConnection = connection
             previewEndpointDescription = connection.endpoint.debugDescription
-            previewParser = BoothFrameParser()
+            resetFrameDecoder(.preview)
             resetPreviewIdentity()
         }
         configure(connection, channel: channel)
     }
 
-    private func connect(to endpoint: NWEndpoint, channel: BoothTransportChannel) {
+    private func connect(
+        to endpoint: NWEndpoint,
+        channel: BoothTransportChannel,
+        parameters: NWParameters? = nil
+    ) {
         guard let activeInterface else { return }
         if channel == .preview, expectedPeerDeviceID == nil { return }
         let description = endpoint.debugDescription
@@ -1245,18 +1630,25 @@ public final class NetworkBoothTransport: BoothTransport {
             guard controlConnection == nil || controlEndpointDescription != description else { return }
             resetPreviewConnection()
             controlConnection?.cancel()
-            controlConnection = NWConnection(to: endpoint, using: makeParameters(for: activeInterface))
+            controlConnectionGeneration &+= 1
+            controlConnection = NWConnection(
+                to: endpoint,
+                using: parameters ?? makeParameters(for: activeInterface)
+            )
             controlEndpointDescription = description
             resetControlAuthentication()
-            controlParser = BoothFrameParser()
+            resetFrameDecoder(.control)
             if let connection = controlConnection { configure(connection, channel: channel) }
         } else {
             guard previewConnection == nil || previewEndpointDescription != description else { return }
             previewFrames.reset()
             previewConnection?.cancel()
-            previewConnection = NWConnection(to: endpoint, using: makeParameters(for: activeInterface))
+            previewConnection = NWConnection(
+                to: endpoint,
+                using: parameters ?? makeParameters(for: activeInterface)
+            )
             previewEndpointDescription = description
-            previewParser = BoothFrameParser()
+            resetFrameDecoder(.preview)
             resetPreviewIdentity()
             if let connection = previewConnection { configure(connection, channel: channel) }
         }
@@ -1264,13 +1656,57 @@ public final class NetworkBoothTransport: BoothTransport {
 
     private func configure(_ connection: NWConnection, channel: BoothTransportChannel) {
         let generationAtStart = callbackGate.generation
+        let connectionGenerationAtStart = channel == .control ? controlConnectionGeneration : nil
+        connection.viabilityUpdateHandler = { [weak self, weak connection] isViable in
+            let reason = isViable ? nil : "Network path is not viable."
+            Task { @MainActor [weak self, weak connection] in
+                guard let self, let connection,
+                      self.isCurrent(connection, channel: channel) else { return }
+                if let reason {
+                    self.scheduleWaitingRecovery(for: connection, channel: channel, reason: reason)
+                } else {
+                    self.cancelWaitingRecovery(for: channel)
+                }
+            }
+        }
+        connection.pathUpdateHandler = { [weak self] path in
+            let route = Self.pathDescription(path)
+            print("[Network] \(channel) path=\(route)")
+            Task { @MainActor [weak self] in
+                self?.emitTransportEvent(.routeChanged, channel: channel, route: route)
+            }
+        }
+        connection.betterPathUpdateHandler = { [weak self, weak connection] hasBetterPath in
+            guard hasBetterPath else { return }
+            Task { @MainActor [weak self, weak connection] in
+                guard let self, let connection,
+                      self.isCurrent(connection, channel: channel) else { return }
+                print("[Network] \(channel) better path available; keeping current connection")
+            }
+        }
         connection.stateUpdateHandler = { [weak self, weak connection] state in
             Task { @MainActor [weak self] in
                 guard let self, let connection else { return }
                 guard self.callbackGate.accepts(generationAtStart),
-                      self.isCurrent(connection, channel: channel) else { return }
+                      self.isCurrent(connection, channel: channel),
+                      connectionGenerationAtStart == nil
+                        || self.controlConnectionGeneration == connectionGenerationAtStart else { return }
                 switch state {
+                case .waiting(let error):
+                    self.emitTransportEvent(
+                        .transportWaiting,
+                        channel: channel,
+                        attempt: self.reconnectAttempt,
+                        reason: error.localizedDescription
+                    )
+                    self.scheduleWaitingRecovery(
+                        for: connection,
+                        channel: channel,
+                        reason: error.localizedDescription
+                    )
                 case .ready:
+                    self.cancelWaitingRecovery(for: channel)
+                    self.emitTransportEvent(.transportReady, channel: channel)
                     if self.activeInterface == .wiredEthernet,
                        let path = connection.currentPath,
                        !path.usesInterfaceType(.wiredEthernet) {
@@ -1287,10 +1723,12 @@ public final class NetworkBoothTransport: BoothTransport {
                         self.sendTransportHello()
                     } else {
                         self.connectionStatus.publishPreviewChannel(connected: true)
+                        self.emitTransportEvent(.previewReconnected, channel: channel)
                         self.receive(on: connection, channel: channel)
                         self.sendPreviewHello(on: connection)
                     }
                 case .failed, .cancelled:
+                    self.cancelWaitingRecovery(for: channel)
                     if channel == .preview {
                         self.connectionStatus.publishPreviewChannel(connected: false)
                     }
@@ -1300,53 +1738,132 @@ public final class NetworkBoothTransport: BoothTransport {
                 }
             }
         }
-        connection.start(queue: .main)
+        connection.start(queue: transportQueue)
+    }
+
+    private func scheduleWaitingRecovery(
+        for connection: NWConnection,
+        channel: BoothTransportChannel,
+        reason: String
+    ) {
+        guard isCurrent(connection, channel: channel), shouldReconnect else { return }
+        let key = channel.rawValue
+        guard waitingRecoveryTasks[key] == nil else { return }
+        lastNetworkError = reason
+        connectionStatus.publishNetworkError(reason)
+        if channel == .control {
+            connectionState = .connecting
+            publishStatus()
+        } else {
+            connectionStatus.publishPreviewChannel(connected: false)
+        }
+
+        waitingRecoveryTasks[key] = Task { @MainActor [weak self, weak connection] in
+            do {
+                try await Task.sleep(for: .seconds(2))
+            } catch {
+                return
+            }
+            guard let self, let connection,
+                  self.isCurrent(connection, channel: channel),
+                  self.shouldReconnect else { return }
+            self.waitingRecoveryTasks[key] = nil
+            connection.cancel()
+        }
+    }
+
+    private func cancelWaitingRecovery(for channel: BoothTransportChannel) {
+        let key = channel.rawValue
+        waitingRecoveryTasks[key]?.cancel()
+        waitingRecoveryTasks[key] = nil
+    }
+
+    private nonisolated static func pathDescription(_ path: NWPath) -> String {
+        if path.usesInterfaceType(.wiredEthernet) { return "Wired Ethernet" }
+        if path.usesInterfaceType(.wifi) { return "Wi-Fi or local wireless" }
+        if path.usesInterfaceType(.other) { return "Other / peer-to-peer" }
+        return "Unknown"
     }
 
     private func receive(on connection: NWConnection, channel: BoothTransportChannel) {
-        connection.receive(minimumIncompleteLength: 1, maximumLength: 64 * 1024) { [weak self] data, _, isComplete, error in
-            let errorMessage = error?.localizedDescription
-            let didFail = error != nil
-            Task { @MainActor [weak self] in
-                guard let self, self.isCurrent(connection, channel: channel) else { return }
-                if let data, !data.isEmpty { self.receiveData(data, channel: channel) }
-                if isComplete || didFail {
-                    self.connectionDidClose(connection, channel: channel, reason: errorMessage)
-                } else {
-                    self.receive(on: connection, channel: channel)
+        Self.receive(
+            on: connection,
+            channel: channel,
+            decoder: frameDecoder,
+            activity: { [heartbeatState] in heartbeatState.markActivity() },
+            deliver: { [weak self, weak connection] frames in
+                guard let self, let connection,
+                      self.isCurrent(connection, channel: channel) else { return }
+                self.handleDecodedFrames(frames)
+            },
+            close: { [weak self, weak connection] reason in
+                guard let self, let connection,
+                      self.isCurrent(connection, channel: channel) else { return }
+                self.connectionDidClose(connection, channel: channel, reason: reason)
+            }
+        )
+    }
+
+    private nonisolated static func receive(
+        on connection: NWConnection,
+        channel: BoothTransportChannel,
+        decoder: BoothTransportFrameDecoder,
+        activity: @escaping @Sendable () -> Void,
+        deliver: @escaping @MainActor ([BoothDecodedTransportFrame]) -> Void,
+        close: @escaping @MainActor (String?) -> Void
+    ) {
+        connection.receive(minimumIncompleteLength: 1, maximumLength: 64 * 1024) { data, _, isComplete, error in
+            var shouldContinue = !isComplete && error == nil
+            if let data, !data.isEmpty {
+                do {
+                    let frames = try decoder.decode(data, channel: channel)
+                    if !frames.isEmpty {
+                        if channel == .control { activity() }
+                        Task { @MainActor in deliver(frames) }
+                    }
+                } catch {
+                    shouldContinue = false
+                    Task { @MainActor in close("Invalid \(channel) frame: \(error)") }
                 }
+            }
+
+            if isComplete || error != nil {
+                Task { @MainActor in close(error?.localizedDescription) }
+            } else if shouldContinue {
+                Self.receive(
+                    on: connection,
+                    channel: channel,
+                    decoder: decoder,
+                    activity: activity,
+                    deliver: deliver,
+                    close: close
+                )
             }
         }
     }
 
-    private func receiveData(_ data: Data, channel: BoothTransportChannel) {
-        do {
-            let frames = try channel == .control
-                ? controlParser.append(data)
-                : previewParser.append(data)
-            if channel == .control { lastControlMessageAt = Date() }
-            for frame in frames {
-                guard frame.channel == channel || frame.channel == .heartbeat else { continue }
-                switch frame.channel {
-                case .control:
-                    guard let message = try? Message.decoded(from: frame.payload) else { continue }
-                    handleControl(message)
-                case .heartbeat:
-                    if channel == .preview { handlePreviewHello(frame.payload) }
-                case .preview:
-                    guard previewIdentityVerified else { continue }
-                    onPreviewFrame?(frame.payload)
-                case .asset:
-                    break
-                }
+    private func handleDecodedFrames(_ frames: [BoothDecodedTransportFrame]) {
+        for frame in frames {
+            switch frame {
+            case .control(let message):
+                lastControlMessageAt = Date()
+                connectionStatus.publishControlActivity(at: lastControlMessageAt)
+                handleControl(message)
+            case .heartbeat:
+                guard peerAuthenticated else { continue }
+                lastControlMessageAt = Date()
+                connectionStatus.publishControlActivity(at: lastControlMessageAt)
+            case .previewHello(let payload):
+                handlePreviewHello(payload)
+            case .preview(let payload):
+                guard previewIdentityVerified else { continue }
+                onPreviewFrame?(payload)
             }
-        } catch {
-            print("[Network] invalid frame: \(error)")
-            connectionDidClose(channel == .control ? controlConnection : previewConnection, channel: channel)
         }
     }
 
     private func handleControl(_ message: Message) {
+        logPairingMessage(message, sent: false)
         switch message {
         case .helloDetails(let hello):
             handleHello(hello)
@@ -1358,22 +1875,25 @@ public final class NetworkBoothTransport: BoothTransport {
             handlePairingRequest(request)
         case .pairingResult(let result):
             handlePairingResult(result)
+        case .pairingVerificationConfirmed(let sessionID, let proof):
+            handlePairingVerificationConfirmed(sessionID: sessionID, proof: proof)
         case .authChallenge(let challenge):
             handleAuthChallenge(challenge)
         case .authProof(let proof):
             handleAuthProof(proof)
         case .connectionRejected(let reason):
             lastNetworkError = reason
-            if pendingPairingRequest != nil || pendingPairingIntent != nil {
+            if hasEphemeralPairingState {
+                failPairing(reason)
+            } else {
                 pendingPairingFailure = reason
-                pendingPairingRequest = nil
-                pendingPairingIntent = nil
+                setPairingStage(.failed, state: .failed(reason))
             }
-            connectionStatus.publishPairing(authenticated: false, state: .failed(reason))
             connectionDidClose(controlConnection, channel: .control, reason: reason)
         case .heartbeat:
             guard peerAuthenticated else { return }
             lastControlMessageAt = Date()
+            connectionStatus.publishControlActivity(at: lastControlMessageAt)
         default:
             guard peerAuthenticated else { return }
             onControlMessage?(message)
@@ -1411,6 +1931,14 @@ public final class NetworkBoothTransport: BoothTransport {
         publishStatus()
 
         if role == .mac {
+            if let pendingPairingCommit {
+                guard pendingPairingCommit.peer.id == hello.deviceID else {
+                    rejectControlConnection("This Mac is waiting for a different iPad to finish pairing.")
+                    return
+                }
+                sendPendingPairingResult(pendingPairingCommit, on: controlConnection)
+                return
+            }
             switch BoothPeerSelectionPolicy.admission(
                 peerID: hello.deviceID,
                 preferredPeerID: trustedStore.preferredPeerID,
@@ -1420,7 +1948,13 @@ public final class NetworkBoothTransport: BoothTransport {
                 beginAuthentication(with: hello.deviceID)
             case .unpaired:
                 if let session = currentPairingSession, session.isActive() {
-                    connectionStatus.publishPairing(state: .pairing(expiresAt: session.info.expiresAt))
+                    let state: BoothPairingState
+                    if let incomingPairingRequest {
+                        state = .incoming(request: incomingPairingRequest, expiresAt: session.info.expiresAt)
+                    } else {
+                        state = .pairing(expiresAt: session.info.expiresAt)
+                    }
+                    setPairingStage(pairingStageValue == .failed ? .discovering : pairingStageValue, state: state)
                 }
             case .notSelected:
                 rejectControlConnection("This Mac is configured for another iPad. Select this iPad in Mac Settings first.")
@@ -1432,15 +1966,21 @@ public final class NetworkBoothTransport: BoothTransport {
             rejectControlConnection("This Mac was not selected on this iPad.")
             return
         }
-        if let pendingPairingRequest {
-            send(.pairingRequest(request: pendingPairingRequest), on: controlConnection, channel: .control)
-            if let expiresAt = discoveredPeersByID[hello.deviceID]?.pairingExpiresAt {
-                connectionStatus.publishPairing(state: .pairing(expiresAt: expiresAt))
+        if pendingPairingCommit?.peer.id == hello.deviceID {
+            if pendingPairingCommit?.method == .pin,
+               pendingPairingVerificationCode != nil {
+                setPairingStage(.verificationPending, state: .authenticating(peerID: hello.deviceID))
+            } else {
+                beginAuthentication(with: hello.deviceID)
             }
             return
         }
+        if let pendingPairingRequest {
+            sendPairingRequest(pendingPairingRequest, on: controlConnection)
+            return
+        }
         if let pendingPairingIntent {
-            send(.pairingIntent(intent: pendingPairingIntent), on: controlConnection, channel: .control)
+            sendPairingIntent(pendingPairingIntent, on: controlConnection)
             return
         }
         guard BoothPeerSelectionPolicy.canAutomaticallyConnect(
@@ -1453,6 +1993,202 @@ public final class NetworkBoothTransport: BoothTransport {
             return
         }
         beginAuthentication(with: hello.deviceID)
+    }
+
+    private var hasEphemeralPairingState: Bool {
+        currentPairingSession != nil
+            || incomingPairingRequest != nil
+            || pendingPairingRequest != nil
+            || pendingPairingIntent != nil
+            || pendingPairingCommit != nil
+    }
+
+    private var currentConnectionOwnsPairingState: Bool {
+        guard let peerID = peerHello?.deviceID else { return false }
+        if role == .mac {
+            return incomingPairingRequest?.iPadIdentity.id == peerID
+                || pendingPairingCommit?.peer.id == peerID
+        }
+        return targetPeerID == peerID
+            && (pendingPairingIntent != nil
+                || pendingPairingRequest != nil
+                || pendingPairingCommit != nil)
+    }
+
+    private var activePairingControlSessionID: String? {
+        currentPairingSession?.info.sessionID
+            ?? pendingPairingRequest?.sessionID
+            ?? pendingPairingSessionID
+            ?? pendingPairingCommit?.sessionID
+    }
+
+    private var pendingPairingStateExpiry: Date {
+        pairingExpiresAt ?? Date().addingTimeInterval(BoothPairingSession.lifetime)
+    }
+
+    private func sendPairingIntent(_ intent: BoothPairingIntent, on connection: NWConnection?) {
+        setPairingStage(.intentSent, state: .waitingForMac(peerID: intent.targetMacDeviceID))
+        sendCriticalControl(
+            .pairingIntent(intent: intent),
+            on: connection,
+            sessionID: pendingPairingSessionID
+        ) { [weak self] result in
+            guard let self else { return }
+            if case .failure(let error) = result {
+                self.failPairing("Pairing request could not be delivered: \(error.message)")
+            }
+        }
+    }
+
+    private func sendPairingSession(
+        _ session: BoothPairingSessionInfo,
+        request: IncomingBoothPairingRequest
+    ) {
+        pendingPairingFailure = nil
+        setPairingStage(.sessionSending, state: .incoming(request: request, expiresAt: session.expiresAt))
+        sendCriticalControl(
+            .pairingSessionAvailable(session: session),
+            on: controlConnection,
+            sessionID: session.sessionID
+        ) { [weak self] result in
+            guard let self else { return }
+            switch result {
+            case .success:
+                self.setPairingStage(.sessionSent, state: .incoming(request: request, expiresAt: session.expiresAt))
+            case .failure(let error):
+                self.failPairing("Pairing session could not be delivered: \(error.message)")
+            }
+        }
+    }
+
+    private func sendPairingRequest(_ request: BoothPairingRequest, on connection: NWConnection?) {
+        setPairingStage(.requestSending, state: .pairing(expiresAt: pendingPairingStateExpiry))
+        sendCriticalControl(
+            .pairingRequest(request: request),
+            on: connection,
+            sessionID: request.sessionID
+        ) { [weak self] result in
+            guard let self else { return }
+            switch result {
+            case .success:
+                self.setPairingStage(.requestSent, state: .pairing(expiresAt: self.pendingPairingStateExpiry))
+            case .failure(let error):
+                self.failPairing("Pairing request could not be delivered: \(error.message)")
+            }
+        }
+    }
+
+    private func sendPendingPairingResult(
+        _ commit: PendingPairingCommit,
+        on connection: NWConnection?
+    ) {
+        guard pendingPairingCommit == commit else { return }
+        pendingPairingFailure = nil
+        setPairingStage(.resultSending, state: .authenticating(peerID: commit.peer.id))
+        sendCriticalControl(
+            .pairingResult(result: commit.result),
+            on: connection,
+            sessionID: commit.sessionID
+        ) { [weak self] result in
+            guard let self else { return }
+            switch result {
+            case .success:
+                if commit.method == .pin {
+                    self.setPairingStage(.verificationPending, state: .authenticating(peerID: commit.peer.id))
+                    if self.didConfirmPairingVerification {
+                        self.sendPairingVerificationConfirmation(commit, on: connection)
+                    }
+                } else {
+                    self.setPairingStage(.authenticating, state: .authenticating(peerID: commit.peer.id))
+                    self.beginAuthentication(with: commit.peer.id)
+                }
+            case .failure(let error):
+                self.failPendingPairingDelivery("Pairing result could not be delivered: \(error.message)")
+            }
+        }
+    }
+
+    private func sendPairingVerificationConfirmation(
+        _ commit: PendingPairingCommit,
+        on connection: NWConnection?
+    ) {
+        guard pendingPairingCommit == commit,
+              commit.method == .pin,
+              pendingPairingVerificationCode != nil,
+              didConfirmPairingVerification else { return }
+        sendCriticalControl(
+            .pairingVerificationConfirmed(
+                sessionID: commit.sessionID,
+                proof: BoothPairingCrypto.makeVerificationConfirmationProof(
+                    secret: commit.secret,
+                    transcript: commit.transcript,
+                    role: .mac
+                )
+            ),
+            on: connection,
+            sessionID: commit.sessionID
+        ) { [weak self] result in
+            guard let self else { return }
+            switch result {
+            case .success:
+                self.setPairingStage(.authenticating, state: .authenticating(peerID: commit.peer.id))
+                self.beginAuthentication(with: commit.peer.id)
+            case .failure(let error):
+                self.didConfirmPairingVerification = false
+                self.failPendingPairingDelivery("Pairing verification could not be delivered: \(error.message)")
+            }
+        }
+    }
+
+    private func sendPairingFailure(
+        _ reason: String,
+        retryable: Bool = false,
+        preserveExistingPairing: Bool = false,
+        completion: (@MainActor (Result<Void, PairingControlSendError>) -> Void)? = nil
+    ) {
+        let responseSessionID = preserveExistingPairing ? nil : activePairingControlSessionID
+        if !preserveExistingPairing {
+            setPairingStage(.resultSending, state: .failed(reason))
+        }
+        let result = BoothPairingResult(
+            accepted: false,
+            reason: reason,
+            retryable: retryable,
+            pairingSessionID: responseSessionID
+        )
+        sendCriticalControl(
+            .pairingResult(result: result),
+            on: controlConnection,
+            sessionID: responseSessionID
+        ) { [weak self] sendResult in
+            guard let self else { return }
+            switch sendResult {
+            case .success:
+                if !preserveExistingPairing {
+                    self.setPairingStage(.failed, state: .failed(reason))
+                }
+            case .failure(let error):
+                if preserveExistingPairing {
+                    self.rejectControlConnection("Pairing response could not be delivered: \(error.message)")
+                } else {
+                    self.failPairing("Pairing response could not be delivered: \(error.message)")
+                }
+            }
+            completion?(sendResult)
+        }
+    }
+
+    private func failPendingPairingDelivery(_ reason: String) {
+        let commit = pendingPairingCommit
+        failPairing(
+            reason,
+            clearTarget: false,
+            clearPendingCommit: false,
+            closeConnection: true
+        )
+        guard let commit, pendingPairingCommit == commit else { return }
+        pendingPairingSessionID = commit.sessionID
+        schedulePairingExpiry(sessionID: commit.sessionID, expiresAt: commit.expiresAt)
     }
 
     private func handlePairingIntent(_ intent: BoothPairingIntent) {
@@ -1480,8 +2216,9 @@ public final class NetworkBoothTransport: BoothTransport {
 
         switch decision {
         case .reject(let reason):
-            sendPairingFailure(reason)
-            rejectControlConnection(reason)
+            sendPairingFailure(reason, preserveExistingPairing: true) { [weak self] _ in
+                self?.rejectControlConnection(reason)
+            }
         case .reuseSession:
             guard let session = currentPairingSession else {
                 sendPairingFailure("Pairing session is unavailable.")
@@ -1492,8 +2229,7 @@ public final class NetworkBoothTransport: BoothTransport {
                 receivedAt: now
             )
             incomingPairingRequest = request
-            publishPairingStatus(state: .incoming(request: request, expiresAt: session.info.expiresAt))
-            send(.pairingSessionAvailable(session: session.info), on: controlConnection, channel: .control)
+            sendPairingSession(session.info, request: request)
         case .startSession:
             lastPairingIntentAt[intent.iPadIdentity.id] = now
             guard startPairingSession(keepingControlConnection: true),
@@ -1506,8 +2242,7 @@ public final class NetworkBoothTransport: BoothTransport {
                 receivedAt: now
             )
             incomingPairingRequest = request
-            publishPairingStatus(state: .incoming(request: request, expiresAt: session.info.expiresAt))
-            send(.pairingSessionAvailable(session: session.info), on: controlConnection, channel: .control)
+            sendPairingSession(session.info, request: request)
         }
     }
 
@@ -1520,34 +2255,84 @@ public final class NetworkBoothTransport: BoothTransport {
               hello.deviceID == session.macDeviceID,
               !session.sessionID.isEmpty,
               !session.macDeviceName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-              session.expiresAt > Date() else { return }
+              session.macEphemeralPublicKey.count == 32,
+              session.expiresAt > Date() else {
+            if role == .iPad, pendingPairingIntent != nil {
+                failPairing("The Mac returned an invalid pairing session.")
+            }
+            return
+        }
 
         if var peer = discoveredPeersByID[session.macDeviceID] {
             peer.pairingSessionID = session.sessionID
             peer.pairingExpiresAt = session.expiresAt
+            peer.pairingMacEphemeralPublicKey = session.macEphemeralPublicKey
             discoveredPeersByID[session.macDeviceID] = peer
         }
+        receivedPairingSession = session
+        pendingPairingSessionID = session.sessionID
+        schedulePairingExpiry(sessionID: session.sessionID, expiresAt: session.expiresAt)
         pendingPairingFailure = nil
-        publishPairingStatus(state: .pairing(expiresAt: session.expiresAt))
+        setPairingStage(.sessionReceived, state: .pairing(expiresAt: session.expiresAt))
+        setPairingStage(.waitingForPIN, state: .pairing(expiresAt: session.expiresAt))
     }
 
-    private func beginPairing(peerID: String, sessionID: String, method: BoothPairingMethod) {
-        let expiresAt = discoveredPeersByID[peerID]?.pairingExpiresAt ?? Date().addingTimeInterval(BoothPairingSession.lifetime)
+    private func beginPairing(
+        peerID: String,
+        sessionID: String,
+        method: BoothPairingMethod,
+        code: String,
+        macEphemeralPublicKey: Data?,
+        expiresAt: Date? = nil
+    ) {
+        pairingGeneration &+= 1
+        cancelPairingExpiry()
+        let expiry = expiresAt
+            ?? discoveredPeersByID[peerID]?.pairingExpiresAt
+            ?? Date().addingTimeInterval(BoothPairingSession.lifetime)
         pendingPairingIntent = nil
         pendingPairingFailure = nil
+        pendingPairingSessionID = sessionID
+        guard let macEphemeralPublicKey, macEphemeralPublicKey.count == 32 else {
+            failPairing("Pairing session is missing its secure key.")
+            return
+        }
+        let ephemeralKey = Curve25519.KeyAgreement.PrivateKey()
+        let iPadEphemeralPublicKey = ephemeralKey.publicKey.rawRepresentation
+        let transcript = BoothPairingCrypto.pairingTranscript(
+            sessionID: sessionID,
+            macDeviceID: peerID,
+            iPadDeviceID: localIdentity.id,
+            method: method,
+            macEphemeralPublicKey: macEphemeralPublicKey,
+            iPadEphemeralPublicKey: iPadEphemeralPublicKey
+        )
         pendingPairingRequest = BoothPairingRequest(
             sessionID: sessionID,
             targetMacDeviceID: peerID,
             iPadIdentity: localIdentity,
-            method: method
+            method: method,
+            iPadEphemeralPublicKey: iPadEphemeralPublicKey,
+            admissionProof: BoothPairingCrypto.makeAdmissionProof(code: code, transcript: transcript)
+        )
+        pendingPairingPrivateKeyData = ephemeralKey.rawRepresentation
+        pendingPairingCode = code
+        receivedPairingSession = BoothPairingSessionInfo(
+            sessionID: sessionID,
+            macDeviceID: peerID,
+            macDeviceName: discoveredPeersByID[peerID]?.displayName ?? peerID,
+            expiresAt: expiresAt ?? Date().addingTimeInterval(BoothPairingSession.lifetime),
+            macEphemeralPublicKey: macEphemeralPublicKey
         )
         targetPeerID = peerID
-        connectionStatus.publishPairing(state: .pairing(expiresAt: expiresAt))
+        schedulePairingExpiry(sessionID: sessionID, expiresAt: expiry)
+        setPairingStage(.requestSending, state: .pairing(expiresAt: expiry))
         if didReceiveHello, peerDeviceID == peerID, !peerAuthenticated,
            let pendingPairingRequest {
-            send(.pairingRequest(request: pendingPairingRequest), on: controlConnection, channel: .control)
+            sendPairingRequest(pendingPairingRequest, on: controlConnection)
             return
         }
+        setPairingStage(.discovering, state: .pairing(expiresAt: expiry))
         restartDiscoveryForPeerSelection()
     }
 
@@ -1563,7 +2348,6 @@ public final class NetworkBoothTransport: BoothTransport {
             return
         }
         guard var session = currentPairingSession else {
-            incomingPairingRequest = nil
             sendPairingFailure("Pairing mode is not active.")
             return
         }
@@ -1571,72 +2355,102 @@ public final class NetworkBoothTransport: BoothTransport {
             sendPairingFailure("Pairing session does not match.")
             return
         }
-
-        let validation: BoothPairingAttemptResult
-        switch request.method {
-        case .pin(let pin):
-            validation = session.validatePIN(pin)
-        case .qrToken(let token):
-            guard request.sessionID == session.info.sessionID else {
-                sendPairingFailure("Pairing QR code is invalid.")
-                return
-            }
-            validation = session.validateQRToken(token)
+        guard request.iPadEphemeralPublicKey.count == 32,
+              request.admissionProof.count == SHA256.Digest.byteCount else {
+            sendPairingFailure("Pairing request is missing secure proof material.")
+            return
         }
+
+        incomingPairingRequest = IncomingBoothPairingRequest(
+            iPadIdentity: request.iPadIdentity
+        )
+        let transcript = BoothPairingCrypto.pairingTranscript(
+            sessionID: request.sessionID,
+            macDeviceID: localIdentity.id,
+            iPadDeviceID: request.iPadIdentity.id,
+            method: request.method,
+            macEphemeralPublicKey: session.info.macEphemeralPublicKey,
+            iPadEphemeralPublicKey: request.iPadEphemeralPublicKey
+        )
+        let validation = session.validateAdmissionProof(
+            request.admissionProof,
+            method: request.method,
+            transcript: transcript
+        )
         currentPairingSession = session
 
         switch validation {
         case .accepted:
             do {
-                let secret = try BoothPairingCrypto.makeSharedSecret()
+                let secret = try session.deriveSecret(
+                    iPadEphemeralPublicKey: request.iPadEphemeralPublicKey,
+                    method: request.method,
+                    transcript: transcript
+                )
                 let peer = TrustedBoothPeer(
                     id: request.iPadIdentity.id,
                     displayName: request.iPadIdentity.displayName,
                     role: .iPad,
                     lastSeenAt: Date()
                 )
-                try trustedStore.trust(peer, secret: secret)
-                trustedStore.preferredPeerID = peer.id
-                trustedStore.autoReconnect = true
-                clearPairingSession()
-                refreshAdvertisedServices()
-                publishPairingStatus()
-                send(
-                    .pairingResult(result: BoothPairingResult(
-                        accepted: true,
-                        macIdentity: localIdentity,
-                        sharedSecret: secret
-                    )),
-                    on: controlConnection,
-                    channel: .control
+                pendingPairingCommit = PendingPairingCommit(
+                    sessionID: request.sessionID,
+                    method: request.method,
+                    peer: peer,
+                    macIdentity: localIdentity,
+                    secret: secret,
+                    expiresAt: session.info.expiresAt,
+                    transcript: transcript,
+                    macEphemeralPublicKey: session.info.macEphemeralPublicKey,
+                    keyAgreementProof: BoothPairingCrypto.makeKeyAgreementProof(
+                        secret: secret,
+                        transcript: transcript,
+                        role: .mac
+                    )
                 )
-                beginAuthentication(with: peer.id)
-            } catch {
-                clearPairingSession()
+                pendingPairingRequest = nil
+                clearActivePairingSession()
+                pendingPairingVerificationCode = request.method == .pin
+                    ? BoothPairingCrypto.makeVerificationCode(secret: secret, transcript: transcript)
+                    : nil
+                didConfirmPairingVerification = false
+                pendingPairingFailure = nil
+                pendingPairingSessionID = request.sessionID
+                targetPeerID = peer.id
+                schedulePairingExpiry(sessionID: request.sessionID, expiresAt: session.info.expiresAt)
                 refreshAdvertisedServices()
-                sendPairingFailure(error.localizedDescription)
+                guard let commit = pendingPairingCommit else {
+                    failPairing("Pairing result could not be prepared.")
+                    return
+                }
+                sendPendingPairingResult(commit, on: controlConnection)
+            } catch {
+                failPairing(error.localizedDescription)
             }
         case .rejected(let remainingAttempts):
             let reason: String
-            switch request.method {
-            case .pin:
-                reason = "Pairing PIN is invalid. \(remainingAttempts) attempts remaining."
-            case .qrToken:
-                reason = "Pairing QR code is invalid."
-            }
-            sendPairingFailure(reason)
+            reason = request.method == .pin
+                ? "Pairing PIN is invalid. \(remainingAttempts) attempts remaining."
+                : "Pairing QR code is invalid."
+            pendingPairingFailure = reason
+            setPairingStage(.failed, state: .failed(reason))
+            sendPairingFailure(reason, retryable: remainingAttempts > 0)
         case .expired:
             expirePairingSession(sessionID: session.info.sessionID)
         case .locked:
             let reason = "Too many incorrect pairing PIN attempts."
             let connection = peerAuthenticated ? nil : controlConnection
-            clearPairingSession()
+            clearActivePairingSession()
             pendingPairingFailure = reason
-            connectionStatus.publishPairing(state: .failed(reason))
+            setPairingStage(.failed, state: .failed(reason))
             refreshAdvertisedServices()
             if let connection {
                 sendThenClose(
-                    .pairingResult(result: BoothPairingResult(accepted: false, reason: reason)),
+                    .pairingResult(result: BoothPairingResult(
+                        accepted: false,
+                        reason: reason,
+                        pairingSessionID: request.sessionID
+                    )),
                     connection: connection,
                     reason: reason
                 )
@@ -1644,59 +2458,159 @@ public final class NetworkBoothTransport: BoothTransport {
         }
     }
 
-    private func sendPairingFailure(_ reason: String) {
-        send(
-            .pairingResult(result: BoothPairingResult(accepted: false, reason: reason)),
-            on: controlConnection,
-            channel: .control
-        )
-    }
-
     private func handlePairingResult(_ result: BoothPairingResult) {
         guard role == .iPad else { return }
-        guard BoothPairingTrustPolicy.accepts(
-            result: result,
-            pendingPairingRequest: pendingPairingRequest,
-            targetPeerID: targetPeerID
-        ),
-        let macIdentity = result.macIdentity,
-        let secret = result.sharedSecret else {
-            let reason = result.reason ?? "Pairing rejected."
-            pendingPairingRequest = nil
-            pendingPairingIntent = nil
-            pendingPairingFailure = reason
-            connectionStatus.publishPairing(state: .failed(reason))
+        if !result.accepted, pendingPairingRequest == nil {
+            // The Mac can cancel or expire after receiving an intent but before
+            // the iPad has submitted its PIN. End that local intent immediately;
+            // otherwise a closed connection would leave the iPad waiting until
+            // its timer, or indefinitely after a route restart.
+            guard let intent = pendingPairingIntent,
+                  peerDeviceID == intent.targetMacDeviceID else { return }
+            failPairing(result.reason ?? "Pairing rejected.")
             return
         }
-        do {
-            try trustedStore.trust(
-                TrustedBoothPeer(
-                    id: macIdentity.id,
-                    displayName: macIdentity.displayName,
-                    role: .mac,
-                    lastSeenAt: Date()
-                ),
-                secret: secret
-            )
-            trustedStore.preferredPeerID = macIdentity.id
-            trustedStore.autoReconnect = true
-            pendingPairingRequest = nil
-            pendingPairingIntent = nil
-            pendingPairingFailure = nil
-            targetPeerID = macIdentity.id
-            publishPairingStatus()
+        guard let pendingRequest = pendingPairingRequest else { return }
+        if let resultSessionID = result.pairingSessionID,
+           resultSessionID != pendingRequest.sessionID {
+            return
+        }
+        if !result.accepted {
+            let reason = result.reason ?? "Pairing rejected."
+            pendingPairingFailure = reason
+            if result.retryable {
+                // Do not resend the same bad PIN automatically after a route
+                // reconnect. Keep the selected peer visible and require a new
+                // user-authored attempt.
+                pendingPairingRequest = nil
+                pendingPairingIntent = nil
+                pendingPairingSessionID = nil
+                deferredAuthChallenge = nil
+                pendingAuthChallenge = nil
+                didInitiateAuthentication = false
+                cancelPairingExpiry()
+                setPairingStage(.failed, state: .failed(reason))
+            } else {
+                let connection = controlConnection
+                resetPairingState(clearTarget: true, clearPendingCommit: true, clearFailure: true)
+                pendingPairingFailure = reason
+                setPairingStage(.failed, state: .failed(reason))
+                connection?.cancel()
+            }
+            return
+        }
+
+        guard BoothPairingTrustPolicy.accepts(
+            result: result,
+            pendingPairingRequest: pendingRequest,
+            targetPeerID: targetPeerID,
+            expectedSessionID: pendingPairingRequest?.sessionID
+        ),
+        let request = pendingPairingRequest,
+        let macIdentity = result.macIdentity,
+        let macEphemeralPublicKey = result.macEphemeralPublicKey,
+        let keyAgreementProof = result.keyAgreementProof,
+        let privateKeyData = pendingPairingPrivateKeyData,
+        let code = pendingPairingCode else {
+            failPairing("Pairing result was not valid for this request.")
+            return
+        }
+
+        guard receivedPairingSession?.macEphemeralPublicKey == macEphemeralPublicKey else {
+            failPairing("Pairing result used a different secure session key.")
+            return
+        }
+        let transcript = BoothPairingCrypto.pairingTranscript(
+            sessionID: request.sessionID,
+            macDeviceID: macIdentity.id,
+            iPadDeviceID: request.iPadIdentity.id,
+            method: request.method,
+            macEphemeralPublicKey: macEphemeralPublicKey,
+            iPadEphemeralPublicKey: request.iPadEphemeralPublicKey
+        )
+        guard let secret = try? BoothPairingCrypto.derivePairingSecret(
+            privateKeyData: privateKeyData,
+            peerPublicKeyData: macEphemeralPublicKey,
+            code: code,
+            transcript: transcript
+        ),
+        BoothPairingCrypto.constantTimeEqual(
+            keyAgreementProof,
+            BoothPairingCrypto.makeKeyAgreementProof(secret: secret, transcript: transcript, role: .mac)
+        ) else {
+            failPairing("Pairing result proof could not be verified.")
+            return
+        }
+
+        let expiry = pairingExpiresAt ?? Date().addingTimeInterval(BoothPairingSession.lifetime)
+        pendingPairingCommit = PendingPairingCommit(
+            sessionID: request.sessionID,
+            method: request.method,
+            peer: TrustedBoothPeer(
+                id: macIdentity.id,
+                displayName: macIdentity.displayName,
+                role: .mac,
+                lastSeenAt: Date()
+            ),
+            macIdentity: macIdentity,
+            secret: secret,
+            expiresAt: expiry,
+            transcript: transcript,
+            macEphemeralPublicKey: macEphemeralPublicKey,
+            keyAgreementProof: keyAgreementProof
+        )
+        pendingPairingSessionID = request.sessionID
+        pendingPairingFailure = nil
+        targetPeerID = macIdentity.id
+        pendingPairingRequest = nil
+        pendingPairingPrivateKeyData = nil
+        pendingPairingCode = nil
+        pendingPairingVerificationCode = request.method == .pin
+            ? BoothPairingCrypto.makeVerificationCode(secret: secret, transcript: transcript)
+            : nil
+        didConfirmPairingVerification = false
+        schedulePairingExpiry(sessionID: request.sessionID, expiresAt: expiry)
+        if request.method == .pin {
+            setPairingStage(.verificationPending, state: .authenticating(peerID: macIdentity.id))
+        } else {
+            setPairingStage(.resultReceived, state: .authenticating(peerID: macIdentity.id))
             beginAuthentication(with: macIdentity.id)
-        } catch {
-            pendingPairingRequest = nil
-            pendingPairingIntent = nil
-            pendingPairingFailure = error.localizedDescription
-            connectionStatus.publishPairing(state: .failed(error.localizedDescription))
+            if let deferredAuthChallenge {
+                self.deferredAuthChallenge = nil
+                handleAuthChallenge(deferredAuthChallenge)
+            }
+        }
+    }
+
+    private func handlePairingVerificationConfirmed(sessionID: String, proof: Data) {
+        guard role == .iPad,
+              let commit = pendingPairingCommit,
+              commit.method == .pin,
+              commit.sessionID == sessionID,
+              pendingPairingVerificationCode != nil,
+              pairingStageValue == .verificationPending,
+              proof.count == SHA256.Digest.byteCount,
+              !peerAuthenticated else { return }
+        let expectedProof = BoothPairingCrypto.makeVerificationConfirmationProof(
+            secret: commit.secret,
+            transcript: commit.transcript,
+            role: .mac
+        )
+        guard BoothPairingCrypto.constantTimeEqual(proof, expectedProof) else {
+            rejectControlConnection("Pairing verification proof is invalid.")
+            return
+        }
+        setPairingStage(.authenticating, state: .authenticating(peerID: commit.peer.id))
+        beginAuthentication(with: commit.peer.id)
+        if let deferredAuthChallenge {
+            self.deferredAuthChallenge = nil
+            handleAuthChallenge(deferredAuthChallenge)
         }
     }
 
     private func beginAuthentication(with peerID: String) {
         guard !didInitiateAuthentication else { return }
-        guard trustedStore.secret(for: peerID) != nil else {
+        guard secretForAuthentication(peerID: peerID) != nil else {
             rejectControlConnection("Authentication failed: pairing secret is unavailable.")
             return
         }
@@ -1707,52 +2621,162 @@ public final class NetworkBoothTransport: BoothTransport {
             )
             didInitiateAuthentication = true
             pendingAuthChallenge = challenge
-            connectionStatus.publishPairing(authenticated: false, state: .authenticating(peerID: peerID))
-            send(.authChallenge(challenge: challenge), on: controlConnection, channel: .control)
+            setPairingStage(.authenticating, state: .authenticating(peerID: peerID))
+            sendCriticalControl(
+                .authChallenge(challenge: challenge),
+                on: controlConnection,
+                sessionID: activePairingControlSessionID
+            ) { [weak self] result in
+                guard let self else { return }
+                if case .failure(let error) = result {
+                    self.handleAuthenticationSendFailure("Authentication challenge could not be delivered: \(error.message)")
+                }
+            }
         } catch {
             rejectControlConnection(error.localizedDescription)
         }
     }
 
     private func handleAuthChallenge(_ challenge: BoothAuthChallenge) {
-        guard let hello = peerHello,
-              challenge.challengerDeviceID == hello.deviceID,
-              challenge.responderDeviceID == localIdentity.id,
-              challenge.isFresh(),
-              let secret = trustedStore.secret(for: hello.deviceID) else {
-            rejectControlConnection("Authentication failed.")
+        guard let hello = peerHello else {
+            rejectControlConnection("Authentication failed: peer hello is unavailable for the challenge.")
+            return
+        }
+        guard challenge.challengerDeviceID == hello.deviceID else {
+            rejectControlConnection("Authentication failed: challenge sender does not match the connected peer.")
+            return
+        }
+        guard challenge.responderDeviceID == localIdentity.id else {
+            rejectControlConnection("Authentication failed: challenge targets a different device.")
+            return
+        }
+        guard challenge.isWellFormed else {
+            rejectControlConnection("Authentication failed: challenge format is invalid.")
+            return
+        }
+        if pendingPairingCommit?.method == .pin,
+           pendingPairingVerificationCode != nil,
+           pairingStageValue == .verificationPending {
+            deferredAuthChallenge = challenge
+            return
+        }
+        // The responder must not use its wall clock to reject a challenge.
+        // Physical iPads on an isolated Ethernet link can differ from the Mac
+        // by more than the challenge lifetime. The challenger verifies
+        // freshness against its own locally retained issuedAt when the proof
+        // returns, so replay protection stays authoritative without requiring
+        // synchronized clocks.
+        // Result delivery and the Mac's authentication challenge can arrive
+        // back-to-back. Until the iPad has processed the accepted result, it
+        // must not answer with a stale Keychain secret from an interrupted or
+        // forgotten relationship.
+        if role == .iPad,
+           pendingPairingRequest != nil,
+           pendingPairingCommit == nil {
+            deferredAuthChallenge = challenge
+            return
+        }
+        guard let authenticationSecret = authenticationSecret(peerID: hello.deviceID) else {
+            rejectControlConnection("Authentication failed: pairing secret is unavailable.")
             return
         }
         let proof = BoothPairingCrypto.makeProof(
             for: challenge,
             responderDeviceID: localIdentity.id,
-            secret: secret
+            secret: authenticationSecret.data
         )
-        send(.authProof(proof: proof), on: controlConnection, channel: .control)
-        if !didInitiateAuthentication { beginAuthentication(with: hello.deviceID) }
+        logPairing(
+            stage: .authenticating,
+            message: "auth proof source=\(authenticationSecret.source) transcript=\(BoothPairingCrypto.transcriptIdentifier(for: challenge, responderDeviceID: localIdentity.id))",
+            sessionID: pairingSessionIDForDiagnostics
+        )
+        sendCriticalControl(
+            .authProof(proof: proof),
+            on: controlConnection,
+            sessionID: activePairingControlSessionID
+        ) { [weak self] result in
+            guard let self else { return }
+            switch result {
+            case .success:
+                if !self.didInitiateAuthentication { self.beginAuthentication(with: hello.deviceID) }
+            case .failure(let error):
+                self.handleAuthenticationSendFailure("Authentication proof could not be delivered: \(error.message)")
+            }
+        }
     }
 
     private func handleAuthProof(_ proof: BoothAuthProof) {
-        guard let hello = peerHello,
-              let challenge = pendingAuthChallenge,
-              let secret = trustedStore.secret(for: hello.deviceID),
-              BoothPairingCrypto.verify(
-                proof,
-                for: challenge,
-                expectedResponderDeviceID: hello.deviceID,
-                secret: secret
-              ) else {
-            rejectControlConnection("Authentication failed.")
+        guard let hello = peerHello else {
+            rejectControlConnection("Authentication failed: peer hello is unavailable.")
             return
         }
-        pendingAuthChallenge = nil
-        completeAuthentication(with: hello)
+        if pendingPairingCommit?.method == .pin,
+           pendingPairingVerificationCode != nil,
+           pairingStageValue == .verificationPending {
+            rejectControlConnection("Pairing verification is still pending.")
+            return
+        }
+        guard let challenge = pendingAuthChallenge else {
+            rejectControlConnection("Authentication failed: challenge state is unavailable.")
+            return
+        }
+        guard let authenticationSecret = authenticationSecret(peerID: hello.deviceID) else {
+            rejectControlConnection("Authentication failed: pairing secret is unavailable.")
+            return
+        }
+        let transcriptID = BoothPairingCrypto.transcriptIdentifier(
+            for: challenge,
+            responderDeviceID: hello.deviceID
+        )
+        let verificationFailure = BoothPairingCrypto.verificationFailure(
+            proof,
+            for: challenge,
+            expectedResponderDeviceID: hello.deviceID,
+            secret: authenticationSecret.data
+        )
+        guard let verificationFailure else {
+            logPairing(
+                stage: .authenticating,
+                message: "auth verified source=\(authenticationSecret.source) transcript=\(transcriptID)",
+                sessionID: pairingSessionIDForDiagnostics
+            )
+            pendingAuthChallenge = nil
+            completeAuthentication(with: hello)
+            return
+        }
+        logPairing(
+            stage: .failed,
+            message: "auth verify failed reason=\(verificationFailure.rawValue) source=\(authenticationSecret.source) transcript=\(transcriptID)",
+            sessionID: pairingSessionIDForDiagnostics
+        )
+        rejectControlConnection("Authentication failed: \(verificationFailure.message).")
     }
 
     private func completeAuthentication(with hello: BoothTransportHello) {
+        if let commit = pendingPairingCommit {
+            guard commit.peer.id == hello.deviceID else {
+                failPairing("Authentication peer does not match the pairing request.")
+                return
+            }
+            setPairingStage(.trustSaving, state: .authenticating(peerID: hello.deviceID))
+            do {
+                try trustedStore.trust(commit.peer, secret: commit.secret)
+                trustedStore.preferredPeerID = commit.peer.id
+                trustedStore.autoReconnect = true
+                pendingPairingCommit = nil
+                pendingPairingVerificationCode = nil
+                didConfirmPairingVerification = false
+                cancelPairingExpiry()
+                pairingGeneration &+= 1
+            } catch {
+                failPairing("Pairing trust could not be saved: \(error.localizedDescription)")
+                return
+            }
+        }
         peerAuthenticated = true
         pendingPairingRequest = nil
         pendingPairingIntent = nil
+        pendingPairingSessionID = nil
         pendingPairingFailure = nil
         incomingPairingRequest = nil
         expectedPeerDeviceID = hello.deviceID
@@ -1762,6 +2786,8 @@ public final class NetworkBoothTransport: BoothTransport {
         connectionState = .connected(peerName: peerName)
         reconnectAttempt = 0
         lastControlMessageAt = Date()
+        connectionStatus.publishControlActivity(at: lastControlMessageAt)
+        connectionStatus.publishReconnectState(inProgress: false)
         lastNetworkError = nil
         trustedStore.updateLastSeen(peerID: hello.deviceID, name: peerName)
         lanHandshakeTask?.cancel()
@@ -1773,15 +2799,48 @@ public final class NetworkBoothTransport: BoothTransport {
             _ = routeMachine.wifiConnected(peer: peerName, fallback: fallbackActive)
         }
         publishStatus()
-        publishPairingStatus(state: .authenticated(peerID: hello.deviceID))
+        setPairingStage(.authenticated, state: .authenticated(peerID: hello.deviceID))
+        emitTransportEvent(.transportReconnectSucceeded, channel: .control, attempt: reconnectAttempt)
         startHeartbeat()
         validatePreviewIdentity()
         if role == .iPad, previewConnection == nil {
             previewBrowser?.cancel()
             previewBrowser = nil
-            startBrowser(channel: .preview)
+            if activeInterface == .wiredEthernet {
+                connect(
+                    to: directLANEndpoint(for: .preview),
+                    channel: .preview,
+                    parameters: .tcp
+                )
+            } else {
+                startBrowser(channel: .preview)
+            }
         }
         onControlMessage?(.hello(role: hello.role))
+    }
+
+    private func secretForAuthentication(peerID: String) -> Data? {
+        authenticationSecret(peerID: peerID)?.data
+    }
+
+    private func authenticationSecret(peerID: String) -> AuthenticationSecret? {
+        // A newly accepted pairing must authenticate with the provisional
+        // secret delivered in its pairing result. A leftover Keychain entry
+        // from a forgotten or interrupted prior relationship must not win
+        // over that session and create an asymmetric HMAC failure.
+        if let commit = pendingPairingCommit, commit.peer.id == peerID {
+            return AuthenticationSecret(data: commit.secret, source: "provisional")
+        }
+        guard let secret = trustedStore.secret(for: peerID) else { return nil }
+        return AuthenticationSecret(data: secret, source: "keychain")
+    }
+
+    private func handleAuthenticationSendFailure(_ reason: String) {
+        if pendingPairingCommit != nil {
+            failPendingPairingDelivery(reason)
+        } else {
+            rejectControlConnection(reason)
+        }
     }
 
     private func rejectIncomingConnection(_ connection: NWConnection, reason: String) {
@@ -1796,18 +2855,25 @@ public final class NetworkBoothTransport: BoothTransport {
                 )
             }
         }
-        connection.start(queue: .main)
+        connection.start(queue: transportQueue)
     }
 
     private func rejectControlConnection(_ reason: String) {
-        lastNetworkError = reason
-        connectionStatus.publishPairing(authenticated: false, state: .failed(reason))
-        if let connection = controlConnection {
+        let connection = controlConnection
+        if currentConnectionOwnsPairingState {
+            failPairing(reason, closeConnection: false)
+        } else if !hasEphemeralPairingState {
+            lastNetworkError = reason
+            setPairingStage(.failed, state: .failed(reason))
+        }
+        if let connection {
             sendThenClose(
                 .connectionRejected(reason: reason),
                 connection: connection,
                 reason: reason
             )
+        } else {
+            connectionDidClose(nil, channel: .control, reason: reason)
         }
     }
 
@@ -1831,8 +2897,95 @@ public final class NetworkBoothTransport: BoothTransport {
             preferredPeerID: preferred,
             updatePreferredPeer: true,
             authenticated: peerAuthenticated,
-            state: state
+            state: state,
+            stage: pairingStageValue
         )
+    }
+
+    private func setPairingStage(_ stage: BoothPairingStage, state: BoothPairingState? = nil) {
+        pairingStageValue = stage
+        publishPairingStatus(state: state)
+        logPairing(stage: stage, message: nil, sessionID: pairingSessionIDForDiagnostics)
+    }
+
+    private var pairingSessionIDForDiagnostics: String? {
+        currentPairingSession?.info.sessionID
+            ?? pendingPairingRequest?.sessionID
+            ?? pendingPairingSessionID
+            ?? pendingPairingCommit?.sessionID
+    }
+
+    private func logPairing(
+        stage: BoothPairingStage,
+        message: String?,
+        sessionID: String?
+    ) {
+#if DEBUG
+        // Once hello has arrived, the connected peer is more authoritative
+        // than request-side presentation data (which is the local iPad identity
+        // on the iPad role).
+        let peerID = peerDeviceID ?? pairingPeerID ?? "none"
+        let peerName = self.peerName.isEmpty ? (pairingPeerDisplayName ?? "none") : self.peerName
+        let route = activeInterface?.rawValue ?? "none"
+        NSLog(
+            "[Pairing] role=%@ peerID=%@ peerName=%@ session=%@ stage=%@ route=%@%@",
+            role.rawValue,
+            peerID,
+            peerName.isEmpty ? "none" : peerName,
+            sessionID ?? "none",
+            stage.rawValue,
+            route,
+            message.map { " message=\($0)" } ?? ""
+        )
+#else
+        _ = (stage, message, sessionID)
+#endif
+    }
+
+    private func logPairingMessage(_ message: Message, sent: Bool, error: Error? = nil) {
+#if DEBUG
+        let direction = sent ? "send" : "receive"
+        logPairing(
+            stage: pairingStageValue,
+            message: "\(direction) \(messageType(message))\(error.map { " failed: \($0.localizedDescription)" } ?? "")",
+            sessionID: pairingSessionIDForDiagnostics
+        )
+#else
+        _ = (message, sent, error)
+#endif
+    }
+
+    private func messageType(_ message: Message) -> String {
+        switch message {
+        case .hello: return "hello"
+        case .helloDetails: return "helloDetails"
+        case .pairingIntent: return "pairingIntent"
+        case .pairingSessionAvailable: return "pairingSessionAvailable"
+        case .pairingRequest: return "pairingRequest"
+        case .pairingResult: return "pairingResult"
+        case .pairingVerificationConfirmed: return "pairingVerificationConfirmed"
+        case .authChallenge: return "authChallenge"
+        case .authProof: return "authProof"
+        case .connectionRejected: return "connectionRejected"
+        case .sessionSync: return "sessionSync"
+        case .boothPaused: return "boothPaused"
+        case .eventConfig: return "eventConfig"
+        case .eventExperienceCatalog: return "eventExperienceCatalog"
+        case .eventExperienceAsset: return "eventExperienceAsset"
+        case .setMirrored: return "setMirrored"
+        case .sessionStart: return "sessionStart"
+        case .customerSessionRequest: return "customerSessionRequest"
+        case .sessionRequestRejected: return "sessionRequestRejected"
+        case .sessionPrepared: return "sessionPrepared"
+        case .beginCountdown: return "beginCountdown"
+        case .shotCaptured: return "shotCaptured"
+        case .captureRecovery: return "captureRecovery"
+        case .captureRecoveryAction: return "captureRecoveryAction"
+        case .reviewDecision: return "reviewDecision"
+        case .sessionFinished: return "sessionFinished"
+        case .operatorOverride: return "operatorOverride"
+        case .heartbeat: return "heartbeat"
+        }
     }
 
     private func sendTransportHello() {
@@ -1911,16 +3064,135 @@ public final class NetworkBoothTransport: BoothTransport {
         flushPreviewFrame()
     }
 
-    private func send(_ message: Message, on connection: NWConnection?, channel: BoothTransportChannel) {
-        guard let connection else { return }
-        guard let payload = try? message.encoded(),
-              let frame = try? BoothFrameEncoder.encode(channel: channel, payload: payload) else { return }
-        connection.send(content: frame, completion: .contentProcessed { error in
-            if let error { print("[Network] send failed: \(error.localizedDescription)") }
+    @discardableResult
+    private func send(
+        _ message: Message,
+        on connection: NWConnection?,
+        channel: BoothTransportChannel
+    ) -> BoothControlSendOutcome {
+        guard let connection else {
+            if channel == .control { recordControlSendFailure(.noConnection) }
+            return .noConnection
+        }
+
+        let payload: Data
+        do {
+            payload = try message.encoded()
+        } catch {
+            if channel == .control { recordControlSendFailure(.encodingFailed) }
+            return .encodingFailed
+        }
+
+        let frame: Data
+        do {
+            frame = try BoothFrameEncoder.encode(channel: channel, payload: payload)
+        } catch let error as BoothFrameError {
+            if channel == .control {
+                recordControlSendFailure(error == .oversizedPayload(payload.count) ? .rejectedOversize : .encodingFailed)
+            }
+            return error == .oversizedPayload(payload.count) ? .rejectedOversize : .encodingFailed
+        } catch {
+            if channel == .control { recordControlSendFailure(.encodingFailed) }
+            return .encodingFailed
+        }
+
+        logPairingMessage(message, sent: true)
+        connection.send(content: frame, completion: .contentProcessed { [weak self, weak connection] error in
+            guard let error else { return }
+            Task { @MainActor [weak self, weak connection] in
+                guard let self, let connection,
+                      self.isCurrent(connection, channel: channel) else { return }
+                if channel == .control {
+                    self.recordControlSendFailure(.networkSendFailed)
+                }
+                self.connectionDidClose(connection, channel: channel, reason: error.localizedDescription)
+            }
+        })
+        return .sent
+    }
+
+    private func recordControlSendFailure(_ outcome: BoothControlSendOutcome) {
+        guard outcome != .sent else { return }
+        let message: String
+        switch outcome {
+        case .noConnection: message = "No active control connection."
+        case .rejectedOversize: message = "Control payload exceeded the transport limit."
+        case .encodingFailed: message = "Control payload encoding failed."
+        case .networkSendFailed: message = "Control payload could not be sent."
+        case .sent: return
+        }
+        lastNetworkError = message
+        connectionStatus.publishNetworkError(message)
+        emitTransportEvent(
+            outcome == .rejectedOversize ? .controlPayloadRejected : .controlSendFailed,
+            channel: .control,
+            byteCount: nil,
+            reason: message
+        )
+        print("[Network] \(message)")
+    }
+
+    private func sendCriticalControl(
+        _ message: Message,
+        on connection: NWConnection?,
+        sessionID: String?,
+        completion: @escaping @MainActor (Result<Void, PairingControlSendError>) -> Void
+    ) {
+        guard let connection else {
+            completion(.failure(.failed("No active control connection.")))
+            return
+        }
+        guard isCurrent(connection, channel: .control) else {
+            completion(.failure(.failed("The control connection is no longer current.")))
+            return
+        }
+        guard let payload = try? message.encoded() else {
+            completion(.failure(.failed("Pairing message encoding failed.")))
+            return
+        }
+        guard let frame = try? BoothFrameEncoder.encode(channel: .control, payload: payload) else {
+            completion(.failure(.failed("Pairing message framing failed.")))
+            return
+        }
+
+        let context = BoothPairingControlSendContext(
+            connectionGeneration: controlConnectionGeneration,
+            pairingGeneration: pairingGeneration,
+            sessionID: sessionID
+        )
+        logPairingMessage(message, sent: true)
+        if case .sessionSync = message {
+            emitTransportEvent(.sessionSyncSent, channel: .control, byteCount: frame.count)
+        }
+        connection.send(content: frame, completion: .contentProcessed { [weak self, weak connection] error in
+            Task { @MainActor [weak self, weak connection] in
+                guard let self, let connection else { return }
+                guard self.isCurrent(connection, channel: .control),
+                      BoothPairingControlSendGate.accepts(
+                          context,
+                          currentConnectionGeneration: self.controlConnectionGeneration,
+                          currentPairingGeneration: self.pairingGeneration,
+                          currentSessionID: self.currentPairingSession?.info.sessionID,
+                          pendingSessionID: self.pendingPairingSessionID,
+                          pendingResultSessionID: self.pendingPairingCommit?.sessionID
+                      ) else {
+                    self.logPairing(stage: self.pairingStageValue, message: "stale send completion ignored", sessionID: context.sessionID)
+                    return
+                }
+
+                if let error {
+                    self.logPairingMessage(message, sent: true, error: error)
+                    completion(.failure(.failed(error.localizedDescription)))
+                } else {
+                    self.logPairing(stage: self.pairingStageValue, message: "send complete \(self.messageType(message))", sessionID: context.sessionID)
+                    completion(.success(()))
+                }
+            }
         })
     }
 
     private func sendThenClose(_ message: Message, connection: NWConnection, reason: String?) {
+        let connectionGenerationAtStart = controlConnectionGeneration
         guard let payload = try? message.encoded(),
               let frame = try? BoothFrameEncoder.encode(channel: .control, payload: payload) else {
             connection.cancel()
@@ -1930,6 +3202,7 @@ public final class NetworkBoothTransport: BoothTransport {
             return
         }
 
+        logPairingMessage(message, sent: true)
         connection.send(content: frame, completion: .contentProcessed { [weak self] error in
             Task { @MainActor [weak self] in
                 guard let self else {
@@ -1937,7 +3210,8 @@ public final class NetworkBoothTransport: BoothTransport {
                     return
                 }
                 let closeReason = error?.localizedDescription ?? reason
-                guard self.isCurrent(connection, channel: .control) else {
+                guard self.isCurrent(connection, channel: .control),
+                      self.controlConnectionGeneration == connectionGenerationAtStart else {
                     connection.cancel()
                     return
                 }
@@ -2017,17 +3291,46 @@ public final class NetworkBoothTransport: BoothTransport {
     }
 
     private func startHeartbeat() {
-        heartbeatTimer?.invalidate()
-        heartbeatTimer = Timer.scheduledTimer(withTimeInterval: Self.heartbeatInterval, repeats: true) { [weak self] _ in
+        heartbeatSource?.cancel()
+        heartbeatSource = nil
+        let state = heartbeatState
+        transportQueue.async { state.markActivity() }
+
+        let source = DispatchSource.makeTimerSource(queue: transportQueue)
+        source.schedule(
+            deadline: .now() + Self.heartbeatInterval,
+            repeating: Self.heartbeatInterval
+        )
+        source.setEventHandler { [weak self] in
+            if state.shouldReportTimeout(after: Self.heartbeatTimeout) {
+                Task { @MainActor [weak self] in
+                    guard let self, self.peerAuthenticated else { return }
+                    self.emitTransportEvent(
+                        .heartbeatTimedOut,
+                        channel: .control,
+                        reason: "No valid control traffic within heartbeat timeout"
+                    )
+                    self.connectionDidClose(
+                        self.controlConnection,
+                        channel: .control,
+                        reason: "heartbeat timeout"
+                    )
+                }
+                return
+            }
             Task { @MainActor [weak self] in
                 guard let self, self.peerAuthenticated else { return }
-                if Date().timeIntervalSince(self.lastControlMessageAt) > Self.heartbeatTimeout {
-                    self.connectionDidClose(self.controlConnection, channel: .control, reason: "heartbeat timeout")
-                } else {
-                    self.sendControl(.heartbeat)
-                }
+                _ = self.sendControl(.heartbeat)
             }
         }
+        source.resume()
+        heartbeatSource = source
+    }
+
+    private func stopHeartbeat() {
+        heartbeatSource?.cancel()
+        heartbeatSource = nil
+        transportQueue.async { [heartbeatState] in heartbeatState.reset() }
     }
 
     private func connectionDidClose(_ connection: NWConnection?, channel: BoothTransportChannel, reason: String? = nil) {
@@ -2035,8 +3338,62 @@ public final class NetworkBoothTransport: BoothTransport {
         if let reason { lastNetworkError = reason }
         if channel == .control {
             guard let connection, connection === controlConnection else { return }
+            cancelWaitingRecovery(for: channel)
+            stopHeartbeat()
+            emitTransportEvent(.transportDisconnected, channel: channel, reason: reason)
+            logPairing(
+                stage: pairingStageValue,
+                message: reason.map { "control connection closed: \($0)" } ?? "control connection closed",
+                sessionID: pairingSessionIDForDiagnostics
+            )
+            if hasEphemeralPairingState, pendingPairingFailure == nil {
+                let state: BoothPairingState
+                let stage: BoothPairingStage
+                if let commit = pendingPairingCommit {
+                    state = .authenticating(peerID: commit.peer.id)
+                    stage = .authenticating
+                } else if let incomingPairingRequest,
+                          let session = currentPairingSession {
+                    state = .incoming(request: incomingPairingRequest, expiresAt: session.info.expiresAt)
+                    stage = .discovering
+                } else if let session = currentPairingSession {
+                    state = .pairing(expiresAt: session.info.expiresAt)
+                    stage = .discovering
+                } else if pendingPairingRequest != nil {
+                    state = .pairing(expiresAt: pendingPairingStateExpiry)
+                    stage = .discovering
+                } else if let pendingPairingIntent {
+                    state = .waitingForMac(peerID: pendingPairingIntent.targetMacDeviceID)
+                    stage = .discovering
+                } else {
+                    state = .failed("Pairing connection closed. Please try again.")
+                    stage = .failed
+                }
+                setPairingStage(stage, state: state)
+            } else if let pendingPairingFailure {
+                setPairingStage(.failed, state: .failed(pendingPairingFailure))
+            }
             if role == .iPad {
                 startRouteDiscovery()
+                return
+            }
+            if retainsManualLANListener {
+                // Do not use the path monitor to choose a new route here.
+                // Static iPad Ethernet often remains "unsatisfied" despite
+                // the control socket having just been usable. Clear only the
+                // closed connection so the still-running fixed listener can
+                // accept the retry/reconnect for this pairing session.
+                controlConnection?.cancel()
+                controlConnectionGeneration &+= 1
+                controlConnection = nil
+                controlEndpointDescription = nil
+                resetFrameDecoder(.control)
+                resetControlAuthentication()
+                connectionState = .disconnected
+                lanHandshakeState = .waiting
+                if controlListener == nil { startListener(channel: .control) }
+                if previewListener == nil { startListener(channel: .preview) }
+                publishStatus()
                 return
             }
             let command = routeMachine.transportDisconnected(
@@ -2046,6 +3403,8 @@ public final class NetworkBoothTransport: BoothTransport {
             apply(command, reason: command == .startWiFi(fallback: true) ? "LAN unavailable" : nil)
         } else {
             guard let connection, connection === previewConnection else { return }
+            cancelWaitingRecovery(for: channel)
+            emitTransportEvent(.previewDisconnected, channel: channel, reason: reason)
             previewConnection?.cancel()
             previewConnection = nil
             previewEndpointDescription = nil
@@ -2114,6 +3473,12 @@ public final class NetworkBoothTransport: BoothTransport {
         }
     }
 
+    private var retainsManualLANListener: Bool {
+        role == .mac
+            && requestedPreference == .lan
+            && activeInterface == .wiredEthernet
+    }
+
     private func resetPreviewIdentity() {
         previewPeerID = nil
         previewPeerSupportsIdentity = false
@@ -2126,18 +3491,25 @@ public final class NetworkBoothTransport: BoothTransport {
         peerAuthenticated = false
         didInitiateAuthentication = false
         pendingAuthChallenge = nil
+        deferredAuthChallenge = nil
         peerHello = nil
         peerDeviceID = nil
         expectedPeerDeviceID = nil
         peerName = ""
         connectedPeerNames = []
-        connectionStatus.publishPairing(authenticated: false)
+        connectionStatus.publishPairing(authenticated: false, stage: pairingStageValue)
     }
 
     private func scheduleReconnect() {
         guard shouldReconnect, reconnectTask == nil else { return }
         let delay = Self.reconnectDelays[min(reconnectAttempt, Self.reconnectDelays.count - 1)]
         reconnectAttempt += 1
+        connectionStatus.publishReconnectState(inProgress: true, attempt: reconnectAttempt)
+        emitTransportEvent(
+            .transportReconnectScheduled,
+            attempt: reconnectAttempt,
+            duration: delay
+        )
         reconnectTask = Task { @MainActor [weak self] in
             try? await Task.sleep(for: .seconds(delay))
             guard let self, !Task.isCancelled else { return }

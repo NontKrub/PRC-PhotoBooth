@@ -35,7 +35,12 @@ final class BoothPreflightService {
         checked.append(networkPathResult(.wifiPath, title: "Wi-Fi path", available: context.wifiPathAvailable, now: now))
         checked.append(networkPathResult(.lanPath, title: "LAN path", available: context.lanPathAvailable, now: now))
         checked.append(ipadTransportResult(context, now: now))
+        checked.append(authenticationResult(context, now: now))
+        checked.append(controlChannelResult(context, now: now))
+        checked.append(previewChannelResult(context, now: now))
         checked.append(networkRouteResult(context, now: now))
+        checked.append(networkFreshnessResult(context, now: now))
+        checked.append(reconnectStateResult(context, now: now))
 
         let output = outputFolderResult(context.outputFolderURL, now: now)
         checked.append(output)
@@ -57,7 +62,8 @@ final class BoothPreflightService {
         let queueUnavailable = context.startupComponents[.jobQueue]?.status == .unavailable
         let queueStatus: PreflightCheckStatus = queueUnavailable || !context.queuePersistenceAvailable || context.requiredJobFailed ? .failed : (context.optionalJobPendingOrFailed ? .warning : .passed)
         let queueDetail = queueUnavailable ? (context.startupComponents[.jobQueue]?.detail ?? "The persistent job queue is unavailable.") : !context.queuePersistenceAvailable ? "The persistent job queue is unavailable." : context.requiredJobFailed ? "A required queue job has permanently failed." : context.optionalJobPendingOrFailed ? "Optional cloud or print work is waiting or failed." : "Queue persistence and required jobs are healthy."
-        checked.append(result(.queueHealth, "Queue health", queueDetail, queueStatus, .required, now))
+        let queueSummary = "Backlog pending=\(context.queuePendingCount), running=\(context.queueRunningCount), retrying=\(context.queueRetryingCount), failed=\(context.queueFailedCount); oldest critical job=\(ageText(context.oldestCriticalJobAge))."
+        checked.append(result(.queueHealth, "Queue health", "\(queueDetail) \(queueSummary)", queueStatus, .required, now))
         checked.append(cloudResult(context, now: now))
         checked.append(printerConfigurationResult(context, now: now))
         checked.append(printerTestResult(context, now: now))
@@ -140,7 +146,7 @@ final class BoothPreflightService {
         available: Bool,
         now: Date
     ) -> PreflightCheckResult {
-        result(
+        return result(
             id,
             title,
             available ? "Network.framework reports this interface is available." : "This interface is unavailable.",
@@ -163,6 +169,73 @@ final class BoothPreflightService {
             .required,
             now
         )
+    }
+
+    private func authenticationResult(_ context: BoothPreflightContext, now: Date) -> PreflightCheckResult {
+        guard context.ipadConnected else {
+            if context.customerDisplayReady {
+                return result(.authentication, "iPad authentication", "Skipped because the external viewer is active.", .skipped, .recommended, now)
+            }
+            return result(.authentication, "iPad authentication", "No authenticated iPad is connected.", .failed, .required, now)
+        }
+        return result(
+            .authentication,
+            "iPad authentication",
+            "The selected iPad is authenticated.",
+            .passed,
+            .required,
+            now
+        )
+    }
+
+    private func controlChannelResult(_ context: BoothPreflightContext, now: Date) -> PreflightCheckResult {
+        guard context.ipadConnected else {
+            return result(.controlChannel, "Control channel", "Skipped because no iPad is authenticated.", .skipped, .recommended, now)
+        }
+        return result(
+            .controlChannel,
+            "Control channel",
+            context.controlChannelConnected ? "Authenticated control channel is connected." : "Authenticated control channel is disconnected.",
+            context.controlChannelConnected ? .passed : .failed,
+            .required,
+            now
+        )
+    }
+
+    private func previewChannelResult(_ context: BoothPreflightContext, now: Date) -> PreflightCheckResult {
+        guard context.ipadConnected else {
+            return result(.previewChannel, "Preview channel", "Skipped because no iPad is authenticated.", .skipped, .recommended, now)
+        }
+        return result(
+            .previewChannel,
+            "Preview channel",
+            context.ipadPreviewChannelConnected ? "Authenticated preview channel is connected." : "Authenticated preview channel is disconnected.",
+            context.ipadPreviewChannelConnected ? .passed : .failed,
+            .required,
+            now
+        )
+    }
+
+    private func networkFreshnessResult(_ context: BoothPreflightContext, now: Date) -> PreflightCheckResult {
+        guard context.ipadConnected else {
+            return result(.networkFreshness, "Network freshness", "Skipped because no iPad is authenticated.", .skipped, .recommended, now)
+        }
+        guard let lastActivity = context.lastControlActivityAt else {
+            return result(.networkFreshness, "Network freshness", "No authenticated control activity has been observed.", .failed, .required, now)
+        }
+        let age = max(0, now.timeIntervalSince(lastActivity))
+        let status: PreflightCheckStatus = age <= 8 ? .passed : .failed
+        return result(.networkFreshness, "Network freshness", "Last authenticated control activity was \(Int(age.rounded()))s ago.", status, .required, now)
+    }
+
+    private func reconnectStateResult(_ context: BoothPreflightContext, now: Date) -> PreflightCheckResult {
+        guard context.ipadConnected else {
+            return result(.reconnectState, "Reconnect state", "Skipped because no iPad is authenticated.", .skipped, .recommended, now)
+        }
+        if context.reconnectInProgress {
+            return result(.reconnectState, "Reconnect state", "Reconnect attempt \(context.reconnectAttempt) is in progress.", .warning, .required, now)
+        }
+        return result(.reconnectState, "Reconnect state", "No reconnect is pending.", .passed, .required, now)
     }
 
     private func networkRouteResult(_ context: BoothPreflightContext, now: Date) -> PreflightCheckResult {
@@ -308,5 +381,10 @@ final class BoothPreflightService {
         if results.contains(where: { $0.requirement == .required && $0.status == .failed }) { return .notReady }
         if results.contains(where: { $0.status == .warning }) { return .readyWithWarnings }
         return .ready
+    }
+
+    private func ageText(_ age: TimeInterval?) -> String {
+        guard let age else { return "unknown" }
+        return "\(Int(max(0, age).rounded()))s"
     }
 }

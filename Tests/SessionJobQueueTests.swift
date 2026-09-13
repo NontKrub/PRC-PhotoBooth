@@ -56,6 +56,33 @@ struct SessionJobQueueTests {
         #expect(snapshot.maximumConcurrentExecutions == 1)
     }
 
+    @Test("older required print is not starved by newer strip arrivals")
+    @MainActor
+    func requiredPrintIsNotStarved() async throws {
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = JobQueueStore(fileURL: directory.appendingPathComponent("jobs.json"))
+        let executor = TestJobExecutor()
+
+        let oldStrip = try await store.enqueue(sessionID: "old-session", kind: .renderStrip)
+        var completedStrip = oldStrip
+        completedStrip.status = .succeeded
+        completedStrip.updatedAt = Date()
+        try await store.update(completedStrip)
+        _ = try await store.enqueue(sessionID: "old-session", kind: .autoPrint)
+        for index in 0..<8 {
+            _ = try await store.enqueue(sessionID: "new-session-\(index)", kind: .renderStrip)
+        }
+
+        let queue = SessionJobQueue(store: store, executor: executor)
+        queue.start()
+        try await waitUntil("old print") {
+            await queue.job(sessionID: "old-session", status: .succeeded, kind: .autoPrint) != nil
+        }
+
+        #expect(await executor.snapshot().kinds.first == .autoPrint)
+    }
+
     @Test("retryable errors wait for retry and manual retry resets the job")
     @MainActor
     func retriesRetryableErrors() async throws {

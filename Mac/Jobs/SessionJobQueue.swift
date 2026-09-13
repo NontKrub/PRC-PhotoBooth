@@ -349,15 +349,22 @@ final class SessionJobQueue {
 
     private func nextRunnableJob(in kinds: [SessionJobKind]) -> SessionJob? {
         let now = Date()
-        for kind in kinds {
-            let candidates = jobs
-                .filter { $0.kind == kind && isRunnable($0, now: now) }
-                .sorted { $0.createdAt < $1.createdAt }
-            if let job = candidates.first, dependenciesSatisfied(for: job) {
-                return job
-            }
+        let runnable = jobs.filter {
+            kinds.contains($0.kind)
+                && isRunnable($0, now: now)
+                && dependenciesSatisfied(for: $0)
         }
-        return nil
+        // Required work is globally oldest-first. Optional GIF work only runs
+        // when no required job is runnable, so heavy rendering cannot delay a
+        // later session's strip/download/gallery/print path.
+        let candidates = runnable.contains(where: { !$0.kind.isOptional })
+            ? runnable.filter { !$0.kind.isOptional }
+            : runnable
+        return candidates.min {
+            if $0.createdAt != $1.createdAt { return $0.createdAt < $1.createdAt }
+            if $0.sessionID != $1.sessionID { return $0.sessionID < $1.sessionID }
+            return $0.id < $1.id
+        }
     }
 
     private func isRunnable(_ job: SessionJob, now: Date) -> Bool {
@@ -373,7 +380,15 @@ final class SessionJobQueue {
 
     private func dependenciesSatisfied(for currentJob: SessionJob) -> Bool {
         func job(for kind: SessionJobKind) -> SessionJob? {
-            jobs.first { $0.sessionID == currentJob.sessionID && $0.kind == kind }
+            jobs
+                .filter {
+                    $0.sessionID == currentJob.sessionID
+                        && $0.kind == kind
+                        && $0.status != .cancelled
+                }
+                .max {
+                    $0.createdAt == $1.createdAt ? $0.id < $1.id : $0.createdAt < $1.createdAt
+                }
         }
 
         func succeeded(_ kind: SessionJobKind) -> Bool {
@@ -386,7 +401,7 @@ final class SessionJobQueue {
         case .registerDownload, .autoPrint:
             return succeeded(.renderStrip)
         case .updateGallery:
-            return succeeded(.renderStrip) && succeeded(.registerDownload)
+            return succeeded(.renderStrip)
         case .renderGIF:
             guard let download = job(for: .registerDownload) else { return true }
             return download.status == .succeeded || download.status == .failed || download.status == .cancelled

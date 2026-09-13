@@ -67,4 +67,12 @@ struct OperationsStatusLogicTests {
         #expect(status.severity == .normal)
         #expect(status.summary == "Test cancelled")
     }
+
+    @Test("connection health exposes trust and preview failures")
+    func connectionHealth() {
+        #expect(OperationsStatusLogic.connection(.connecting, authenticated: false, previewConnected: false).severity == .warning)
+        #expect(OperationsStatusLogic.connection(.connected(peerName: "iPad"), authenticated: false, previewConnected: false).summary == "Trust pending")
+        #expect(OperationsStatusLogic.connection(.connected(peerName: "iPad"), authenticated: true, previewConnected: false).severity == .failure)
+        #expect(OperationsStatusLogic.connection(.connected(peerName: "iPad"), authenticated: true, previewConnected: true).severity == .normal)
+    }
 }

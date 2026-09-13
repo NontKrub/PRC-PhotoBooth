@@ -2,6 +2,7 @@ import Foundation
 import Combine
 import CoreImage
 import CoreGraphics
+import SwiftUI
 
 // iPad-side coordinator — receives messages from Mac, drives local UI state.
 @MainActor
@@ -38,6 +39,7 @@ final class iPadViewModel: ObservableObject {
 #endif
     private var sessionRequestTimeoutTask: Task<Void, Never>?
     private var countdownTask: Task<Void, Never>?
+    private var connectionRecoveryTask: Task<Void, Never>?
     private var sessionMessageGate = SessionMessageGate()
 #if DEBUG
     @Published private(set) var demoKioskMode = false
@@ -48,6 +50,17 @@ final class iPadViewModel: ObservableObject {
     var networkTransport: NetworkBoothTransport? { multipeer as? NetworkBoothTransport }
     var connectionStatus: BoothConnectionStatus { multipeer.connectionStatus }
     var canChangeConnection: Bool { stateMachine.phase == .idle }
+    var isBoothSessionActive: Bool {
+        if case .idle = stateMachine.phase { return false }
+        return true
+    }
+    var shouldShowReconnectOverlay: Bool {
+        guard isBoothSessionActive, !isConnectionReady else { return false }
+#if DEBUG
+        if demoKioskMode { return false }
+#endif
+        return true
+    }
     var isConnectionReady: Bool {
         guard case .connected = connectionStatus.state else { return false }
         guard networkTransport != nil else { return true }
@@ -87,6 +100,17 @@ final class iPadViewModel: ObservableObject {
     func refreshNearbyMacs() {
         guard canChangeConnection else { return }
         networkTransport?.restart()
+    }
+
+    func handleScenePhase(_ phase: ScenePhase) {
+        guard phase == .active, !isConnectionReady, connectionRecoveryTask == nil else { return }
+        connectionRecoveryTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            self.multipeer.restart()
+            try? await Task.sleep(for: .seconds(2))
+            guard !Task.isCancelled else { return }
+            self.connectionRecoveryTask = nil
+        }
     }
 
     init() {
@@ -563,6 +587,10 @@ final class iPadViewModel: ObservableObject {
 
     func currentPrompt(for photoIndex: Int) -> SessionPromptPresentation? {
         sessionPresentation?.prompts.first { $0.photoIndex == photoIndex }
+    }
+
+    func captureFraming(for photoIndex: Int) -> CaptureFramingGeometry? {
+        CaptureFramingGeometry.framing(for: photoIndex, in: eventConfig)
     }
 
     private func applyCatalogDefaults(preserveLanguage: Bool) {

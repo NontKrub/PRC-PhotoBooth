@@ -106,6 +106,26 @@ enum OperationsStatusLogic {
         case .unknown: return OperationsSectionStatus(summary: "Unknown", severity: .warning)
         }
     }
+
+    static func connection(
+        _ state: BoothConnectionState,
+        authenticated: Bool,
+        previewConnected: Bool
+    ) -> OperationsSectionStatus {
+        guard case .connected = state else {
+            return OperationsSectionStatus(
+                summary: state == .connecting ? "Reconnecting…" : "Disconnected",
+                severity: state == .connecting ? .warning : .failure
+            )
+        }
+        guard authenticated else {
+            return OperationsSectionStatus(summary: "Trust pending", severity: .warning)
+        }
+        guard previewConnected else {
+            return OperationsSectionStatus(summary: "Preview unavailable", severity: .failure)
+        }
+        return OperationsSectionStatus(summary: "Connected", severity: .normal)
+    }
 }
 
 struct OperationsView: View {
@@ -140,6 +160,11 @@ struct OperationsView: View {
                     preflightResults
                 } label: {
                     operationsHeader(title: "Preflight Results", status: preflightStatus)
+                }
+                GroupBox {
+                    connectionStabilitySection
+                } label: {
+                    operationsHeader(title: "Connection Stability", status: connectionStabilityStatus)
                 }
                 if coordinator.recoveryService.recoverableCaptureSession != nil {
                     DisclosureGroup(isExpanded: $recoveryExpanded) {
@@ -571,29 +596,81 @@ struct OperationsView: View {
 
     private var remoteOperatorSection: some View {
         GroupBox("Remote Operator") {
-            let pairingURL = coordinator.operatorPairingURL
-            HStack(alignment: .top, spacing: 16) {
-                if let qr = generateQRCode(from: pairingURL) {
-                    Image(nsImage: NSImage(cgImage: qr, size: .zero))
-                        .interpolation(.none)
-                        .resizable()
-                        .frame(width: 130, height: 130)
-                        .accessibilityLabel("Remote operator pairing QR code")
+            if !coordinator.isRemoteOperatorEnabled {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Disabled by default. Enable only on a trusted local network.")
+                        .foregroundStyle(.secondary)
+                    Button("Enable Remote Operator") {
+                        coordinator.enableRemoteOperator()
+                    }
+                    .buttonStyle(.borderedProminent)
                 }
-                VStack(alignment: .leading, spacing: 7) {
-                    Text("Scan to connect an operator device.")
-                    Text(pairingURL).font(.caption.monospaced()).textSelection(.enabled)
-                    HStack {
-                        Button("Copy Pairing Link") {
-                            NSPasteboard.general.clearContents()
-                            NSPasteboard.general.setString(pairingURL, forType: .string)
-                        }
-                        if let station = coordinator.sharingStationURL {
-                            Text("Sharing Station: \(station)").font(.caption.monospaced()).textSelection(.enabled)
+            } else if let pairingURL = coordinator.operatorPairingURL {
+                HStack(alignment: .top, spacing: 16) {
+                    if let qr = generateQRCode(from: pairingURL) {
+                        Image(nsImage: NSImage(cgImage: qr, size: .zero))
+                            .interpolation(.none)
+                            .resizable()
+                            .frame(width: 130, height: 130)
+                            .accessibilityLabel("Remote operator pairing QR code")
+                    }
+                    VStack(alignment: .leading, spacing: 7) {
+                        Text("Scan once to connect an operator device. The link is a credential and expires shortly.")
+                        Text(pairingURL).font(.caption.monospaced()).textSelection(.enabled)
+                        HStack {
+                            Button("Copy Pairing Link") {
+                                NSPasteboard.general.clearContents()
+                                NSPasteboard.general.setString(pairingURL, forType: .string)
+                            }
+                            Button("Revoke Access", role: .destructive) {
+                                coordinator.disableRemoteOperator()
+                            }
+                            if let station = coordinator.sharingStationURL {
+                                Text("Sharing Station: \(station)").font(.caption.monospaced()).textSelection(.enabled)
+                            }
                         }
                     }
                 }
             }
+        }
+    }
+
+    private var connectionStabilityStatus: OperationsSectionStatus {
+        OperationsStatusLogic.connection(
+            connectionStatus.state,
+            authenticated: connectionStatus.isPeerAuthenticated,
+            previewConnected: connectionStatus.isPreviewChannelConnected
+        )
+    }
+
+    private var connectionStabilitySection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 16) {
+                Label(
+                    connectionStabilityStatus.summary ?? "Unknown",
+                    systemImage: connectionStabilityStatus.severity == .normal
+                        ? "checkmark.circle.fill"
+                        : "exclamationmark.triangle.fill"
+                )
+                .foregroundStyle(connectionStabilityStatus.severity == .failure ? .red : connectionStabilityStatus.severity == .warning ? .orange : .green)
+                Spacer()
+                Text(connectionStatus.peerDisplayName ?? "No iPad")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            HStack(spacing: 18) {
+                healthValue("Control", controlConnectionLabel)
+                healthValue("Preview", connectionStatus.isPreviewChannelConnected ? "Connected" : "Unavailable")
+                healthValue("Trust", connectionStatus.isPeerAuthenticated ? "Authenticated" : "Not authenticated")
+            }
+        }
+    }
+
+    private var controlConnectionLabel: String {
+        switch connectionStatus.state {
+        case .connected: return "Connected"
+        case .connecting: return "Reconnecting…"
+        case .disconnected: return "Disconnected"
         }
     }
 

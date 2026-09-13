@@ -8,6 +8,12 @@ enum OperationsEventKind: String, Codable, Sendable, CaseIterable {
     case ipadConnected, ipadDisconnected, ipadReconnected
     case printSucceeded, printFailed
     case cloudUploadSucceeded, cloudUploadFailed, jobRetried
+    case transportDiscoveryStarted, transportConnecting, transportReady
+    case transportWaiting, transportDisconnected, transportReconnectScheduled
+    case transportReconnectSucceeded, heartbeatTimedOut, routeChanged
+    case controlSendFailed, controlPayloadRejected
+    case previewDisconnected, previewReconnected, sessionSyncSent, sessionSyncFailed
+    case ipadAppForegrounded, ipadAppBackgrounded
 }
 
 struct OperationsEvent: Codable, Sendable, Equatable, Identifiable {
@@ -18,6 +24,10 @@ struct OperationsEvent: Codable, Sendable, Equatable, Identifiable {
     var photoIndex: Int?
     var duration: Double?
     var reason: String?
+    var channel: String?
+    var route: String?
+    var attempt: Int?
+    var byteCount: Int?
 }
 
 actor OperationsEventStore {
@@ -36,7 +46,11 @@ actor OperationsEventStore {
         sessionID: String? = nil,
         photoIndex: Int? = nil,
         duration: Double? = nil,
-        reason: String? = nil
+        reason: String? = nil,
+        channel: String? = nil,
+        route: String? = nil,
+        attempt: Int? = nil,
+        byteCount: Int? = nil
     ) {
         loadIfNeeded()
         let now = Date()
@@ -47,7 +61,11 @@ actor OperationsEventStore {
             sessionID: sessionID,
             photoIndex: photoIndex,
             duration: duration,
-            reason: reason
+            reason: OperationsEventRedactor.text(reason),
+            channel: OperationsEventRedactor.text(channel),
+            route: OperationsEventRedactor.text(route),
+            attempt: attempt,
+            byteCount: byteCount
         ))
         trim(now: now)
         save()
@@ -102,5 +120,22 @@ actor OperationsEventStore {
     private func recordError(_ error: Error) {
         lastError = error.localizedDescription
         NSLog("[Operations] Event storage failed: %@", error.localizedDescription)
+    }
+}
+
+enum OperationsEventRedactor {
+    private static let sensitiveWords = [
+        "token", "password", "secret", "private key", "credential",
+        "authorization", "bearer", "pin", "keychain", "access_token",
+        "pairing-v2:"
+    ]
+
+    static func text(_ value: String?) -> String? {
+        guard let value, !value.isEmpty else { return nil }
+        let normalized = value.lowercased()
+        guard !sensitiveWords.contains(where: normalized.contains) else { return "[redacted]" }
+        return value
+            .replacingOccurrences(of: "\n", with: " ")
+            .replacingOccurrences(of: "\r", with: " ")
     }
 }

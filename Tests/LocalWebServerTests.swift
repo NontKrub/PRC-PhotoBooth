@@ -7,6 +7,32 @@ import CryptoKit
 
 @Suite("Local download server")
 struct LocalWebServerTests {
+    @Test("operator routes are closed until explicitly enabled")
+    func operatorRoutesAreDisabledByDefault() async throws {
+        let server = LocalWebServer(port: 0)
+        await server.configureOperatorHandlers(OperatorWebHandlers(
+            isEnabled: { false },
+            pair: { _ in nil },
+            authorize: { _ in false },
+            status: { .empty },
+            action: { _ in false },
+            events: { Data("[]".utf8) }
+        ))
+        try await server.start()
+        defer { Task { await server.stop() } }
+        let status = await server.waitUntilReady(timeout: 2)
+        guard case .ready(let port) = status.state else {
+            Issue.record("Server did not become ready: \(status)")
+            return
+        }
+
+        let url = try #require(URL(string: "http://127.0.0.1:\(port)/operator"))
+        let (body, response) = try await URLSession.shared.data(from: url)
+        let httpResponse = try #require(response as? HTTPURLResponse)
+        #expect(httpResponse.statusCode == 404)
+        #expect(String(decoding: body, as: UTF8.self).contains("pair") == false)
+    }
+
     @Test("bind failure is reported without crashing")
     @MainActor
     func bindFailureIsReported() async throws {
@@ -69,6 +95,9 @@ struct LocalWebServerTests {
         let httpResponse = try #require(response as? HTTPURLResponse)
         #expect(httpResponse.statusCode == 200)
         #expect(httpResponse.value(forHTTPHeaderField: "Content-Length") == String(original.count))
+        #expect(httpResponse.value(forHTTPHeaderField: "Cache-Control") == "no-store")
+        #expect(httpResponse.value(forHTTPHeaderField: "Referrer-Policy") == "no-referrer")
+        #expect(httpResponse.value(forHTTPHeaderField: "X-Content-Type-Options") == "nosniff")
         #expect(downloaded.count == original.count)
         #expect(Data(SHA256.hash(data: downloaded)) == Data(SHA256.hash(data: original)))
     }

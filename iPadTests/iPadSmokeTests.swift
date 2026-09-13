@@ -138,4 +138,82 @@ struct iPadSmokeTests {
         viewModel.stateMachine.startSession(config: EventConfig(photoCount: 1))
         #expect(!viewModel.canChangeConnection)
     }
+
+    @Test("countdown derives framing from its active photo slot")
+    @MainActor
+    func countdownUsesActiveSlotFraming() throws {
+        let viewModel = iPadViewModel()
+        defer { viewModel.multipeer.disconnect() }
+        let config = framingConfig()
+        viewModel.eventConfig = config
+        viewModel.stateMachine.applyAuthoritativeSnapshot(
+            sessionID: "framing",
+            config: config,
+            phase: .countdown(photoIndex: 0, secondsRemaining: 3)
+        )
+
+        let framing = try #require(viewModel.captureFraming(for: 0))
+        #expect(abs(framing.aspectRatio - 2.0 / 3.0) < 0.000_001)
+    }
+
+    @Test("countdown and retake restore each photo's framing")
+    @MainActor
+    func countdownAndRetakeUseCurrentPhotoIndex() throws {
+        let viewModel = iPadViewModel()
+        defer { viewModel.multipeer.disconnect() }
+        let config = framingConfig()
+        viewModel.eventConfig = config
+        viewModel.stateMachine.startSession(config: config)
+        viewModel.stateMachine.beginCountdown(photoIndex: 0)
+        let firstRatio = try #require(viewModel.captureFraming(for: 0)).aspectRatio
+
+        viewModel.stateMachine.applyAuthoritativePhase(.countdown(photoIndex: 1, secondsRemaining: 3))
+        let secondRatio = try #require(viewModel.captureFraming(for: 1)).aspectRatio
+        #expect(abs(firstRatio - 2.0 / 3.0) < 0.000_001)
+        #expect(abs(secondRatio - 3.0 / 2.0) < 0.000_001)
+
+        viewModel.stateMachine.applyAuthoritativePhase(.review(photoIndex: 1))
+        viewModel.stateMachine.retakeShot(photoIndex: 1)
+        #expect(viewModel.stateMachine.phase == .countdown(photoIndex: 1, secondsRemaining: config.countdownSeconds))
+        let retakeRatio = try #require(viewModel.captureFraming(for: 1)).aspectRatio
+        #expect(abs(retakeRatio - secondRatio) < 0.000_001)
+    }
+
+    @Test("countdown view builds when slot framing falls back")
+    @MainActor
+    func countdownBuildsWithMissingOrInvalidSlot() {
+        let viewModel = iPadViewModel()
+        defer { viewModel.multipeer.disconnect() }
+        let invalid = EventConfig(
+            photoCount: 1,
+            canvasWidth: 1200,
+            canvasHeight: 1800,
+            slots: [SharedPhotoSlot(id: "invalid", normalizedRect: CGRect(x: 0, y: 0, width: 0, height: 1))]
+        )
+        viewModel.eventConfig = invalid
+        viewModel.stateMachine.applyAuthoritativeSnapshot(
+            sessionID: "invalid-framing",
+            config: invalid,
+            phase: .countdown(photoIndex: 0, secondsRemaining: 3)
+        )
+
+        #expect(viewModel.captureFraming(for: 0) == nil)
+        let host = UIHostingController(
+            rootView: CountdownView(photoIndex: 0, secondsRemaining: 3).environmentObject(viewModel)
+        )
+        _ = host.view
+        #expect(host.viewIfLoaded != nil)
+    }
+
+    private func framingConfig() -> EventConfig {
+        EventConfig(
+            photoCount: 2,
+            canvasWidth: 1200,
+            canvasHeight: 1800,
+            slots: [
+                SharedPhotoSlot(id: "portrait", normalizedRect: CGRect(x: 0, y: 0, width: 0.5, height: 0.5), photoIndex: 0),
+                SharedPhotoSlot(id: "landscape", normalizedRect: CGRect(x: 0, y: 0, width: 0.75, height: 1.0 / 3.0), photoIndex: 1)
+            ]
+        )
+    }
 }

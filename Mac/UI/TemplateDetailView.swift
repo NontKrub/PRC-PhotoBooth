@@ -9,9 +9,14 @@ struct TemplateDetailView: View {
     let onImportForegroundOverlay: (URL) -> Void
     let onRemoveForegroundOverlay: () -> Void
     let onImportPromptImage: (Int, URL) -> Void
-    @State private var showingImporter = false
-    @State private var showingForegroundImporter = false
+    @State private var showingAssetImporter = false
+    @State private var assetImportDestination: AssetImportDestination?
     @State private var showingSlotEditor = false
+
+    private enum AssetImportDestination {
+        case frame
+        case foregroundOverlay
+    }
 
     var body: some View {
         Form {
@@ -39,13 +44,19 @@ struct TemplateDetailView: View {
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
-                Button("Import / Replace Frame PNG…") { showingImporter = true }
+                Button("Import / Replace Frame PNG…") {
+                    assetImportDestination = .frame
+                    showingAssetImporter = true
+                }
             }
             Section("Foreground Overlay") {
                 Text(template.foregroundOverlayFileName ?? "No foreground overlay")
                     .font(.caption)
                     .foregroundStyle(.secondary)
-                Button("Import / Replace Foreground PNG…") { showingForegroundImporter = true }
+                Button("Import / Replace Foreground PNG…") {
+                    assetImportDestination = .foregroundOverlay
+                    showingAssetImporter = true
+                }
                 if template.foregroundOverlayFileName != nil {
                     Button("Remove Foreground Overlay", role: .destructive, action: onRemoveForegroundOverlay)
                 }
@@ -60,20 +71,20 @@ struct TemplateDetailView: View {
             }
         }
         .fileImporter(
-            isPresented: $showingImporter,
+            isPresented: $showingAssetImporter,
             allowedContentTypes: [.png, .jpeg, .heic],
             allowsMultipleSelection: false
         ) { result in
-            guard case .success(let urls) = result, let url = urls.first else { return }
-            onImportFrame(url)
-        }
-        .fileImporter(
-            isPresented: $showingForegroundImporter,
-            allowedContentTypes: [.png],
-            allowsMultipleSelection: false
-        ) { result in
-            guard case .success(let urls) = result, let url = urls.first else { return }
-            onImportForegroundOverlay(url)
+            defer { assetImportDestination = nil }
+            guard case .success(let urls) = result,
+                  let url = urls.first,
+                  let assetImportDestination else { return }
+            switch assetImportDestination {
+            case .frame:
+                onImportFrame(url)
+            case .foregroundOverlay:
+                onImportForegroundOverlay(url)
+            }
         }
         .sheet(isPresented: $showingSlotEditor) {
             TemplateFrameSlotEditor(
