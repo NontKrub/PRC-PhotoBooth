@@ -717,6 +717,61 @@ struct BoothPairingTests {
         #expect(!BoothPeerSelectionPolicy.canAutomaticallyConnect(peerID: "mac-1", preferredPeerID: "mac-1", trustedPeerIDs: trusted, autoReconnect: false))
     }
 
+    @Test("secure negotiation reuses the Mac session and establishes symmetrically")
+    func secureNegotiationIsMacAuthoritative() throws {
+        var mac = BoothSecureChannelNegotiator(
+            role: .mac,
+            localDeviceID: "mac-1",
+            expectedPeerDeviceID: "ipad-1",
+            connectionGeneration: 9
+        )
+        var iPad = BoothSecureChannelNegotiator(
+            role: .iPad,
+            localDeviceID: "ipad-1",
+            expectedPeerDeviceID: "mac-1",
+            connectionGeneration: 9
+        )
+
+        let macHello: BoothSecureChannelHello
+        if case .sendHello(let hello) = try mac.begin(generation: 9) {
+            macHello = hello
+        } else {
+            Issue.record("Mac must send the authoritative hello")
+            return
+        }
+
+        let iPadActions = try iPad.receiveHello(macHello, generation: 9)
+        let iPadHello: BoothSecureChannelHello
+        if case .sendHello(let hello) = iPadActions.first(where: {
+            if case .sendHello = $0 { return true }
+            return false
+        }) {
+            iPadHello = hello
+        } else {
+            Issue.record("iPad must echo the Mac session in its responder hello")
+            return
+        }
+        #expect(iPadHello.sessionID == macHello.sessionID)
+
+        #expect(try mac.receiveHello(iPadHello, generation: 9) == [.configure])
+        try mac.markReadySent(generation: 9)
+        try iPad.markReadySent(generation: 9)
+        #expect(try mac.receiveReady(sessionID: macHello.sessionID, generation: 9) == .established)
+        #expect(try iPad.receiveReady(sessionID: macHello.sessionID, generation: 9) == .established)
+    }
+
+    @Test("secure negotiation ignores a stale connection generation")
+    func secureNegotiationRejectsStaleGeneration() throws {
+        var mac = BoothSecureChannelNegotiator(
+            role: .mac,
+            localDeviceID: "mac-1",
+            expectedPeerDeviceID: "ipad-1",
+            connectionGeneration: 2
+        )
+        #expect(try mac.begin(generation: 2) != .ignored)
+        #expect(try mac.receiveReady(sessionID: "stale", generation: 1) == .ignored)
+    }
+
     private var macIdentity: BoothDeviceIdentity {
         BoothDeviceIdentity(id: "mac-1", displayName: "PRC-Booth-01", role: .mac)
     }

@@ -161,9 +161,11 @@ final class BoothCoordinator {
     private(set) var currentSessionPresentation: SessionPresentation?
     private var lastSessionPresentation: SessionPresentation?
     private var finishedAwaitingCustomerAckSessionID: String?
+    private var customerFinishedInFlightSessionID: String?
     private var sessionAssetReferences: [Int: BoothAssetReference] = [:]
     private var stripAssetReference: BoothAssetReference?
     private var pendingPromptAssets: [String: (reference: BoothAssetReference, data: Data)] = [:]
+    private var assetSources: [BoothAssetReference: Data] = [:]
     private var assetAssembler = BoothAssetAssembler()
     var externalSelection = CustomerSessionSelectionDraft()
 
@@ -675,6 +677,7 @@ final class BoothCoordinator {
 
     @discardableResult
     private func sendAsset(data: Data, reference: BoothAssetReference) -> Bool {
+        assetSources[reference] = data
         guard let chunks = try? BoothAssetTransfer.chunks(data: data, reference: reference) else {
             errorMessage = "Asset could not be prepared for transfer: \(reference.assetID)"
             return false
@@ -1412,6 +1415,7 @@ final class BoothCoordinator {
         reviewDecisionPending = false
         sessionAssetReferences = [:]
         stripAssetReference = nil
+        assetSources = [:]
         assetAssembler = BoothAssetAssembler()
         guard recoveryService.recoverableCaptureSession == nil else {
             errorMessage = "Resume or discard the unfinished session in Operations."
@@ -2191,6 +2195,7 @@ final class BoothCoordinator {
             reviewDecisionPending = false
             sessionAssetReferences = [:]
             stripAssetReference = nil
+            assetSources = [:]
             pendingPromptAssets = [:]
             currentStripPreview = nil
             currentFilteredReviewImages = [:]
@@ -2226,6 +2231,7 @@ final class BoothCoordinator {
         currentFilteredReviewImages = [:]
         sessionAssetReferences = [:]
         stripAssetReference = nil
+        assetSources = [:]
         pendingPromptAssets = [:]
         assetAssembler = BoothAssetAssembler()
         currentStripPreview = nil
@@ -2250,6 +2256,7 @@ final class BoothCoordinator {
         currentSession = store.restoreSessionRecord(from: manifest)
         var recoveredPresentation = (try? workspace.loadPresentationSnapshot(manifest: manifest))
             ?? presentation(for: manifest.eventConfig, sessionID: manifest.id)
+        assetSources = [:]
         pendingPromptAssets = [:]
         recoveredPresentation.prompts = recoveredPresentation.prompts.map { prompt in
             guard let data = prompt.imageData, !data.isEmpty else { return prompt }
@@ -2756,6 +2763,10 @@ final class BoothCoordinator {
         multipeer.onControlMessage = { [weak self] msg in
             self?.handleMessage(msg)
         }
+        multipeer.onTransportReady = { [weak self] peer in
+            guard peer.role == .iPad else { return }
+            self?.handleTransportReady()
+        }
         multipeer.onAssetChunk = { [weak self] chunk in
             self?.handleAssetChunk(chunk)
         }
@@ -2777,19 +2788,23 @@ final class BoothCoordinator {
         )
     }
 
+    private func handleTransportReady() {
+        if let event = activeEvent {
+            multipeer.sendControl(.eventConfig(config: event.toEventConfig()))
+        }
+        sendExperienceCatalog()
+        resynciPad()
+    }
+
     private func handleMessage(_ msg: Message) {
         switch msg {
-        case .hello(let role) where role == .iPad:
-            if let event = activeEvent {
-                multipeer.sendControl(.eventConfig(config: event.toEventConfig()))
-            }
-            sendExperienceCatalog()
-            resynciPad()
         case .sessionStart(let context):
             guard context == nil else { break }
             if stateMachine.phase == .idle, activeEvent != nil {
                 startSession()
             }
+        case .assetRequest(let references):
+            handleAssetRequest(references)
         case .customerSessionRequest(let selection):
             guard stateMachine.phase == .idle || stateMachine.phase == .selectingExperience || stateMachine.phase == .readyToStart else {
                 multipeer.sendControl(.sessionRequestRejected(reason: LocalizedText(
@@ -2824,12 +2839,38 @@ final class BoothCoordinator {
         }
     }
 
+    private func handleAssetRequest(_ references: [BoothAssetReference]) {
+        guard !references.isEmpty, references.count <= 16 else {
+            errorMessage = "Asset recovery request was rejected."
+            return
+        }
+        for reference in Set(references) {
+            let isKnownSession = reference.sessionID == nil
+                || reference.sessionID == currentSession?.id
+                || reference.sessionID == stateMachine.currentSessionID
+                || reference.sessionID == lastCompletedSessionID
+            guard isKnownSession,
+                  let data = assetSources[reference],
+                  data.count == reference.byteCount,
+                  Data(SHA256.hash(data: data)) == reference.sha256,
+                  sendAsset(data: data, reference: reference) else {
+                multipeer.sendControl(.assetUnavailable(
+                    reference: reference,
+                    reason: "The requested asset is no longer available."
+                ))
+                continue
+            }
+        }
+    }
+
     private func handleCustomerFinished(_ context: SessionMessageContext) {
         guard let sessionID = finishedAwaitingCustomerAckSessionID,
               context.sessionID == sessionID,
               context.sequence == sessionMessageSequence,
               acceptsClientSessionMessage(context),
-              case .finished = stateMachine.phase else { return }
+              case .finished = stateMachine.phase,
+              customerFinishedInFlightSessionID == nil else { return }
+        customerFinishedInFlightSessionID = sessionID
         let idle = SessionSyncSnapshot(
             config: stateMachine.config,
             sessionID: nil,
@@ -2840,11 +2881,14 @@ final class BoothCoordinator {
         )
         multipeer.sendControl(.sessionSync(snapshot: idle)) { [weak self] outcome in
             guard let self else { return }
+            guard self.customerFinishedInFlightSessionID == sessionID else { return }
             guard outcome == .sent,
                   self.finishedAwaitingCustomerAckSessionID == sessionID else {
+                self.customerFinishedInFlightSessionID = nil
                 self.errorMessage = "The next session acknowledgement could not be delivered."
                 return
             }
+            self.customerFinishedInFlightSessionID = nil
             self.finishedAwaitingCustomerAckSessionID = nil
             self.currentManifest = nil
             self.currentManifestID = nil
@@ -2858,6 +2902,7 @@ final class BoothCoordinator {
             self.lastSessionPresentation = nil
             self.sessionAssetReferences = [:]
             self.stripAssetReference = nil
+            self.assetSources = [:]
             self.pendingPromptAssets = [:]
             self.assetAssembler = BoothAssetAssembler()
             self.capture.resetStills()

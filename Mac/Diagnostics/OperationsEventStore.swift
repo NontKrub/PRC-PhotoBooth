@@ -106,7 +106,7 @@ actor OperationsEventStore {
 
     private func trim(now: Date) {
         let cutoff = now.addingTimeInterval(-retention)
-        events = Array(events.filter { $0.timestamp >= cutoff }.suffix(10_000))
+        events = Array(events.filter { $0.timestamp >= cutoff }.suffix(5_000))
     }
 
     private func save() {

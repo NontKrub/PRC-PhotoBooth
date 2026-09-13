@@ -1,5 +1,6 @@
 import Foundation
 import Combine
+import CryptoKit
 import CoreImage
 import CoreGraphics
 import SwiftUI
@@ -42,11 +43,14 @@ final class iPadViewModel: ObservableObject {
     private var reviewDecisionTimeoutTask: Task<Void, Never>?
     private var recoveryActionTimeoutTask: Task<Void, Never>?
     private var finishRequestTimeoutTask: Task<Void, Never>?
+    private var transientRequestGeneration: UInt64 = 0
     private var countdownTask: Task<Void, Never>?
     private var connectionRecoveryTask: Task<Void, Never>?
     private var sessionMessageGate = SessionMessageGate()
     private var assetAssembler = BoothAssetAssembler()
     private var receivedAssets: [String: Data] = [:]
+    private var receivedAssetReferences: [String: BoothAssetReference] = [:]
+    private var expectedAssetReferences: [String: BoothAssetReference] = [:]
     private var reviewAssetIndices: [String: Int] = [:]
 #if DEBUG
     @Published private(set) var demoKioskMode = false
@@ -167,6 +171,11 @@ final class iPadViewModel: ObservableObject {
         multipeer.onAssetChunk = { [weak self] chunk in
             self?.handleAssetChunk(chunk)
         }
+        multipeer.onTransportEvent = { [weak self] event in
+            guard event.kind == .transportReady,
+                  event.channel == String(describing: BoothTransportChannel.asset) else { return }
+            self?.requestMissingExpectedAssets()
+        }
         multipeer.onPreviewFrame = { [weak self] jpegData in
             guard let self else { return }
             self.updatePreview(jpegData)
@@ -218,9 +227,6 @@ final class iPadViewModel: ObservableObject {
 
     private func handleMessage(_ msg: Message) {
         switch msg {
-        case .hello(let role) where role == .mac:
-            multipeer.sendControl(.hello(role: .iPad))
-
         case .sessionSync(let snapshot):
             applySessionSync(snapshot)
 
@@ -261,19 +267,11 @@ final class iPadViewModel: ObservableObject {
                   acceptSessionChange(context, message: "sessionStart") else { break }
             cancelCountdown()
             clearSessionMedia()
-            isSessionRequestPending = false
-            reviewDecisionPending = false
-            recoveryActionPending = false
-            finishRequestPending = false
-            sessionRequestTimeoutTask?.cancel()
             stateMachine.startSession(config: eventConfig, sessionID: context.sessionID)
 
         case .sessionRequestRejected(let reason):
             cancelCountdown()
-            isSessionRequestPending = false
-            reviewDecisionPending = false
-            recoveryActionPending = false
-            sessionRequestTimeoutTask?.cancel()
+            clearTransientRequestState()
             sessionRequestError = reason
             stateMachine.beginSelectingExperience()
 
@@ -281,23 +279,16 @@ final class iPadViewModel: ObservableObject {
             guard acceptSessionChange(context, message: "sessionPrepared") else { break }
             cancelCountdown()
             clearSessionMedia()
-            isSessionRequestPending = false
-            reviewDecisionPending = false
-            recoveryActionPending = false
-            finishRequestPending = false
-            sessionRequestTimeoutTask?.cancel()
             eventConfig = config
             stateMachine.startSession(config: config, sessionID: presentation.sessionID)
             sessionPresentation = presentation
+            registerExpectedAssets(in: presentation)
             selectedLanguage = presentation.language
             installPresentationImages(presentation)
 
         case .beginCountdown(let context, let descriptor):
             guard accept(context, message: "beginCountdown") else { break }
-            recoveryActionPending = false
-            reviewDecisionPending = false
-            recoveryActionTimeoutTask?.cancel()
-            reviewDecisionTimeoutTask?.cancel()
+            clearTransientRequestState()
             stateMachine.applyAuthoritativePhase(
                 .countdown(photoIndex: descriptor.photoIndex, secondsRemaining: max(0, Int(ceil(descriptor.captureAt.timeIntervalSinceNow)))),
                 countdownDeadline: descriptor.captureAt
@@ -307,8 +298,7 @@ final class iPadViewModel: ObservableObject {
         case .shotCaptured(let context, let index, let thumbData):
             guard accept(context, message: "shotCaptured") else { break }
             cancelCountdown()
-            recoveryActionPending = false
-            reviewDecisionPending = false
+            clearTransientRequestState()
             stateMachine.applyAuthoritativePhase(.captured(photoIndex: index))
             let historyThumbnail = ReviewImageEncoder.thumbnailData(from: thumbData) ?? thumbData
             stateMachine.enterReview(
@@ -320,20 +310,18 @@ final class iPadViewModel: ObservableObject {
         case .shotCapturedAsset(let context, let index, let asset):
             guard accept(context, message: "shotCapturedAsset") else { break }
             cancelCountdown()
-            recoveryActionPending = false
-            reviewDecisionPending = false
+            clearTransientRequestState()
+            registerExpectedAsset(asset)
             reviewAssetIndices[asset.assetID] = index
             stateMachine.applyAuthoritativePhase(.captured(photoIndex: index))
-            if let data = receivedAssets[asset.assetID] {
+            if let data = cachedAsset(for: asset) {
                 installReviewAsset(asset, photoIndex: index, data: data)
             }
 
         case .captureRecovery(let context, let index, let failure):
             guard accept(context, message: "captureRecovery") else { break }
             cancelCountdown()
-            recoveryActionPending = false
-            recoveryActionTimeoutTask?.cancel()
-            reviewDecisionPending = false
+            clearTransientRequestState()
             stateMachine.applyAuthoritativePhase(.captureRecovery(photoIndex: index, failure: failure))
 
         case .reviewDecision(let context, let action):
@@ -343,8 +331,7 @@ final class iPadViewModel: ObservableObject {
                 ? .keep(photoIndex: idx)
                 : .retake(photoIndex: idx)
             guard CustomerDisplayWorkflow.canApply(customerAction, in: stateMachine.phase) else { break }
-            reviewDecisionPending = false
-            reviewDecisionTimeoutTask?.cancel()
+            clearTransientRequestState()
             switch action {
             case .keep: stateMachine.keepShot(photoIndex: idx)
             case .retake: stateMachine.retakeShot(photoIndex: idx)
@@ -353,25 +340,25 @@ final class iPadViewModel: ObservableObject {
         case .sessionFinished(let context, let qr, let stripData, _):
             guard accept(context, message: "sessionFinished") else { break }
             cancelCountdown()
-            recoveryActionPending = false
-            reviewDecisionPending = false
-            finishRequestPending = false
-            finishRequestTimeoutTask?.cancel()
+            clearTransientRequestState()
             stripThumbImage = stripData.flatMap(Self.cgImage(from:))
             stateMachine.applyAuthoritativePhase(.finished(qrPayload: qr))
 
         case .sessionFinishedAssets(let context, let qr, let stripAsset, _):
             guard accept(context, message: "sessionFinishedAssets") else { break }
             cancelCountdown()
-            recoveryActionPending = false
-            reviewDecisionPending = false
-            finishRequestPending = false
-            finishRequestTimeoutTask?.cancel()
+            clearTransientRequestState()
             stripThumbImage = nil
-            if let stripAsset, let data = receivedAssets[stripAsset.assetID] {
+            if let stripAsset { registerExpectedAsset(stripAsset) }
+            if let stripAsset, let data = cachedAsset(for: stripAsset) {
                 stripThumbImage = Self.cgImage(from: data)
             }
             stateMachine.applyAuthoritativePhase(.finished(qrPayload: qr))
+
+        case .assetUnavailable(let reference, let reason):
+            guard reference.sessionID == nil
+                    || reference.sessionID == sessionMessageGate.currentSessionID else { break }
+            sessionRequestError = reason
 
         case .operatorOverride(let context, let action):
             if let context {
@@ -379,6 +366,7 @@ final class iPadViewModel: ObservableObject {
             } else if !stateMachine.currentSessionID.isEmpty {
                 break
             }
+            clearTransientRequestState()
             if case .cancelSession = action { cancelCountdown() }
             stateMachine.operatorOverride(action)
 
@@ -387,6 +375,7 @@ final class iPadViewModel: ObservableObject {
     }
 
     private func clearSessionMedia() {
+        clearTransientRequestState()
         previewDecodeTask?.cancel()
         pendingPreviewJPEG = nil
         lastPreviewFrameAt = nil
@@ -395,10 +384,83 @@ final class iPadViewModel: ObservableObject {
         promptImages = [:]
         stripThumbImage = nil
         receivedAssets = [:]
+        receivedAssetReferences = [:]
+        expectedAssetReferences = [:]
         reviewAssetIndices = [:]
         assetAssembler = BoothAssetAssembler()
+    }
+
+    private func clearTransientRequestState() {
+        transientRequestGeneration &+= 1
+        sessionRequestTimeoutTask?.cancel()
         reviewDecisionTimeoutTask?.cancel()
         recoveryActionTimeoutTask?.cancel()
+        finishRequestTimeoutTask?.cancel()
+        sessionRequestTimeoutTask = nil
+        reviewDecisionTimeoutTask = nil
+        recoveryActionTimeoutTask = nil
+        finishRequestTimeoutTask = nil
+        isSessionRequestPending = false
+        reviewDecisionPending = false
+        recoveryActionPending = false
+        finishRequestPending = false
+        sessionRequestError = nil
+    }
+
+    private func beginTransientRequest() -> UInt64 {
+        clearTransientRequestState()
+        return transientRequestGeneration
+    }
+
+    private func registerExpectedAsset(_ reference: BoothAssetReference) {
+        expectedAssetReferences[reference.assetID] = reference
+    }
+
+    private func registerExpectedAssets(in presentation: SessionPresentation) {
+        for prompt in presentation.prompts {
+            if let imageAsset = prompt.imageAsset {
+                registerExpectedAsset(imageAsset)
+            }
+        }
+    }
+
+    private func cachedAsset(for reference: BoothAssetReference) -> Data? {
+        guard receivedAssetReferences[reference.assetID] == reference,
+              let data = receivedAssets[reference.assetID],
+              data.count == reference.byteCount,
+              Data(SHA256.hash(data: data)) == reference.sha256 else { return nil }
+        return data
+    }
+
+    private func requestMissingAssets(for snapshot: SessionSyncSnapshot) {
+        var references = Set<BoothAssetReference>()
+        if let presentation = snapshot.presentation {
+            registerExpectedAssets(in: presentation)
+            references.formUnion(presentation.prompts.compactMap(\.imageAsset))
+        }
+        if let reviewAsset = snapshot.reviewAsset {
+            registerExpectedAsset(reviewAsset)
+            references.insert(reviewAsset)
+        }
+        if let stripAsset = snapshot.stripAsset {
+            registerExpectedAsset(stripAsset)
+            references.insert(stripAsset)
+        }
+        for reference in snapshot.keptShotAssets.values {
+            registerExpectedAsset(reference)
+            references.insert(reference)
+        }
+        let missing = references.filter { cachedAsset(for: $0) == nil }.prefix(16)
+        guard !missing.isEmpty else { return }
+        _ = multipeer.sendControl(.assetRequest(references: Array(missing)))
+    }
+
+    private func requestMissingExpectedAssets() {
+        let missing = expectedAssetReferences.values
+            .filter { cachedAsset(for: $0) == nil }
+            .prefix(16)
+        guard !missing.isEmpty else { return }
+        _ = multipeer.sendControl(.assetRequest(references: Array(missing)))
     }
 
     private func installPresentationImages(_ presentation: SessionPresentation) {
@@ -407,7 +469,7 @@ final class iPadViewModel: ObservableObject {
                 result[prompt.promptID] = image
             }
             if let asset = prompt.imageAsset,
-               let data = receivedAssets[asset.assetID],
+               let data = cachedAsset(for: asset),
                let image = Self.cgImage(from: data) {
                 result[prompt.promptID] = image
             }
@@ -417,9 +479,19 @@ final class iPadViewModel: ObservableObject {
     private func handleAssetChunk(_ chunk: BoothAssetChunk) {
         let activeSessionID = sessionMessageGate.currentSessionID
         guard chunk.metadata.sessionID == nil || chunk.metadata.sessionID == activeSessionID else { return }
+        if let expected = expectedAssetReferences[chunk.metadata.assetID] {
+            guard expected == chunk.metadata.reference else { return }
+        } else {
+            guard chunk.metadata.sessionID == nil,
+                  chunk.metadata.kind == .templatePreview else { return }
+        }
         do {
             guard let (reference, data) = try assetAssembler.append(chunk) else { return }
+            if let expected = expectedAssetReferences[reference.assetID] {
+                guard expected == reference else { return }
+            }
             receivedAssets[reference.assetID] = data
+            receivedAssetReferences[reference.assetID] = reference
             switch reference.kind {
             case .templatePreview:
                 if let image = Self.cgImage(from: data) { experienceAssets[reference.assetID] = image }
@@ -438,6 +510,7 @@ final class iPadViewModel: ObservableObject {
             }
         } catch {
             receivedAssets.removeValue(forKey: chunk.metadata.assetID)
+            receivedAssetReferences.removeValue(forKey: chunk.metadata.assetID)
             sessionRequestError = "An asset could not be received. Please reconnect."
         }
     }
@@ -473,6 +546,7 @@ final class iPadViewModel: ObservableObject {
     }
 
     private func applySessionSync(_ snapshot: SessionSyncSnapshot) {
+        clearTransientRequestState()
         let previousSessionID = sessionMessageGate.currentSessionID
         if previousSessionID != snapshot.sessionID || snapshot.sessionID == nil {
             clearSessionMedia()
@@ -483,13 +557,11 @@ final class iPadViewModel: ObservableObject {
         stateMachine.config = snapshot.config
         selectedLanguage = snapshot.presentation?.language ?? snapshot.config.customerLanguage
         sessionPresentation = snapshot.presentation
+        assetAssembler = BoothAssetAssembler()
+        requestMissingAssets(for: snapshot)
         if let presentation = snapshot.presentation { installPresentationImages(presentation) }
         isMirrored = snapshot.isMirrored
         isBoothPaused = snapshot.isBoothPaused
-        recoveryActionPending = false
-        reviewDecisionPending = false
-        finishRequestPending = false
-        finishRequestTimeoutTask?.cancel()
         guard let sessionID = snapshot.sessionID else {
             stateMachine.reset()
             return
@@ -499,7 +571,7 @@ final class iPadViewModel: ObservableObject {
         if case .review(let index) = snapshot.phase {
             if let reviewAsset = snapshot.reviewAsset {
                 reviewAssetIndices[reviewAsset.assetID] = index
-                if let data = receivedAssets[reviewAsset.assetID] {
+                if let data = cachedAsset(for: reviewAsset) {
                     reviewImageData = data
                     keptShots[index] = ReviewImageEncoder.thumbnailData(from: data) ?? data
                 }
@@ -509,7 +581,7 @@ final class iPadViewModel: ObservableObject {
             }
         }
         for (index, reference) in snapshot.keptShotAssets {
-            if let data = receivedAssets[reference.assetID] {
+            if let data = cachedAsset(for: reference) {
                 keptShots[index] = ReviewImageEncoder.thumbnailData(from: data) ?? data
             }
         }
@@ -527,7 +599,7 @@ final class iPadViewModel: ObservableObject {
         if case .finished = snapshot.phase {
             stripThumbImage = nil
             if let stripAsset = snapshot.stripAsset,
-               let data = receivedAssets[stripAsset.assetID] {
+               let data = cachedAsset(for: stripAsset) {
                 stripThumbImage = Self.cgImage(from: data)
             } else if let data = snapshot.stripThumbnailData {
                 stripThumbImage = Self.cgImage(from: data)
@@ -536,7 +608,7 @@ final class iPadViewModel: ObservableObject {
         if let presentation = snapshot.presentation { installPresentationImages(presentation) }
         if let reviewAsset = snapshot.reviewAsset,
            let index = reviewAssetIndices[reviewAsset.assetID],
-           let data = receivedAssets[reviewAsset.assetID] {
+           let data = cachedAsset(for: reviewAsset) {
             installReviewAsset(reviewAsset, photoIndex: index, data: data)
         }
         if let countdown = snapshot.countdown {
@@ -638,18 +710,22 @@ final class iPadViewModel: ObservableObject {
 
     func customerTappedToBegin() {
         guard CustomerDisplayWorkflow.canApply(.begin, in: stateMachine.phase) else { return }
-        sessionRequestError = nil
         if requiresExperienceSelection {
             beginExperienceSelection()
         } else {
             applyCatalogDefaults(preserveLanguage: false)
-            stateMachine.startSession(config: eventConfig)
+            requestMacToStartSession()
         }
     }
 
     func customerTappedStart() {
         guard !isSessionRequestPending,
               CustomerDisplayWorkflow.canApply(.start, in: stateMachine.phase) else { return }
+        requestMacToStartSession()
+    }
+
+    private func requestMacToStartSession() {
+        guard !isSessionRequestPending else { return }
 #if DEBUG
         if demoKioskMode {
             DemoKioskDriver.startSession(on: self)
@@ -657,13 +733,16 @@ final class iPadViewModel: ObservableObject {
         }
 #endif
         guard let catalog = experienceCatalog else {
+            let generation = beginTransientRequest()
             isSessionRequestPending = true
             multipeer.sendControl(.sessionStart(context: nil)) { [weak self] outcome in
-                guard let self, outcome != .sent else { return }
+                guard let self,
+                      self.transientRequestGeneration == generation,
+                      outcome != .sent else { return }
                 self.isSessionRequestPending = false
                 self.sessionRequestError = "The booth is not connected. Please try again."
             }
-            armSessionRequestTimeout()
+            armSessionRequestTimeout(generation: generation)
             return
         }
         guard let templateID = selectedTemplateID,
@@ -678,21 +757,31 @@ final class iPadViewModel: ObservableObject {
             filterID: filterID,
             language: selectedLanguage
         )
+        let generation = beginTransientRequest()
         isSessionRequestPending = true
-        sessionRequestError = nil
         multipeer.sendControl(.customerSessionRequest(selection: selection)) { [weak self] outcome in
-            guard let self, outcome != .sent else { return }
+            guard let self,
+                  self.transientRequestGeneration == generation,
+                  outcome != .sent else { return }
             self.isSessionRequestPending = false
             self.sessionRequestError = "The booth is not connected. Please try again."
         }
-        armSessionRequestTimeout()
+        armSessionRequestTimeout(generation: generation)
     }
 
-    private func armSessionRequestTimeout() {
+    private func armSessionRequestTimeout(generation: UInt64) {
         sessionRequestTimeoutTask?.cancel()
         sessionRequestTimeoutTask = Task { @MainActor [weak self] in
-            try? await Task.sleep(for: .seconds(8))
-            guard let self, self.isSessionRequestPending else { return }
+            do {
+                try await Task.sleep(for: .seconds(8))
+            } catch {
+                return
+            }
+            guard let self,
+                  !Task.isCancelled,
+                  self.transientRequestGeneration == generation,
+                  self.isSessionRequestPending else { return }
+            self.sessionRequestTimeoutTask = nil
             self.isSessionRequestPending = false
             self.sessionRequestError = LocalizedText(
                 english: "The operator did not respond. Please try again.",
@@ -751,7 +840,13 @@ final class iPadViewModel: ObservableObject {
             customerLanguage: selectedLanguage,
             gifQualityPreset: eventConfig.gifQualityPreset
         )
-        stateMachine.startSession(config: eventConfig)
+#if DEBUG
+        if demoKioskMode {
+            stateMachine.startSession(config: eventConfig)
+            return
+        }
+#endif
+        requestMacToStartSession()
     }
 
     func returnToExperienceSelection() {
@@ -782,6 +877,60 @@ final class iPadViewModel: ObservableObject {
         }
     }
 
+    private func armReviewDecisionTimeout(generation: UInt64) {
+        reviewDecisionTimeoutTask?.cancel()
+        reviewDecisionTimeoutTask = Task { @MainActor [weak self] in
+            do {
+                try await Task.sleep(for: .seconds(8))
+            } catch {
+                return
+            }
+            guard let self,
+                  !Task.isCancelled,
+                  self.transientRequestGeneration == generation,
+                  self.reviewDecisionPending else { return }
+            self.reviewDecisionTimeoutTask = nil
+            self.reviewDecisionPending = false
+            self.sessionRequestError = "The booth did not confirm that choice. Please try again."
+        }
+    }
+
+    private func armRecoveryActionTimeout(generation: UInt64) {
+        recoveryActionTimeoutTask?.cancel()
+        recoveryActionTimeoutTask = Task { @MainActor [weak self] in
+            do {
+                try await Task.sleep(for: .seconds(8))
+            } catch {
+                return
+            }
+            guard let self,
+                  !Task.isCancelled,
+                  self.transientRequestGeneration == generation,
+                  self.recoveryActionPending else { return }
+            self.recoveryActionTimeoutTask = nil
+            self.recoveryActionPending = false
+            self.sessionRequestError = "The booth did not confirm that recovery choice. Please try again."
+        }
+    }
+
+    private func armFinishRequestTimeout(generation: UInt64) {
+        finishRequestTimeoutTask?.cancel()
+        finishRequestTimeoutTask = Task { @MainActor [weak self] in
+            do {
+                try await Task.sleep(for: .seconds(8))
+            } catch {
+                return
+            }
+            guard let self,
+                  !Task.isCancelled,
+                  self.transientRequestGeneration == generation,
+                  self.finishRequestPending else { return }
+            self.finishRequestTimeoutTask = nil
+            self.finishRequestPending = false
+            self.sessionRequestError = "The booth did not confirm the next session. Please try again."
+        }
+    }
+
     func customerKeep(photoIndex: Int) {
         guard !reviewDecisionPending,
               CustomerDisplayWorkflow.canApply(.keep(photoIndex: photoIndex), in: stateMachine.phase) else { return }
@@ -792,21 +941,18 @@ final class iPadViewModel: ObservableObject {
         }
 #endif
         guard let context = currentSessionMessageContext else { return }
+        let generation = beginTransientRequest()
         reviewDecisionPending = true
         cancelCountdown()
         multipeer.sendControl(.reviewDecision(context: context, action: .keep)) { [weak self] outcome in
-            guard let self, outcome != .sent else { return }
+            guard let self,
+                  self.transientRequestGeneration == generation,
+                  outcome != .sent else { return }
             self.reviewDecisionPending = false
             self.sessionRequestError = "The booth did not receive that choice. Please try again."
         }
         guard reviewDecisionPending else { return }
-        reviewDecisionTimeoutTask?.cancel()
-        reviewDecisionTimeoutTask = Task { @MainActor [weak self] in
-            try? await Task.sleep(for: .seconds(8))
-            guard let self, self.reviewDecisionPending else { return }
-            self.reviewDecisionPending = false
-            self.sessionRequestError = "The booth did not confirm that choice. Please try again."
-        }
+        armReviewDecisionTimeout(generation: generation)
     }
 
     func customerRetake(photoIndex: Int) {
@@ -820,21 +966,18 @@ final class iPadViewModel: ObservableObject {
         }
 #endif
         guard let context = currentSessionMessageContext else { return }
+        let generation = beginTransientRequest()
         reviewDecisionPending = true
         cancelCountdown()
         multipeer.sendControl(.reviewDecision(context: context, action: .retake)) { [weak self] outcome in
-            guard let self, outcome != .sent else { return }
+            guard let self,
+                  self.transientRequestGeneration == generation,
+                  outcome != .sent else { return }
             self.reviewDecisionPending = false
             self.sessionRequestError = "The booth did not receive that choice. Please try again."
         }
         guard reviewDecisionPending else { return }
-        reviewDecisionTimeoutTask?.cancel()
-        reviewDecisionTimeoutTask = Task { @MainActor [weak self] in
-            try? await Task.sleep(for: .seconds(8))
-            guard let self, self.reviewDecisionPending else { return }
-            self.reviewDecisionPending = false
-            self.sessionRequestError = "The booth did not confirm that choice. Please try again."
-        }
+        armReviewDecisionTimeout(generation: generation)
     }
 
     func customerRetryReceive(photoIndex: Int) {
@@ -864,41 +1007,34 @@ final class iPadViewModel: ObservableObject {
         }
         guard CustomerDisplayWorkflow.canApply(customerAction, in: stateMachine.phase) else { return }
         guard let context = currentSessionMessageContext else { return }
+        let generation = beginTransientRequest()
         recoveryActionPending = true
         multipeer.sendControl(.captureRecoveryAction(context: context, action: action)) { [weak self] outcome in
-            guard let self, outcome != .sent else { return }
+            guard let self,
+                  self.transientRequestGeneration == generation,
+                  outcome != .sent else { return }
             self.recoveryActionPending = false
             self.sessionRequestError = "The booth did not receive that recovery choice. Please try again."
         }
         guard recoveryActionPending else { return }
-        recoveryActionTimeoutTask?.cancel()
-        recoveryActionTimeoutTask = Task { @MainActor [weak self] in
-            try? await Task.sleep(for: .seconds(8))
-            guard let self, self.recoveryActionPending else { return }
-            self.recoveryActionPending = false
-            self.sessionRequestError = "The booth did not confirm that recovery choice. Please try again."
-        }
+        armRecoveryActionTimeout(generation: generation)
     }
 
     func customerDone() {
         guard !finishRequestPending, case .finished = stateMachine.phase,
               let context = currentSessionMessageContext else { return }
         cancelCountdown()
+        let generation = beginTransientRequest()
         finishRequestPending = true
-        sessionRequestError = nil
         multipeer.sendControl(.customerFinished(context: context)) { [weak self] outcome in
-            guard let self, outcome != .sent else { return }
+            guard let self,
+                  self.transientRequestGeneration == generation,
+                  outcome != .sent else { return }
             self.finishRequestPending = false
             self.sessionRequestError = "The booth did not receive the next-session request. Please try again."
         }
         guard finishRequestPending else { return }
-        finishRequestTimeoutTask?.cancel()
-        finishRequestTimeoutTask = Task { @MainActor [weak self] in
-            try? await Task.sleep(for: .seconds(8))
-            guard let self, self.finishRequestPending else { return }
-            self.finishRequestPending = false
-            self.sessionRequestError = "The booth did not confirm the next session. Please try again."
-        }
+        armFinishRequestTimeout(generation: generation)
     }
 
 #if DEBUG

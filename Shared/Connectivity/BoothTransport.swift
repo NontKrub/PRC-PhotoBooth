@@ -386,6 +386,7 @@ public protocol BoothTransport: AnyObject {
     var onPreviewFrame: (@MainActor (Data) -> Void)? { get set }
     var onAssetChunk: (@MainActor (BoothAssetChunk) -> Void)? { get set }
     var onTransportEvent: (@MainActor (BoothTransportDiagnosticEvent) -> Void)? { get set }
+    var onTransportReady: (@MainActor (BoothDeviceIdentity) -> Void)? { get set }
 
     func start()
     func restart()
@@ -590,6 +591,7 @@ public enum BoothFrameEncoder {
 
 enum BoothDecodedTransportFrame: Sendable {
     case control(Message)
+    case assetBinding(BoothChannelBindingHello)
     case asset(BoothAssetChunk)
     case heartbeat
     case previewHello(Data)
@@ -602,12 +604,14 @@ enum BoothDecodedTransportFrame: Sendable {
 final class BoothTransportFrameDecoder: @unchecked Sendable {
     private var controlParser = BoothFrameParser()
     private var previewParser = BoothFrameParser()
+    private var assetParser = BoothFrameParser()
 
     func reset(_ channel: BoothTransportChannel) {
         switch channel {
         case .control: controlParser = BoothFrameParser()
         case .preview: previewParser = BoothFrameParser()
-        case .asset, .heartbeat: break
+        case .asset: assetParser = BoothFrameParser()
+        case .heartbeat: break
         }
     }
 
@@ -616,13 +620,16 @@ final class BoothTransportFrameDecoder: @unchecked Sendable {
         channel: BoothTransportChannel,
         secureChannel: BoothSecureChannel? = nil
     ) throws -> [BoothDecodedTransportFrame] {
-        let parsed = try channel == .control
-            ? controlParser.append(data)
-            : previewParser.append(data)
+        let parsed: [BoothNetworkFrame]
+        switch channel {
+        case .control: parsed = try controlParser.append(data)
+        case .preview: parsed = try previewParser.append(data)
+        case .asset: parsed = try assetParser.append(data)
+        case .heartbeat: parsed = try controlParser.append(data)
+        }
         return try parsed.compactMap { frame in
             guard frame.channel == channel
-                || (channel == .control && frame.channel == .asset)
-                || frame.channel == .heartbeat else { return nil }
+                    || (channel == .control && frame.channel == .heartbeat) else { return nil }
             switch frame.channel {
             case .control:
                 let payload: Data
@@ -640,15 +647,17 @@ final class BoothTransportFrameDecoder: @unchecked Sendable {
                 }
                 return .control(message)
             case .asset:
-                let payload: Data
-                if let secureChannel, secureChannel.isConfigured {
-                    payload = try secureChannel.open(frame.payload, channel: .asset)
-                } else {
-                    payload = frame.payload
+                guard let secureChannel, secureChannel.isConfigured else {
+                    throw BoothSecureChannelError.notReady
+                }
+                let payload = try secureChannel.open(frame.payload, channel: .asset)
+                if let binding = try BoothAssetTransfer.decodeBinding(payload) {
+                    return .assetBinding(binding)
                 }
                 return .asset(try BoothAssetTransfer.decode(payload))
             case .heartbeat:
-                return channel == .preview ? .previewHello(frame.payload) : .heartbeat
+                guard channel == .control else { throw BoothFrameError.invalidMessage }
+                return .heartbeat
             case .preview:
                 if let secureChannel, secureChannel.isConfigured {
                     return .preview(try secureChannel.open(frame.payload, channel: .preview))

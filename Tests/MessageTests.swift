@@ -80,6 +80,25 @@ struct MessageTests {
                 sequence: 6,
                 countdown: countdown
             )),
+            .assetRequest(references: [BoothAssetReference(
+                assetID: "asset-request",
+                sessionID: context.sessionID,
+                revision: "v1",
+                kind: .reviewImage,
+                byteCount: 32,
+                sha256: Data(repeating: 0x45, count: 32)
+            )]),
+            .assetUnavailable(
+                reference: BoothAssetReference(
+                    assetID: "asset-missing",
+                    sessionID: context.sessionID,
+                    revision: "v1",
+                    kind: .stripThumbnail,
+                    byteCount: 32,
+                    sha256: Data(repeating: 0x46, count: 32)
+                ),
+                reason: "Asset source unavailable"
+            ),
             .boothPaused(isPaused: true),
             .setMirrored(isMirrored: true),
             .sessionStart(context: nil),
@@ -185,6 +204,30 @@ struct MessageTests {
         #expect(!json.contains("keptShots"))
     }
 
+    @Test("asset sockets do not accept heartbeat frames")
+    func assetChannelRejectsHeartbeatFrames() throws {
+        let frame = try BoothFrameEncoder.encode(channel: .heartbeat, payload: Data())
+        let decoded = try BoothTransportFrameDecoder().decode(frame, channel: .asset)
+        #expect(decoded.isEmpty)
+    }
+
+    @Test("asset channel binding is explicit and round-trippable")
+    func assetChannelBinding() throws {
+        let binding = BoothChannelBindingHello(
+            secureSessionID: "secure-session",
+            channel: .asset,
+            senderDeviceID: "mac",
+            receiverDeviceID: "ipad"
+        )
+        let encoded = try BoothAssetTransfer.encodeBinding(binding)
+        #expect(try BoothAssetTransfer.decodeBinding(encoded) == binding)
+        #expect(try BoothAssetTransfer.decodeBinding(Data("PRA1".utf8)) == nil)
+        let unencryptedFrame = try BoothFrameEncoder.encode(channel: .asset, payload: encoded)
+        #expect(throws: BoothSecureChannelError.notReady) {
+            _ = try BoothTransportFrameDecoder().decode(unencryptedFrame, channel: .asset)
+        }
+    }
+
     @Test("connection status clears identity and peer list together")
     @MainActor
     func connectionStatusIsAuthoritative() {
@@ -230,9 +273,9 @@ struct MessageTests {
         #expect(legacyHello.deviceName == "legacy-id")
         #expect(legacyHello.networkPreference == nil)
     }
-    @Test("v1.4.2 connection protocol is version 5 and legacy protocol 2 remains decodable but incompatible")
+    @Test("v1.4.2 connection protocol is version 6 and legacy protocol 2 remains decodable but incompatible")
     func protocolVersionMismatchIsVisible() throws {
-        #expect(BoothTransportHello.currentProtocolVersion == 5)
+        #expect(BoothTransportHello.currentProtocolVersion == 6)
         let legacy = Data(#"{"protocolVersion":2,"appVersion":"1.4.1","role":"iPad","deviceID":"legacy-id","capabilities":["control"]}"#.utf8)
         let hello = try JSONDecoder().decode(BoothTransportHello.self, from: legacy)
         #expect(hello.protocolVersion == 2)

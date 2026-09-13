@@ -66,6 +66,7 @@ public final class MultipeerService: NSObject, BoothTransport {
     public var onPreviewFrame:   (@MainActor (Data) -> Void)?
     public var onAssetChunk: (@MainActor (BoothAssetChunk) -> Void)?
     public var onTransportEvent: (@MainActor (BoothTransportDiagnosticEvent) -> Void)?
+    public var onTransportReady: (@MainActor (BoothDeviceIdentity) -> Void)?
 
     public var requestedNetworkPreference: BoothNetworkPreference {
         get { connectionStatus.requestedNetwork }
@@ -83,7 +84,7 @@ public final class MultipeerService: NSObject, BoothTransport {
     private var advertiser: MCNearbyServiceAdvertiser?
     private var browser: MCNearbyServiceBrowser?
 
-    private var heartbeatTimer: Timer?
+    private var heartbeatSource: DispatchSourceTimer?
     private var connectionTimeoutTask: Task<Void, Never>?
     private var handshakeTimeoutTasks: [String: Task<Void, Never>] = [:]
     private var reconnectTask: Task<Void, Never>?
@@ -256,8 +257,15 @@ public final class MultipeerService: NSObject, BoothTransport {
 
         lastHeartbeatReceived = Date()
         connectionStatus.publishControlActivity(at: lastHeartbeatReceived)
-        heartbeatTimer?.invalidate()
-        heartbeatTimer = Timer.scheduledTimer(withTimeInterval: kHeartbeatInterval, repeats: true) { [weak self] _ in
+        heartbeatSource?.cancel()
+        let source = DispatchSource.makeTimerSource(
+            queue: DispatchQueue(label: "PRC-PhotoBooth.MultipeerHeartbeat", qos: .utility)
+        )
+        source.schedule(
+            deadline: .now() + kHeartbeatInterval,
+            repeating: kHeartbeatInterval
+        )
+        source.setEventHandler { [weak self] in
             Task { @MainActor [weak self] in
                 guard let self else { return }
                 guard let activePeer = self.peerTracker.activePeer else {
@@ -277,11 +285,13 @@ public final class MultipeerService: NSObject, BoothTransport {
                 self.sendControl(.heartbeat)
             }
         }
+        source.resume()
+        heartbeatSource = source
     }
 
     private func stopHeartbeat() {
-        heartbeatTimer?.invalidate()
-        heartbeatTimer = nil
+        heartbeatSource?.cancel()
+        heartbeatSource = nil
     }
 
     private func startConnectionTimeout() {
@@ -457,6 +467,11 @@ public final class MultipeerService: NSObject, BoothTransport {
                 startHeartbeat()
                 print("[MPC] verified peer: \(peerName), role: \(remoteRole)")
                 if peerTracker.activePeer == peerName {
+                    onTransportReady?(BoothDeviceIdentity(
+                        id: peerName,
+                        displayName: peerName,
+                        role: remoteRole
+                    ))
                     onControlMessage?(message)
                 }
             case .wrongRole:

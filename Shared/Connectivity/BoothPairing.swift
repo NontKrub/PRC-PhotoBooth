@@ -1278,7 +1278,7 @@ public enum BoothPairingError: LocalizedError, Equatable {
         case .wrongDevice: return "Pairing code belongs to a different Mac."
         case .invalidPairingIntent: return "Pairing request does not match this connection."
         case .wrongRole: return "The discovered device has the wrong booth role."
-        case .incompatibleProtocol: return "This device uses an older PRC PhotoBooth connection protocol. Update both devices to v1.4.2."
+        case .incompatibleProtocol: return "This version of PRC PhotoBooth is incompatible. Update both the Mac and iPad booth apps."
         case .unpaired: return "This device is not paired."
         case .notSelected: return "This Mac is configured for another iPad. Select this iPad in Mac Settings first."
         case .authenticationFailed: return "Authentication failed."

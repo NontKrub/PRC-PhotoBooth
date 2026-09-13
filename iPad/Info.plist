@@ -24,6 +24,7 @@
 	<array>
 		<string>_prc-control._tcp</string>
 		<string>_prc-preview._tcp</string>
+		<string>_prc-asset._tcp</string>
 		<string>_prc-photobooth._tcp</string>
 		<string>_prc-photobooth._udp</string>
 	</array>

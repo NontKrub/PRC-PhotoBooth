@@ -44,6 +44,7 @@ targets:
         NSBonjourServices:
           - _prc-control._tcp
           - _prc-preview._tcp
+          - _prc-asset._tcp
           - _prc-photobooth._tcp
           - _prc-photobooth._udp
     entitlements:
@@ -120,6 +121,7 @@ targets:
         NSBonjourServices:
           - _prc-control._tcp
           - _prc-preview._tcp
+          - _prc-asset._tcp
           - _prc-photobooth._tcp
           - _prc-photobooth._udp
         UIRequiresFullScreen: true

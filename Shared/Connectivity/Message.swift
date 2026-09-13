@@ -94,7 +94,7 @@ public enum CaptureRecoveryAction: Codable, Sendable, Equatable {
 }
 
 public struct BoothTransportHello: Codable, Sendable, Equatable {
-    public static let currentProtocolVersion = 5
+    public static let currentProtocolVersion = 6
 
     public var protocolVersion: Int
     public var appVersion: String
@@ -116,7 +116,7 @@ public struct BoothTransportHello: Codable, Sendable, Equatable {
             "preview-identity",
             "pairing-v2",
             "secure-channel-v1",
-            "asset-channel-v1"
+            "asset-channel-v2"
         ],
         networkPreference: BoothNetworkPreference? = .wifi
     ) {
@@ -257,6 +257,7 @@ public enum BoothAssetTransfer {
     public static let maximumConcurrentAssets = 16
     public static let maximumBufferedAssetBytes = 32 * 1024 * 1024
     private static let magic = Data([0x50, 0x52, 0x41, 0x31])
+    private static let bindingMagic = Data([0x50, 0x52, 0x42, 0x31])
 
     public static func chunks(
         data: Data,
@@ -308,6 +309,42 @@ public enum BoothAssetTransfer {
         result.append(metadata)
         result.append(chunk.data)
         return result
+    }
+
+    public static func encodeBinding(_ binding: BoothChannelBindingHello) throws -> Data {
+        guard binding.isWellFormed else {
+            throw BoothAssetTransferError.invalidMetadata
+        }
+        let payload = try JSONEncoder().encode(binding)
+        guard payload.count <= 8 * 1024 else {
+            throw BoothAssetTransferError.metadataTooLarge(payload.count)
+        }
+        var result = bindingMagic
+        appendUInt32(UInt32(payload.count), to: &result)
+        result.append(payload)
+        return result
+    }
+
+    public static func decodeBinding(_ data: Data) throws -> BoothChannelBindingHello? {
+        guard data.count >= bindingMagic.count else { return nil }
+        guard data.prefix(bindingMagic.count) == bindingMagic else { return nil }
+        let payloadLength = try readUInt32(data, offset: bindingMagic.count)
+        guard payloadLength <= 8 * 1024 else {
+            throw BoothAssetTransferError.metadataTooLarge(Int(payloadLength))
+        }
+        let payloadStart = bindingMagic.count + 4
+        let payloadEnd = payloadStart + Int(payloadLength)
+        guard payloadEnd == data.count else {
+            throw BoothAssetTransferError.malformedFrame
+        }
+        let binding = try JSONDecoder().decode(
+            BoothChannelBindingHello.self,
+            from: data[payloadStart..<payloadEnd]
+        )
+        guard binding.isWellFormed else {
+            throw BoothAssetTransferError.invalidMetadata
+        }
+        return binding
     }
 
     public static func decode(_ data: Data) throws -> BoothAssetChunk {
@@ -558,6 +595,8 @@ public enum Message: Codable, Sendable, Equatable {
     case secureChannelReady(sessionID: String, proof: Data)
     case connectionRejected(reason: String)
     case sessionSync(snapshot: SessionSyncSnapshot)
+    case assetRequest(references: [BoothAssetReference])
+    case assetUnavailable(reference: BoothAssetReference, reason: String)
     case boothPaused(isPaused: Bool)
     case eventConfig(config: EventConfig)
     case eventExperienceCatalog(catalog: CustomerExperienceCatalog)
