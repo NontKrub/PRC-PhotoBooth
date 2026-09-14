@@ -261,6 +261,7 @@ public final class NetworkBoothTransport: BoothTransport {
         onTransportEvent?(BoothTransportDiagnosticEvent(
             kind: kind,
             channel: channel.map { String(describing: $0) },
+            generation: channel.map { connectionGeneration(for: $0) },
             route: route ?? activeInterface?.rawValue,
             attempt: attempt,
             byteCount: byteCount,

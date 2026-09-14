@@ -70,19 +70,44 @@ struct iPadContentView: View {
                !vm.isBoothFullyReady {
                 VStack {
                     Spacer()
-                    Label(
-                        vm.connectionStatus.isPreviewChannelConnected
-                            ? (isThai ? "กำลังโหลดรูปภาพบูธ…" : "Loading booth assets…")
-                            : (isThai ? "กำลังเชื่อมต่อภาพตัวอย่าง…" : "Preview reconnecting…"),
-                        systemImage: vm.connectionStatus.isPreviewChannelConnected
-                            ? "photo.on.rectangle.angled"
-                            : "video.slash"
-                    )
-                    .font(.callout.weight(.semibold))
-                    .foregroundStyle(.white.opacity(0.8))
-                    .shadow(radius: 4)
-                    .padding(.bottom, 24)
+                    if !vm.connectionStatus.isPreviewChannelConnected {
+                        Label(
+                            isThai ? "กำลังเชื่อมต่อภาพตัวอย่าง…" : "Preview reconnecting…",
+                            systemImage: "video.slash"
+                        )
+                        .font(.callout.weight(.semibold))
+                        .foregroundStyle(.white.opacity(0.8))
+                        .shadow(radius: 4)
+                    } else if vm.assetRecoveryStatus != .idle {
+                        VStack(spacing: 4) {
+                            Label(
+                                vm.assetRecoveryStatus.title(for: vm.selectedLanguage),
+                                systemImage: vm.assetRecoveryStatus == .reconnectRequired
+                                    || vm.assetRecoveryStatus == .operatorRecoveryRequired
+                                    ? "arrow.clockwise.circle"
+                                    : "photo.on.rectangle.angled"
+                            )
+                            if let detail = vm.assetRecoveryStatus.detail(for: vm.selectedLanguage) {
+                                Text(detail)
+                                    .font(.footnote)
+                                    .foregroundStyle(.white.opacity(0.7))
+                                    .multilineTextAlignment(.center)
+                            }
+                        }
+                        .font(.callout.weight(.semibold))
+                        .foregroundStyle(.white.opacity(0.8))
+                        .shadow(radius: 4)
+                    } else {
+                        Label(
+                            isThai ? "กำลังโหลดรูปภาพบูธ…" : "Loading booth assets…",
+                            systemImage: "photo.on.rectangle.angled"
+                        )
+                        .font(.callout.weight(.semibold))
+                        .foregroundStyle(.white.opacity(0.8))
+                        .shadow(radius: 4)
+                    }
                 }
+                .padding(.bottom, 24)
                 .accessibilityElement(children: .combine)
             }
 

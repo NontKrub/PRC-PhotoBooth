@@ -25,6 +25,7 @@ final class iPadViewModel: ObservableObject {
     @Published private(set) var recoveryActionPending = false
     @Published private(set) var finishRequestPending = false
     @Published var sessionRequestError: String?
+    @Published private(set) var assetRecoveryStatus: BoothAssetRecoveryStatus = .idle
     @Published var stripThumbImage: CGImage?
     @Published var isMirrored = false
     @Published var isBoothPaused = false
@@ -54,7 +55,8 @@ final class iPadViewModel: ObservableObject {
     private var receivedAssetReferences: [String: BoothAssetReference] = [:]
     private var expectedAssetReferences: [String: BoothAssetReference] = [:]
     private var expectedAssetOrder: [BoothAssetReference] = []
-    private var assetRetryCounts: [BoothAssetReference: Int] = [:]
+    private var assetRetryTracker = BoothAssetRetryTracker()
+    private var assetReadyAwaitingNewGeneration = false
     private var reviewAssetIndices: [String: Int] = [:]
 #if DEBUG
     @Published private(set) var demoKioskMode = false
@@ -197,9 +199,28 @@ final class iPadViewModel: ObservableObject {
                   event.channel == String(describing: BoothTransportChannel.asset) else { return }
             switch event.kind {
             case .transportReady:
-                self.assetRequestPump.clearInFlight()
+                let transition = self.assetRetryTracker.activate(
+                    generation: self.assetGeneration(for: event),
+                    missing: self.missingExpectedAssets()
+                )
+                guard transition != .stale else { return }
+                self.assetReadyAwaitingNewGeneration = false
+                if transition != .duplicate {
+                    self.assetRequestPump.clearInFlight()
+                }
                 self.requestMissingExpectedAssets()
+                if transition == .advanced,
+                   !self.missingExpectedAssets().isEmpty,
+                   self.assetRecoveryStatus == .restoring {
+                    self.assetRecoveryStatus = .connectionRecovered
+                }
             case .transportDisconnected:
+                guard self.assetRetryTracker.acceptsDisconnect(generation: event.generation) else { return }
+                self.assetReadyAwaitingNewGeneration = true
+                if !self.missingExpectedAssets().isEmpty,
+                   self.assetRecoveryStatus == .idle {
+                    self.assetRecoveryStatus = .restoring
+                }
                 self.resetAssetProcessing()
                 self.assetRequestPump.clearInFlight()
             default:
@@ -388,11 +409,12 @@ final class iPadViewModel: ObservableObject {
             stateMachine.applyAuthoritativePhase(.finished(qrPayload: qr))
             requestMissingExpectedAssets()
 
-        case .assetUnavailable(let reference, let reason):
+        case .assetUnavailable(let reference, _):
             guard expectedAssetReferences[reference.assetID] == reference else { break }
             assetRequestPump.markUnavailable(reference)
-            assetRetryCounts.removeValue(forKey: reference)
-            sessionRequestError = reason
+            assetRetryTracker.remove(reference)
+            assetRecoveryStatus = .operatorRecoveryRequired
+            sessionRequestError = nil
             requestMissingExpectedAssets()
 
         case .operatorOverride(let context, let action):
@@ -423,7 +445,9 @@ final class iPadViewModel: ObservableObject {
         receivedAssetReferences = [:]
         expectedAssetReferences = [:]
         expectedAssetOrder = []
-        assetRetryCounts = [:]
+        assetRetryTracker.resetForSession()
+        assetReadyAwaitingNewGeneration = false
+        assetRecoveryStatus = .idle
         reviewAssetIndices = [:]
         resetAssetProcessing()
         assetRequestPump.reset()
@@ -456,7 +480,7 @@ final class iPadViewModel: ObservableObject {
             receivedAssets.removeValue(forKey: reference.assetID)
             receivedAssetReferences.removeValue(forKey: reference.assetID)
             assetRequestPump.markCompleted(previous)
-            assetRetryCounts.removeValue(forKey: previous)
+            assetRetryTracker.remove(previous)
         }
         if let index = expectedAssetOrder.firstIndex(where: { $0.assetID == reference.assetID }) {
             expectedAssetOrder[index] = reference
@@ -512,15 +536,36 @@ final class iPadViewModel: ObservableObject {
         requestMissingExpectedAssets()
     }
 
+    private func assetGeneration(for event: BoothTransportDiagnosticEvent) -> Int {
+        if let generation = event.generation { return generation }
+        if assetReadyAwaitingNewGeneration {
+            return (assetRetryTracker.currentGeneration ?? -1) + 1
+        }
+        return assetRetryTracker.currentGeneration ?? 0
+    }
+
+    private func missingExpectedAssets() -> Set<BoothAssetReference> {
+        Set(expectedAssetOrder.filter { cachedAsset(for: $0) == nil })
+    }
+
     private func requestMissingExpectedAssets() {
+        let missing = missingExpectedAssets()
         var cached = Set<BoothAssetReference>()
         for reference in expectedAssetOrder where cachedAsset(for: reference) != nil {
             cached.insert(reference)
         }
         let requestable = expectedAssetOrder.filter {
-            (assetRetryCounts[$0] ?? 0) <= BoothAssetRetryPolicy.maximumAutomaticRetries
+            missing.contains($0) && assetRetryTracker.canRequest($0)
         }
         let batch = assetRequestPump.nextBatch(expected: requestable, cached: cached)
+        if missing.isEmpty {
+            assetRecoveryStatus = .idle
+        } else if assetRecoveryStatus != .operatorRecoveryRequired,
+                  requestable.contains(where: { assetRetryTracker.canRequest($0) }) {
+            assetRecoveryStatus = .restoring
+        } else if assetRecoveryStatus != .operatorRecoveryRequired {
+            assetRecoveryStatus = .reconnectRequired
+        }
         guard !batch.isEmpty else { return }
         multipeer.sendControl(.assetRequest(references: batch)) { [weak self] outcome in
             guard let self else { return }
@@ -548,7 +593,7 @@ final class iPadViewModel: ObservableObject {
         }
         expectedAssetReferences = next
         expectedAssetOrder = unique
-        assetRetryCounts = assetRetryCounts.filter { next[$0.key.assetID] == $0.key }
+        assetRetryTracker.retain(expected: Set(unique))
     }
 
     private func installPresentationImages(_ presentation: SessionPresentation) {
@@ -622,7 +667,7 @@ final class iPadViewModel: ObservableObject {
         if let expected = expectedAssetReferences[reference.assetID], expected != reference { return }
         if cachedAsset(for: reference) != nil { return }
         assetRequestPump.markCompleted(reference)
-        assetRetryCounts.removeValue(forKey: reference)
+        assetRetryTracker.markCompleted(reference)
         receivedAssets[reference.assetID] = data
         receivedAssetReferences[reference.assetID] = reference
         switch reference.kind {
@@ -659,12 +704,16 @@ final class iPadViewModel: ObservableObject {
         assetRequestPump.clearInFlight()
         receivedAssets.removeValue(forKey: reference.assetID)
         receivedAssetReferences.removeValue(forKey: reference.assetID)
-        let failureCount = assetRetryCounts[reference, default: 0]
-        assetRetryCounts[reference] = failureCount + 1
-        if BoothAssetRetryPolicy.shouldRetry(after: failureCount) {
+        let channelGeneration = assetRetryTracker.currentGeneration ?? 0
+        if assetRetryTracker.recordFailure(reference, generation: channelGeneration) {
+            assetRecoveryStatus = .restoring
             requestMissingExpectedAssets()
         } else {
-            sessionRequestError = "An asset could not be received. Please reconnect."
+            let recoveryGenerationsUsed = assetRetryTracker.state(for: reference)?.recoveryGenerationsUsed ?? 0
+            assetRecoveryStatus = recoveryGenerationsUsed >= BoothAssetRetryPolicy.maximumRecoveryGenerations
+                ? .operatorRecoveryRequired
+                : .reconnectRequired
+            sessionRequestError = nil
         }
     }
 
@@ -1239,9 +1288,162 @@ final class iPadViewModel: ObservableObject {
 
 enum BoothAssetRetryPolicy {
     static let maximumAutomaticRetries = 2
+    static let maximumRecoveryGenerations = 2
 
     static func shouldRetry(after failureCount: Int) -> Bool {
         failureCount < maximumAutomaticRetries
+    }
+}
+
+enum BoothAssetRecoveryStatus: Equatable {
+    case idle
+    case restoring
+    case connectionRecovered
+    case reconnectRequired
+    case operatorRecoveryRequired
+
+    func title(for language: CustomerLanguage) -> String {
+        switch self {
+        case .idle: return ""
+        case .restoring: return LocalizedText(
+            english: "Restoring photo…",
+            thai: "กำลังกู้คืนรูปภาพ…"
+        ).value(for: language)
+        case .connectionRecovered: return LocalizedText(
+            english: "Connection recovered. Retrying image.",
+            thai: "เชื่อมต่อแล้ว กำลังลองกู้คืนรูปภาพอีกครั้ง"
+        ).value(for: language)
+        case .reconnectRequired, .operatorRecoveryRequired: return LocalizedText(
+            english: "Photo couldn't be restored.",
+            thai: "ไม่สามารถกู้คืนรูปภาพได้"
+        ).value(for: language)
+        }
+    }
+
+    func detail(for language: CustomerLanguage) -> String? {
+        switch self {
+        case .idle, .restoring, .connectionRecovered:
+            return nil
+        case .reconnectRequired:
+            return LocalizedText(
+                english: "Reconnect to retry the image.",
+                thai: "เชื่อมต่อใหม่เพื่อลองกู้คืนรูปภาพอีกครั้ง"
+            ).value(for: language)
+        case .operatorRecoveryRequired:
+            return LocalizedText(
+                english: "Please ask the operator to restart recovery for this session.",
+                thai: "โปรดขอให้เจ้าหน้าที่เริ่มการกู้คืนสำหรับเซสชันนี้อีกครั้ง"
+            ).value(for: language)
+        }
+    }
+}
+
+enum BoothAssetRetryGenerationTransition: Equatable {
+    case initial
+    case advanced
+    case duplicate
+    case stale
+}
+
+struct BoothAssetRetryState: Equatable, Sendable {
+    let generation: Int
+    let attemptsInGeneration: Int
+    let recoveryGenerationsUsed: Int
+}
+
+struct BoothAssetRetryTracker: Sendable {
+    private(set) var currentGeneration: Int?
+    private var states: [BoothAssetReference: BoothAssetRetryState] = [:]
+
+    mutating func activate(
+        generation: Int,
+        missing: Set<BoothAssetReference>
+    ) -> BoothAssetRetryGenerationTransition {
+        if let currentGeneration {
+            if generation < currentGeneration { return .stale }
+            if generation == currentGeneration { return .duplicate }
+        }
+
+        let transition: BoothAssetRetryGenerationTransition = currentGeneration == nil
+            ? .initial
+            : .advanced
+        currentGeneration = generation
+
+        for reference in missing {
+            guard let previous = states[reference] else { continue }
+            let recoveryCount = previous.recoveryGenerationsUsed
+            guard recoveryCount < BoothAssetRetryPolicy.maximumRecoveryGenerations else {
+                states[reference] = BoothAssetRetryState(
+                    generation: generation,
+                    attemptsInGeneration: BoothAssetRetryPolicy.maximumAutomaticRetries + 1,
+                    recoveryGenerationsUsed: recoveryCount
+                )
+                continue
+            }
+            states[reference] = BoothAssetRetryState(
+                generation: generation,
+                attemptsInGeneration: 0,
+                recoveryGenerationsUsed: recoveryCount + 1
+            )
+        }
+        return transition
+    }
+
+    func acceptsDisconnect(generation: Int?) -> Bool {
+        guard let generation, let currentGeneration else { return true }
+        return generation >= currentGeneration
+    }
+
+    func canRequest(_ reference: BoothAssetReference) -> Bool {
+        guard let state = states[reference] else { return true }
+        guard let currentGeneration, state.generation == currentGeneration else { return false }
+        return state.attemptsInGeneration <= BoothAssetRetryPolicy.maximumAutomaticRetries
+    }
+
+    mutating func recordFailure(
+        _ reference: BoothAssetReference,
+        generation: Int
+    ) -> Bool {
+        if currentGeneration == nil { currentGeneration = generation }
+        guard currentGeneration == generation else { return false }
+
+        let previous = states[reference] ?? BoothAssetRetryState(
+            generation: generation,
+            attemptsInGeneration: 0,
+            recoveryGenerationsUsed: 0
+        )
+        guard previous.generation == generation else { return false }
+        let attempts = min(
+            previous.attemptsInGeneration + 1,
+            BoothAssetRetryPolicy.maximumAutomaticRetries + 1
+        )
+        states[reference] = BoothAssetRetryState(
+            generation: generation,
+            attemptsInGeneration: attempts,
+            recoveryGenerationsUsed: previous.recoveryGenerationsUsed
+        )
+        return attempts <= BoothAssetRetryPolicy.maximumAutomaticRetries
+    }
+
+    mutating func markCompleted(_ reference: BoothAssetReference) {
+        states.removeValue(forKey: reference)
+    }
+
+    mutating func remove(_ reference: BoothAssetReference) {
+        states.removeValue(forKey: reference)
+    }
+
+    mutating func retain(expected: Set<BoothAssetReference>) {
+        states = states.filter { expected.contains($0.key) }
+    }
+
+    mutating func resetForSession() {
+        currentGeneration = nil
+        states.removeAll()
+    }
+
+    func state(for reference: BoothAssetReference) -> BoothAssetRetryState? {
+        states[reference]
     }
 }
 

@@ -349,3 +349,29 @@ Execution ledger. Preserve earlier historical checklists below.
 - [x] Full test suite: 286 passed; one documented pre-existing localization failure
 - [ ] Computer Use Mac validation: launch passed; UI interaction blocked by native pipe closure
 - [ ] Physical hardware validation (not run; hardware unavailable)
+
+## Final event-readiness closure — 2026-09-14
+
+- [x] Verify branch `fix/v1.4.2-stability-pairing` at starting SHA `f49382b7bab62786bc3a9e2e9f304d4be23f1464`.
+- [x] Preserve pre-existing Xcode user-state modification and untracked sync-conflict file; do not stage either.
+- [x] Confirm immutable release configuration: Xcode 27, Swift 6, macOS 15.0, iPadOS 16.0, version 1.4.2 (6), iPad-only.
+- [x] Inspect current CI run `34806079207`; macOS artifact upload failed with exact `ENOTFOUND` after package/name/path validation; iPad upload and Stable macOS lane passed.
+- [x] Run fresh baseline: `xcodegen generate`, Mac Debug/Release, Mac tests, iPad Debug/Release, iPad tests, unsigned generic iOS Release, `git diff --check`.
+- [x] Reproduce and fix bounded asset retry recovery across a fresh verified Asset-channel generation.
+- [x] Add deterministic asset retry tests A-H without duplicate transport-generation state.
+- [x] Re-run full automated matrix and record actual test counts: Mac 397/397 in 57 suites; iPad 18/18 in 2 suites.
+- [x] Run secure Control writer 10,000-message regression.
+- [x] Add/run 500-session deterministic soak.
+- [x] Add/run 8-photo relaunch/recovery test.
+- [ ] Add/run 12-second MainActor stall test.
+- [ ] Add/run network failure during MainActor stall test.
+- [x] Run Mac/iPad TSan where supported; no TSan race diagnostics reported.
+- [ ] Run Instruments Time Profiler, Swift Concurrency, Allocations, and memory checks.
+- [ ] Run native UI review for affected recovery states with localization/accessibility checks.
+- [ ] Run Device Hub GUI matrix.
+- [ ] Run physical private-router/no-internet, Personal Hotspot, Direct Ethernet, QR/PIN, camera, printer, relaunch, and three-hour old-iPad gates.
+- [ ] Re-run final-SHA GitHub Actions and record all three lane conclusions.
+- [x] Final Caveman root-cause review and Ponytail review; exact blockers recorded below.
+- [ ] Release verdict remains `NOT READY` until every mandatory gate has evidence.
+
+- [x] Current closure notes: protocol 6 and the authenticated CryptoKit directional channel are the active v1.4.2 security architecture. Earlier TLS/PSK, protocol-3, and simulator-only entries are historical and superseded, not current implementation TODOs. Generic iOS Release is device compilation evidence only; Device Hub GUI and physical-device validation remain unrun.

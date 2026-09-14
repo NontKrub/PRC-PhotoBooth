@@ -277,3 +277,164 @@ struct iPadSmokeTests {
         )
     }
 }
+
+@Suite("Asset retry recovery")
+struct AssetRetryRecoveryTests {
+    private func reference(_ index: Int, sessionID: String = "session") -> BoothAssetReference {
+        BoothAssetReference(
+            assetID: "asset-\(index)",
+            sessionID: sessionID,
+            revision: "revision-\(index)",
+            kind: .reviewImage,
+            byteCount: 1,
+            sha256: Data([UInt8(truncatingIfNeeded: index)])
+        )
+    }
+
+    @Test("retry exhaustion stops requests in the current generation")
+    func retryExhaustionStopsRequests() {
+        let asset = reference(0)
+        var tracker = BoothAssetRetryTracker()
+
+        let initial = tracker.activate(generation: 41, missing: [asset])
+        let firstFailureCanRetry = tracker.recordFailure(asset, generation: 41)
+        let secondFailureCanRetry = tracker.recordFailure(asset, generation: 41)
+        let thirdFailureCanRetry = tracker.recordFailure(asset, generation: 41)
+        #expect(initial == .initial)
+        #expect(firstFailureCanRetry)
+        #expect(secondFailureCanRetry)
+        #expect(!thirdFailureCanRetry)
+        #expect(!tracker.canRequest(asset))
+    }
+
+    @Test("fresh asset reconnect restores bounded retry allowance")
+    func freshReconnectRestoresRetryAllowance() throws {
+        let asset = reference(0)
+        var tracker = BoothAssetRetryTracker()
+        _ = tracker.activate(generation: 41, missing: [asset])
+        _ = tracker.recordFailure(asset, generation: 41)
+        _ = tracker.recordFailure(asset, generation: 41)
+        _ = tracker.recordFailure(asset, generation: 41)
+
+        let transition = tracker.activate(generation: 42, missing: [asset])
+        #expect(transition == .advanced)
+        #expect(tracker.canRequest(asset))
+        #expect(try #require(tracker.state(for: asset)).recoveryGenerationsUsed == 1)
+        tracker.markCompleted(asset)
+        #expect(tracker.state(for: asset) == nil)
+    }
+
+    @Test("duplicate ready does not reset retry state")
+    func duplicateReadyDoesNotReset() throws {
+        let asset = reference(0)
+        var tracker = BoothAssetRetryTracker()
+        _ = tracker.activate(generation: 41, missing: [asset])
+        _ = tracker.recordFailure(asset, generation: 41)
+        _ = tracker.recordFailure(asset, generation: 41)
+        _ = tracker.recordFailure(asset, generation: 41)
+        let before = try #require(tracker.state(for: asset))
+
+        let transition = tracker.activate(generation: 41, missing: [asset])
+        #expect(transition == .duplicate)
+        #expect(tracker.state(for: asset) == before)
+        #expect(!tracker.canRequest(asset))
+    }
+
+    @Test("stale asset generation cannot replace current recovery state")
+    func staleGenerationIsIgnored() throws {
+        let asset = reference(0)
+        var tracker = BoothAssetRetryTracker()
+        _ = tracker.activate(generation: 41, missing: [asset])
+        _ = tracker.recordFailure(asset, generation: 41)
+        _ = tracker.activate(generation: 42, missing: [asset])
+        let current = try #require(tracker.state(for: asset))
+
+        let transition = tracker.activate(generation: 41, missing: [asset])
+        #expect(transition == .stale)
+        #expect(!tracker.acceptsDisconnect(generation: 41))
+        #expect(tracker.state(for: asset) == current)
+    }
+
+    @Test("persistent corruption stops after two recovery generations")
+    func persistentCorruptionRemainsBounded() throws {
+        let asset = reference(0)
+        var tracker = BoothAssetRetryTracker()
+
+        for generation in 41...43 {
+            _ = tracker.activate(generation: generation, missing: [asset])
+            #expect(tracker.canRequest(asset))
+            let firstFailureCanRetry = tracker.recordFailure(asset, generation: generation)
+            let secondFailureCanRetry = tracker.recordFailure(asset, generation: generation)
+            let thirdFailureCanRetry = tracker.recordFailure(asset, generation: generation)
+            #expect(firstFailureCanRetry)
+            #expect(secondFailureCanRetry)
+            #expect(!thirdFailureCanRetry)
+        }
+
+        #expect(try #require(tracker.state(for: asset)).recoveryGenerationsUsed == 2)
+        #expect(!tracker.canRequest(asset))
+        _ = tracker.activate(generation: 44, missing: [asset])
+        #expect(!tracker.canRequest(asset))
+    }
+
+    @Test("successful asset removes all retry metadata")
+    func successRemovesRetryState() {
+        let asset = reference(0)
+        var tracker = BoothAssetRetryTracker()
+        _ = tracker.activate(generation: 41, missing: [asset])
+        _ = tracker.recordFailure(asset, generation: 41)
+        tracker.markCompleted(asset)
+
+        #expect(tracker.state(for: asset) == nil)
+        #expect(tracker.canRequest(asset))
+    }
+
+    @Test("session rollover cannot reuse prior session retry state")
+    func sessionRolloverClearsRetryState() {
+        let oldAsset = reference(0, sessionID: "session-a")
+        let newAsset = reference(0, sessionID: "session-b")
+        var tracker = BoothAssetRetryTracker()
+        _ = tracker.activate(generation: 41, missing: [oldAsset])
+        _ = tracker.recordFailure(oldAsset, generation: 41)
+        tracker.resetForSession()
+
+        #expect(tracker.state(for: oldAsset) == nil)
+        #expect(tracker.currentGeneration == nil)
+        #expect(tracker.canRequest(newAsset))
+    }
+
+    @Test("customer recovery status uses localized, non-technical copy")
+    func recoveryStatusCopyIsCustomerSafe() {
+        #expect(
+            BoothAssetRecoveryStatus.connectionRecovered.title(for: .english)
+                == "Connection recovered. Retrying image."
+        )
+        #expect(
+            BoothAssetRecoveryStatus.reconnectRequired.detail(for: .english)
+                == "Reconnect to retry the image."
+        )
+        #expect(
+            BoothAssetRecoveryStatus.operatorRecoveryRequired.detail(for: .thai)
+                == "โปรดขอให้เจ้าหน้าที่เริ่มการกู้คืนสำหรับเซสชันนี้อีกครั้ง"
+        )
+    }
+
+    @Test("large request pump remains ordered and bounded")
+    func thirtyReferencePumpRemainsBounded() {
+        let expected = (0..<30).map { reference($0) }
+        var pump = BoothAssetRequestPump(maximumInFlight: 8)
+        var requested: [BoothAssetReference] = []
+        var cached = Set<BoothAssetReference>()
+
+        while requested.count < expected.count {
+            let batch = pump.nextBatch(expected: expected, cached: cached)
+            requested.append(contentsOf: batch)
+            for asset in batch {
+                pump.markCompleted(asset)
+                cached.insert(asset)
+            }
+        }
+
+        #expect(requested == expected)
+    }
+}

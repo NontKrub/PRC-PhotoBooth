@@ -388,6 +388,7 @@ public struct BoothTransportDiagnosticEvent: Codable, Sendable, Equatable {
     public let kind: BoothTransportDiagnosticKind
     public let timestamp: Date
     public let channel: String?
+    public let generation: Int?
     public let route: String?
     public let attempt: Int?
     public let byteCount: Int?
@@ -398,6 +399,7 @@ public struct BoothTransportDiagnosticEvent: Codable, Sendable, Equatable {
         kind: BoothTransportDiagnosticKind,
         timestamp: Date = Date(),
         channel: String? = nil,
+        generation: Int? = nil,
         route: String? = nil,
         attempt: Int? = nil,
         byteCount: Int? = nil,
@@ -407,6 +409,7 @@ public struct BoothTransportDiagnosticEvent: Codable, Sendable, Equatable {
         self.kind = kind
         self.timestamp = timestamp
         self.channel = channel
+        self.generation = generation
         self.route = route
         self.attempt = attempt
         self.byteCount = byteCount

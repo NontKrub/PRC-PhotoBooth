@@ -926,3 +926,67 @@ Debug and Release builds passed.
 Computer Use launched the Mac app but UI interaction was blocked when the
 native accessibility pipe closed. Physical iPad, Ethernet, Sony, printer,
 and display checks are hardware-dependent and remain unrun.
+
+## Final event-readiness closure — 2026-09-14
+
+Starting branch: `fix/v1.4.2-stability-pairing`.
+Starting SHA: `f49382b7bab62786bc3a9e2e9f304d4be23f1464` (`Fix v1.4.2 event readiness`).
+Dirty state preserved before work: modified machine-local
+`PRC-PhotoBooth.xcodeproj/project.xcworkspace/xcuserdata/nont.xcuserdatad/UserInterfaceState.xcuserstate`;
+untracked `PRC-PhotoBooth.xcodeproj/project.sync-conflict-20260914-064337-7G5YJKM.pbxproj`.
+No branch switch, reset, clean, restore, or stash permitted.
+
+Immutable configuration: Xcode `27.0`; Swift `6.4` / project language mode `6.0`;
+macOS `15.0`; iPadOS `16.0`; iPad-only target; marketing version `1.4.2`, build `6`.
+`project.yml` remains XcodeGen source of truth.
+
+Current remote CI evidence: workflow run `34806079207` for this SHA failed only at
+`Upload macOS app artifact`; package/path/name validation passed, exact upload error
+was `Failed to CreateArtifact: Unable to make request: ENOTFOUND`. iPad artifact
+upload and Stable macOS lane passed. Root cause currently localizes to runner
+artifact-service DNS/endpoint access; no workflow correction is proven yet.
+
+Historical current-tree ledger totals: Mac `392/392`; iPad `9/9`. Fresh baseline
+matrix is required before source edits. Remaining P1: asset retry recovery across
+fresh verified Asset-channel generations. Outstanding gates: deterministic 500-session
+soak, 8-photo relaunch restore, 12-second MainActor stall, network failure during
+stall, secure-writer stress rerun, TSan, Instruments, Device Hub, physical router/
+hotspot/Ethernet, camera, QR/PIN, printer, old-iPad relaunch, and three-hour soak.
+
+Execution order:
+
+1. Baseline project generation, builds, tests, and diff validation.
+2. Asset retry recovery epoch fix plus focused tests.
+3. Re-run focused/full automation; preserve CI YAML unless a proven workflow defect appears.
+
+Final evidence recorded for this closure:
+
+- Fresh baseline before source edits: xcodegen generate, Mac Debug/Release,
+  Mac 395/395 in 56 suites, iPad Debug/Release, iPad 9/9, unsigned
+  generic iOS Release, and git diff --check all passed.
+- Asset retry A-H coverage passes in the iPad suite: bounded two-retry
+  per-generation behavior, fresh-generation recovery, duplicate/stale ready
+  protection, two-generation global ceiling, success/session cleanup, localized
+  recovery copy, and the 30-reference ordered/bounded pump.
+- Final automation: Mac 397/397 in 57 suites; iPad 18/18 in 2 suites;
+  Mac/iPad Debug and Release builds plus unsigned generic iOS Release passed.
+  The existing secure Control writer test delivered 10,000 ordered messages.
+- Deterministic stress coverage passes for 500 synthetic customer sessions and
+  an 8-photo authoritative relaunch/asset-assembly path. The exact 12-second
+  MainActor-stall and network-failure-during-stall gates remain unrun because
+  the hosted Mac app test target restarts when its MainActor is deliberately
+  blocked; no flaky replacement is counted as release evidence.
+- Mac and iPad Thread Sanitizer test runs passed with no reported TSan race
+  diagnostics. Instruments templates are installed, but no event-workload
+  Time Profiler/Swift Concurrency/Allocations trace was captured.
+- Current v1.4.2 documentation uses protocol 6 and the authenticated
+  CryptoKit directional channel already present in the source. Earlier
+  TLS/PSK, protocol-3, and simulator-only statements remain historical audit
+  entries and are superseded by this closure; they are not current
+  implementation requirements. The generic iOS Release build proves device
+  compilation only; Device Hub GUI and physical-device evidence remain
+  explicitly unrun.
+
+4. Add only production-path deterministic failure-injection coverage that current architecture can support.
+5. Review affected UI with Impeccable/frontend-design native constraints.
+6. Update factual release ledger and report `READY FOR EVENT` only after every mandatory gate passes.
