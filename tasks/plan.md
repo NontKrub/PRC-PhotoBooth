@@ -945,7 +945,7 @@ Current remote CI evidence: workflow run `34806079207` for this SHA failed only 
 was `Failed to CreateArtifact: Unable to make request: ENOTFOUND`. iPad artifact
 upload and Stable macOS lane passed. Root cause currently localizes to runner
 artifact-service DNS/endpoint access; no workflow correction is proven yet.
-Final-SHA CI run 34812594423 for 21356b9 passed all three lanes: Build macOS app,
+Final-SHA CI run 34813252769 for 0ff869e passed all three lanes: Build macOS app,
 Build iPad Simulator app, and Stable macOS lane. Mac and iPad artifact uploads
 also passed; no workflow change was required.
 
@@ -989,7 +989,7 @@ Final evidence recorded for this closure:
   implementation requirements. The generic iOS Release build proves device
   compilation only; Device Hub GUI and physical-device evidence remain
   explicitly unrun.
-- Final-SHA GitHub Actions run 34812594423 passed for commit 21356b9; all
+- Final-SHA GitHub Actions run 34813252769 passed for commit 0ff869e; all
   required CI lanes and artifact uploads are green.
 
 4. Add only production-path deterministic failure-injection coverage that current architecture can support.

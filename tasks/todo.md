@@ -370,7 +370,7 @@ Execution ledger. Preserve earlier historical checklists below.
 - [ ] Run native UI review for affected recovery states with localization/accessibility checks.
 - [ ] Run Device Hub GUI matrix.
 - [ ] Run physical private-router/no-internet, Personal Hotspot, Direct Ethernet, QR/PIN, camera, printer, relaunch, and three-hour old-iPad gates.
-- [x] Re-run final-SHA GitHub Actions 34812594423 for commit 21356b9; all three lanes and artifact uploads passed.
+- [x] Re-run final-SHA GitHub Actions 34813252769 for commit 0ff869e; all three lanes and artifact uploads passed.
 - [x] Final Caveman root-cause review and Ponytail review; exact blockers recorded below.
 - [ ] Release verdict remains `NOT READY` until every mandatory gate has evidence.
 
