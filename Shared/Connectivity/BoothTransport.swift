@@ -426,6 +426,21 @@ enum BoothPathAuthorityPolicy {
     }
 }
 
+enum BoothForegroundRecoveryAction: Equatable {
+    case none
+    case restartControl
+    case waitForSecondaryChannels
+
+    static func action(
+        controlReady: Bool,
+        previewReady: Bool,
+        assetReady: Bool
+    ) -> Self {
+        guard controlReady else { return .restartControl }
+        return previewReady && assetReady ? .none : .waitForSecondaryChannels
+    }
+}
+
 enum BoothSecondaryChannelAdmissionDecision: Equatable {
     case acceptCandidate
     case rejectCandidate
@@ -708,6 +723,34 @@ struct BoothTransportCallbackGate: Sendable {
 
     func accepts(_ generation: Int) -> Bool {
         generation == self.generation
+    }
+}
+
+/// Invalidated with its owning connection so queued receive callbacks cannot
+/// deliver frames or refresh liveness after that connection is replaced.
+final class BoothTransportReceiveToken: @unchecked Sendable {
+    private let lock = NSLock()
+    private var valid = true
+    private var didStart = false
+
+    var isValid: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return valid
+    }
+
+    func begin() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        guard valid, !didStart else { return false }
+        didStart = true
+        return true
+    }
+
+    func invalidate() {
+        lock.lock()
+        valid = false
+        lock.unlock()
     }
 }
 

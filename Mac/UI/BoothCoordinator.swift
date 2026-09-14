@@ -92,6 +92,7 @@ final class BoothCoordinator {
     private(set) var reviewDecisionPending = false
     private(set) var startupComponents: [StartupComponent: StartupComponentHealth] = [:]
     var serverURL: String = ""
+    private(set) var isLocalServerReady = false
     var cameraSourceKind: CameraSourceKind = .avFoundation {
         didSet {
             if cameraSourceKind == .avFoundation {
@@ -308,12 +309,14 @@ final class BoothCoordinator {
             }
             let serverStatus = await server.waitUntilReady()
             if case .failed(let message) = serverStatus.state {
+                isLocalServerReady = false
                 startupComponents[.localServer] = StartupComponentHealth(
                     status: .unavailable,
                     detail: "Local download server failed: \(message)"
                 )
                 errorMessage = startupComponents[.localServer]?.detail
             } else if case .ready = serverStatus.state {
+                isLocalServerReady = !serverURL.isEmpty
                 startupComponents[.localServer] = .ready
             }
 
@@ -370,14 +373,16 @@ final class BoothCoordinator {
     }
 
     var operatorPairingURL: String? {
-        guard operatorAuth.isEnabled else { return nil }
-        let base = serverURL.isEmpty
-            ? "http://\(LocalWebServer.lanIPAddress() ?? "localhost"):8585"
-            : serverURL
-        return "\(base)/operator/pair/\(operatorAuth.pairingTokenValue())"
+        guard operatorAuth.isEnabled,
+              isLocalServerReady,
+              !serverURL.isEmpty else { return nil }
+        return "\(serverURL)/operator/pair/\(operatorAuth.pairingTokenValue())"
     }
 
     func enableRemoteOperator() {
+        guard RemoteOperatorAuth.isAvailableInCurrentBuild,
+              isLocalServerReady,
+              !serverURL.isEmpty else { return }
         operatorAuth.enable()
         isRemoteOperatorEnabled = true
     }
@@ -705,6 +710,7 @@ final class BoothCoordinator {
             kind: .reviewImage
         )
         sessionAssetReferences[photoIndex] = reference
+        assetSources[reference] = data
         multipeer.sendControl(.shotCapturedAsset(context: context, index: photoIndex, asset: reference))
         _ = sendAsset(data: data, reference: reference)
     }
@@ -1566,7 +1572,9 @@ final class BoothCoordinator {
                     throw NSError(domain: "PRCPhotoBooth.Session", code: 1, userInfo: [NSLocalizedDescriptionKey: "Session identity could not be issued."])
                 }
                 let sessionID = session.id
-                let promptAssets = Array(pendingPromptAssets.values)
+                for asset in pendingPromptAssets.values {
+                    assetSources[asset.reference] = asset.data
+                }
                 multipeer.sendControl(.sessionStart(context: startContext))
                 multipeer.sendControl(.eventConfig(config: config))
                 multipeer.sendControl(.sessionPrepared(
@@ -1582,9 +1590,6 @@ final class BoothCoordinator {
                         return
                     }
                     self.beginCountdown(photoIndex: 0)
-                    for asset in promptAssets {
-                        _ = self.sendAsset(data: asset.data, reference: asset.reference)
-                    }
                 }
             } catch {
                 if let createdDirectory { try? FileManager.default.removeItem(at: createdDirectory) }
@@ -2300,7 +2305,9 @@ final class BoothCoordinator {
         }
         let recoveredSessionID = manifest.id
         let recoveredPhotoIndex = manifest.nextPhotoIndex
-        let promptAssets = Array(pendingPromptAssets.values)
+        for asset in pendingPromptAssets.values {
+            assetSources[asset.reference] = asset.data
+        }
         multipeer.sendControl(.sessionStart(context: startContext))
         multipeer.sendControl(.eventConfig(config: manifest.eventConfig))
         multipeer.sendControl(.sessionPrepared(
@@ -2316,9 +2323,6 @@ final class BoothCoordinator {
                 return
             }
             self.beginCountdown(photoIndex: recoveredPhotoIndex)
-            for asset in promptAssets {
-                _ = self.sendAsset(data: asset.data, reference: asset.reference)
-            }
         }
     }
 
@@ -2329,6 +2333,9 @@ final class BoothCoordinator {
             currentManifestID = nil
             currentSession = nil
             currentSessionPresentation = nil
+            assetSources = [:]
+            pendingPromptAssets = [:]
+            assetAssembler = BoothAssetAssembler()
             capture.resetStills()
             retakeCounts = [:]
             gifFrames = [:]
@@ -2553,6 +2560,9 @@ final class BoothCoordinator {
         finishedAwaitingCustomerAckSessionID = manifest.id
         stateMachine.finishSession(qrPayload: qr)
         if let context = nextSessionMessageContext() {
+            if let stripThumb, let stripAssetReference {
+                assetSources[stripAssetReference] = stripThumb
+            }
             multipeer.sendControl(.sessionFinishedAssets(
                 context: context,
                 qrPayload: qr,

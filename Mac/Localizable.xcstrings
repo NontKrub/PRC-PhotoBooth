@@ -1939,6 +1939,17 @@
         }
       }
     },
+    "Development only — unencrypted HTTP. Use only on a trusted local network." : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "สำหรับการพัฒนาเท่านั้น — HTTP ไม่เข้ารหัส ใช้บนเครือข่ายท้องถิ่นที่เชื่อถือได้เท่านั้น"
+          }
+        }
+      }
+    },
     "Device Name" : {
       "extractionState" : "stale",
       "localizations" : {
@@ -2226,6 +2237,17 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "เปิดใช้งาน"
+          }
+        }
+      }
+    },
+    "Enable Remote Operator" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "เปิดใช้ผู้ควบคุมระยะไกล"
           }
         }
       }
@@ -5289,6 +5311,17 @@
         }
       }
     },
+    "Remote control requires a secure operator transport. Local booth operation is unaffected." : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "การควบคุมระยะไกลต้องใช้การเชื่อมต่อผู้ควบคุมที่ปลอดภัย การทำงานของบูธภายในเครื่องยังใช้งานได้ตามปกติ"
+          }
+        }
+      }
+    },
     "Remote path" : {
       "extractionState" : "manual",
       "localizations" : {
@@ -5670,6 +5703,17 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "กำลังบันทึก…"
+          }
+        }
+      }
+    },
+    "Scan once to connect an operator device. The link is a credential and expires shortly." : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "สแกนเพียงครั้งเดียวเพื่อเชื่อมต่ออุปกรณ์ผู้ควบคุม ลิงก์นี้เป็นข้อมูลรับรองและจะหมดอายุในไม่ช้า"
           }
         }
       }
@@ -6784,6 +6828,17 @@
         }
       }
     },
+    "Unavailable in this release" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ไม่พร้อมใช้งานในรุ่นนี้"
+          }
+        }
+      }
+    },
     "Unfinished session" : {
       "extractionState" : "manual",
       "localizations" : {
@@ -6938,6 +6993,17 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "กำลังรอ"
+          }
+        }
+      }
+    },
+    "Waiting for local server and LAN address…" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "กำลังรอเซิร์ฟเวอร์ภายในเครื่องและที่อยู่ LAN…"
           }
         }
       }

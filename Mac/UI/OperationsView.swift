@@ -123,14 +123,14 @@ enum OperationsStatusLogic {
         guard authenticated else {
             return OperationsSectionStatus(summary: "Trust pending", severity: .warning)
         }
-        guard previewConnected else {
-            return OperationsSectionStatus(summary: "Preview unavailable", severity: .failure)
-        }
         guard secureConnected else {
             return OperationsSectionStatus(summary: "Secure channel unavailable", severity: .failure)
         }
+        guard previewConnected else {
+            return OperationsSectionStatus(summary: "Preview unavailable", severity: .warning)
+        }
         guard assetReady else {
-            return OperationsSectionStatus(summary: "Assets unavailable", severity: .failure)
+            return OperationsSectionStatus(summary: "Assets unavailable", severity: .warning)
         }
         return OperationsSectionStatus(summary: "Connected", severity: .normal)
     }
@@ -214,7 +214,7 @@ struct OperationsView: View {
                 DisclosureGroup(isExpanded: $remoteExpanded) {
                     remoteOperatorSection
                 } label: {
-                    operationsHeader(title: "Remote Operator", status: .init(summary: nil, severity: .normal))
+                    operationsHeader(title: "Remote Operator", status: remoteOperatorStatus)
                 }
             }
             .padding(24)
@@ -604,14 +604,37 @@ struct OperationsView: View {
 
     private var remoteOperatorSection: some View {
         GroupBox("Remote Operator") {
-            if !coordinator.isRemoteOperatorEnabled {
+            if !RemoteOperatorAuth.isAvailableInCurrentBuild {
                 VStack(alignment: .leading, spacing: 8) {
-                    Text("Disabled by default. Enable only on a trusted local network.")
+                    Label(
+                        operatorString("Unavailable in this release", locale: locale),
+                        systemImage: "lock.shield"
+                    )
+                    Text(operatorString(
+                        "Remote control requires a secure operator transport. Local booth operation is unaffected.",
+                        locale: locale
+                    ))
                         .foregroundStyle(.secondary)
-                    Button("Enable Remote Operator") {
-                        coordinator.enableRemoteOperator()
+                }
+            } else if !coordinator.isRemoteOperatorEnabled {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text(operatorString(
+                        "Development only — unencrypted HTTP. Use only on a trusted local network.",
+                        locale: locale
+                    ))
+                        .foregroundStyle(.secondary)
+                    if canEnableRemoteOperator {
+                        Button(operatorString("Enable Remote Operator", locale: locale)) {
+                            coordinator.enableRemoteOperator()
+                        }
+                        .buttonStyle(.borderedProminent)
+                    } else {
+                        Label(
+                            operatorString("Waiting for local server and LAN address…", locale: locale),
+                            systemImage: "network.slash"
+                        )
+                        .foregroundStyle(.secondary)
                     }
-                    .buttonStyle(.borderedProminent)
                 }
             } else if let pairingURL = coordinator.operatorPairingURL {
                 HStack(alignment: .top, spacing: 16) {
@@ -639,8 +662,27 @@ struct OperationsView: View {
                         }
                     }
                 }
+            } else {
+                Label(
+                    operatorString("Waiting for local server and LAN address…", locale: locale),
+                    systemImage: "network.slash"
+                )
+                .foregroundStyle(.secondary)
             }
         }
+    }
+
+    private var canEnableRemoteOperator: Bool {
+        guard case .ready = serverStatus.state,
+              let host = URL(string: coordinator.serverURL)?.host,
+              !host.isEmpty else { return false }
+        return host != "localhost" && host != "127.0.0.1"
+    }
+
+    private var remoteOperatorStatus: OperationsSectionStatus {
+        RemoteOperatorAuth.isAvailableInCurrentBuild
+            ? .init(summary: nil, severity: .normal)
+            : .init(summary: operatorString("Unavailable", locale: locale), severity: .warning)
     }
 
     private var connectionStabilityStatus: OperationsSectionStatus {

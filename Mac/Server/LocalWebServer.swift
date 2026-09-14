@@ -292,6 +292,7 @@ actor LocalWebServer {
     }
 
     private func operatorResponse(for request: HTTPServerRequest) async -> LocalDownloadResponse {
+        guard RemoteOperatorAuth.isAvailableInCurrentBuild else { return notFound() }
         guard let handlers = operatorHandlers else { return notFound() }
         guard await handlers.isEnabled() else { return notFound() }
         let path = request.path.split(separator: "?", maxSplits: 1, omittingEmptySubsequences: false).first.map(String.init) ?? request.path

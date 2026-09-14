@@ -7,6 +7,7 @@ struct RemoteOperatorAuthTests {
     @Test("pairing is one-time and operator sessions are revocable")
     @MainActor
     func pairingLifecycle() {
+        #expect(RemoteOperatorAuth.isAvailableInCurrentBuild)
         let auth = RemoteOperatorAuth()
         #expect(auth.pairingTokenValue().isEmpty)
         auth.enable()

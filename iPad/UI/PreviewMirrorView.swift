@@ -48,7 +48,9 @@ struct PreviewMirrorView: View {
                     Image(systemName: "video.slash")
                         .font(.system(size: 40))
                         .foregroundStyle(.white.opacity(0.3))
-                    Text("Waiting for camera…")
+                    Text(vm.isAuthoritativeControlReady
+                         ? (vm.selectedLanguage == .thai ? "กำลังเชื่อมต่อภาพตัวอย่าง…" : "Preview reconnecting…")
+                         : (vm.selectedLanguage == .thai ? "กำลังรอกล้อง…" : "Waiting for camera…"))
                         .font(.caption)
                         .foregroundStyle(.white.opacity(0.3))
                 }

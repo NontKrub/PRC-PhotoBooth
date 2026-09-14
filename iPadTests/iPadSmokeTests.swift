@@ -1,4 +1,5 @@
 import Combine
+import CryptoKit
 import SwiftUI
 import UIKit
 import Testing
@@ -132,14 +133,70 @@ struct iPadSmokeTests {
         viewModel.multipeer.connectionStatus.publishSecureChannel(ready: true)
         viewModel.multipeer.connectionStatus.publishAssetChannel(connected: true, verified: true)
         viewModel.multipeer.connectionStatus.publishControlActivity()
+        #expect(viewModel.isAuthoritativeControlReady)
         #expect(viewModel.isConnectionReady)
         viewModel.multipeer.connectionStatus.publishPreviewChannel(connected: false)
+        #expect(viewModel.isAuthoritativeControlReady)
+        #expect(!viewModel.isBoothFullyReady)
         #expect(!viewModel.isConnectionReady)
         viewModel.multipeer.connectionStatus.publishPreviewChannel(connected: true)
         #expect(viewModel.isConnectionReady)
 
         viewModel.stateMachine.startSession(config: EventConfig(photoCount: 1))
         #expect(!viewModel.canChangeConnection)
+    }
+
+    @Test("foreground recovery restarts only when authoritative control is unhealthy")
+    func foregroundRecoveryPolicy() {
+        #expect(
+            BoothForegroundRecoveryAction.action(
+                controlReady: false,
+                previewReady: false,
+                assetReady: false
+            ) == .restartControl
+        )
+        #expect(
+            BoothForegroundRecoveryAction.action(
+                controlReady: true,
+                previewReady: false,
+                assetReady: true
+            ) == .waitForSecondaryChannels
+        )
+        #expect(
+            BoothForegroundRecoveryAction.action(
+                controlReady: true,
+                previewReady: true,
+                assetReady: true
+            ) == .none
+        )
+        #expect(BoothAssetRetryPolicy.shouldRetry(after: 0))
+        #expect(BoothAssetRetryPolicy.shouldRetry(after: 1))
+        #expect(!BoothAssetRetryPolicy.shouldRetry(after: 2))
+    }
+
+    @Test("asset pipeline can reset a failed assembly in the current generation")
+    func assetPipelineResetsCurrentGeneration() async throws {
+        let data = Data(repeating: 0x41, count: 500_000)
+        let reference = BoothAssetReference(
+            assetID: "prompt-1",
+            sessionID: "session-1",
+            revision: "revision-1",
+            kind: .promptImage,
+            byteCount: data.count,
+            sha256: Data(SHA256.hash(data: data))
+        )
+        let chunks = try BoothAssetTransfer.chunks(data: data, reference: reference)
+        let pipeline = BoothAssetReceivePipeline()
+        await pipeline.reset(to: 4)
+        _ = try await pipeline.append(chunks[0], generation: 4)
+        await pipeline.resetCurrent(generation: 4)
+
+        var completed: (BoothAssetReference, Data)?
+        for chunk in chunks {
+            completed = try await pipeline.append(chunk, generation: 4) ?? completed
+        }
+        #expect(completed?.0 == reference)
+        #expect(completed?.1 == data)
     }
 
     @Test("countdown derives framing from its active photo slot")

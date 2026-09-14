@@ -54,6 +54,7 @@ final class iPadViewModel: ObservableObject {
     private var receivedAssetReferences: [String: BoothAssetReference] = [:]
     private var expectedAssetReferences: [String: BoothAssetReference] = [:]
     private var expectedAssetOrder: [BoothAssetReference] = []
+    private var assetRetryCounts: [BoothAssetReference: Int] = [:]
     private var reviewAssetIndices: [String: Int] = [:]
 #if DEBUG
     @Published private(set) var demoKioskMode = false
@@ -69,13 +70,13 @@ final class iPadViewModel: ObservableObject {
         return true
     }
     var shouldShowReconnectOverlay: Bool {
-        guard isBoothSessionActive, !isConnectionReady else { return false }
+        guard isBoothSessionActive, !isAuthoritativeControlReady else { return false }
 #if DEBUG
         if demoKioskMode { return false }
 #endif
         return true
     }
-    var isConnectionReady: Bool {
+    var isAuthoritativeControlReady: Bool {
         guard case .connected = connectionStatus.state else { return false }
         guard networkTransport != nil else { return true }
         let isFresh = connectionStatus.lastControlActivityAt.map {
@@ -83,9 +84,16 @@ final class iPadViewModel: ObservableObject {
         } ?? false
         return connectionStatus.isPeerAuthenticated
             && connectionStatus.isSecureChannelEstablished
-            && connectionStatus.isPreviewChannelConnected
-            && connectionStatus.isAssetChannelReady
             && isFresh
+    }
+    var isBoothFullyReady: Bool {
+        guard isAuthoritativeControlReady else { return false }
+        guard networkTransport != nil else { return true }
+        return connectionStatus.isPreviewChannelConnected
+            && connectionStatus.isAssetChannelReady
+    }
+    var isConnectionReady: Bool {
+        isBoothFullyReady
     }
 
     func renameDevice(_ name: String) {
@@ -125,11 +133,19 @@ final class iPadViewModel: ObservableObject {
 
     func handleScenePhase(_ phase: ScenePhase) {
         if phase != .active {
+            previewDecodeTask?.cancel()
+            previewDecodeTask = nil
             latestPreviewImage = nil
             pendingPreviewJPEG = nil
             lastPreviewFrameAt = nil
         }
-        guard phase == .active, !isConnectionReady, connectionRecoveryTask == nil else { return }
+        guard phase == .active, connectionRecoveryTask == nil else { return }
+        let recoveryAction = BoothForegroundRecoveryAction.action(
+            controlReady: isAuthoritativeControlReady,
+            previewReady: networkTransport == nil || connectionStatus.isPreviewChannelConnected,
+            assetReady: networkTransport == nil || connectionStatus.isAssetChannelReady
+        )
+        guard recoveryAction == .restartControl else { return }
         connectionRecoveryTask = Task { @MainActor [weak self] in
             guard let self else { return }
             self.multipeer.restart()
@@ -373,9 +389,9 @@ final class iPadViewModel: ObservableObject {
             requestMissingExpectedAssets()
 
         case .assetUnavailable(let reference, let reason):
-            guard reference.sessionID == nil
-                    || reference.sessionID == sessionMessageGate.currentSessionID else { break }
+            guard expectedAssetReferences[reference.assetID] == reference else { break }
             assetRequestPump.markUnavailable(reference)
+            assetRetryCounts.removeValue(forKey: reference)
             sessionRequestError = reason
             requestMissingExpectedAssets()
 
@@ -396,6 +412,7 @@ final class iPadViewModel: ObservableObject {
     private func clearSessionMedia() {
         clearTransientRequestState()
         previewDecodeTask?.cancel()
+        previewDecodeTask = nil
         pendingPreviewJPEG = nil
         lastPreviewFrameAt = nil
         latestPreviewImage = nil
@@ -406,6 +423,7 @@ final class iPadViewModel: ObservableObject {
         receivedAssetReferences = [:]
         expectedAssetReferences = [:]
         expectedAssetOrder = []
+        assetRetryCounts = [:]
         reviewAssetIndices = [:]
         resetAssetProcessing()
         assetRequestPump.reset()
@@ -438,6 +456,7 @@ final class iPadViewModel: ObservableObject {
             receivedAssets.removeValue(forKey: reference.assetID)
             receivedAssetReferences.removeValue(forKey: reference.assetID)
             assetRequestPump.markCompleted(previous)
+            assetRetryCounts.removeValue(forKey: previous)
         }
         if let index = expectedAssetOrder.firstIndex(where: { $0.assetID == reference.assetID }) {
             expectedAssetOrder[index] = reference
@@ -498,7 +517,10 @@ final class iPadViewModel: ObservableObject {
         for reference in expectedAssetOrder where cachedAsset(for: reference) != nil {
             cached.insert(reference)
         }
-        let batch = assetRequestPump.nextBatch(expected: expectedAssetOrder, cached: cached)
+        let requestable = expectedAssetOrder.filter {
+            (assetRetryCounts[$0] ?? 0) <= BoothAssetRetryPolicy.maximumAutomaticRetries
+        }
+        let batch = assetRequestPump.nextBatch(expected: requestable, cached: cached)
         guard !batch.isEmpty else { return }
         multipeer.sendControl(.assetRequest(references: batch)) { [weak self] outcome in
             guard let self else { return }
@@ -526,7 +548,7 @@ final class iPadViewModel: ObservableObject {
         }
         expectedAssetReferences = next
         expectedAssetOrder = unique
-        assetRequestPump.reset()
+        assetRetryCounts = assetRetryCounts.filter { next[$0.key.assetID] == $0.key }
     }
 
     private func installPresentationImages(_ presentation: SessionPresentation) {
@@ -545,6 +567,7 @@ final class iPadViewModel: ObservableObject {
     private func handleAssetChunk(_ chunk: BoothAssetChunk) {
         let activeSessionID = sessionMessageGate.currentSessionID
         guard chunk.metadata.sessionID == nil || chunk.metadata.sessionID == activeSessionID else { return }
+        if cachedAsset(for: chunk.metadata.reference) != nil { return }
         if let expected = expectedAssetReferences[chunk.metadata.assetID] {
             guard expected == chunk.metadata.reference else { return }
         } else {
@@ -563,6 +586,13 @@ final class iPadViewModel: ObservableObject {
                     Self.cgImage(from: data)
                 }.value
                 guard let self else { return }
+                guard let image else {
+                    await self.rejectAsset(
+                        chunk.metadata.reference,
+                        generation: generation
+                    )
+                    return
+                }
                 self.applyCompletedAsset(
                     reference: reference,
                     data: data,
@@ -572,7 +602,7 @@ final class iPadViewModel: ObservableObject {
                 )
             } catch {
                 guard let self else { return }
-                self.rejectAsset(
+                await self.rejectAsset(
                     chunk.metadata.reference,
                     generation: generation
                 )
@@ -590,7 +620,9 @@ final class iPadViewModel: ObservableObject {
         guard generation == assetProcessingGeneration,
               reference.sessionID == nil || reference.sessionID == activeSessionID else { return }
         if let expected = expectedAssetReferences[reference.assetID], expected != reference { return }
+        if cachedAsset(for: reference) != nil { return }
         assetRequestPump.markCompleted(reference)
+        assetRetryCounts.removeValue(forKey: reference)
         receivedAssets[reference.assetID] = data
         receivedAssetReferences[reference.assetID] = reference
         switch reference.kind {
@@ -617,14 +649,23 @@ final class iPadViewModel: ObservableObject {
         requestMissingExpectedAssets()
     }
 
-    private func rejectAsset(_ reference: BoothAssetReference, generation: UInt64) {
-        guard generation == assetProcessingGeneration else { return }
-        let pipeline = assetReceivePipeline
-        Task { await pipeline.reset(to: generation) }
-        assetRequestPump.markSendFailed([reference])
+    private func rejectAsset(_ reference: BoothAssetReference, generation: UInt64) async {
+        guard generation == assetProcessingGeneration,
+              reference.sessionID == nil || reference.sessionID == sessionMessageGate.currentSessionID else { return }
+        await assetReceivePipeline.resetCurrent(generation: generation)
+        guard generation == assetProcessingGeneration,
+              reference.sessionID == nil || reference.sessionID == sessionMessageGate.currentSessionID else { return }
+        // ponytail: the assembler is generation-scoped; replay every in-flight reference after a reset. Split per-reference assemblers only if concurrent asset memory is measured as a bottleneck.
+        assetRequestPump.clearInFlight()
         receivedAssets.removeValue(forKey: reference.assetID)
         receivedAssetReferences.removeValue(forKey: reference.assetID)
-        sessionRequestError = "An asset could not be received. Please reconnect."
+        let failureCount = assetRetryCounts[reference, default: 0]
+        assetRetryCounts[reference] = failureCount + 1
+        if BoothAssetRetryPolicy.shouldRetry(after: failureCount) {
+            requestMissingExpectedAssets()
+        } else {
+            sessionRequestError = "An asset could not be received. Please reconnect."
+        }
     }
 
     private func installReviewAsset(
@@ -1196,13 +1237,26 @@ final class iPadViewModel: ObservableObject {
 
 }
 
-private actor BoothAssetReceivePipeline {
+enum BoothAssetRetryPolicy {
+    static let maximumAutomaticRetries = 2
+
+    static func shouldRetry(after failureCount: Int) -> Bool {
+        failureCount < maximumAutomaticRetries
+    }
+}
+
+actor BoothAssetReceivePipeline {
     private var assembler = BoothAssetAssembler()
     private var generation: UInt64 = 0
 
     func reset(to generation: UInt64) {
         guard generation > self.generation else { return }
         self.generation = generation
+        assembler = BoothAssetAssembler()
+    }
+
+    func resetCurrent(generation: UInt64) {
+        guard generation == self.generation else { return }
         assembler = BoothAssetAssembler()
     }
 

@@ -1,5 +1,36 @@
 # PRC PhotoBooth — v1.4.2 Stability, Printing, Connectivity & Pairing
 
+## Final event-readiness implementation evidence — 2026-09-14
+
+This section records the completed working-tree pass from reviewed SHA
+`42612c82c432899ef723d2bb400e53e2f28dd6b3`. No commit, push, or project-file
+regeneration was performed; source membership did not change.
+
+Implemented software slices:
+
+- Ethernet and Wi-Fi path hints no longer outrank an authenticated, secure control connection. Real connection failure, viability loss, waiting deadlines, and heartbeat failure remain authoritative. Recovery deadlines are queue-confined and tied to the exact channel, generation, and connection.
+- Receive parsing and liveness are connection-scoped; stale callbacks cannot reuse a parser, refresh liveness, or mutate the replacement connection.
+- iPad control readiness is separate from full booth readiness. Foreground recovery restarts only for authoritative control loss; Preview and Asset degradation recover independently.
+- Asset assembly resets the current generation after corruption, retries at most twice automatically, rejects stale/session-mismatched completions, and keeps `assetUnavailable` distinct from transport corruption.
+- Prompt delivery is request-driven after sources are registered for the full session lifetime. Review and strip sources follow the same recovery-safe lifetime rule.
+- Remote Operator privileged HTTP control is unavailable in Release; DEBUG remains explicitly marked development-only and unencrypted.
+- Operations, preflight, reconnect, degraded-preview, degraded-asset, idle, and localization states were polished only at the affected native UI seams.
+
+Automated evidence:
+
+- Mac complete tests: `395/395`, `0` failures, `0` skipped; iPad simulator tests: `9/9`, `0` failures, `0` skipped.
+- Mac Debug/Release, iPad Debug/Release, and unsigned generic iPadOS Release compile: PASS. iPad simulator: `9FB3C107-DCA8-4D98-B9DA-A594BB232A5B`; target minimum remains iPadOS 16.0.
+- Mac Thread Sanitizer test run: `395/395` PASS with zero runtime warnings; iPad simulator TSan: `9/9` PASS with zero runtime warnings.
+- A loopback test drives the existing secure `BoothControlWritePump` through `10,000` ordered mixed control messages and verifies receiver-side decryption/order and zero pending queue after completion.
+- `git diff --check` and the targeted transport/security regression search pass. Existing unrelated Xcode user-state and sync-conflict files remain unmodified by this work and unstaged.
+
+Mandatory evidence not available in this environment remains explicitly open:
+
+- 500-session integrated transport soak, 8-photo relaunch/recovery, deliberate 12-second MainActor stall, and network-failure-during-stall test.
+- Instruments (Swift Concurrency, Time Profiler, Allocations, System Trace), packet capture, Device Hub GUI matrix, GitHub Actions rerun, physical private/no-internet router, Personal Hotspot, direct Ethernet/cable removal, old iPad relaunch, camera, printer, and three-hour event soak.
+
+Release verdict: `NOT READY` until the open physical, tooling, and integrated-soak gates are completed.
+
 ## Final stability implementation pass — 2026-09-14
 
 Starting branch: `fix/v1.4.2-stability-pairing`.
@@ -8,6 +39,23 @@ Starting dirty state: modified `PRC-PhotoBooth.xcodeproj/project.xcworkspace/xcu
 Remote parity at start: `HEAD...origin/fix/v1.4.2-stability-pairing` = `0 0`.
 
 Scope: complete the remaining deterministic recovery, channel-admission, MainActor, status/preflight, diagnostics, and test slices from the final event-readiness brief. Physical network, Device Hub, camera, printer, Instruments, TSan, and multi-hour soak gates remain evidence-only until actually run.
+
+## Final event-readiness continuation — 2026-09-14
+
+Implementation brief: `PRC PhotoBooth v1.4.2 — Final Event-Readiness Implementation Plan`.
+
+Execution baseline:
+
+- Branch: `fix/v1.4.2-stability-pairing`
+- Starting SHA: `42612c82c432899ef723d2bb400e53e2f28dd6b3`
+- Dirty files: modified `PRC-PhotoBooth.xcodeproj/project.xcworkspace/xcuserdata/nont.xcuserdatad/UserInterfaceState.xcuserstate`; untracked `PRC-PhotoBooth.xcodeproj/project.sync-conflict-20260914-064337-7G5YJKM.pbxproj`. Preserve both; do not stage.
+- Toolchain: Xcode `27.0` (`27A5252f`), Swift `6.4`, macOS `27.0` (`26A5425a`), project Swift language mode `6.0`.
+- Targets: macOS `15.0`; iPadOS/iOS `16.0`; iPad-only device family; marketing version `1.4.2`, build `6`.
+- Baseline Mac tests: `392/392` in `56/56` suites per current release ledger; fresh `xcodebuild ... PRC-PhotoBoothTests ... test` exit `0` on this checkout.
+- Baseline builds: Mac Debug, Mac Release, iPad Debug, iPad Release on simulator `9FB3C107-DCA8-4D98-B9DA-A594BB232A5B`, and unsigned generic iPadOS Release all exited `0` with isolated `/tmp/prc-photobooth-v142-baseline-*` DerivedData.
+- Sub-agent review: requested read-only dispatch was unavailable because the agent thread limit was reached; equivalent local read-only review will be recorded with findings.
+
+Scope: implement only concrete remaining software defects from the brief. Do not perform another networking rewrite. Physical, Device Hub, TSan, Instruments, packet-capture, camera, printer, app-relaunch, and multi-hour soak evidence remains mandatory and unrun unless separately exercised.
 
 > Current release work starts from `fix/v1.4.1-stability-print-connectivity` at reviewed head `e4bef7bac0c4f7f4e713dda1b39e5b471b874cdb`. v1.4.1 is not a separate release.
 

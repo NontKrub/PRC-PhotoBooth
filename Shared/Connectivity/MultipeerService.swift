@@ -349,7 +349,11 @@ public final class MultipeerService: NSObject, BoothTransport {
         guard let session = _session else { return }
         let targets = targetPeers(from: session)
         guard !targets.isEmpty else { return }
-        try? session.send(jpegData.packedAsPreview(), toPeers: targets, with: .unreliable)
+        do {
+            try session.send(jpegData.packedAsPreview(), toPeers: targets, with: .unreliable)
+        } catch {
+            print("[MPC] preview send error: \(error)")
+        }
     }
 
     private func targetPeers(from session: MCSession) -> [MCPeerID] {

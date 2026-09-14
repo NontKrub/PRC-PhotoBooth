@@ -1,5 +1,20 @@
 # Current release: v1.4.2 — Stability, Printing, Connectivity & Pairing
 
+## Final event-readiness continuation — 2026-09-14
+
+- [x] Record branch `fix/v1.4.2-stability-pairing`, starting SHA `42612c82c432899ef723d2bb400e53e2f28dd6b3`, dirty Xcode user-state and sync-conflict files, Xcode 27.0, Swift 6.4, macOS 27.0, macOS 15/iPadOS 16 targets, version `1.4.2 (6)`.
+- [x] Record baseline Mac test command exit `0`; existing ledger baseline is Mac `392/392` in `56/56` suites.
+- [x] Record fresh pre-edit Mac Debug, Mac Release, iPad Debug, iPad Release on simulator `9FB3C107-DCA8-4D98-B9DA-A594BB232A5B`, and unsigned generic iPadOS Release builds; all exited `0` with isolated DerivedData.
+- [x] Implement and test Ethernet path authority, split foreground recovery, low-level recovery timing, bounded asset retry, request-driven prompt delivery, and Release Remote Operator policy.
+- [x] Polish only affected connection/preflight/degraded-state UI after functional slices pass.
+- [x] Run the final automated matrix: Mac `395/395`, iPad `9/9`, Mac/iPad Debug and Release builds, and unsigned generic iPadOS Release compile.
+- [x] Run the deterministic 10,000-message secure control-writer loopback stress test; receiver ordering and pending queue bounds passed.
+- [ ] Integrated 500-session transport soak, 8-photo relaunch/recovery, 12-second MainActor stall, and network-failure-under-stall test remain open.
+- [ ] Instruments, packet capture, Device Hub, physical network/camera/QR/printer, relaunch, and three-hour soak remain mandatory release gates.
+- [x] Run Mac TSan: `395/395` passed with zero runtime warnings.
+- [x] iPad simulator TSan: `9/9` passed with zero runtime warnings.
+- [ ] Release verdict remains `NOT READY` until mandatory physical/tooling gates pass.
+
 This is the active checklist. Historical v1.3/v1.4 notes remain below and are not release instructions.
 
 ## Final stability continuation — 2026-09-14

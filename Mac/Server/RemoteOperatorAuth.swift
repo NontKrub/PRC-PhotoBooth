@@ -2,6 +2,14 @@ import Foundation
 
 @MainActor
 final class RemoteOperatorAuth {
+    nonisolated static var isAvailableInCurrentBuild: Bool {
+#if DEBUG
+        true
+#else
+        false
+#endif
+    }
+
     private struct ExpiringToken {
         var value: String
         var expiresAt: Date
@@ -12,6 +20,7 @@ final class RemoteOperatorAuth {
     private(set) var isEnabled = false
 
     func enable() {
+        guard Self.isAvailableInCurrentBuild else { return }
         isEnabled = true
     }
 
@@ -21,7 +30,7 @@ final class RemoteOperatorAuth {
     }
 
     func pairingTokenValue() -> String {
-        guard isEnabled else { return "" }
+        guard isEnabled, Self.isAvailableInCurrentBuild else { return "" }
         if let pairingToken, pairingToken.expiresAt > Date() { return pairingToken.value }
         let token = Self.randomToken()
         pairingToken = ExpiringToken(value: token, expiresAt: Date().addingTimeInterval(600))
@@ -30,6 +39,7 @@ final class RemoteOperatorAuth {
 
     func pair(_ token: String) -> String? {
         guard isEnabled,
+              Self.isAvailableInCurrentBuild,
               let pairingToken,
               pairingToken.expiresAt > Date(),
               token == pairingToken.value else { return nil }
@@ -41,6 +51,7 @@ final class RemoteOperatorAuth {
 
     func isValidOperatorToken(_ token: String?) -> Bool {
         guard isEnabled,
+              Self.isAvailableInCurrentBuild,
               let token,
               let stored = operatorTokens[token],
               stored.expiresAt > Date() else {

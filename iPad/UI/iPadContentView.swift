@@ -4,6 +4,8 @@ struct iPadContentView: View {
     @EnvironmentObject private var vm: iPadViewModel
     @State private var showingConnectionSettings = false
 
+    private var isThai: Bool { vm.selectedLanguage == .thai }
+
     var body: some View {
         ZStack {
             Color.black.ignoresSafeArea()
@@ -49,14 +51,39 @@ struct iPadContentView: View {
                     ProgressView()
                         .tint(.white)
                         .scaleEffect(1.25)
-                    Text("Reconnecting…")
+                    Text(isThai ? "กำลังเชื่อมต่อใหม่…" : "Reconnecting…")
                         .font(.title2.bold())
                         .foregroundStyle(.white)
-                    Text("Please wait for staff.")
+                    Text(isThai ? "กรุณารอเจ้าหน้าที่" : "Please wait for staff.")
                         .foregroundStyle(.white.opacity(0.75))
                 }
                 .accessibilityElement(children: .combine)
-                .accessibilityLabel("Reconnecting. Please wait for staff.")
+                .accessibilityLabel(
+                    isThai
+                        ? "กำลังเชื่อมต่อใหม่ กรุณารอเจ้าหน้าที่"
+                        : "Reconnecting. Please wait for staff."
+                )
+            }
+
+            if vm.isBoothSessionActive,
+               vm.isAuthoritativeControlReady,
+               !vm.isBoothFullyReady {
+                VStack {
+                    Spacer()
+                    Label(
+                        vm.connectionStatus.isPreviewChannelConnected
+                            ? (isThai ? "กำลังโหลดรูปภาพบูธ…" : "Loading booth assets…")
+                            : (isThai ? "กำลังเชื่อมต่อภาพตัวอย่าง…" : "Preview reconnecting…"),
+                        systemImage: vm.connectionStatus.isPreviewChannelConnected
+                            ? "photo.on.rectangle.angled"
+                            : "video.slash"
+                    )
+                    .font(.callout.weight(.semibold))
+                    .foregroundStyle(.white.opacity(0.8))
+                    .shadow(radius: 4)
+                    .padding(.bottom, 24)
+                }
+                .accessibilityElement(children: .combine)
             }
 
             if vm.canChangeConnection {

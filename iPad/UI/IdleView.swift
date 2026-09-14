@@ -4,6 +4,8 @@ struct IdleView: View {
     @EnvironmentObject private var vm: iPadViewModel
     @State private var pulse = false
 
+    private var isThai: Bool { vm.selectedLanguage == .thai }
+
     var body: some View {
         ZStack {
             PreviewMirrorView().ignoresSafeArea()
@@ -58,36 +60,50 @@ struct IdleView: View {
                 connectionBadge
                     .padding(.bottom, 44)
 
-                // Tap indicator
-                VStack(spacing: 14) {
-                    ZStack {
-                        Circle()
-                            .strokeBorder(.white.opacity(pulse ? 0 : 0.2), lineWidth: 1)
-                            .frame(width: pulse ? 80 : 50, height: pulse ? 80 : 50)
-                            .animation(.easeOut(duration: 1.6).repeatForever(autoreverses: false), value: pulse)
-                        Circle()
-                            .fill(.white.opacity(0.12))
-                            .frame(width: 50, height: 50)
-                        Image(systemName: "hand.tap.fill")
-                            .font(.system(size: 20, weight: .medium))
-                            .foregroundStyle(.white.opacity(0.75))
+                if vm.isConnectionReady {
+                    // Tap indicator
+                    VStack(spacing: 14) {
+                        ZStack {
+                            Circle()
+                                .strokeBorder(.white.opacity(pulse ? 0 : 0.2), lineWidth: 1)
+                                .frame(width: pulse ? 80 : 50, height: pulse ? 80 : 50)
+                                .animation(.easeOut(duration: 1.6).repeatForever(autoreverses: false), value: pulse)
+                            Circle()
+                                .fill(.white.opacity(0.12))
+                                .frame(width: 50, height: 50)
+                            Image(systemName: "hand.tap.fill")
+                                .font(.system(size: 20, weight: .medium))
+                                .foregroundStyle(.white.opacity(0.75))
+                        }
+                        Text(isThai ? "แตะที่ใดก็ได้เพื่อเริ่ม" : "Tap anywhere to begin")
+                            .font(.system(size: 15, weight: .medium))
+                            .foregroundStyle(.white.opacity(0.45))
+                            .tracking(0.5)
                     }
-                    Text("Tap anywhere to begin")
-                        .font(.system(size: 15, weight: .medium))
-                        .foregroundStyle(.white.opacity(0.45))
-                        .tracking(0.5)
+                    .padding(.bottom, 60)
+                    .contentShape(Rectangle())
+                    .onTapGesture { vm.customerTappedToBegin() }
+                    .accessibilityElement(children: .combine)
+                    .accessibilityLabel(isThai ? "แตะที่ใดก็ได้เพื่อเริ่ม" : "Tap anywhere to begin")
+                    .accessibilityAction { vm.customerTappedToBegin() }
+                } else {
+                    VStack(spacing: 8) {
+                        Label(
+                            vm.isAuthoritativeControlReady
+                                ? (isThai ? "กำลังเตรียมบูธ" : "Preparing booth")
+                                : (isThai ? "กำลังรอผู้ควบคุม" : "Waiting for operator"),
+                            systemImage: vm.isAuthoritativeControlReady ? "hourglass" : "wifi.exclamationmark"
+                        )
+                        .font(.system(size: 17, weight: .semibold))
+                        Text(isThai ? "ต้องเชื่อมต่อก่อนเริ่ม" : "Connection required before starting")
+                            .font(.system(size: 14, weight: .medium))
+                            .foregroundStyle(.white.opacity(0.45))
+                    }
+                    .foregroundStyle(.white.opacity(0.75))
+                    .padding(.bottom, 60)
+                    .accessibilityElement(children: .combine)
+                    .accessibilityLabel(isThai ? "กำลังรอการเชื่อมต่อ ต้องเชื่อมต่อก่อนเริ่ม" : "Waiting for connection. Connection required before starting.")
                 }
-                .padding(.bottom, 60)
-            }
-        }
-        .onTapGesture {
-            if vm.isConnectionReady {
-                vm.customerTappedToBegin()
-            }
-        }
-        .accessibilityAction(.default) {
-            if vm.isConnectionReady {
-                vm.customerTappedToBegin()
             }
         }
         .onAppear { pulse = true }
@@ -109,14 +125,21 @@ struct IdleView: View {
     }
 
     var connectionColor: Color {
+        if vm.isAuthoritativeControlReady && !vm.isBoothFullyReady { return .orange }
         switch vm.multipeer.connectionStatus.state {
         case .disconnected: return Color(red: 1, green: 0.35, blue: 0.35)
         case .connecting:   return .orange
-        case .connected:    return Color(red: 0.25, green: 0.88, blue: 0.5)
+        case .connected:    return vm.isAuthoritativeControlReady ? Color(red: 0.25, green: 0.88, blue: 0.5) : .orange
         }
     }
 
     var badgeLabel: String {
+        if vm.isAuthoritativeControlReady && !vm.isBoothFullyReady {
+            return isThai ? "กำลังเตรียมบูธ" : "Preparing booth"
+        }
+        if !vm.isAuthoritativeControlReady {
+            return isThai ? "กำลังรอผู้ควบคุม" : "Waiting for operator"
+        }
         switch vm.multipeer.connectionStatus.state {
         case .connected:    return vm.selectedLanguage == .thai ? "เชื่อมต่อกับผู้ควบคุมแล้ว" : "Connected to operator"
         case .connecting:   return vm.selectedLanguage == .thai ? "กำลังเชื่อมต่อกับผู้ควบคุม…" : "Connecting to operator…"
