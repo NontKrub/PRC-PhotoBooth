@@ -110,7 +110,9 @@ enum OperationsStatusLogic {
     static func connection(
         _ state: BoothConnectionState,
         authenticated: Bool,
-        previewConnected: Bool
+        previewConnected: Bool,
+        secureConnected: Bool = true,
+        assetReady: Bool = true
     ) -> OperationsSectionStatus {
         guard case .connected = state else {
             return OperationsSectionStatus(
@@ -123,6 +125,12 @@ enum OperationsStatusLogic {
         }
         guard previewConnected else {
             return OperationsSectionStatus(summary: "Preview unavailable", severity: .failure)
+        }
+        guard secureConnected else {
+            return OperationsSectionStatus(summary: "Secure channel unavailable", severity: .failure)
+        }
+        guard assetReady else {
+            return OperationsSectionStatus(summary: "Assets unavailable", severity: .failure)
         }
         return OperationsSectionStatus(summary: "Connected", severity: .normal)
     }
@@ -639,7 +647,9 @@ struct OperationsView: View {
         OperationsStatusLogic.connection(
             connectionStatus.state,
             authenticated: connectionStatus.isPeerAuthenticated,
-            previewConnected: connectionStatus.isPreviewChannelConnected
+            previewConnected: connectionStatus.isPreviewChannelConnected,
+            secureConnected: connectionStatus.isSecureChannelEstablished,
+            assetReady: connectionStatus.isAssetChannelReady
         )
     }
 
@@ -661,6 +671,8 @@ struct OperationsView: View {
             HStack(spacing: 18) {
                 healthValue("Control", controlConnectionLabel)
                 healthValue("Preview", connectionStatus.isPreviewChannelConnected ? "Connected" : "Unavailable")
+                healthValue("Secure", connectionStatus.isSecureChannelEstablished ? "Established" : "Unavailable")
+                healthValue("Assets", connectionStatus.isAssetChannelReady ? "Ready" : "Unavailable")
                 healthValue("Trust", connectionStatus.isPeerAuthenticated ? "Authenticated" : "Not authenticated")
             }
         }

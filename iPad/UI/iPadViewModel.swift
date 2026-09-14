@@ -47,10 +47,13 @@ final class iPadViewModel: ObservableObject {
     private var countdownTask: Task<Void, Never>?
     private var connectionRecoveryTask: Task<Void, Never>?
     private var sessionMessageGate = SessionMessageGate()
-    private var assetAssembler = BoothAssetAssembler()
+    private let assetReceivePipeline = BoothAssetReceivePipeline()
+    private var assetProcessingGeneration: UInt64 = 0
+    private var assetRequestPump = BoothAssetRequestPump()
     private var receivedAssets: [String: Data] = [:]
     private var receivedAssetReferences: [String: BoothAssetReference] = [:]
     private var expectedAssetReferences: [String: BoothAssetReference] = [:]
+    private var expectedAssetOrder: [BoothAssetReference] = []
     private var reviewAssetIndices: [String: Int] = [:]
 #if DEBUG
     @Published private(set) var demoKioskMode = false
@@ -79,7 +82,9 @@ final class iPadViewModel: ObservableObject {
             Date().timeIntervalSince($0) < 10
         } ?? false
         return connectionStatus.isPeerAuthenticated
+            && connectionStatus.isSecureChannelEstablished
             && connectionStatus.isPreviewChannelConnected
+            && connectionStatus.isAssetChannelReady
             && isFresh
     }
 
@@ -172,9 +177,18 @@ final class iPadViewModel: ObservableObject {
             self?.handleAssetChunk(chunk)
         }
         multipeer.onTransportEvent = { [weak self] event in
-            guard event.kind == .transportReady,
+            guard let self,
                   event.channel == String(describing: BoothTransportChannel.asset) else { return }
-            self?.requestMissingExpectedAssets()
+            switch event.kind {
+            case .transportReady:
+                self.assetRequestPump.clearInFlight()
+                self.requestMissingExpectedAssets()
+            case .transportDisconnected:
+                self.resetAssetProcessing()
+                self.assetRequestPump.clearInFlight()
+            default:
+                break
+            }
         }
         multipeer.onPreviewFrame = { [weak self] jpegData in
             guard let self else { return }
@@ -283,6 +297,7 @@ final class iPadViewModel: ObservableObject {
             stateMachine.startSession(config: config, sessionID: presentation.sessionID)
             sessionPresentation = presentation
             registerExpectedAssets(in: presentation)
+            requestMissingExpectedAssets()
             selectedLanguage = presentation.language
             installPresentationImages(presentation)
 
@@ -317,6 +332,7 @@ final class iPadViewModel: ObservableObject {
             if let data = cachedAsset(for: asset) {
                 installReviewAsset(asset, photoIndex: index, data: data)
             }
+            requestMissingExpectedAssets()
 
         case .captureRecovery(let context, let index, let failure):
             guard accept(context, message: "captureRecovery") else { break }
@@ -354,11 +370,14 @@ final class iPadViewModel: ObservableObject {
                 stripThumbImage = Self.cgImage(from: data)
             }
             stateMachine.applyAuthoritativePhase(.finished(qrPayload: qr))
+            requestMissingExpectedAssets()
 
         case .assetUnavailable(let reference, let reason):
             guard reference.sessionID == nil
                     || reference.sessionID == sessionMessageGate.currentSessionID else { break }
+            assetRequestPump.markUnavailable(reference)
             sessionRequestError = reason
+            requestMissingExpectedAssets()
 
         case .operatorOverride(let context, let action):
             if let context {
@@ -386,8 +405,10 @@ final class iPadViewModel: ObservableObject {
         receivedAssets = [:]
         receivedAssetReferences = [:]
         expectedAssetReferences = [:]
+        expectedAssetOrder = []
         reviewAssetIndices = [:]
-        assetAssembler = BoothAssetAssembler()
+        resetAssetProcessing()
+        assetRequestPump.reset()
     }
 
     private func clearTransientRequestState() {
@@ -413,6 +434,16 @@ final class iPadViewModel: ObservableObject {
     }
 
     private func registerExpectedAsset(_ reference: BoothAssetReference) {
+        if let previous = expectedAssetReferences[reference.assetID], previous != reference {
+            receivedAssets.removeValue(forKey: reference.assetID)
+            receivedAssetReferences.removeValue(forKey: reference.assetID)
+            assetRequestPump.markCompleted(previous)
+        }
+        if let index = expectedAssetOrder.firstIndex(where: { $0.assetID == reference.assetID }) {
+            expectedAssetOrder[index] = reference
+        } else {
+            expectedAssetOrder.append(reference)
+        }
         expectedAssetReferences[reference.assetID] = reference
     }
 
@@ -427,40 +458,75 @@ final class iPadViewModel: ObservableObject {
     private func cachedAsset(for reference: BoothAssetReference) -> Data? {
         guard receivedAssetReferences[reference.assetID] == reference,
               let data = receivedAssets[reference.assetID],
-              data.count == reference.byteCount,
-              Data(SHA256.hash(data: data)) == reference.sha256 else { return nil }
+              data.count == reference.byteCount else { return nil }
         return data
     }
 
+    private func resetAssetProcessing() {
+        assetProcessingGeneration &+= 1
+        let generation = assetProcessingGeneration
+        let pipeline = assetReceivePipeline
+        Task { await pipeline.reset(to: generation) }
+    }
+
     private func requestMissingAssets(for snapshot: SessionSyncSnapshot) {
-        var references = Set<BoothAssetReference>()
+        var references: [BoothAssetReference] = []
+        var seen = Set<BoothAssetReference>()
+        func append(_ reference: BoothAssetReference) {
+            guard seen.insert(reference).inserted else { return }
+            references.append(reference)
+        }
+
+        if let reviewAsset = snapshot.reviewAsset { append(reviewAsset) }
+        if let stripAsset = snapshot.stripAsset { append(stripAsset) }
         if let presentation = snapshot.presentation {
-            registerExpectedAssets(in: presentation)
-            references.formUnion(presentation.prompts.compactMap(\.imageAsset))
+            for reference in presentation.prompts.compactMap(\.imageAsset) {
+                append(reference)
+            }
         }
-        if let reviewAsset = snapshot.reviewAsset {
-            registerExpectedAsset(reviewAsset)
-            references.insert(reviewAsset)
+        for index in snapshot.keptShotAssets.keys.sorted() {
+            if let reference = snapshot.keptShotAssets[index] {
+                append(reference)
+            }
         }
-        if let stripAsset = snapshot.stripAsset {
-            registerExpectedAsset(stripAsset)
-            references.insert(stripAsset)
-        }
-        for reference in snapshot.keptShotAssets.values {
-            registerExpectedAsset(reference)
-            references.insert(reference)
-        }
-        let missing = references.filter { cachedAsset(for: $0) == nil }.prefix(16)
-        guard !missing.isEmpty else { return }
-        _ = multipeer.sendControl(.assetRequest(references: Array(missing)))
+        replaceExpectedAssets(with: references)
+        requestMissingExpectedAssets()
     }
 
     private func requestMissingExpectedAssets() {
-        let missing = expectedAssetReferences.values
-            .filter { cachedAsset(for: $0) == nil }
-            .prefix(16)
-        guard !missing.isEmpty else { return }
-        _ = multipeer.sendControl(.assetRequest(references: Array(missing)))
+        var cached = Set<BoothAssetReference>()
+        for reference in expectedAssetOrder where cachedAsset(for: reference) != nil {
+            cached.insert(reference)
+        }
+        let batch = assetRequestPump.nextBatch(expected: expectedAssetOrder, cached: cached)
+        guard !batch.isEmpty else { return }
+        multipeer.sendControl(.assetRequest(references: batch)) { [weak self] outcome in
+            guard let self else { return }
+            guard outcome == .sent else {
+                self.assetRequestPump.markSendFailed(batch)
+                return
+            }
+        }
+    }
+
+    private func replaceExpectedAssets(with references: [BoothAssetReference]) {
+        var unique: [BoothAssetReference] = []
+        var seen = Set<BoothAssetReference>()
+        for reference in references where seen.insert(reference).inserted {
+            unique.append(reference)
+        }
+        let next = Dictionary(unique.map { ($0.assetID, $0) }, uniquingKeysWith: { _, latest in latest })
+        guard next != expectedAssetReferences || unique != expectedAssetOrder else { return }
+
+        for previous in expectedAssetReferences.values where next[previous.assetID] != previous {
+            receivedAssets.removeValue(forKey: previous.assetID)
+            receivedAssetReferences.removeValue(forKey: previous.assetID)
+            reviewAssetIndices.removeValue(forKey: previous.assetID)
+            assetRequestPump.markCompleted(previous)
+        }
+        expectedAssetReferences = next
+        expectedAssetOrder = unique
+        assetRequestPump.reset()
     }
 
     private func installPresentationImages(_ presentation: SessionPresentation) {
@@ -485,34 +551,80 @@ final class iPadViewModel: ObservableObject {
             guard chunk.metadata.sessionID == nil,
                   chunk.metadata.kind == .templatePreview else { return }
         }
-        do {
-            guard let (reference, data) = try assetAssembler.append(chunk) else { return }
-            if let expected = expectedAssetReferences[reference.assetID] {
-                guard expected == reference else { return }
+        let generation = assetProcessingGeneration
+        let pipeline = assetReceivePipeline
+        Task { [weak self, pipeline] in
+            do {
+                guard let (reference, data) = try await pipeline.append(
+                    chunk,
+                    generation: generation
+                ) else { return }
+                let image = await Task.detached(priority: .userInitiated) {
+                    Self.cgImage(from: data)
+                }.value
+                guard let self else { return }
+                self.applyCompletedAsset(
+                    reference: reference,
+                    data: data,
+                    image: image,
+                    activeSessionID: activeSessionID,
+                    generation: generation
+                )
+            } catch {
+                guard let self else { return }
+                self.rejectAsset(
+                    chunk.metadata.reference,
+                    generation: generation
+                )
             }
-            receivedAssets[reference.assetID] = data
-            receivedAssetReferences[reference.assetID] = reference
-            switch reference.kind {
-            case .templatePreview:
-                if let image = Self.cgImage(from: data) { experienceAssets[reference.assetID] = image }
-            case .promptImage:
-                if let presentation = sessionPresentation { installPresentationImages(presentation) }
-            case .reviewImage:
-                if let index = reviewAssetIndices[reference.assetID] {
-                    installReviewAsset(reference, photoIndex: index, data: data)
-                }
-            case .stripThumbnail:
-                guard reference.sessionID == activeSessionID,
-                      case .finished = stateMachine.phase else { break }
-                stripThumbImage = Self.cgImage(from: data)
-            case .gifThumbnail:
-                break
-            }
-        } catch {
-            receivedAssets.removeValue(forKey: chunk.metadata.assetID)
-            receivedAssetReferences.removeValue(forKey: chunk.metadata.assetID)
-            sessionRequestError = "An asset could not be received. Please reconnect."
         }
+    }
+
+    private func applyCompletedAsset(
+        reference: BoothAssetReference,
+        data: Data,
+        image: CGImage?,
+        activeSessionID: String?,
+        generation: UInt64
+    ) {
+        guard generation == assetProcessingGeneration,
+              reference.sessionID == nil || reference.sessionID == activeSessionID else { return }
+        if let expected = expectedAssetReferences[reference.assetID], expected != reference { return }
+        assetRequestPump.markCompleted(reference)
+        receivedAssets[reference.assetID] = data
+        receivedAssetReferences[reference.assetID] = reference
+        switch reference.kind {
+        case .templatePreview:
+            if let image { experienceAssets[reference.assetID] = image }
+        case .promptImage:
+            if let image {
+                for prompt in sessionPresentation?.prompts ?? []
+                where prompt.imageAsset?.assetID == reference.assetID {
+                    promptImages[prompt.promptID] = image
+                }
+            }
+        case .reviewImage:
+            if let index = reviewAssetIndices[reference.assetID] {
+                installReviewAsset(reference, photoIndex: index, data: data)
+            }
+        case .stripThumbnail:
+            guard reference.sessionID == activeSessionID,
+                  case .finished = stateMachine.phase else { break }
+            stripThumbImage = image
+        case .gifThumbnail:
+            break
+        }
+        requestMissingExpectedAssets()
+    }
+
+    private func rejectAsset(_ reference: BoothAssetReference, generation: UInt64) {
+        guard generation == assetProcessingGeneration else { return }
+        let pipeline = assetReceivePipeline
+        Task { await pipeline.reset(to: generation) }
+        assetRequestPump.markSendFailed([reference])
+        receivedAssets.removeValue(forKey: reference.assetID)
+        receivedAssetReferences.removeValue(forKey: reference.assetID)
+        sessionRequestError = "An asset could not be received. Please reconnect."
     }
 
     private func installReviewAsset(
@@ -557,7 +669,7 @@ final class iPadViewModel: ObservableObject {
         stateMachine.config = snapshot.config
         selectedLanguage = snapshot.presentation?.language ?? snapshot.config.customerLanguage
         sessionPresentation = snapshot.presentation
-        assetAssembler = BoothAssetAssembler()
+        resetAssetProcessing()
         requestMissingAssets(for: snapshot)
         if let presentation = snapshot.presentation { installPresentationImages(presentation) }
         isMirrored = snapshot.isMirrored
@@ -1082,4 +1194,27 @@ final class iPadViewModel: ObservableObject {
     }
 #endif
 
+}
+
+private actor BoothAssetReceivePipeline {
+    private var assembler = BoothAssetAssembler()
+    private var generation: UInt64 = 0
+
+    func reset(to generation: UInt64) {
+        guard generation > self.generation else { return }
+        self.generation = generation
+        assembler = BoothAssetAssembler()
+    }
+
+    func append(
+        _ chunk: BoothAssetChunk,
+        generation: UInt64
+    ) throws -> (BoothAssetReference, Data)? {
+        guard generation >= self.generation else { return nil }
+        if generation > self.generation {
+            self.generation = generation
+            assembler = BoothAssetAssembler()
+        }
+        return try assembler.append(chunk)
+    }
 }

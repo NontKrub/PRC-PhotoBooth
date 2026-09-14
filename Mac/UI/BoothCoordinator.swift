@@ -1308,6 +1308,9 @@ final class BoothCoordinator {
             ipadConnected: ipadConnected,
             controlChannelConnected: controlChannelConnected,
             ipadPreviewChannelConnected: connectionStatus.isPreviewChannelConnected,
+            secureTransportReady: connectionStatus.isSecureChannelEstablished,
+            assetChannelConnected: connectionStatus.isAssetChannelConnected,
+            assetChannelVerified: connectionStatus.isAssetChannelVerified,
             lastControlActivityAt: connectionStatus.lastControlActivityAt,
             reconnectInProgress: connectionStatus.isReconnectInProgress,
             reconnectAttempt: connectionStatus.reconnectAttempt,
@@ -2844,22 +2847,32 @@ final class BoothCoordinator {
             errorMessage = "Asset recovery request was rejected."
             return
         }
-        for reference in Set(references) {
+        var seen = Set<BoothAssetReference>()
+        for reference in references where seen.insert(reference).inserted {
             let isKnownSession = reference.sessionID == nil
                 || reference.sessionID == currentSession?.id
                 || reference.sessionID == stateMachine.currentSessionID
                 || reference.sessionID == lastCompletedSessionID
-            guard isKnownSession,
-                  let data = assetSources[reference],
-                  data.count == reference.byteCount,
-                  Data(SHA256.hash(data: data)) == reference.sha256,
-                  sendAsset(data: data, reference: reference) else {
+            guard isKnownSession else {
                 multipeer.sendControl(.assetUnavailable(
                     reference: reference,
                     reason: "The requested asset is no longer available."
                 ))
                 continue
             }
+            guard let data = assetSources[reference],
+                  data.count == reference.byteCount,
+                  Data(SHA256.hash(data: data)) == reference.sha256 else {
+                multipeer.sendControl(.assetUnavailable(
+                    reference: reference,
+                    reason: "The requested asset is no longer available."
+                ))
+                continue
+            }
+            // A valid source can still be temporarily unable to queue on the
+            // asset channel. Keep it retryable; only missing/invalid sources
+            // are permanently unavailable.
+            _ = sendAsset(data: data, reference: reference)
         }
     }
 

@@ -74,5 +74,7 @@ struct OperationsStatusLogicTests {
         #expect(OperationsStatusLogic.connection(.connected(peerName: "iPad"), authenticated: false, previewConnected: false).summary == "Trust pending")
         #expect(OperationsStatusLogic.connection(.connected(peerName: "iPad"), authenticated: true, previewConnected: false).severity == .failure)
         #expect(OperationsStatusLogic.connection(.connected(peerName: "iPad"), authenticated: true, previewConnected: true).severity == .normal)
+        #expect(OperationsStatusLogic.connection(.connected(peerName: "iPad"), authenticated: true, previewConnected: true, secureConnected: false).severity == .failure)
+        #expect(OperationsStatusLogic.connection(.connected(peerName: "iPad"), authenticated: true, previewConnected: true, assetReady: false).severity == .failure)
     }
 }

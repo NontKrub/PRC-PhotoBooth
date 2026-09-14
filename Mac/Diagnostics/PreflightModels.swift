@@ -54,6 +54,8 @@ enum PreflightCheckID: String, Sendable, CaseIterable, Identifiable {
     case authentication
     case controlChannel
     case previewChannel
+    case secureTransport
+    case assetChannel
     case networkRoute
     case networkFreshness
     case reconnectState
@@ -108,6 +110,9 @@ struct BoothPreflightContext: Sendable {
     var ipadConnected: Bool
     var controlChannelConnected: Bool
     var ipadPreviewChannelConnected: Bool
+    var secureTransportReady: Bool
+    var assetChannelConnected: Bool
+    var assetChannelVerified: Bool
     var lastControlActivityAt: Date?
     var reconnectInProgress: Bool
     var reconnectAttempt: Int
@@ -160,6 +165,9 @@ struct BoothPreflightContext: Sendable {
         ipadConnected: Bool = false,
         controlChannelConnected: Bool = false,
         ipadPreviewChannelConnected: Bool = false,
+        secureTransportReady: Bool = false,
+        assetChannelConnected: Bool = false,
+        assetChannelVerified: Bool = false,
         lastControlActivityAt: Date? = nil,
         reconnectInProgress: Bool = false,
         reconnectAttempt: Int = 0,
@@ -211,6 +219,9 @@ struct BoothPreflightContext: Sendable {
         self.ipadConnected = ipadConnected
         self.controlChannelConnected = controlChannelConnected
         self.ipadPreviewChannelConnected = ipadPreviewChannelConnected
+        self.secureTransportReady = secureTransportReady
+        self.assetChannelConnected = assetChannelConnected
+        self.assetChannelVerified = assetChannelVerified
         self.lastControlActivityAt = lastControlActivityAt
         self.reconnectInProgress = reconnectInProgress
         self.reconnectAttempt = reconnectAttempt

@@ -185,6 +185,8 @@ struct iPadConnectionSettingsView: View {
                     .accessibilityIdentifier("Connected Mac")
                 LabeledContent("Authentication", value: "Trusted")
                 LabeledContent("Connection", value: connectionLabel)
+                LabeledContent("Secure transport", value: status.isSecureChannelEstablished ? "Ready" : "Unavailable")
+                LabeledContent("Asset delivery", value: status.isAssetChannelReady ? "Ready" : "Reconnecting")
                 if let latency = status.roundTripLatency {
                     LabeledContent("Round trip", value: "\(Int(latency * 1000)) ms")
                 }

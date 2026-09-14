@@ -38,6 +38,8 @@ final class BoothPreflightService {
         checked.append(authenticationResult(context, now: now))
         checked.append(controlChannelResult(context, now: now))
         checked.append(previewChannelResult(context, now: now))
+        checked.append(secureTransportResult(context, now: now))
+        checked.append(assetChannelResult(context, now: now))
         checked.append(networkRouteResult(context, now: now))
         checked.append(networkFreshnessResult(context, now: now))
         checked.append(reconnectStateResult(context, now: now))
@@ -214,6 +216,33 @@ final class BoothPreflightService {
             .required,
             now
         )
+    }
+
+    private func secureTransportResult(_ context: BoothPreflightContext, now: Date) -> PreflightCheckResult {
+        guard context.ipadConnected else {
+            return result(.secureTransport, "Secure transport", "Skipped because no iPad is authenticated.", .skipped, .recommended, now)
+        }
+        return result(
+            .secureTransport,
+            "Secure transport",
+            context.secureTransportReady ? "Authenticated secure channel is established." : "Secure channel negotiation is incomplete.",
+            context.secureTransportReady ? .passed : .failed,
+            .required,
+            now
+        )
+    }
+
+    private func assetChannelResult(_ context: BoothPreflightContext, now: Date) -> PreflightCheckResult {
+        guard context.ipadConnected else {
+            return result(.assetChannel, "Asset channel", "Skipped because no iPad is authenticated.", .skipped, .recommended, now)
+        }
+        let ready = context.assetChannelConnected && context.assetChannelVerified
+        let detail = ready
+            ? "Authenticated asset channel is connected and verified."
+            : context.assetChannelConnected
+                ? "Asset channel is connected but its identity is not verified."
+                : "Authenticated asset channel is disconnected."
+        return result(.assetChannel, "Asset channel", detail, ready ? .passed : .failed, .required, now)
     }
 
     private func networkFreshnessResult(_ context: BoothPreflightContext, now: Date) -> PreflightCheckResult {

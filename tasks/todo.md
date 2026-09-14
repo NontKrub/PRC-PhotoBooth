@@ -2,6 +2,18 @@
 
 This is the active checklist. Historical v1.3/v1.4 notes remain below and are not release instructions.
 
+## Final stability continuation — 2026-09-14
+
+- [x] Add ordered, bounded, reconnect-safe asset request pumping; invalid/missing sources report unavailable while transient asset backpressure remains retryable.
+- [x] Keep authenticated secure control authoritative over generic Wi-Fi path hints; reject unauthenticated replacement of verified preview/asset channels.
+- [x] Move waiting, reconnect, LAN-recovery, asset-reconnect, preview-write, and iPad asset assembly/hash/decode progression off the MainActor where applicable.
+- [x] Expose secure and asset channel readiness through status, preflight, Operations, diagnostics, and iPad Connection Settings.
+- [x] Add deterministic recovery/admission tests, including 20- and 30-reference asset-pump coverage.
+- [x] Mac automated tests: 392/392 in 56/56 suites; iPad simulator tests: 7/7 in 1/1 suite.
+- [x] Mac app and iPad simulator app builds passed; `git diff --check` passed.
+- [ ] MainActor-stall, TSan, Instruments, packet-capture, Device Hub GUI, physical network/camera/QR/printer, relaunch, and multi-hour soak gates remain unrun.
+- [ ] Release verdict remains NOT READY until the physical and tooling gates are closed.
+
 ## Pairing-regression follow-up — 2026-08-31
 
 This dated ledger supersedes earlier v1.4.2 pairing rows below. Reviewed branch: `fix/v1.4.2-stability-pairing`; starting and final uncommitted Git HEAD: `83941dd5c487cab51e6f10e711136ecbd17c8ecf`.

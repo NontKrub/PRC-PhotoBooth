@@ -83,6 +83,25 @@ struct PreflightServiceTests {
         #expect(service.result(for: .networkFreshness)?.status == .failed)
     }
 
+    @Test("authenticated iPad requires secure and verified asset channels")
+    @MainActor
+    func secureAndAssetChannelsAreRequired() async {
+        let service = BoothPreflightService()
+        var base = context(ipadConnected: true, effectiveNetwork: .wifi)
+        base.controlChannelConnected = true
+        base.ipadPreviewChannelConnected = true
+        base.lastControlActivityAt = Date()
+        base.secureTransportReady = false
+        base.assetChannelConnected = true
+        base.assetChannelVerified = false
+
+        await service.runSafeChecks(using: base)
+
+        #expect(service.result(for: .secureTransport)?.status == .failed)
+        #expect(service.result(for: .assetChannel)?.status == .failed)
+        #expect(service.readiness == .notReady)
+    }
+
     @Test("disk thresholds are reported")
     @MainActor
     func diskThresholds() async {
@@ -249,6 +268,9 @@ private func context(
     event: EventConfig? = EventConfig(photoCount: 1, slots: [SharedPhotoSlot(photoIndex: 0)]),
     customerDisplayReady: Bool = true,
     ipadConnected: Bool = false,
+    secureTransportReady: Bool = true,
+    assetChannelConnected: Bool = true,
+    assetChannelVerified: Bool = true,
     requestedNetwork: BoothNetworkPreference = .wifi,
     effectiveNetwork: BoothEffectiveNetworkTransport = .unavailable,
     wifiPathAvailable: Bool = true,
@@ -278,6 +300,9 @@ private func context(
         previewRequired: previewRequired,
         customerDisplayReady: customerDisplayReady,
         ipadConnected: ipadConnected,
+        secureTransportReady: secureTransportReady,
+        assetChannelConnected: assetChannelConnected,
+        assetChannelVerified: assetChannelVerified,
         requestedNetwork: requestedNetwork,
         effectiveNetwork: effectiveNetwork,
         wifiPathAvailable: wifiPathAvailable,

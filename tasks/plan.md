@@ -1,5 +1,14 @@
 # PRC PhotoBooth — v1.4.2 Stability, Printing, Connectivity & Pairing
 
+## Final stability implementation pass — 2026-09-14
+
+Starting branch: `fix/v1.4.2-stability-pairing`.
+Starting SHA: `d7e1b2368a6a7d725ed8eafc6be631aa9ac90851`.
+Starting dirty state: modified `PRC-PhotoBooth.xcodeproj/project.xcworkspace/xcuserdata/nont.xcuserdatad/UserInterfaceState.xcuserstate`; untracked `PRC-PhotoBooth.xcodeproj/project.sync-conflict-20260914-064337-7G5YJKM.pbxproj`. Both are machine-local and intentionally preserved.
+Remote parity at start: `HEAD...origin/fix/v1.4.2-stability-pairing` = `0 0`.
+
+Scope: complete the remaining deterministic recovery, channel-admission, MainActor, status/preflight, diagnostics, and test slices from the final event-readiness brief. Physical network, Device Hub, camera, printer, Instruments, TSan, and multi-hour soak gates remain evidence-only until actually run.
+
 > Current release work starts from `fix/v1.4.1-stability-print-connectivity` at reviewed head `e4bef7bac0c4f7f4e713dda1b39e5b471b874cdb`. v1.4.1 is not a separate release.
 
 ## Current v1.4.2 ledger

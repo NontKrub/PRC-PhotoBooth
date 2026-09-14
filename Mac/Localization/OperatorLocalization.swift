@@ -102,6 +102,8 @@ func operatorPreflightTitle(_ id: PreflightCheckID, locale: Locale) -> String {
     case .authentication: key = "iPad authentication"
     case .controlChannel: key = "Control channel"
     case .previewChannel: key = "Preview channel"
+    case .secureTransport: key = "Secure transport"
+    case .assetChannel: key = "Asset channel"
     case .networkRoute: key = "Effective network route"
     case .networkFreshness: key = "Network freshness"
     case .reconnectState: key = "Reconnect state"

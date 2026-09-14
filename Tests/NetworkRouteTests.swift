@@ -1,3 +1,4 @@
+import Foundation
 import Testing
 
 @testable import PRC_PhotoBooth_Mac
@@ -457,5 +458,84 @@ struct PreviewChannelIdentityTests {
             controlPeerID: nil,
             identityRequired: false
         ))
+    }
+}
+
+@Suite("Transport recovery policy")
+struct TransportRecoveryPolicyTests {
+    private func reference(_ index: Int) -> BoothAssetReference {
+        BoothAssetReference(
+            assetID: "asset-\(index)",
+            sessionID: "session",
+            revision: "revision-\(index)",
+            kind: .reviewImage,
+            byteCount: 1,
+            sha256: Data([UInt8(index)])
+        )
+    }
+
+    @Test("Asset request pump drains ordered references beyond one batch")
+    func assetRequestsDrain() {
+        let expected = (0..<20).map(reference)
+        var pump = BoothAssetRequestPump(maximumInFlight: 8)
+
+        let first = pump.nextBatch(expected: expected, cached: [])
+        #expect(first == Array(expected.prefix(8)))
+        #expect(pump.nextBatch(expected: expected, cached: []).isEmpty)
+
+        pump.markCompleted(first[0])
+        pump.markUnavailable(first[1])
+        let second = pump.nextBatch(expected: expected, cached: [expected[0]])
+        #expect(second == [expected[8], expected[9]])
+
+        pump.clearInFlight()
+        let afterReconnect = pump.nextBatch(
+            expected: expected,
+            cached: Set([expected[0], expected[8], expected[9]])
+        )
+        #expect(afterReconnect == Array(expected[2...7]) + [expected[10], expected[11]])
+    }
+
+    @Test("Asset request pump has no hidden total limit")
+    func assetRequestsDrainThirtyReferences() {
+        let expected = (0..<30).map(reference)
+        var pump = BoothAssetRequestPump(maximumInFlight: 8)
+        var requested: [BoothAssetReference] = []
+        var cached = Set<BoothAssetReference>()
+
+        while requested.count < expected.count {
+            let batch = pump.nextBatch(expected: expected, cached: cached)
+            requested.append(contentsOf: batch)
+            for reference in batch {
+                pump.markCompleted(reference)
+                cached.insert(reference)
+            }
+        }
+
+        #expect(requested == expected)
+    }
+
+    @Test("Healthy authenticated control outranks a generic path hint")
+    func healthyControlIgnoresPathHint() {
+        #expect(
+            BoothPathAuthorityPolicy.action(hasAuthenticatedControl: true)
+                == .observeOnly
+        )
+        #expect(
+            BoothPathAuthorityPolicy.action(hasAuthenticatedControl: false)
+                == .evaluateRoute
+        )
+    }
+
+    @Test("Verified secondary channels reject unverified candidates")
+    func verifiedSecondaryChannelIsProtected() {
+        #expect(
+            BoothSecondaryChannelAdmissionPolicy.decision(existingVerified: true)
+                == .rejectCandidate
+        )
+        #expect(
+            BoothSecondaryChannelAdmissionPolicy.decision(existingVerified: false)
+                == .acceptCandidate
+        )
     }
 }

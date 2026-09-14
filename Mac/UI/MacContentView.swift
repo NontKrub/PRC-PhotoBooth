@@ -593,6 +593,8 @@ struct SettingsView: View {
             diagnosticRow("Wi-Fi path observation", pathObservationText(status.wifiPathObservation))
             diagnosticRow("Control channel", connectionStateText(status.state))
             diagnosticRow("Authenticated", status.isPeerAuthenticated ? "Yes" : "No")
+            diagnosticRow("Secure channel", status.isSecureChannelEstablished ? "Established" : "Unavailable")
+            diagnosticRow("Asset channel", status.isAssetChannelReady ? "Connected and verified" : status.isAssetChannelConnected ? "Connected; verifying" : "Disconnected")
             diagnosticRow("Pairing stage", status.pairingStage.rawValue)
             diagnosticRow("Pairing peer", (coordinator.multipeer as? NetworkBoothTransport)?.pairingPeerDisplayName ?? "None")
             diagnosticRow("Preview channel", status.isPreviewChannelConnected ? "Connected" : "Disconnected")

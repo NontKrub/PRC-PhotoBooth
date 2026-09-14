@@ -129,6 +129,8 @@ struct iPadSmokeTests {
             authenticated: true,
             state: .authenticated(peerID: "mac-1")
         )
+        viewModel.multipeer.connectionStatus.publishSecureChannel(ready: true)
+        viewModel.multipeer.connectionStatus.publishAssetChannel(connected: true, verified: true)
         viewModel.multipeer.connectionStatus.publishControlActivity()
         #expect(viewModel.isConnectionReady)
         viewModel.multipeer.connectionStatus.publishPreviewChannel(connected: false)

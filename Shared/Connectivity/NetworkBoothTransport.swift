@@ -166,16 +166,18 @@ public final class NetworkBoothTransport: BoothTransport {
     private var controlConnectionGeneration = 0
     private var pairingGeneration = 0
     private var previewConnection: NWConnection?
+    private var previewConnectionGeneration = 0
     private var assetConnection: NWConnection?
+    private var assetConnectionGeneration = 0
     private let frameDecoder = BoothTransportFrameDecoder()
-    private var previewFrames = LatestFrameCoalescer()
+    private let previewWritePump: BoothPreviewWritePump
     private var heartbeatSource: DispatchSourceTimer?
     private let heartbeatState = BoothTransportHeartbeatState()
     private var lanHandshakeTask: Task<Void, Never>?
-    private var waitingRecoveryTasks: [UInt8: Task<Void, Never>] = [:]
+    private var waitingRecoverySources: [UInt8: DispatchSourceTimer] = [:]
     private var lastControlMessageAt = Date.distantPast
-    private var reconnectTask: Task<Void, Never>?
-    private var lanRecoveryTask: Task<Void, Never>?
+    private var reconnectSource: DispatchSourceTimer?
+    private var lanRecoverySource: DispatchSourceTimer?
     private var lanRecoveryPending = false
     private var lastLANRecoveryAttemptAt: Date?
     private var reconnectAttempt = 0
@@ -199,16 +201,12 @@ public final class NetworkBoothTransport: BoothTransport {
     private var didReceiveWiFiPathUpdate = false
     private var isLANPathAvailable = false
     private var isWiFiPathAvailable = false
-    private var previewMetricsStartedAt = Date()
-    private var previewFramesSubmitted = 0
-    private var previewFramesSent = 0
-    private var previewBytesSent = 0
     private var lanHandshakeState: BoothLANHandshakeState = .unknown
     private var lastNetworkError: String?
     private var pairingStageValue: BoothPairingStage = .idle
     private let controlWritePump: BoothControlWritePump
     private let assetWritePump: BoothAssetWritePump
-    private var assetReconnectTask: Task<Void, Never>?
+    private var assetReconnectSource: DispatchSourceTimer?
     private let transportQueue = DispatchQueue(
         label: "PRC-PhotoBooth.Transport",
         qos: .userInitiated
@@ -267,6 +265,10 @@ public final class NetworkBoothTransport: BoothTransport {
             queue: self.transportQueue,
             secureChannel: self.secureChannel
         )
+        self.previewWritePump = BoothPreviewWritePump(
+            queue: self.transportQueue,
+            secureChannel: self.secureChannel
+        )
         if role == .iPad, trustedStore.autoReconnect {
             self.targetPeerID = trustedStore.preferredPeerID
         }
@@ -282,11 +284,24 @@ public final class NetworkBoothTransport: BoothTransport {
         self.assetWritePump.onFailure = { [weak self] outcome, reason, generation in
             Task { @MainActor [weak self] in
                 guard let self,
-                      generation == self.controlConnectionGeneration,
+                      generation == self.assetConnectionGeneration,
                       let connection = self.assetConnection else { return }
                 self.emitTransportEvent(.assetRejected, channel: .asset, reason: reason)
                 self.connectionDidClose(connection, channel: .asset, reason: reason)
                 if outcome == .rejectedOversize { self.lastNetworkError = reason }
+            }
+        }
+        self.previewWritePump.onFailure = { [weak self] reason, generation in
+            Task { @MainActor [weak self] in
+                guard let self,
+                      generation == self.previewConnectionGeneration,
+                      let connection = self.previewConnection else { return }
+                self.connectionDidClose(connection, channel: .preview, reason: reason)
+            }
+        }
+        self.previewWritePump.onMetrics = { [weak self] diagnostics in
+            Task { @MainActor [weak self] in
+                self?.connectionStatus.publishPreviewDiagnostics(diagnostics)
             }
         }
         publishPairingStatus()
@@ -349,8 +364,9 @@ public final class NetworkBoothTransport: BoothTransport {
         do {
             if !keepingControlConnection, !peerAuthenticated {
                 controlConnectionGeneration &+= 1
+                assetConnectionGeneration &+= 1
                 controlWritePump.invalidate(generation: controlConnectionGeneration)
-                assetWritePump.invalidate(generation: controlConnectionGeneration)
+                assetWritePump.invalidate(generation: assetConnectionGeneration)
                 controlConnection?.cancel()
                 controlConnection = nil
                 controlEndpointDescription = nil
@@ -780,14 +796,15 @@ public final class NetworkBoothTransport: BoothTransport {
     @discardableResult
     public func sendAsset(_ chunk: BoothAssetChunk) -> BoothControlSendOutcome {
         guard peerAuthenticated,
-              secureChannelEstablished else {
+              secureChannelEstablished,
+              assetIdentityVerified else {
             emitTransportEvent(.assetRejected, channel: .asset, reason: "Secure asset channel is not ready")
             return .noConnection
         }
         let outcome = assetWritePump.enqueue(
             chunk,
             connection: assetConnection,
-            generation: controlConnectionGeneration,
+            generation: assetConnectionGeneration,
             completion: { @MainActor [weak self] outcome in
                 guard let self else { return }
                 if outcome == .sent {
@@ -809,10 +826,11 @@ public final class NetworkBoothTransport: BoothTransport {
     }
 
     public func sendPreviewFrame(_ jpegData: Data) {
-        previewFrames.enqueue(jpegData)
-        previewFramesSubmitted += 1
-        flushPreviewFrame()
-        publishPreviewMetricsIfNeeded()
+        previewWritePump.enqueue(
+            jpegData,
+            connection: previewConnection,
+            generation: previewConnectionGeneration
+        )
     }
 
     public func probeEthernet() async -> EthernetProbeResult {
@@ -975,7 +993,7 @@ public final class NetworkBoothTransport: BoothTransport {
     }
 
     private func scheduleLANRecovery(after delay: TimeInterval) {
-        guard lanRecoveryTask == nil,
+        guard lanRecoverySource == nil,
               shouldReconnect,
               activeInterface == .wifi,
               requestedPreference == .lan,
@@ -983,21 +1001,22 @@ public final class NetworkBoothTransport: BoothTransport {
               isLANPathAvailable else { return }
 
         lanRecoveryPending = true
-        lanRecoveryTask = Task { @MainActor [weak self] in
-            do {
-                try await Task.sleep(for: .seconds(delay))
-            } catch {
-                return
+        let source = DispatchSource.makeTimerSource(queue: transportQueue)
+        source.schedule(deadline: .now() + delay)
+        source.setEventHandler { [weak self] in
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                self.lanRecoverySource = nil
+                guard self.isLANPathAvailable,
+                      self.shouldReconnect,
+                      self.activeInterface == .wifi,
+                      self.requestedPreference == .lan,
+                      self.fallbackActive else { return }
+                self.attemptPendingLANRecoveryIfIdle()
             }
-            guard let self, !Task.isCancelled else { return }
-            self.lanRecoveryTask = nil
-            guard self.isLANPathAvailable,
-                  self.shouldReconnect,
-                  self.activeInterface == .wifi,
-                  self.requestedPreference == .lan,
-                  self.fallbackActive else { return }
-            self.attemptPendingLANRecoveryIfIdle()
         }
+        lanRecoverySource = source
+        source.resume()
     }
 
     public func attemptPendingLANRecoveryIfIdle() {
@@ -1026,8 +1045,8 @@ public final class NetworkBoothTransport: BoothTransport {
     }
 
     private func cancelLANRecovery() {
-        lanRecoveryTask?.cancel()
-        lanRecoveryTask = nil
+        lanRecoverySource?.cancel()
+        lanRecoverySource = nil
         lanRecoveryPending = false
     }
 
@@ -1035,6 +1054,16 @@ public final class NetworkBoothTransport: BoothTransport {
         didReceiveWiFiPathUpdate = true
         isWiFiPathAvailable = available
         publishPathAvailability()
+        if !available,
+           BoothPathAuthorityPolicy.action(hasAuthenticatedControl: hasAuthoritativeControl)
+                == .observeOnly {
+            emitTransportEvent(
+                .pathHintUnavailableIgnored,
+                channel: .control,
+                reason: "Generic Wi-Fi path hint ignored while authenticated control is healthy."
+            )
+            return
+        }
         if available {
             guard role == .mac, activeInterface == nil else { return }
             let command = routeMachine.wifiPathChanged(
@@ -1412,14 +1441,14 @@ public final class NetworkBoothTransport: BoothTransport {
     private func tearDownActiveTransport() {
         activeInterface = nil
         callbackGate.invalidate()
-        reconnectTask?.cancel()
-        reconnectTask = nil
-        assetReconnectTask?.cancel()
-        assetReconnectTask = nil
+        reconnectSource?.cancel()
+        reconnectSource = nil
+        assetReconnectSource?.cancel()
+        assetReconnectSource = nil
         lanHandshakeTask?.cancel()
         lanHandshakeTask = nil
-        waitingRecoveryTasks.values.forEach { $0.cancel() }
-        waitingRecoveryTasks.removeAll()
+        waitingRecoverySources.values.forEach { $0.cancel() }
+        waitingRecoverySources.removeAll()
         stopHeartbeat()
         cancelTransportObjects()
         peerName = ""
@@ -1431,8 +1460,9 @@ public final class NetworkBoothTransport: BoothTransport {
 
     private func cancelTransportObjects() {
         controlConnectionGeneration &+= 1
+        assetConnectionGeneration &+= 1
         controlWritePump.invalidate(generation: controlConnectionGeneration)
-        assetWritePump.invalidate(generation: controlConnectionGeneration)
+        assetWritePump.invalidate(generation: assetConnectionGeneration)
         controlBrowser?.cancel()
         previewBrowser?.cancel()
         assetBrowser?.cancel()
@@ -1459,7 +1489,8 @@ public final class NetworkBoothTransport: BoothTransport {
         resetFrameDecoder(.control)
         resetFrameDecoder(.preview)
         resetFrameDecoder(.asset)
-        previewFrames.reset()
+        previewConnectionGeneration &+= 1
+        previewWritePump.invalidate(generation: previewConnectionGeneration)
         didReceiveHello = false
         peerAuthenticated = false
         secureChannel.reset()
@@ -1473,6 +1504,7 @@ public final class NetworkBoothTransport: BoothTransport {
         secureChannelReadySent = false
         secureChannelReadyReceived = false
         secureChannelEstablished = false
+        connectionStatus.publishSecureChannel(ready: false)
         didInitiateAuthentication = false
         peerHello = nil
         pendingAuthChallenge = nil
@@ -1780,12 +1812,35 @@ public final class NetworkBoothTransport: BoothTransport {
             connection.cancel()
             return
         }
+        if channel == .preview,
+           BoothSecondaryChannelAdmissionPolicy.decision(existingVerified: previewIdentityVerified)
+                == .rejectCandidate {
+            connection.cancel()
+            emitTransportEvent(
+                .secondaryCandidateRejected,
+                channel: .preview,
+                reason: "Verified preview channel is already active."
+            )
+            return
+        }
+        if channel == .asset,
+           BoothSecondaryChannelAdmissionPolicy.decision(existingVerified: assetIdentityVerified)
+                == .rejectCandidate {
+            connection.cancel()
+            emitTransportEvent(
+                .secondaryCandidateRejected,
+                channel: .asset,
+                reason: "Verified asset channel is already active."
+            )
+            return
+        }
         if channel == .control {
             resetPreviewConnection()
             controlConnection?.cancel()
             controlConnectionGeneration &+= 1
+            assetConnectionGeneration &+= 1
             controlWritePump.invalidate(generation: controlConnectionGeneration)
-            assetWritePump.invalidate(generation: controlConnectionGeneration)
+            assetWritePump.invalidate(generation: assetConnectionGeneration)
             assetConnection?.cancel()
             assetConnection = nil
             assetEndpointDescription = nil
@@ -1797,20 +1852,23 @@ public final class NetworkBoothTransport: BoothTransport {
             resetFrameDecoder(.control)
             controlWritePump.bind(connection, generation: controlConnectionGeneration)
         } else if channel == .preview {
-            previewFrames.reset()
+            previewConnectionGeneration &+= 1
+            previewWritePump.invalidate(generation: previewConnectionGeneration)
             previewConnection?.cancel()
             previewConnection = connection
             previewEndpointDescription = connection.endpoint.debugDescription
             resetFrameDecoder(.preview)
             resetPreviewIdentity()
+            previewWritePump.bind(connection, generation: previewConnectionGeneration)
         } else {
+            assetConnectionGeneration &+= 1
             assetConnection?.cancel()
-            assetWritePump.invalidate(generation: controlConnectionGeneration)
+            assetWritePump.invalidate(generation: assetConnectionGeneration)
             assetConnection = connection
             assetEndpointDescription = connection.endpoint.debugDescription
             resetAssetBinding()
             resetFrameDecoder(.asset)
-            assetWritePump.bind(connection, generation: controlConnectionGeneration)
+            assetWritePump.bind(connection, generation: assetConnectionGeneration)
         }
         configure(connection, channel: channel)
     }
@@ -1829,8 +1887,9 @@ public final class NetworkBoothTransport: BoothTransport {
             resetPreviewConnection()
             controlConnection?.cancel()
             controlConnectionGeneration &+= 1
+            assetConnectionGeneration &+= 1
             controlWritePump.invalidate(generation: controlConnectionGeneration)
-            assetWritePump.invalidate(generation: controlConnectionGeneration)
+            assetWritePump.invalidate(generation: assetConnectionGeneration)
             assetConnection?.cancel()
             assetConnection = nil
             assetEndpointDescription = nil
@@ -1847,7 +1906,17 @@ public final class NetworkBoothTransport: BoothTransport {
             }
         } else if channel == .preview {
             guard previewConnection == nil || previewEndpointDescription != description else { return }
-            previewFrames.reset()
+            if BoothSecondaryChannelAdmissionPolicy.decision(existingVerified: previewIdentityVerified)
+                    == .rejectCandidate {
+                emitTransportEvent(
+                    .secondaryCandidateRejected,
+                    channel: .preview,
+                    reason: "Verified preview channel is already active."
+                )
+                return
+            }
+            previewConnectionGeneration &+= 1
+            previewWritePump.invalidate(generation: previewConnectionGeneration)
             previewConnection?.cancel()
             previewConnection = NWConnection(
                 to: endpoint,
@@ -1856,11 +1925,24 @@ public final class NetworkBoothTransport: BoothTransport {
             previewEndpointDescription = description
             resetFrameDecoder(.preview)
             resetPreviewIdentity()
-            if let connection = previewConnection { configure(connection, channel: channel) }
+            if let connection = previewConnection {
+                previewWritePump.bind(connection, generation: previewConnectionGeneration)
+                configure(connection, channel: channel)
+            }
         } else {
             guard assetConnection == nil || assetEndpointDescription != description else { return }
+            if BoothSecondaryChannelAdmissionPolicy.decision(existingVerified: assetIdentityVerified)
+                    == .rejectCandidate {
+                emitTransportEvent(
+                    .secondaryCandidateRejected,
+                    channel: .asset,
+                    reason: "Verified asset channel is already active."
+                )
+                return
+            }
+            assetConnectionGeneration &+= 1
             assetConnection?.cancel()
-            assetWritePump.invalidate(generation: controlConnectionGeneration)
+            assetWritePump.invalidate(generation: assetConnectionGeneration)
             assetConnection = NWConnection(
                 to: endpoint,
                 using: parameters ?? makeParameters(for: activeInterface)
@@ -1869,7 +1951,7 @@ public final class NetworkBoothTransport: BoothTransport {
             resetAssetBinding()
             resetFrameDecoder(.asset)
             if let connection = assetConnection {
-                assetWritePump.bind(connection, generation: controlConnectionGeneration)
+                assetWritePump.bind(connection, generation: assetConnectionGeneration)
                 configure(connection, channel: channel)
             }
         }
@@ -1950,11 +2032,12 @@ public final class NetworkBoothTransport: BoothTransport {
                         self.receive(on: connection, channel: channel)
                         self.sendTransportHello()
                     } else if channel == .preview {
-                        self.connectionStatus.publishPreviewChannel(connected: true)
                         self.emitTransportEvent(.previewReconnected, channel: channel)
                         self.receive(on: connection, channel: channel)
                         self.sendPreviewHello(on: connection)
                     } else {
+                        self.connectionStatus.publishAssetChannel(connected: true, verified: false)
+                        self.emitTransportEvent(.assetChannelConnected, channel: channel)
                         self.receive(on: connection, channel: .asset)
                         self.sendAssetBinding(on: connection)
                     }
@@ -1962,6 +2045,9 @@ public final class NetworkBoothTransport: BoothTransport {
                     self.cancelWaitingRecovery(for: channel)
                     if channel == .preview {
                         self.connectionStatus.publishPreviewChannel(connected: false)
+                    } else if channel == .asset {
+                        self.connectionStatus.publishAssetChannel(connected: false)
+                        self.emitTransportEvent(.assetChannelDisconnected, channel: channel)
                     }
                     self.connectionDidClose(connection, channel: channel)
                 default:
@@ -1979,34 +2065,44 @@ public final class NetworkBoothTransport: BoothTransport {
     ) {
         guard isCurrent(connection, channel: channel), shouldReconnect else { return }
         let key = channel.rawValue
-        guard waitingRecoveryTasks[key] == nil else { return }
+        guard waitingRecoverySources[key] == nil else { return }
         lastNetworkError = reason
         connectionStatus.publishNetworkError(reason)
         if channel == .control {
             connectionState = .connecting
             publishStatus()
-        } else {
+        } else if channel == .preview {
             connectionStatus.publishPreviewChannel(connected: false)
+        } else if channel == .asset {
+            connectionStatus.publishAssetChannel(connected: false)
         }
 
-        waitingRecoveryTasks[key] = Task { @MainActor [weak self, weak connection] in
-            do {
-                try await Task.sleep(for: .seconds(2))
-            } catch {
-                return
-            }
-            guard let self, let connection,
-                  self.isCurrent(connection, channel: channel),
-                  self.shouldReconnect else { return }
-            self.waitingRecoveryTasks[key] = nil
+        emitTransportEvent(
+            .waitingRecoveryScheduled,
+            channel: channel,
+            duration: 2,
+            reason: reason
+        )
+        let source = DispatchSource.makeTimerSource(queue: transportQueue)
+        source.schedule(deadline: .now() + 2)
+        source.setEventHandler { [weak self, weak connection] in
+            guard let self, let connection else { return }
             connection.cancel()
+            Task { @MainActor [weak self, weak connection] in
+                guard let self, let connection,
+                      self.isCurrent(connection, channel: channel) else { return }
+                self.waitingRecoverySources[key] = nil
+            }
         }
+        waitingRecoverySources[key] = source
+        source.resume()
     }
 
     private func cancelWaitingRecovery(for channel: BoothTransportChannel) {
         let key = channel.rawValue
-        waitingRecoveryTasks[key]?.cancel()
-        waitingRecoveryTasks[key] = nil
+        guard let source = waitingRecoverySources.removeValue(forKey: key) else { return }
+        source.cancel()
+        emitTransportEvent(.waitingRecoveryCancelled, channel: channel)
     }
 
     private nonisolated static func pathDescription(_ path: NWPath) -> String {
@@ -2175,8 +2271,14 @@ public final class NetworkBoothTransport: BoothTransport {
             return
         }
         guard hello.capabilities.contains("secure-channel-v1"),
-              hello.capabilities.contains("asset-channel-v2") else {
+              hello.capabilities.contains("asset-channel-v2"),
+              hello.capabilities.contains(Self.previewIdentityCapability) else {
             rejectControlConnection(BoothPairingError.incompatibleProtocol.localizedDescription)
+            return
+        }
+        if let peerDeviceID,
+           peerDeviceID != hello.deviceID {
+            rejectControlConnection("Control peer identity changed during this connection.")
             return
         }
 
@@ -3085,6 +3187,7 @@ public final class NetworkBoothTransport: BoothTransport {
             secureChannelReadySent = false
             secureChannelReadyReceived = false
             secureChannelEstablished = false
+            connectionStatus.publishSecureChannel(ready: false)
             secureChannel.reset()
             secureNegotiator.setExpectedPeerDeviceID(peerDeviceID)
             let action = try secureNegotiator.begin(generation: controlConnectionGeneration)
@@ -3235,6 +3338,7 @@ public final class NetworkBoothTransport: BoothTransport {
         secureNegotiationTimeoutSource = nil
         try? secureNegotiator.markEstablished(generation: controlConnectionGeneration)
         secureChannelEstablished = true
+        connectionStatus.publishSecureChannel(ready: true)
         emitTransportEvent(.secureChannelEstablished, channel: .control)
         startHeartbeat()
         if role == .iPad, previewConnection == nil {
@@ -3274,6 +3378,7 @@ public final class NetworkBoothTransport: BoothTransport {
     private func resetAssetBinding() {
         assetIdentityVerified = false
         assetBindingSent = false
+        connectionStatus.publishAssetChannel(connected: assetConnection != nil, verified: false)
     }
 
     private func sendAssetBinding(on connection: NWConnection) {
@@ -3284,7 +3389,7 @@ public final class NetworkBoothTransport: BoothTransport {
             connectionDidClose(connection, channel: .asset, reason: "Asset channel has no secure control session")
             return
         }
-        let generation = controlConnectionGeneration
+        let generation = assetConnectionGeneration
         let binding = BoothChannelBindingHello(
             secureSessionID: secureSessionID,
             channel: .asset,
@@ -3295,10 +3400,10 @@ public final class NetworkBoothTransport: BoothTransport {
         let outcome = assetWritePump.enqueueBinding(
             binding,
             connection: connection,
-            generation: generation
+            generation: assetConnectionGeneration
         ) { @MainActor [weak self, weak connection] outcome in
             guard let self, let connection,
-                  self.controlConnectionGeneration == generation,
+                  self.assetConnectionGeneration == generation,
                   self.isCurrent(connection, channel: .asset) else { return }
             guard outcome == .sent else {
                 self.assetBindingSent = false
@@ -3324,6 +3429,8 @@ public final class NetworkBoothTransport: BoothTransport {
             return
         }
         assetIdentityVerified = true
+        connectionStatus.publishAssetChannel(connected: true, verified: true)
+        emitTransportEvent(.assetChannelVerified, channel: .asset)
         emitTransportEvent(.transportReady, channel: .asset)
         if role == .mac, !deferredAssetRequests.isEmpty {
             let references = deferredAssetRequests
@@ -3343,17 +3450,18 @@ public final class NetworkBoothTransport: BoothTransport {
     }
 
     private func scheduleAssetReconnect() {
-        guard shouldReconnect, assetReconnectTask == nil else { return }
-        assetReconnectTask = Task { @MainActor [weak self] in
-            do {
-                try await Task.sleep(for: .seconds(0.5))
-            } catch {
-                return
+        guard shouldReconnect, assetReconnectSource == nil else { return }
+        let source = DispatchSource.makeTimerSource(queue: transportQueue)
+        source.schedule(deadline: .now() + 0.5)
+        source.setEventHandler { [weak self] in
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                self.assetReconnectSource = nil
+                self.startAssetChannelIfNeeded()
             }
-            guard let self, !Task.isCancelled else { return }
-            self.assetReconnectTask = nil
-            self.startAssetChannelIfNeeded()
         }
+        assetReconnectSource = source
+        source.resume()
     }
 
     private func startSecureNegotiationTimeout() {
@@ -3379,6 +3487,7 @@ public final class NetworkBoothTransport: BoothTransport {
 
     private func failSecureChannel(_ reason: String) {
         secureChannelEstablished = false
+        connectionStatus.publishSecureChannel(ready: false)
         secureNegotiationTimeoutSource?.cancel()
         secureNegotiationTimeoutSource = nil
         emitTransportEvent(.secureChannelFailed, channel: .control, reason: reason)
@@ -3616,7 +3725,12 @@ public final class NetworkBoothTransport: BoothTransport {
                     return
                 }
                 self.didSendPreviewHello = true
-                self.flushPreviewFrame()
+                if self.previewIdentityVerified {
+                    self.previewWritePump.markReady(
+                        connection,
+                        generation: self.previewConnectionGeneration
+                    )
+                }
             }
         })
     }
@@ -3644,10 +3758,10 @@ public final class NetworkBoothTransport: BoothTransport {
     }
 
     private func validatePreviewIdentity() {
-        guard peerAuthenticated else { return }
-        if !previewPeerSupportsIdentity {
-            previewIdentityVerified = true
-            flushPreviewFrame()
+        guard peerAuthenticated, previewPeerSupportsIdentity else {
+            if peerAuthenticated {
+                connectionDidClose(previewConnection, channel: .preview, reason: "preview identity capability is required")
+            }
             return
         }
         guard previewPeerMatchesControlPeer(
@@ -3659,7 +3773,10 @@ public final class NetworkBoothTransport: BoothTransport {
             return
         }
         previewIdentityVerified = true
-        flushPreviewFrame()
+        connectionStatus.publishPreviewChannel(connected: true)
+        if didSendPreviewHello, let connection = previewConnection {
+            previewWritePump.markReady(connection, generation: previewConnectionGeneration)
+        }
     }
 
     @discardableResult
@@ -3811,76 +3928,6 @@ public final class NetworkBoothTransport: BoothTransport {
         }
     }
 
-    private func flushPreviewFrame() {
-        guard didSendPreviewHello,
-              previewIdentityVerified,
-              let connection = previewConnection,
-              let jpeg = previewFrames.startNext() else { return }
-        sendPreviewFrame(jpeg, on: connection)
-    }
-
-    private func sendPreviewFrame(_ jpeg: Data, on connection: NWConnection) {
-        guard let payload = try? secureChannel.protect(jpeg, channel: .preview),
-              let frame = try? BoothFrameEncoder.encode(channel: .preview, payload: payload) else {
-            let next = previewFrames.completeWrite()
-            if let next { sendPreviewFrame(next, on: connection) }
-            return
-        }
-        previewFramesSent += 1
-        previewBytesSent += jpeg.count
-        connection.send(content: frame, completion: .contentProcessed { [weak self] error in
-            Task { @MainActor [weak self] in
-                guard let self, self.isCurrent(connection, channel: .preview) else { return }
-                if let error {
-                    print("[Network] preview send failed: \(error.localizedDescription)")
-                    self.previewFrames.resetWriteState()
-                    self.connectionDidClose(connection, channel: .preview, reason: error.localizedDescription)
-                    return
-                }
-                if let next = self.previewFrames.completeWrite() {
-                    self.sendPreviewFrame(next, on: connection)
-                }
-                self.publishPreviewMetricsIfNeeded()
-            }
-        })
-    }
-
-    private func publishPreviewMetricsIfNeeded() {
-        let now = Date()
-        let elapsed = now.timeIntervalSince(previewMetricsStartedAt)
-        guard elapsed >= 1 else { return }
-        var diagnostics = BoothPreviewDiagnostics()
-        diagnostics.fps = Double(previewFramesSent) / elapsed
-        diagnostics.bytesPerSecond = Double(previewBytesSent) / elapsed
-        diagnostics.framesSubmitted = previewFramesSubmitted
-        diagnostics.framesSent = previewFramesSent
-        diagnostics.framesCoalesced = previewFrames.coalescedFrameCount
-        connectionStatus.publishPreviewDiagnostics(diagnostics)
-#if DEBUG
-        let state = previewIdentityVerified ? "ready" : "waiting"
-        NSLog(
-            "[Network] Preview state=%@ submitted=%d sent=%d coalesced=%d control=%@",
-            state,
-            previewFramesSubmitted,
-            previewFramesSent,
-            previewFrames.coalescedFrameCount,
-            connectionStateLabel
-        )
-#endif
-        previewMetricsStartedAt = now
-        previewFramesSubmitted = 0
-        previewFramesSent = 0
-        previewBytesSent = 0
-    }
-
-    private var connectionStateLabel: String {
-        switch connectionState {
-        case .disconnected: return "disconnected"
-        case .connecting: return "connecting"
-        case .connected: return "connected"
-        }
-    }
-
     private func startHeartbeat() {
         heartbeatSource?.cancel()
         heartbeatSource = nil
@@ -3997,8 +4044,9 @@ public final class NetworkBoothTransport: BoothTransport {
                 assetEndpointDescription = nil
                 controlConnection?.cancel()
                 controlConnectionGeneration &+= 1
+                assetConnectionGeneration &+= 1
                 controlWritePump.invalidate(generation: controlConnectionGeneration)
-                assetWritePump.invalidate(generation: controlConnectionGeneration)
+                assetWritePump.invalidate(generation: assetConnectionGeneration)
                 controlConnection = nil
                 controlEndpointDescription = nil
                 resetFrameDecoder(.control)
@@ -4024,7 +4072,8 @@ public final class NetworkBoothTransport: BoothTransport {
             previewConnection?.cancel()
             previewConnection = nil
             previewEndpointDescription = nil
-            previewFrames.reset()
+            previewConnectionGeneration &+= 1
+            previewWritePump.invalidate(generation: previewConnectionGeneration)
             resetPreviewIdentity()
             connectionStatus.publishPreviewChannel(connected: false)
             if role == .iPad {
@@ -4040,7 +4089,10 @@ public final class NetworkBoothTransport: BoothTransport {
             assetConnection = nil
             assetEndpointDescription = nil
             resetAssetBinding()
-            assetWritePump.invalidate(generation: controlConnectionGeneration)
+            assetConnectionGeneration &+= 1
+            assetWritePump.invalidate(generation: assetConnectionGeneration)
+            connectionStatus.publishAssetChannel(connected: false)
+            emitTransportEvent(.assetChannelDisconnected, channel: .asset, reason: reason)
             resetFrameDecoder(.asset)
             if role == .iPad {
                 assetBrowser?.cancel()
@@ -4094,7 +4146,7 @@ public final class NetworkBoothTransport: BoothTransport {
                 ? (isWiFiPathAvailable ? .available : .unavailable) : .unknown,
             lanHandshake: lanHandshakeState,
             lastNetworkError: lastNetworkError,
-            isPreviewChannelConnected: previewConnection != nil
+            isPreviewChannelConnected: previewIdentityVerified
         )
     }
 
@@ -4108,11 +4160,13 @@ public final class NetworkBoothTransport: BoothTransport {
     }
 
     private func resetPreviewConnection() {
+        previewConnectionGeneration &+= 1
         previewConnection?.cancel()
         previewConnection = nil
         previewEndpointDescription = nil
-        previewFrames.reset()
+        previewWritePump.invalidate(generation: previewConnectionGeneration)
         resetPreviewIdentity()
+        connectionStatus.publishPreviewChannel(connected: false)
         if role == .iPad {
             previewBrowser?.cancel()
             previewBrowser = nil
@@ -4123,6 +4177,10 @@ public final class NetworkBoothTransport: BoothTransport {
         role == .mac
             && requestedPreference == .lan
             && activeInterface == .wiredEthernet
+    }
+
+    private var hasAuthoritativeControl: Bool {
+        controlConnection != nil && peerAuthenticated && secureChannelEstablished
     }
 
     private func resetPreviewIdentity() {
@@ -4152,6 +4210,7 @@ public final class NetworkBoothTransport: BoothTransport {
         secureChannelReadySent = false
         secureChannelReadyReceived = false
         secureChannelEstablished = false
+        connectionStatus.publishSecureChannel(ready: false)
         didInitiateAuthentication = false
         pendingAuthChallenge = nil
         deferredAuthChallenge = nil
@@ -4164,7 +4223,7 @@ public final class NetworkBoothTransport: BoothTransport {
     }
 
     private func scheduleReconnect() {
-        guard shouldReconnect, reconnectTask == nil else { return }
+        guard shouldReconnect, reconnectSource == nil else { return }
         let delay = Self.reconnectDelays[min(reconnectAttempt, Self.reconnectDelays.count - 1)]
         reconnectAttempt += 1
         connectionStatus.publishReconnectState(inProgress: true, attempt: reconnectAttempt)
@@ -4173,31 +4232,36 @@ public final class NetworkBoothTransport: BoothTransport {
             attempt: reconnectAttempt,
             duration: delay
         )
-        reconnectTask = Task { @MainActor [weak self] in
-            try? await Task.sleep(for: .seconds(delay))
-            guard let self, !Task.isCancelled else { return }
-            self.reconnectTask = nil
-            if self.role == .iPad, self.activeInterface == nil {
-                self.startRouteDiscovery()
-                return
-            }
-            if self.activeInterface == nil {
-                let command = self.routeMachine.start(
-                    lanAvailable: self.pathAvailable(.wiredEthernet),
-                    wifiAvailable: self.pathAvailable(.wifi)
-                )
-                self.apply(command, reason: nil)
-                return
-            }
-            if self.role == .mac {
-                if self.controlListener == nil { self.startListener(channel: .control) }
-                if self.previewListener == nil { self.startListener(channel: .preview) }
-                if self.assetListener == nil { self.startListener(channel: .asset) }
-            } else {
-                if self.controlBrowser == nil { self.startBrowser(channel: .control) }
-                if self.previewBrowser == nil { self.startBrowser(channel: .preview) }
+        let source = DispatchSource.makeTimerSource(queue: transportQueue)
+        source.schedule(deadline: .now() + delay)
+        source.setEventHandler { [weak self] in
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                self.reconnectSource = nil
+                if self.role == .iPad, self.activeInterface == nil {
+                    self.startRouteDiscovery()
+                    return
+                }
+                if self.activeInterface == nil {
+                    let command = self.routeMachine.start(
+                        lanAvailable: self.pathAvailable(.wiredEthernet),
+                        wifiAvailable: self.pathAvailable(.wifi)
+                    )
+                    self.apply(command, reason: nil)
+                    return
+                }
+                if self.role == .mac {
+                    if self.controlListener == nil { self.startListener(channel: .control) }
+                    if self.previewListener == nil { self.startListener(channel: .preview) }
+                    if self.assetListener == nil { self.startListener(channel: .asset) }
+                } else {
+                    if self.controlBrowser == nil { self.startBrowser(channel: .control) }
+                    if self.previewBrowser == nil { self.startBrowser(channel: .preview) }
+                }
             }
         }
+        reconnectSource = source
+        source.resume()
     }
 
     private static func localDeviceName(for role: DeviceRole) -> String {

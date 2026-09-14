@@ -1,4 +1,5 @@
 import Foundation
+import Network
 #if os(macOS)
 import Observation
 #else
@@ -143,6 +144,18 @@ public final class BoothConnectionStatus {
 #if os(iOS)
     @Published
 #endif
+    public private(set) var isSecureChannelEstablished = false
+#if os(iOS)
+    @Published
+#endif
+    public private(set) var isAssetChannelConnected = false
+#if os(iOS)
+    @Published
+#endif
+    public private(set) var isAssetChannelVerified = false
+#if os(iOS)
+    @Published
+#endif
     public private(set) var previewDiagnostics = BoothPreviewDiagnostics()
 #if os(iOS)
     @Published
@@ -188,6 +201,10 @@ public final class BoothConnectionStatus {
     public var isFallbackActive: Bool {
         if case .fallbackWiFi = routeState { return true }
         return fallbackReason != nil && requestedNetwork == .lan
+    }
+
+    public var isAssetChannelReady: Bool {
+        isAssetChannelConnected && isAssetChannelVerified
     }
 
     public init(requestedNetwork: BoothNetworkPreference = .wifi) {
@@ -251,6 +268,19 @@ public final class BoothConnectionStatus {
         isPreviewChannelConnected = connected
     }
 
+    public func publishSecureChannel(ready: Bool) {
+        isSecureChannelEstablished = ready
+        if !ready {
+            isAssetChannelConnected = false
+            isAssetChannelVerified = false
+        }
+    }
+
+    public func publishAssetChannel(connected: Bool, verified: Bool = false) {
+        isAssetChannelConnected = connected
+        isAssetChannelVerified = connected && verified
+    }
+
     public func publishPreviewDiagnostics(_ diagnostics: BoothPreviewDiagnostics) {
         previewDiagnostics = diagnostics
     }
@@ -287,8 +317,13 @@ public final class BoothConnectionStatus {
     public func publishDisconnected() {
         isPeerAuthenticated = false
         roundTripLatency = nil
+        lastControlActivityAt = nil
         isReconnectInProgress = false
         reconnectAttempt = 0
+        lanHandshake = .unknown
+        isPreviewChannelConnected = false
+        publishSecureChannel(ready: false)
+        publishAssetChannel(connected: false)
         publish(
             requestedNetwork: requestedNetwork,
             state: .disconnected,
@@ -335,9 +370,16 @@ public enum BoothTransportDiagnosticKind: String, Codable, Sendable {
     case criticalSendCompleted
     case assetSent
     case assetRejected
+    case assetChannelConnected
+    case assetChannelVerified
+    case assetChannelDisconnected
     case secureChannelEstablished
     case secureChannelFailed
     case routeViabilityChanged
+    case pathHintUnavailableIgnored
+    case secondaryCandidateRejected
+    case waitingRecoveryScheduled
+    case waitingRecoveryCancelled
     case ipadAppForegrounded
     case ipadAppBackgrounded
 }
@@ -370,6 +412,81 @@ public struct BoothTransportDiagnosticEvent: Codable, Sendable, Equatable {
         self.byteCount = byteCount
         self.duration = duration
         self.reason = reason
+    }
+}
+
+enum BoothPathHintAction: Equatable {
+    case observeOnly
+    case evaluateRoute
+}
+
+enum BoothPathAuthorityPolicy {
+    static func action(hasAuthenticatedControl: Bool) -> BoothPathHintAction {
+        hasAuthenticatedControl ? .observeOnly : .evaluateRoute
+    }
+}
+
+enum BoothSecondaryChannelAdmissionDecision: Equatable {
+    case acceptCandidate
+    case rejectCandidate
+}
+
+enum BoothSecondaryChannelAdmissionPolicy {
+    static func decision(existingVerified: Bool) -> BoothSecondaryChannelAdmissionDecision {
+        existingVerified ? .rejectCandidate : .acceptCandidate
+    }
+}
+
+struct BoothAssetRequestPump: Sendable {
+    private(set) var inFlight: Set<BoothAssetReference> = []
+    private(set) var unavailable: Set<BoothAssetReference> = []
+    let maximumInFlight: Int
+
+    init(maximumInFlight: Int = 8) {
+        self.maximumInFlight = max(1, maximumInFlight)
+    }
+
+    mutating func nextBatch(
+        expected: [BoothAssetReference],
+        cached: Set<BoothAssetReference>
+    ) -> [BoothAssetReference] {
+        let capacity = maximumInFlight - inFlight.count
+        guard capacity > 0 else { return [] }
+
+        var selected: [BoothAssetReference] = []
+        var seen = Set<BoothAssetReference>()
+        for reference in expected where selected.count < capacity {
+            guard seen.insert(reference).inserted,
+                  !cached.contains(reference),
+                  !inFlight.contains(reference),
+                  !unavailable.contains(reference) else { continue }
+            selected.append(reference)
+            inFlight.insert(reference)
+        }
+        return selected
+    }
+
+    mutating func markCompleted(_ reference: BoothAssetReference) {
+        inFlight.remove(reference)
+        unavailable.remove(reference)
+    }
+
+    mutating func markUnavailable(_ reference: BoothAssetReference) {
+        inFlight.remove(reference)
+        unavailable.insert(reference)
+    }
+
+    mutating func markSendFailed(_ references: [BoothAssetReference]) {
+        inFlight.subtract(references)
+    }
+
+    mutating func clearInFlight() {
+        inFlight.removeAll()
+    }
+
+    mutating func reset() {
+        inFlight.removeAll()
+        unavailable.removeAll()
     }
 }
 
@@ -458,6 +575,127 @@ struct LatestFrameCoalescer: Sendable {
         writeInFlight = false
         pendingFrame = nil
         coalescedFrameCount = 0
+    }
+}
+
+/// Queue-confined preview writer. Preview keeps only the newest pending frame;
+/// control and asset writers remain independent of its backpressure.
+final class BoothPreviewWritePump: @unchecked Sendable {
+    private let queue: DispatchQueue
+    private let secureChannel: BoothSecureChannel
+    private var connection: NWConnection?
+    private var connectionGeneration = 0
+    private var ready = false
+    private var pendingFrame: Data?
+    private var inFlight = false
+    private var framesSubmitted = 0
+    private var framesSent = 0
+    private var framesCoalesced = 0
+    private var bytesSent = 0
+    private var metricsStartedAt = Date()
+
+    var onFailure: (@Sendable (String, Int) -> Void)?
+    var onMetrics: (@Sendable (BoothPreviewDiagnostics) -> Void)?
+
+    init(queue: DispatchQueue, secureChannel: BoothSecureChannel) {
+        self.queue = queue
+        self.secureChannel = secureChannel
+    }
+
+    func bind(_ connection: NWConnection, generation: Int) {
+        queue.async { [weak self] in
+            guard let self else { return }
+            self.connection = connection
+            self.connectionGeneration = generation
+            self.ready = false
+            self.pendingFrame = nil
+            self.inFlight = false
+        }
+    }
+
+    func markReady(_ connection: NWConnection, generation: Int) {
+        queue.async { [weak self, weak connection] in
+            guard let self, let connection,
+                  self.connection === connection,
+                  self.connectionGeneration == generation else { return }
+            self.ready = true
+            self.flush()
+        }
+    }
+
+    func enqueue(
+        _ jpegData: Data,
+        connection expectedConnection: NWConnection?,
+        generation: Int
+    ) {
+        queue.async { [weak self, weak expectedConnection] in
+            guard let self, let expectedConnection,
+                  self.connection === expectedConnection,
+                  self.connectionGeneration == generation else { return }
+            if self.inFlight { self.framesCoalesced += 1 }
+            self.framesSubmitted += 1
+            self.pendingFrame = jpegData
+            self.flush()
+        }
+    }
+
+    func invalidate(generation: Int) {
+        queue.sync { [weak self] in
+            guard let self else { return }
+            self.connection = nil
+            self.connectionGeneration = generation
+            self.ready = false
+            self.pendingFrame = nil
+            self.inFlight = false
+        }
+    }
+
+    private func flush() {
+        guard ready, !inFlight, let connection, let jpegData = pendingFrame else { return }
+        pendingFrame = nil
+        inFlight = true
+        do {
+            let payload = try secureChannel.protect(jpegData, channel: .preview)
+            let frame = try BoothFrameEncoder.encode(channel: .preview, payload: payload)
+            connection.send(content: frame, completion: .contentProcessed { [weak self, weak connection] error in
+                guard let self, let connection else { return }
+                self.queue.async { self.complete(jpegData: jpegData, connection: connection, error: error) }
+            })
+        } catch {
+            complete(jpegData: jpegData, connection: connection, error: error)
+        }
+    }
+
+    private func complete(jpegData: Data, connection: NWConnection, error: Error?) {
+        guard self.connection === connection else { return }
+        inFlight = false
+        if let error {
+            ready = false
+            onFailure?(error.localizedDescription, connectionGeneration)
+            return
+        }
+        framesSent += 1
+        bytesSent += jpegData.count
+        flush()
+        publishMetricsIfNeeded()
+    }
+
+    private func publishMetricsIfNeeded() {
+        let now = Date()
+        let elapsed = now.timeIntervalSince(metricsStartedAt)
+        guard elapsed >= 1 else { return }
+        var diagnostics = BoothPreviewDiagnostics()
+        diagnostics.fps = Double(framesSent) / elapsed
+        diagnostics.bytesPerSecond = Double(bytesSent) / elapsed
+        diagnostics.framesSubmitted = framesSubmitted
+        diagnostics.framesSent = framesSent
+        diagnostics.framesCoalesced = framesCoalesced
+        onMetrics?(diagnostics)
+        metricsStartedAt = now
+        framesSubmitted = 0
+        framesSent = 0
+        framesCoalesced = 0
+        bytesSent = 0
     }
 }
 
