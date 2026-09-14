@@ -4,10 +4,13 @@ import CryptoKit
 import CoreImage
 import CoreGraphics
 import SwiftUI
+import UIKit
 
 // iPad-side coordinator — receives messages from Mac, drives local UI state.
 @MainActor
 final class iPadViewModel: ObservableObject {
+    static let assetResponseDeadline: TimeInterval = 5
+
     let multipeer: BoothTransport
     let stateMachine: SessionStateMachine
 
@@ -58,6 +61,11 @@ final class iPadViewModel: ObservableObject {
     private var assetRetryTracker = BoothAssetRetryTracker()
     private var assetReadyAwaitingNewGeneration = false
     private var reviewAssetIndices: [String: Int] = [:]
+    private var assetResponseDeadlineTasks: [BoothAssetReference: Task<Void, Never>] = [:]
+    private var assetResponseDeadlineTokens: [BoothAssetReference: UInt64] = [:]
+    private var nextAssetResponseDeadlineToken: UInt64 = 0
+    private var assetResponseDeadlines = BoothAssetResponseDeadlineRegistry()
+    private var lastAssetRecycleGeneration: Int?
 #if DEBUG
     @Published private(set) var demoKioskMode = false
 #endif
@@ -94,6 +102,15 @@ final class iPadViewModel: ObservableObject {
         return connectionStatus.isPreviewChannelConnected
             && connectionStatus.isAssetChannelReady
     }
+    var isReviewMediaReady: Bool {
+        guard case .review = stateMachine.phase,
+              let data = stateMachine.reviewImageData else { return false }
+        return Self.cgImage(from: data) != nil
+    }
+    var isReviewMediaMissing: Bool {
+        guard case .review = stateMachine.phase else { return false }
+        return !isReviewMediaReady
+    }
     var isConnectionReady: Bool {
         isBoothFullyReady
     }
@@ -111,6 +128,11 @@ final class iPadViewModel: ObservableObject {
     func requestPairing(with peerID: String) {
         guard canChangeConnection else { return }
         networkTransport?.requestPairing(with: peerID)
+    }
+
+    func retryPairing(with peerID: String) {
+        guard canChangeConnection else { return }
+        networkTransport?.retryPairing(with: peerID)
     }
 
     func pair(peerID: String, pin: String) {
@@ -206,7 +228,9 @@ final class iPadViewModel: ObservableObject {
                 guard transition != .stale else { return }
                 self.assetReadyAwaitingNewGeneration = false
                 if transition != .duplicate {
+                    self.cancelAssetResponseDeadlines()
                     self.assetRequestPump.clearInFlight()
+                    self.lastAssetRecycleGeneration = nil
                 }
                 self.requestMissingExpectedAssets()
                 if transition == .advanced,
@@ -216,6 +240,7 @@ final class iPadViewModel: ObservableObject {
                 }
             case .transportDisconnected:
                 guard self.assetRetryTracker.acceptsDisconnect(generation: event.generation) else { return }
+                self.cancelAssetResponseDeadlines()
                 self.assetReadyAwaitingNewGeneration = true
                 if !self.missingExpectedAssets().isEmpty,
                    self.assetRecoveryStatus == .idle {
@@ -323,7 +348,7 @@ final class iPadViewModel: ObservableObject {
         case .sessionRequestRejected(let reason):
             cancelCountdown()
             clearTransientRequestState()
-            sessionRequestError = reason
+            setSessionRequestError(reason)
             stateMachine.beginSelectingExperience()
 
         case .sessionPrepared(let config, let presentation, let context):
@@ -449,6 +474,7 @@ final class iPadViewModel: ObservableObject {
         assetReadyAwaitingNewGeneration = false
         assetRecoveryStatus = .idle
         reviewAssetIndices = [:]
+        lastAssetRecycleGeneration = nil
         resetAssetProcessing()
         assetRequestPump.reset()
     }
@@ -468,6 +494,11 @@ final class iPadViewModel: ObservableObject {
         recoveryActionPending = false
         finishRequestPending = false
         sessionRequestError = nil
+    }
+
+    private func setSessionRequestError(_ message: String) {
+        sessionRequestError = message
+        UIAccessibility.post(notification: .announcement, argument: message)
     }
 
     private func beginTransientRequest() -> UInt64 {
@@ -506,6 +537,7 @@ final class iPadViewModel: ObservableObject {
     }
 
     private func resetAssetProcessing() {
+        cancelAssetResponseDeadlines()
         assetProcessingGeneration &+= 1
         let generation = assetProcessingGeneration
         let pipeline = assetReceivePipeline
@@ -559,6 +591,7 @@ final class iPadViewModel: ObservableObject {
         }
         let batch = assetRequestPump.nextBatch(expected: requestable, cached: cached)
         if missing.isEmpty {
+            cancelAssetResponseDeadlines()
             assetRecoveryStatus = .idle
         } else if assetRecoveryStatus != .operatorRecoveryRequired,
                   requestable.contains(where: { assetRetryTracker.canRequest($0) }) {
@@ -567,12 +600,26 @@ final class iPadViewModel: ObservableObject {
             assetRecoveryStatus = .reconnectRequired
         }
         guard !batch.isEmpty else { return }
+        let processingGeneration = assetProcessingGeneration
+        let sessionID = sessionMessageGate.currentSessionID
+        let channelGeneration = assetRetryTracker.currentGeneration ?? 0
         multipeer.sendControl(.assetRequest(references: batch)) { [weak self] outcome in
             guard let self else { return }
+            guard self.assetProcessingGeneration == processingGeneration,
+                  self.sessionMessageGate.currentSessionID == sessionID,
+                  self.assetRetryTracker.currentGeneration == channelGeneration else { return }
             guard outcome == .sent else {
                 self.assetRequestPump.markSendFailed(batch)
+                self.handleAssetFailure(batch, channelGeneration: channelGeneration)
                 return
             }
+            let outstanding = batch.filter { self.assetRequestPump.inFlight.contains($0) }
+            self.armAssetResponseDeadline(
+                for: outstanding,
+                channelGeneration: channelGeneration,
+                processingGeneration: processingGeneration,
+                sessionID: sessionID
+            )
         }
     }
 
@@ -585,6 +632,7 @@ final class iPadViewModel: ObservableObject {
         let next = Dictionary(unique.map { ($0.assetID, $0) }, uniquingKeysWith: { _, latest in latest })
         guard next != expectedAssetReferences || unique != expectedAssetOrder else { return }
 
+        cancelAssetResponseDeadlines()
         for previous in expectedAssetReferences.values where next[previous.assetID] != previous {
             receivedAssets.removeValue(forKey: previous.assetID)
             receivedAssetReferences.removeValue(forKey: previous.assetID)
@@ -670,6 +718,7 @@ final class iPadViewModel: ObservableObject {
         assetRetryTracker.markCompleted(reference)
         receivedAssets[reference.assetID] = data
         receivedAssetReferences[reference.assetID] = reference
+        cancelAssetResponseDeadline(for: reference)
         switch reference.kind {
         case .templatePreview:
             if let image { experienceAssets[reference.assetID] = image }
@@ -694,6 +743,108 @@ final class iPadViewModel: ObservableObject {
         requestMissingExpectedAssets()
     }
 
+    private func cancelAssetResponseDeadline(for reference: BoothAssetReference) {
+        assetResponseDeadlines.cancel(reference)
+        assetResponseDeadlineTokens.removeValue(forKey: reference)
+        assetResponseDeadlineTasks.removeValue(forKey: reference)?.cancel()
+    }
+
+    private func cancelAssetResponseDeadlines() {
+        assetResponseDeadlines.reset()
+        assetResponseDeadlineTokens.removeAll()
+        assetResponseDeadlineTasks.values.forEach { $0.cancel() }
+        assetResponseDeadlineTasks.removeAll()
+    }
+
+    private func armAssetResponseDeadline(
+        for references: [BoothAssetReference],
+        channelGeneration: Int,
+        processingGeneration: UInt64,
+        sessionID: String?
+    ) {
+        guard !references.isEmpty else { return }
+        assetResponseDeadlines.arm(references)
+        for reference in references {
+            nextAssetResponseDeadlineToken &+= 1
+            let token = nextAssetResponseDeadlineToken
+            assetResponseDeadlineTasks[reference]?.cancel()
+            assetResponseDeadlineTokens[reference] = token
+            assetResponseDeadlineTasks[reference] = Task { @MainActor [weak self] in
+                do {
+                    try await Task.sleep(for: .seconds(Self.assetResponseDeadline))
+                } catch {
+                    return
+                }
+                guard let self,
+                      !Task.isCancelled,
+                      self.assetResponseDeadlineTokens[reference] == token,
+                      self.assetResponseDeadlines.contains(reference) else { return }
+                self.assetResponseDeadlineTokens.removeValue(forKey: reference)
+                self.assetResponseDeadlines.cancel(reference)
+                self.assetResponseDeadlineTasks.removeValue(forKey: reference)
+                self.handleAssetResponseDeadline(
+                    references: [reference],
+                    channelGeneration: channelGeneration,
+                    processingGeneration: processingGeneration,
+                    sessionID: sessionID
+                )
+            }
+        }
+    }
+
+    private func handleAssetResponseDeadline(
+        references: [BoothAssetReference],
+        channelGeneration: Int,
+        processingGeneration: UInt64,
+        sessionID: String?
+    ) {
+        guard processingGeneration == assetProcessingGeneration,
+              sessionMessageGate.currentSessionID == sessionID,
+              assetRetryTracker.currentGeneration == channelGeneration else { return }
+        let missing = missingExpectedAssets()
+        let timedOut = references.filter {
+            missing.contains($0) && assetRequestPump.inFlight.contains($0)
+        }
+        guard !timedOut.isEmpty else { return }
+        assetRequestPump.markSendFailed(timedOut)
+        handleAssetFailure(timedOut, channelGeneration: channelGeneration)
+    }
+
+    private func handleAssetFailure(
+        _ references: [BoothAssetReference],
+        channelGeneration: Int
+    ) {
+        var canRetryAll = true
+        for reference in references {
+            canRetryAll = assetRetryTracker.recordFailure(
+                reference,
+                generation: channelGeneration
+            ) && canRetryAll
+        }
+        if canRetryAll {
+            assetRecoveryStatus = .restoring
+            requestMissingExpectedAssets()
+            return
+        }
+
+        let canRecycle = references.contains {
+            assetRetryTracker.shouldRecycleCurrentGeneration($0)
+        }
+        guard canRecycle else {
+            assetRecoveryStatus = .operatorRecoveryRequired
+            sessionRequestError = nil
+            return
+        }
+        assetRecoveryStatus = .reconnectRequired
+        guard lastAssetRecycleGeneration != channelGeneration else { return }
+        lastAssetRecycleGeneration = channelGeneration
+        guard networkTransport != nil else {
+            assetRecoveryStatus = .operatorRecoveryRequired
+            return
+        }
+        multipeer.recycleAssetChannel()
+    }
+
     private func rejectAsset(_ reference: BoothAssetReference, generation: UInt64) async {
         guard generation == assetProcessingGeneration,
               reference.sessionID == nil || reference.sessionID == sessionMessageGate.currentSessionID else { return }
@@ -701,20 +852,12 @@ final class iPadViewModel: ObservableObject {
         guard generation == assetProcessingGeneration,
               reference.sessionID == nil || reference.sessionID == sessionMessageGate.currentSessionID else { return }
         // ponytail: the assembler is generation-scoped; replay every in-flight reference after a reset. Split per-reference assemblers only if concurrent asset memory is measured as a bottleneck.
+        cancelAssetResponseDeadlines()
         assetRequestPump.clearInFlight()
         receivedAssets.removeValue(forKey: reference.assetID)
         receivedAssetReferences.removeValue(forKey: reference.assetID)
         let channelGeneration = assetRetryTracker.currentGeneration ?? 0
-        if assetRetryTracker.recordFailure(reference, generation: channelGeneration) {
-            assetRecoveryStatus = .restoring
-            requestMissingExpectedAssets()
-        } else {
-            let recoveryGenerationsUsed = assetRetryTracker.state(for: reference)?.recoveryGenerationsUsed ?? 0
-            assetRecoveryStatus = recoveryGenerationsUsed >= BoothAssetRetryPolicy.maximumRecoveryGenerations
-                ? .operatorRecoveryRequired
-                : .reconnectRequired
-            sessionRequestError = nil
-        }
+        handleAssetFailure([reference], channelGeneration: channelGeneration)
     }
 
     private func installReviewAsset(
@@ -942,7 +1085,7 @@ final class iPadViewModel: ObservableObject {
                       self.transientRequestGeneration == generation,
                       outcome != .sent else { return }
                 self.isSessionRequestPending = false
-                self.sessionRequestError = "The booth is not connected. Please try again."
+                self.setSessionRequestError("The booth is not connected. Please try again.")
             }
             armSessionRequestTimeout(generation: generation)
             return
@@ -966,7 +1109,7 @@ final class iPadViewModel: ObservableObject {
                   self.transientRequestGeneration == generation,
                   outcome != .sent else { return }
             self.isSessionRequestPending = false
-            self.sessionRequestError = "The booth is not connected. Please try again."
+            self.setSessionRequestError("The booth is not connected. Please try again.")
         }
         armSessionRequestTimeout(generation: generation)
     }
@@ -985,10 +1128,10 @@ final class iPadViewModel: ObservableObject {
                   self.isSessionRequestPending else { return }
             self.sessionRequestTimeoutTask = nil
             self.isSessionRequestPending = false
-            self.sessionRequestError = LocalizedText(
+            self.setSessionRequestError(LocalizedText(
                 english: "The operator did not respond. Please try again.",
                 thai: "ผู้ควบคุมไม่ตอบสนอง กรุณาลองอีกครั้ง"
-            ).value(for: self.selectedLanguage)
+            ).value(for: self.selectedLanguage))
         }
     }
 
@@ -1093,7 +1236,7 @@ final class iPadViewModel: ObservableObject {
                   self.reviewDecisionPending else { return }
             self.reviewDecisionTimeoutTask = nil
             self.reviewDecisionPending = false
-            self.sessionRequestError = "The booth did not confirm that choice. Please try again."
+            self.setSessionRequestError("The booth did not confirm that choice. Please try again.")
         }
     }
 
@@ -1111,7 +1254,7 @@ final class iPadViewModel: ObservableObject {
                   self.recoveryActionPending else { return }
             self.recoveryActionTimeoutTask = nil
             self.recoveryActionPending = false
-            self.sessionRequestError = "The booth did not confirm that recovery choice. Please try again."
+            self.setSessionRequestError("The booth did not confirm that recovery choice. Please try again.")
         }
     }
 
@@ -1129,12 +1272,16 @@ final class iPadViewModel: ObservableObject {
                   self.finishRequestPending else { return }
             self.finishRequestTimeoutTask = nil
             self.finishRequestPending = false
-            self.sessionRequestError = "The booth did not confirm the next session. Please try again."
+            self.setSessionRequestError("The booth did not confirm the next session. Please try again.")
         }
     }
 
     func customerKeep(photoIndex: Int) {
-        guard !reviewDecisionPending,
+        guard CustomerDisplayWorkflow.canUseReviewActions(
+                  in: stateMachine.phase,
+                  reviewMediaReady: isReviewMediaReady
+              ),
+              !reviewDecisionPending,
               CustomerDisplayWorkflow.canApply(.keep(photoIndex: photoIndex), in: stateMachine.phase) else { return }
 #if DEBUG
         if demoKioskMode {
@@ -1151,14 +1298,18 @@ final class iPadViewModel: ObservableObject {
                   self.transientRequestGeneration == generation,
                   outcome != .sent else { return }
             self.reviewDecisionPending = false
-            self.sessionRequestError = "The booth did not receive that choice. Please try again."
+            self.setSessionRequestError("The booth did not receive that choice. Please try again.")
         }
         guard reviewDecisionPending else { return }
         armReviewDecisionTimeout(generation: generation)
     }
 
     func customerRetake(photoIndex: Int) {
-        guard !reviewDecisionPending,
+        guard CustomerDisplayWorkflow.canUseReviewActions(
+                  in: stateMachine.phase,
+                  reviewMediaReady: isReviewMediaReady
+              ),
+              !reviewDecisionPending,
               CustomerDisplayWorkflow.canApply(.retake(photoIndex: photoIndex), in: stateMachine.phase) else { return }
 #if DEBUG
         if demoKioskMode {
@@ -1176,7 +1327,7 @@ final class iPadViewModel: ObservableObject {
                   self.transientRequestGeneration == generation,
                   outcome != .sent else { return }
             self.reviewDecisionPending = false
-            self.sessionRequestError = "The booth did not receive that choice. Please try again."
+            self.setSessionRequestError("The booth did not receive that choice. Please try again.")
         }
         guard reviewDecisionPending else { return }
         armReviewDecisionTimeout(generation: generation)
@@ -1216,7 +1367,7 @@ final class iPadViewModel: ObservableObject {
                   self.transientRequestGeneration == generation,
                   outcome != .sent else { return }
             self.recoveryActionPending = false
-            self.sessionRequestError = "The booth did not receive that recovery choice. Please try again."
+            self.setSessionRequestError("The booth did not receive that recovery choice. Please try again.")
         }
         guard recoveryActionPending else { return }
         armRecoveryActionTimeout(generation: generation)
@@ -1233,7 +1384,7 @@ final class iPadViewModel: ObservableObject {
                   self.transientRequestGeneration == generation,
                   outcome != .sent else { return }
             self.finishRequestPending = false
-            self.sessionRequestError = "The booth did not receive the next-session request. Please try again."
+            self.setSessionRequestError("The booth did not receive the next-session request. Please try again.")
         }
         guard finishRequestPending else { return }
         armFinishRequestTimeout(generation: generation)
@@ -1444,6 +1595,36 @@ struct BoothAssetRetryTracker: Sendable {
 
     func state(for reference: BoothAssetReference) -> BoothAssetRetryState? {
         states[reference]
+    }
+
+    func shouldRecycleCurrentGeneration(_ reference: BoothAssetReference) -> Bool {
+        guard let currentGeneration,
+              let state = states[reference],
+              state.generation == currentGeneration,
+              state.attemptsInGeneration > BoothAssetRetryPolicy.maximumAutomaticRetries else {
+            return false
+        }
+        return state.recoveryGenerationsUsed < BoothAssetRetryPolicy.maximumRecoveryGenerations
+    }
+}
+
+struct BoothAssetResponseDeadlineRegistry: Equatable, Sendable {
+    private(set) var pending: Set<BoothAssetReference> = []
+
+    mutating func arm(_ references: [BoothAssetReference]) {
+        pending.formUnion(references)
+    }
+
+    mutating func cancel(_ reference: BoothAssetReference) {
+        pending.remove(reference)
+    }
+
+    func contains(_ reference: BoothAssetReference) -> Bool {
+        pending.contains(reference)
+    }
+
+    mutating func reset() {
+        pending.removeAll()
     }
 }
 

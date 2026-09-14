@@ -28,6 +28,65 @@ public struct TrustedBoothPeer: Codable, Sendable, Equatable, Identifiable {
     }
 }
 
+/// Prevents duplicate pairing requests on the same session and Control
+/// connection while allowing a fresh request after either one changes.
+public struct BoothPairingRequestSubmissionGate: Equatable, Sendable {
+    private(set) var sessionID: String?
+    private(set) var connectionGeneration: Int?
+
+    @discardableResult
+    public mutating func claim(sessionID: String, connectionGeneration: Int) -> Bool {
+        guard self.sessionID != sessionID || self.connectionGeneration != connectionGeneration else {
+            return false
+        }
+        self.sessionID = sessionID
+        self.connectionGeneration = connectionGeneration
+        return true
+    }
+
+    public mutating func resetIfMatches(sessionID: String, connectionGeneration: Int) {
+        guard self.sessionID == sessionID,
+              self.connectionGeneration == connectionGeneration else { return }
+        self.sessionID = nil
+        self.connectionGeneration = nil
+    }
+
+    public mutating func reset() {
+        sessionID = nil
+        connectionGeneration = nil
+    }
+}
+
+/// Resolves the peer shown in pairing diagnostics without ever falling back
+/// to the local identity. The iPad's pairing request contains the iPad
+/// identity, so request-side data is not the iPad's remote peer.
+public struct BoothPairingDiagnosticPeer: Equatable, Sendable {
+    public let id: String?
+    public let displayName: String?
+
+    public init(id: String?, displayName: String?) {
+        self.id = id
+        self.displayName = displayName
+    }
+
+    public static func resolve(
+        role: DeviceRole,
+        connectedPeer: BoothDeviceIdentity?,
+        targetMacPeer: BoothDeviceIdentity?,
+        pendingIPadPeer: BoothDeviceIdentity?,
+        fallbackPeer: TrustedBoothPeer?
+    ) -> Self {
+        if role == .iPad {
+            if let peer = connectedPeer ?? targetMacPeer {
+                return Self(id: peer.id, displayName: peer.displayName)
+            }
+        } else if let peer = connectedPeer ?? pendingIPadPeer {
+            return Self(id: peer.id, displayName: peer.displayName)
+        }
+        return Self(id: fallbackPeer?.id, displayName: fallbackPeer?.displayName)
+    }
+}
+
 /// Diagnostic stage for the secure pairing handshake.
 ///
 /// This is deliberately separate from `BoothPairingState`: the latter is the

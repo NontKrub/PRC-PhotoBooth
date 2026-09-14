@@ -12,6 +12,41 @@ public enum BoothNetworkInterfacePolicy: String, Equatable, Hashable, Sendable {
     case wiredEthernet
 }
 
+enum BoothRouteCandidateProvenance: String, Codable, Equatable, Sendable {
+    case localNetworkBonjour = "Wi-Fi Bonjour"
+    case ethernetConstrainedBonjour = "Ethernet-constrained Bonjour"
+    case ethernetCompatibilityBonjour = "Ethernet compatibility Bonjour"
+    case directStaticLAN = "Direct Ethernet static"
+
+    var interface: BoothNetworkInterfacePolicy {
+        switch self {
+        case .localNetworkBonjour:
+            return .wifi
+        case .ethernetConstrainedBonjour, .ethernetCompatibilityBonjour, .directStaticLAN:
+            return .wiredEthernet
+        }
+    }
+}
+
+enum BoothRouteCandidatePolicy {
+    static func discoveryProvenance(
+        interface: BoothNetworkInterfacePolicy,
+        isLANCompatibilityFallback: Bool
+    ) -> BoothRouteCandidateProvenance {
+        if isLANCompatibilityFallback { return .ethernetCompatibilityBonjour }
+        return interface == .wifi
+            ? .localNetworkBonjour
+            : .ethernetConstrainedBonjour
+    }
+
+    static func shouldRejectNonEthernetPath(
+        provenance: BoothRouteCandidateProvenance
+    ) -> Bool {
+        provenance == .ethernetConstrainedBonjour
+            || provenance == .ethernetCompatibilityBonjour
+    }
+}
+
 public enum BoothEffectiveNetworkTransport: String, Codable, Equatable, Sendable {
     case wifi
     case lan
@@ -68,12 +103,13 @@ struct BoothRouteDiscoverySelection: Equatable, Sendable {
     mutating func consider(
         _ interface: BoothNetworkInterfacePolicy,
         preferredPreference: BoothNetworkPreference,
-        advertisedPreference: BoothNetworkPreference? = nil
+        advertisedPreference _: BoothNetworkPreference? = nil
     ) -> Decision {
         guard selectedInterface == nil else { return .ignored }
 
-        let preference = advertisedPreference ?? preferredPreference
-        let preferredInterface: BoothNetworkInterfacePolicy = preference == .lan ? .wiredEthernet : .wifi
+        let preferredInterface: BoothNetworkInterfacePolicy = preferredPreference == .lan
+            ? .wiredEthernet
+            : .wifi
         guard interface != preferredInterface else {
             selectedInterface = interface
             pendingInterface = nil
@@ -94,6 +130,29 @@ struct BoothRouteDiscoverySelection: Equatable, Sendable {
     mutating func reset() {
         selectedInterface = nil
         pendingInterface = nil
+    }
+}
+
+enum BoothRouteDiscoveryDecision: Equatable, Sendable {
+    case reuse
+    case restart
+}
+
+enum BoothRouteDiscoveryPolicy {
+    static func decision(
+        targetPeerID: String?,
+        requestedPreference: BoothNetworkPreference,
+        activeTargetPeerID: String?,
+        activePreference: BoothNetworkPreference?,
+        hasActiveDiscovery: Bool,
+        hasActiveControlAttempt: Bool
+    ) -> BoothRouteDiscoveryDecision {
+        guard hasActiveDiscovery || hasActiveControlAttempt,
+              targetPeerID == activeTargetPeerID,
+              requestedPreference == activePreference else {
+            return .restart
+        }
+        return .reuse
     }
 }
 

@@ -66,6 +66,14 @@ public enum CustomerDisplayWorkflow {
                 || phase.isFinished
         }
     }
+
+    public static func canUseReviewActions(
+        in phase: BoothPhase,
+        reviewMediaReady: Bool
+    ) -> Bool {
+        guard case .review = phase else { return false }
+        return reviewMediaReady
+    }
 }
 
 private extension BoothPhase {

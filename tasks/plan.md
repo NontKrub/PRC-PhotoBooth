@@ -1,5 +1,21 @@
 # PRC PhotoBooth — v1.4.2 Stability, Printing, Connectivity & Pairing
 
+## Final pairing and asset-recovery implementation — 2026-09-14
+
+Baseline before source edits:
+
+- Branch: `fix/v1.4.2-stability-pairing`
+- HEAD: `6b082b19d1d1ee2d4910ec3534170f461c3619a7`
+- Toolchain: Xcode `27.0` (`27A5252f`), Swift `6.4`, XcodeGen `2.46.0`
+- Mac tests: `397/397` in `57` suites, exit `0`
+- iPad simulator tests: `18/18` in `2` suites, exit `0`, simulator `9FB3C107-DCA8-4D98-B9DA-A594BB232A5B`
+- `git diff --check`: pass
+- Pre-existing protected files preserved: local `UserInterfaceState.xcuserstate` modification and untracked sync-conflict `.pbxproj`
+
+Implementation scope: make PIN pairing discovery idempotent; keep local route preference authoritative while preserving Direct Ethernet compatibility; correct pairing diagnostics; add bounded silent-Asset recovery and Review media gating; add deterministic owner/policy tests; refine only affected iPad recovery copy and accessibility. Physical network, Device Hub, camera, printer, Instruments, and soak evidence remains separate.
+
+Post-review follow-up: the Luna Max architecture/security review identified that a single asset deadline could be replaced by a later batch. The implementation now tracks one deadline per outstanding asset, including partial-batch completion, and adds a silent-early-batch regression test. A pairing submission gate and iPad Review media/runtime smoke coverage were also added. A later read-only Luna Max review found stale critical-send failure mutation, shared Bonjour discovery buckets, compatibility-path provenance ambiguity, and failed asset-send stalling; all four software findings are now fixed. Physical/network/hardware/accessibility/performance/soak and full two-peer integration evidence remain `NOT RUN`.
+
 ## Final event-readiness implementation evidence — 2026-09-14
 
 This section records the completed working-tree pass from reviewed SHA

@@ -1,6 +1,10 @@
 import Foundation
 
 enum OperationsEventKind: String, Codable, Sendable, CaseIterable {
+    case routeDiscoveryStarted
+    case routeDiscoveryRestarted, routeDiscoveryReused, routeCandidateDiscovered
+    case controlConnectionCreated, controlConnectionPreparing, controlHelloReceived
+    case pairingRequestSubmitted
     case sessionStarted, sessionCompleted, sessionCancelled
     case captureStarted, captureSucceeded, captureFailed, captureRecovered
     case captureDeferred, captureRetried, previousPhotoUsed
@@ -33,6 +37,10 @@ struct OperationsEvent: Codable, Sendable, Equatable, Identifiable {
     var route: String?
     var attempt: Int?
     var byteCount: Int?
+    var targetPeerID: String?
+    var routeGeneration: Int?
+    var networkPreference: BoothNetworkPreference?
+    var candidateSource: String?
 }
 
 actor OperationsEventStore {
@@ -55,7 +63,11 @@ actor OperationsEventStore {
         channel: String? = nil,
         route: String? = nil,
         attempt: Int? = nil,
-        byteCount: Int? = nil
+        byteCount: Int? = nil,
+        targetPeerID: String? = nil,
+        routeGeneration: Int? = nil,
+        networkPreference: BoothNetworkPreference? = nil,
+        candidateSource: String? = nil
     ) {
         loadIfNeeded()
         let now = Date()
@@ -70,7 +82,11 @@ actor OperationsEventStore {
             channel: OperationsEventRedactor.text(channel),
             route: OperationsEventRedactor.text(route),
             attempt: attempt,
-            byteCount: byteCount
+            byteCount: byteCount,
+            targetPeerID: OperationsEventRedactor.text(targetPeerID),
+            routeGeneration: routeGeneration,
+            networkPreference: networkPreference,
+            candidateSource: OperationsEventRedactor.text(candidateSource)
         ))
         trim(now: now)
         save()

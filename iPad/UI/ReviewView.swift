@@ -7,7 +7,7 @@ struct ReviewView: View {
     private var isThai: Bool { vm.selectedLanguage == .thai }
 
     var reviewImage: CGImage? {
-        guard let data = vm.stateMachine.reviewImageData ?? vm.stateMachine.keptShots[photoIndex],
+        guard let data = vm.stateMachine.reviewImageData,
               let src = CGImageSourceCreateWithData(data as CFData, nil)
         else { return nil }
         return CGImageSourceCreateImageAtIndex(src, 0, nil)
@@ -41,9 +41,18 @@ struct ReviewView: View {
                             .scaledToFit()
                             .clipShape(RoundedRectangle(cornerRadius: 18))
                     } else {
-                        Image(systemName: "photo")
-                            .font(.system(size: 56))
-                            .foregroundStyle(.white.opacity(0.2))
+                        VStack(spacing: 14) {
+                            ProgressView()
+                                .tint(.white)
+                                .scaleEffect(1.15)
+                            Text(isThai ? "กำลังกู้คืนรูปภาพ…" : "Restoring photo…")
+                                .font(.headline)
+                                .foregroundStyle(.white.opacity(0.78))
+                        }
+                        .accessibilityElement(children: .combine)
+                        .accessibilityLabel(
+                            isThai ? "กำลังกู้คืนรูปภาพ" : "Restoring photo"
+                        )
                     }
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -69,7 +78,7 @@ struct ReviewView: View {
                         .overlay(RoundedRectangle(cornerRadius: 16).strokeBorder(.white.opacity(0.15), lineWidth: 1))
                     }
                     .buttonStyle(.plain)
-                    .disabled(vm.reviewDecisionPending)
+                    .disabled(!vm.isReviewMediaReady || vm.reviewDecisionPending)
 
                     // Keep — primary
                     Button(action: { vm.customerKeep(photoIndex: photoIndex) }) {
@@ -84,7 +93,7 @@ struct ReviewView: View {
                         .background(Color.white, in: RoundedRectangle(cornerRadius: 16))
                     }
                     .buttonStyle(.plain)
-                    .disabled(vm.reviewDecisionPending)
+                    .disabled(!vm.isReviewMediaReady || vm.reviewDecisionPending)
                 }
                 .padding(.bottom, 56)
             }

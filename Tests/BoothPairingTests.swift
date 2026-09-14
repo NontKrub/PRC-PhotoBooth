@@ -6,6 +6,54 @@ import Testing
 
 @Suite("Booth pairing")
 struct BoothPairingTests {
+    @Test("pairing request submission is once per session and connection")
+    func pairingRequestSubmissionGateAllowsOnlyFreshAttempts() {
+        var gate = BoothPairingRequestSubmissionGate()
+
+        let firstClaim = gate.claim(sessionID: "session-1", connectionGeneration: 7)
+        let duplicateClaim = gate.claim(sessionID: "session-1", connectionGeneration: 7)
+        let newConnectionClaim = gate.claim(sessionID: "session-1", connectionGeneration: 8)
+        let duplicateConnectionClaim = gate.claim(sessionID: "session-1", connectionGeneration: 8)
+        let newSessionClaim = gate.claim(sessionID: "session-2", connectionGeneration: 8)
+        #expect(firstClaim)
+        #expect(!duplicateClaim)
+        #expect(newConnectionClaim)
+        #expect(!duplicateConnectionClaim)
+        #expect(newSessionClaim)
+
+        gate.resetIfMatches(sessionID: "session-1", connectionGeneration: 8)
+        let staleResetClaim = gate.claim(sessionID: "session-2", connectionGeneration: 8)
+        #expect(!staleResetClaim)
+        gate.resetIfMatches(sessionID: "session-2", connectionGeneration: 8)
+        let resetClaim = gate.claim(sessionID: "session-2", connectionGeneration: 8)
+        #expect(resetClaim)
+    }
+
+    @Test("iPad pairing diagnostics identify the selected Mac, not the local iPad")
+    func pairingDiagnosticPeerUsesRemoteRole() {
+        let localIPad = BoothDeviceIdentity(
+            id: "ipad-local",
+            displayName: "Customer iPad",
+            role: .iPad
+        )
+        let selectedMac = BoothDeviceIdentity(
+            id: "mac-selected",
+            displayName: "Operator Mac",
+            role: .mac
+        )
+
+        let resolved = BoothPairingDiagnosticPeer.resolve(
+            role: .iPad,
+            connectedPeer: nil,
+            targetMacPeer: selectedMac,
+            pendingIPadPeer: localIPad,
+            fallbackPeer: nil
+        )
+
+        #expect(resolved.id == "mac-selected")
+        #expect(resolved.displayName == "Operator Mac")
+    }
+
     @Test("pairing intent validates its target, role, protocol, and hello identity")
     func pairingIntentValidation() throws {
         let intent = BoothPairingIntent(

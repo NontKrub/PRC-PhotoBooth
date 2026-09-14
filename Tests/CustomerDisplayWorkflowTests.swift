@@ -39,4 +39,20 @@ struct CustomerDisplayWorkflowTests {
         #expect(CustomerDisplayWorkflow.canApply(.usePreviousCapture(photoIndex: 1), in: recovery))
         #expect(!CustomerDisplayWorkflow.canApply(.retryReceive(photoIndex: 0), in: recovery))
     }
+
+    @Test("Review actions require the authoritative review media")
+    func reviewActionsRequireMedia() {
+        #expect(CustomerDisplayWorkflow.canUseReviewActions(
+            in: .review(photoIndex: 1),
+            reviewMediaReady: true
+        ))
+        #expect(!CustomerDisplayWorkflow.canUseReviewActions(
+            in: .review(photoIndex: 1),
+            reviewMediaReady: false
+        ))
+        #expect(!CustomerDisplayWorkflow.canUseReviewActions(
+            in: .processing,
+            reviewMediaReady: true
+        ))
+    }
 }

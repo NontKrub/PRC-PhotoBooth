@@ -351,6 +351,14 @@ public enum BoothControlSendOutcome: Equatable, Sendable {
 }
 
 public enum BoothTransportDiagnosticKind: String, Codable, Sendable {
+    case routeDiscoveryStarted
+    case routeDiscoveryRestarted
+    case routeDiscoveryReused
+    case routeCandidateDiscovered
+    case controlConnectionCreated
+    case controlConnectionPreparing
+    case controlHelloReceived
+    case pairingRequestSubmitted
     case transportDiscoveryStarted
     case transportConnecting
     case transportReady
@@ -394,6 +402,10 @@ public struct BoothTransportDiagnosticEvent: Codable, Sendable, Equatable {
     public let byteCount: Int?
     public let duration: TimeInterval?
     public let reason: String?
+    public let targetPeerID: String?
+    public let routeGeneration: Int?
+    public let networkPreference: BoothNetworkPreference?
+    public let candidateSource: String?
 
     public init(
         kind: BoothTransportDiagnosticKind,
@@ -404,7 +416,11 @@ public struct BoothTransportDiagnosticEvent: Codable, Sendable, Equatable {
         attempt: Int? = nil,
         byteCount: Int? = nil,
         duration: TimeInterval? = nil,
-        reason: String? = nil
+        reason: String? = nil,
+        targetPeerID: String? = nil,
+        routeGeneration: Int? = nil,
+        networkPreference: BoothNetworkPreference? = nil,
+        candidateSource: String? = nil
     ) {
         self.kind = kind
         self.timestamp = timestamp
@@ -415,6 +431,10 @@ public struct BoothTransportDiagnosticEvent: Codable, Sendable, Equatable {
         self.byteCount = byteCount
         self.duration = duration
         self.reason = reason
+        self.targetPeerID = targetPeerID
+        self.routeGeneration = routeGeneration
+        self.networkPreference = networkPreference
+        self.candidateSource = candidateSource
     }
 }
 
@@ -534,6 +554,7 @@ public protocol BoothTransport: AnyObject {
     @discardableResult
     func sendAsset(_ chunk: BoothAssetChunk) -> BoothControlSendOutcome
     func sendPreviewFrame(_ jpegData: Data)
+    func recycleAssetChannel()
     func disconnect()
 }
 
@@ -549,6 +570,8 @@ public extension BoothTransport {
     func sendAsset(_ chunk: BoothAssetChunk) -> BoothControlSendOutcome {
         .networkSendFailed
     }
+
+    func recycleAssetChannel() {}
 
     func restart() {
         disconnect()

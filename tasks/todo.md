@@ -1,5 +1,27 @@
 # Current release: v1.4.2 — Stability, Printing, Connectivity & Pairing
 
+## Final pairing and asset-recovery implementation — 2026-09-14
+
+- [x] Record baseline branch, SHA, protected dirty files, toolchain, and automated tests.
+- [x] Split idempotent pairing discovery from destructive retry/selection restart.
+- [x] Keep local route preference authoritative; retain remote TXT/hello value as metadata only.
+- [x] Preserve Direct Ethernet static endpoint and iPadOS 16 compatibility browser; gate path-hint relaxation by provenance/authentication.
+- [x] Correct role-aware pairing diagnostics.
+- [x] Add bounded silent-Asset deadline and Asset-only recycle using existing generation gates.
+- [x] Gate Review Keep/Retake on authoritative media and expose recovery independently of socket readiness.
+- [x] Add deterministic pairing, route, asset, and review regression coverage.
+- [x] Run affected/full automation and build matrix; report physical/tooling gates as unrun.
+- [x] Initial architecture/security review completed; the Critical asset-deadline finding was fixed and automated gates rerun. Release verdict remains `NOT READY` without mandatory physical/tooling evidence.
+
+## Final review follow-up — 2026-09-14
+
+- [x] Ignore stale critical-send completions without mutating the current pairing attempt.
+- [x] Isolate concurrent constrained and compatibility Bonjour results by route provenance.
+- [x] Enforce Ethernet-path provenance for the compatibility `.lan` discovery path.
+- [x] Route failed asset-request sends through the existing bounded retry and Asset-only recovery policy.
+- [x] Re-run full automated/build gates: Mac `404/404`, iPad simulator `20/20`, Mac/iPad builds, and `git diff --check`; push only product source, tests, and readiness notes while preserving local Xcode state and sync-conflict artifacts.
+- [ ] Release verdict remains `NOT READY` until integrated, physical, and tooling gates pass.
+
 ## Final event-readiness continuation — 2026-09-14
 
 - [x] Record branch `fix/v1.4.2-stability-pairing`, starting SHA `42612c82c432899ef723d2bb400e53e2f28dd6b3`, dirty Xcode user-state and sync-conflict files, Xcode 27.0, Swift 6.4, macOS 27.0, macOS 15/iPadOS 16 targets, version `1.4.2 (6)`.

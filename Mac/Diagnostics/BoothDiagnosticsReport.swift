@@ -185,6 +185,10 @@ struct BoothDiagnosticsReport {
             let details = [
                 safe(event.channel),
                 safe(event.route),
+                event.targetPeerID.map { "target=\($0)" },
+                event.routeGeneration.map { "routeGen=\($0)" },
+                event.networkPreference.map { "preference=\($0.rawValue)" },
+                safe(event.candidateSource),
                 safe(event.reason)
             ].compactMap { $0 }.joined(separator: " · ")
             return "\(dateText(event.timestamp)) \(event.kind.rawValue)\(details.isEmpty ? "" : " — \(details)")"

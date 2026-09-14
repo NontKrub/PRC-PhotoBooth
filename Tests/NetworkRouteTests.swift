@@ -545,36 +545,131 @@ struct RouteDiscoveryPolicyTests {
         #expect(selection.selectedInterface == .wifi)
     }
 
-    @Test("Advertised Mac preference is authoritative")
-    func advertisedPreferenceWins() {
+    @Test("Local preference remains authoritative over a Mac advertisement")
+    func advertisedPreferenceDoesNotOverrideLocalChoice() {
         var selection = BoothRouteDiscoverySelection()
 
-        let ignored = selection.consider(
+        let accepted = selection.consider(
             .wifi,
             preferredPreference: .wifi,
             advertisedPreference: .lan
         )
-        let accepted = selection.consider(
+        let ignored = selection.consider(
             .wiredEthernet,
             preferredPreference: .wifi,
             advertisedPreference: .lan
         )
 
-        #expect(ignored == .waitingForPreferredInterface)
         #expect(accepted == .accepted)
-        #expect(selection.selectedInterface == .wiredEthernet)
+        #expect(ignored == .ignored)
+        #expect(selection.selectedInterface == .wifi)
     }
 
-    @Test("LAN advertisement still permits Wi-Fi fallback after the grace window")
-    func advertisedLANFallsBackToWiFi() {
+    @Test("A LAN advertisement does not make Wi-Fi wait for LAN")
+    func advertisedLANDoesNotDelayWiFi() {
         var selection = BoothRouteDiscoverySelection()
 
         #expect(selection.consider(
             .wifi,
             preferredPreference: .wifi,
             advertisedPreference: .lan
-        ) == .waitingForPreferredInterface)
-        #expect(selection.promotePending() == .wifi)
+        ) == .accepted)
+        #expect(selection.promotePending() == nil)
+    }
+
+    @Test("Discovery ensure reuses the same target and local preference")
+    func ensureReusesMatchingAttempt() {
+        #expect(
+            BoothRouteDiscoveryPolicy.decision(
+                targetPeerID: "mac-1",
+                requestedPreference: .wifi,
+                activeTargetPeerID: "mac-1",
+                activePreference: .wifi,
+                hasActiveDiscovery: true,
+                hasActiveControlAttempt: false
+            ) == .reuse
+        )
+        #expect(
+            BoothRouteDiscoveryPolicy.decision(
+                targetPeerID: "mac-2",
+                requestedPreference: .wifi,
+                activeTargetPeerID: "mac-1",
+                activePreference: .wifi,
+                hasActiveDiscovery: true,
+                hasActiveControlAttempt: false
+            ) == .restart
+        )
+        #expect(
+            BoothRouteDiscoveryPolicy.decision(
+                targetPeerID: "mac-1",
+                requestedPreference: .lan,
+                activeTargetPeerID: "mac-1",
+                activePreference: .wifi,
+                hasActiveDiscovery: true,
+                hasActiveControlAttempt: false
+            ) == .restart
+        )
+        #expect(
+            BoothRouteDiscoveryPolicy.decision(
+                targetPeerID: "mac-1",
+                requestedPreference: .wifi,
+                activeTargetPeerID: "mac-1",
+                activePreference: .wifi,
+                hasActiveDiscovery: false,
+                hasActiveControlAttempt: true
+            ) == .reuse
+        )
+        #expect(
+            BoothRouteDiscoveryPolicy.decision(
+                targetPeerID: "mac-1",
+                requestedPreference: .wifi,
+                activeTargetPeerID: "mac-1",
+                activePreference: .wifi,
+                hasActiveDiscovery: false,
+                hasActiveControlAttempt: false
+            ) == .restart
+        )
+    }
+
+    @Test("Route candidate provenance keeps constrained and compatibility paths distinct")
+    func routeCandidateProvenanceIsExplicit() {
+        #expect(
+            BoothRouteCandidatePolicy.discoveryProvenance(
+                interface: .wifi,
+                isLANCompatibilityFallback: false
+            ) == .localNetworkBonjour
+        )
+        #expect(
+            BoothRouteCandidatePolicy.discoveryProvenance(
+                interface: .wiredEthernet,
+                isLANCompatibilityFallback: false
+            ) == .ethernetConstrainedBonjour
+        )
+        #expect(
+            BoothRouteCandidatePolicy.discoveryProvenance(
+                interface: .wiredEthernet,
+                isLANCompatibilityFallback: true
+            ) == .ethernetCompatibilityBonjour
+        )
+        #expect(
+            BoothRouteCandidatePolicy.shouldRejectNonEthernetPath(
+                provenance: .ethernetConstrainedBonjour
+            )
+        )
+        #expect(
+            BoothRouteCandidatePolicy.shouldRejectNonEthernetPath(
+                provenance: .ethernetCompatibilityBonjour
+            )
+        )
+        #expect(
+            !BoothRouteCandidatePolicy.shouldRejectNonEthernetPath(
+                provenance: .directStaticLAN
+            )
+        )
+        #expect(
+            BoothRouteCandidateProvenance.ethernetCompatibilityBonjour.interface
+                == .wiredEthernet
+        )
     }
 
     @Test("Reset permits a new discovery cycle")
@@ -720,6 +815,18 @@ struct TransportRecoveryPolicyTests {
         }
 
         #expect(requested == expected)
+    }
+
+    @Test("Failed asset sends release references for bounded retry")
+    func failedAssetSendsReleaseReferences() {
+        let expected = (0..<2).map(reference)
+        var pump = BoothAssetRequestPump(maximumInFlight: 8)
+        let batch = pump.nextBatch(expected: expected, cached: [])
+
+        pump.markSendFailed(batch)
+
+        #expect(pump.inFlight.isEmpty)
+        #expect(pump.nextBatch(expected: expected, cached: []) == batch)
     }
 
     @Test("Healthy authenticated control outranks a wired Ethernet path hint")

@@ -305,6 +305,7 @@ struct AssetRetryRecoveryTests {
         #expect(secondFailureCanRetry)
         #expect(!thirdFailureCanRetry)
         #expect(!tracker.canRequest(asset))
+        #expect(tracker.shouldRecycleCurrentGeneration(asset))
     }
 
     @Test("fresh asset reconnect restores bounded retry allowance")
@@ -373,6 +374,7 @@ struct AssetRetryRecoveryTests {
 
         #expect(try #require(tracker.state(for: asset)).recoveryGenerationsUsed == 2)
         #expect(!tracker.canRequest(asset))
+        #expect(!tracker.shouldRecycleCurrentGeneration(asset))
         _ = tracker.activate(generation: 44, missing: [asset])
         #expect(!tracker.canRequest(asset))
     }
@@ -417,6 +419,68 @@ struct AssetRetryRecoveryTests {
             BoothAssetRecoveryStatus.operatorRecoveryRequired.detail(for: .thai)
                 == "โปรดขอให้เจ้าหน้าที่เริ่มการกู้คืนสำหรับเซสชันนี้อีกครั้ง"
         )
+    }
+
+    @Test("a later asset batch preserves earlier response deadlines")
+    func laterAssetBatchPreservesEarlierDeadlines() {
+        let expected = (0..<9).map { reference($0) }
+        var pump = BoothAssetRequestPump(maximumInFlight: 8)
+        var registry = BoothAssetResponseDeadlineRegistry()
+        let firstBatch = pump.nextBatch(expected: expected, cached: [])
+        registry.arm(firstBatch)
+
+        pump.markCompleted(firstBatch[0])
+        let laterBatch = pump.nextBatch(expected: expected, cached: [firstBatch[0]])
+        registry.cancel(firstBatch[0])
+        registry.arm(laterBatch)
+
+        #expect(registry.contains(firstBatch[1]))
+        #expect(registry.contains(laterBatch[0]))
+        #expect(registry.pending.count == 8)
+    }
+
+    @Test("review actions require decoded authoritative media")
+    @MainActor
+    func reviewActionsRequireAuthoritativeMedia() {
+        let viewModel = iPadViewModel()
+        defer { viewModel.multipeer.disconnect() }
+        let config = EventConfig(photoCount: 1)
+
+        viewModel.stateMachine.applyAuthoritativeSnapshot(
+            sessionID: "review-media",
+            config: config,
+            phase: .review(photoIndex: 0),
+            reviewImageData: nil
+        )
+        #expect(viewModel.isReviewMediaMissing)
+        #expect(!viewModel.isReviewMediaReady)
+        #expect(!CustomerDisplayWorkflow.canUseReviewActions(
+            in: viewModel.stateMachine.phase,
+            reviewMediaReady: viewModel.isReviewMediaReady
+        ))
+
+        let renderer = UIGraphicsImageRenderer(size: CGSize(width: 1, height: 1))
+        let data = renderer.jpegData(withCompressionQuality: 1) { context in
+            UIColor.black.setFill()
+            context.fill(CGRect(x: 0, y: 0, width: 1, height: 1))
+        }
+        viewModel.stateMachine.applyAuthoritativeSnapshot(
+            sessionID: "review-media",
+            config: config,
+            phase: .review(photoIndex: 0),
+            reviewImageData: data
+        )
+        #expect(viewModel.isReviewMediaReady)
+        #expect(CustomerDisplayWorkflow.canUseReviewActions(
+            in: viewModel.stateMachine.phase,
+            reviewMediaReady: viewModel.isReviewMediaReady
+        ))
+
+        let host = UIHostingController(
+            rootView: ReviewView(photoIndex: 0).environmentObject(viewModel)
+        )
+        _ = host.view
+        #expect(host.viewIfLoaded != nil)
     }
 
     @Test("large request pump remains ordered and bounded")

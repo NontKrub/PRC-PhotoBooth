@@ -96,6 +96,31 @@ struct BoothDiagnosticsReportTests {
         #expect(events.last?.route == "wifi")
     }
 
+    @Test("event history keeps route and pairing context without secrets")
+    func eventHistoryPreservesTransportContext() async throws {
+        let fileURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("PRC-transport-context-\(UUID().uuidString).json")
+        defer { try? FileManager.default.removeItem(at: fileURL) }
+
+        let store = OperationsEventStore(fileURL: fileURL)
+        await store.record(
+            .routeCandidateDiscovered,
+            reason: "Bonjour network hint=lan",
+            channel: "control",
+            route: "wiredEthernet",
+            targetPeerID: "mac-1",
+            routeGeneration: 7,
+            networkPreference: .wifi,
+            candidateSource: "Ethernet compatibility Bonjour"
+        )
+
+        let event = try #require((await store.load()).last)
+        #expect(event.targetPeerID == "mac-1")
+        #expect(event.routeGeneration == 7)
+        #expect(event.networkPreference == .wifi)
+        #expect(event.candidateSource == "Ethernet compatibility Bonjour")
+    }
+
     private func snapshot() -> BoothDiagnosticsReport.Snapshot {
         var metrics = BoothPreviewDiagnostics()
         metrics.fps = 29.8

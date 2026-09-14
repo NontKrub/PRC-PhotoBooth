@@ -67,7 +67,7 @@ struct iPadContentView: View {
 
             if vm.isBoothSessionActive,
                vm.isAuthoritativeControlReady,
-               !vm.isBoothFullyReady {
+               (!vm.isBoothFullyReady || vm.isReviewMediaMissing) {
                 VStack {
                     Spacer()
                     if !vm.connectionStatus.isPreviewChannelConnected {

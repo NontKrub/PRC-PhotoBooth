@@ -343,7 +343,10 @@ struct iPadConnectionSettingsView: View {
     private func retryPairing() {
         guard let peerID = lastPairingPeerID
                 ?? nearbyMacs.first(where: { !$0.isTrusted })?.id else { return }
-        startPairing(with: peerID)
+        lastPairingPeerID = peerID
+        selectedPairingMacName = nearbyMacs.first { $0.id == peerID }?.displayName
+        automaticPairingPeerID = peerID
+        vm.retryPairing(with: peerID)
     }
 
     private func startPairing(with peerID: String) {

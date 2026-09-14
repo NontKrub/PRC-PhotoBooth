@@ -2797,7 +2797,11 @@ final class BoothCoordinator {
             channel: event.channel,
             route: event.route,
             attempt: event.attempt,
-            byteCount: event.byteCount
+            byteCount: event.byteCount,
+            targetPeerID: event.targetPeerID,
+            routeGeneration: event.routeGeneration,
+            networkPreference: event.networkPreference,
+            candidateSource: event.candidateSource
         )
     }
 
@@ -3138,7 +3142,11 @@ final class BoothCoordinator {
         channel: String? = nil,
         route: String? = nil,
         attempt: Int? = nil,
-        byteCount: Int? = nil
+        byteCount: Int? = nil,
+        targetPeerID: String? = nil,
+        routeGeneration: Int? = nil,
+        networkPreference: BoothNetworkPreference? = nil,
+        candidateSource: String? = nil
     ) {
         Task {
             await operationsEvents.record(
@@ -3150,7 +3158,11 @@ final class BoothCoordinator {
                 channel: channel,
                 route: route,
                 attempt: attempt,
-                byteCount: byteCount
+                byteCount: byteCount,
+                targetPeerID: targetPeerID,
+                routeGeneration: routeGeneration,
+                networkPreference: networkPreference,
+                candidateSource: candidateSource
             )
         }
     }
