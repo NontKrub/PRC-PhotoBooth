@@ -1011,3 +1011,42 @@ Final evidence recorded for this closure:
 4. Add only production-path deterministic failure-injection coverage that current architecture can support.
 5. Review affected UI with Impeccable/frontend-design native constraints.
 6. Update factual release ledger and report `READY FOR EVENT` only after every mandatory gate passes.
+
+## v1.4.2 stability implementation amendment — 2026-09-14
+
+This amendment records the implementation pass based on starting SHA
+`7a11774b948529096e9575d51e777ffa329ef1d4`. `project.yml` remains the source of
+truth; the generated Xcode project was regenerated after adding source files.
+
+- [x] Route preview delivery through a queue-confined latest-frame pump with one
+  pending frame, generation invalidation, and receiver-side coalescing diagnostics.
+- [x] Admit liveness only from authenticated encrypted Control traffic; reject raw
+  channel-4 heartbeat payloads and keep heartbeat/reconnect timer decisions on the
+  transport queue.
+- [x] Bound iPad review/preview/asset image decoding and publish the current review
+  image once, outside the SwiftUI body, with session and generation checks.
+- [x] Propagate cancellation through finalization and automatic-print jobs; keep
+  AppKit print submission on MainActor and validate image readability off-main.
+- [x] Store new operator PIN hashes in Keychain with bounded retry backoff and
+  migrate a legacy UserDefaults hash after successful verification.
+- [x] Remove app-level legacy MultipeerConnectivity selection and refine only the
+  affected pairing, reconnect, review, and Operations accessibility/status UI.
+- [x] Add deterministic preview flood, stale-generation, raw-heartbeat rejection,
+  reconnect-while-MainActor-blocked, and bounded-image decode coverage.
+- [ ] Complete the full NWConnection/listener/browser lifecycle split; the current
+  runtime extraction covers heartbeat and reconnect timers, while route/socket
+  ownership remains in `NetworkBoothTransport`.
+- [x] Re-run the complete automated matrix: Mac Debug/Release builds, Mac
+  410/410 tests in 58 suites, iPad Debug/Release simulator builds, iPad 20/20
+  tests, and unsigned generic iPadOS Release compilation.
+- [x] Run Mac and iPad TSan: 410/410 and 20/20 respectively, with no reported
+  TSan race diagnostics or runtime warnings.
+- [x] Run the single Impeccable detector pass over the affected UI; it returned
+  no findings.
+- [ ] Capture Instruments workload traces, complete Device Hub UI review, and
+  run physical network/camera/printer plus multi-hour soak gates. The paired
+  physical device currently available is an iPad Air 11-inch (M4) on iOS 27,
+  not the required iPad Pro 9.7 on iPadOS 16, so it is not substituted.
+
+Release verdict for this amendment remains `NOT READY FOR EVENT` until the
+mandatory physical, UI, profiling, and soak evidence is captured.

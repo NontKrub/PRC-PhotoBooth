@@ -178,15 +178,7 @@ final class BoothCoordinator {
     init() {
         let networkPreference = Self.loadNetworkPreference()
         let status = BoothConnectionStatus(requestedNetwork: networkPreference)
-#if DEBUG
-        if ProcessInfo.processInfo.arguments.contains("--legacy-multipeer") {
-            multipeer = MultipeerService(role: .mac, connectionStatus: status)
-        } else {
-            multipeer = NetworkBoothTransport(role: .mac, networkPreference: networkPreference, connectionStatus: status)
-        }
-#else
         multipeer = NetworkBoothTransport(role: .mac, networkPreference: networkPreference, connectionStatus: status)
-#endif
         connectionStatus = status
         capture = CaptureService()
         stateMachine = SessionStateMachine()

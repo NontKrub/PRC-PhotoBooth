@@ -2,6 +2,23 @@ import Testing
 import Foundation
 @testable import PRC_PhotoBooth_Mac
 
+private final class LockedDataBuffer: @unchecked Sendable {
+    private let lock = NSLock()
+    private var values: [Data] = []
+
+    func append(_ value: Data) {
+        lock.lock()
+        values.append(value)
+        lock.unlock()
+    }
+
+    var snapshot: [Data] {
+        lock.lock()
+        defer { lock.unlock() }
+        return values
+    }
+}
+
 @Suite("Network framing")
 struct NetworkFramingTests {
     @Test("preview coalescing keeps only newest pending frame")
@@ -106,5 +123,76 @@ struct NetworkFramingTests {
 
         state.markActivity()
         #expect(state.shouldReportTimeout(after: 0))
+    }
+
+    @Test("raw heartbeat channel frames are rejected")
+    func rawHeartbeatChannelIsRejected() {
+        let decoder = BoothTransportFrameDecoder()
+        let frame = try! BoothFrameEncoder.encode(
+            channel: .heartbeat,
+            payload: Data("heartbeat".utf8)
+        )
+
+        #expect(throws: BoothFrameError.invalidMessage) {
+            try decoder.decode(frame, channel: .control)
+        }
+    }
+
+    @Test("preview delivery keeps one pending frame while MainActor is blocked")
+    func previewDeliveryCoalescesBeforeMainActor() {
+        let queue = DispatchQueue(label: "PRC-PhotoBooth.Tests.PreviewDelivery")
+        let pump = BoothLatestPreviewDeliveryPump(queue: queue)
+        let entered = DispatchSemaphore(value: 0)
+        let release = DispatchSemaphore(value: 0)
+        let delivered = DispatchSemaphore(value: 0)
+        DispatchQueue.main.async {
+            entered.signal()
+            release.wait()
+        }
+        #expect(entered.wait(timeout: .now() + 1) == .success)
+
+        let received = LockedDataBuffer()
+        pump.onDeliver = { data, _, _ in
+            received.append(data)
+            delivered.signal()
+        }
+
+        queue.sync {
+            for index in 0..<10_000 {
+                pump.enqueueOnQueue(Data("frame-\(index)".utf8), generation: 0)
+            }
+        }
+        let snapshot = pump.snapshot()
+        #expect(snapshot.framesReceived == 10_000)
+        #expect(snapshot.framesCoalesced == 9_999)
+        #expect(snapshot.pendingFrames == 1)
+
+        release.signal()
+        #expect(delivered.wait(timeout: .now() + 2) == .success)
+        let values = received.snapshot
+        #expect(values.count == 1)
+        let last = values.last
+        #expect(last == Data("frame-9999".utf8))
+    }
+
+    @Test("preview delivery drops pending frames from an old generation")
+    func previewDeliveryRejectsStaleGeneration() {
+        let queue = DispatchQueue(label: "PRC-PhotoBooth.Tests.PreviewGeneration")
+        let pump = BoothLatestPreviewDeliveryPump(queue: queue)
+        let delivered = DispatchSemaphore(value: 0)
+        let received = LockedDataBuffer()
+        pump.onDeliver = { data, _, _ in
+            received.append(data)
+            delivered.signal()
+        }
+
+        queue.sync {
+            pump.enqueueOnQueue(Data("old".utf8), generation: 0)
+            pump.resetOnQueue(generation: 1)
+            pump.enqueueOnQueue(Data("new".utf8), generation: 1)
+        }
+
+        #expect(delivered.wait(timeout: .now() + 2) == .success)
+        #expect(received.snapshot == [Data("new".utf8)])
     }
 }

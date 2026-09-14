@@ -21,7 +21,11 @@ bash run.sh
 
 `project.yml` is the XcodeGen source file. The `.xcodeproj` is generated from it — edit `project.yml`, not the pbxproj.
 
-Swift 6.0, macOS 15.0 / iOS 18.0 deployment targets. `SWIFT_STRICT_CONCURRENCY: targeted`.
+Swift 6.0, macOS 15.0 / iPadOS 16.0 deployment targets. `SWIFT_STRICT_CONCURRENCY: targeted`.
+
+Xcode 27 uses Device Hub for simulated and physical iPad devices. The command-line
+destination string for a simulator remains `platform=iOS Simulator`; there is no
+`platform=Device Hub` xcodebuild destination.
 
 ## Architecture
 
@@ -33,7 +37,7 @@ Shared/
   Connectivity/Message.swift      — shared JSON wire protocol and state-sync models
   Connectivity/BoothTransport.swift — framed channels and transport abstraction
   Connectivity/NetworkBoothTransport.swift — production Bonjour/TCP transport
-  Connectivity/MultipeerService.swift — temporary DEBUG fallback adapter
+  Connectivity/MultipeerService.swift — retained legacy adapter source; not app-selected
   State/BoothPhase.swift          — session state enum
   State/SessionStateMachine.swift — @Observable state machine
 
@@ -63,7 +67,7 @@ iPad/
 
 **Session lifecycle:** `BoothCoordinator.startSession()` → `SessionStateMachine` drives `BoothPhase` → countdown task fires → `CaptureService.captureStill(for:)` → photo stored in `capturedStills[photoIndex]` → `Compositor.render(images:)` composites strip → saved to `Application Support/PRC-PhotoBooth/Sessions/<id>/strip.png`.
 
-**Mac → iPad messaging:** Control messages are `Message` enum encoded as JSON inside an explicit 8-byte framed Network.framework control stream. Preview JPEGs use a separate latest-frame-wins stream. `NetworkBoothTransport` is production; `MultipeerService` is a DEBUG fallback. Both expose `BoothTransport` so coordinators do not know the transport.
+**Mac → iPad messaging:** Control messages are `Message` enum encoded as JSON inside an explicit 8-byte framed Network.framework control stream. Preview JPEGs use a separate latest-frame-wins stream. `NetworkBoothTransport` is the production transport selected by both apps; the legacy `MultipeerService` source is not app-selected.
 
 **Capture recovery:** `BoothPhase.captureRecovery` is authoritative for failed receive/decode/PTP attempts. Actions pass through `CustomerDisplayWorkflow.canApply`; `CaptureService`/`DSLRCameraSource` isolate attempt IDs and cancel all terminal tasks. `SessionSyncSnapshot` rebuilds the iPad after reconnect.
 
@@ -103,4 +107,4 @@ Sessions older than 60 days are auto-cleaned on launch. The local HTTP server (`
 
 ## PIN Gate
 
-`PINGateView` gates the Event Setup and Analytics tabs. The PIN is stored in the macOS Keychain via `KeychainHelper`. Default PIN is `1234` if none is set.
+`PINGateView` gates the Event Setup and Analytics tabs. The PIN is stored in the macOS Keychain via `KeychainHelper`, with bounded retry backoff; a legacy UserDefaults hash is migrated after a successful verification.

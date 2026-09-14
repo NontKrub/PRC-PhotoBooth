@@ -22,6 +22,10 @@ bash run.sh
 
 Use `xcodegen generate` after changing `project.yml`. Use the Mac and iPad build commands to validate each app separately. Run the test command before submitting behavior changes. `bash run.sh` is useful for manual end-to-end checks, but it contains a machine-specific simulator UUID and DerivedData path.
 
+Xcode 27 uses Device Hub for simulated and physical iPad devices. Keep
+`platform=iOS Simulator` in command-line simulator destinations; Device Hub is an
+Xcode UI/device-management surface, not an `xcodebuild` platform destination.
+
 ## Coding Style & Naming Conventions
 
 Use Swift 6 with 4-space indentation, matching `project.yml`. Prefer SwiftUI and `@Observable` patterns already used in `Mac/UI/BoothCoordinator.swift` and `iPad/UI/iPadViewModel.swift`. Keep platform-specific code in `Mac/` or `iPad/`; place wire formats, shared models, and state-machine logic in `Shared/`. Name tests after the behavior under test, for example `MessageTests` and `StateMachineTests`.

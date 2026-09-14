@@ -160,7 +160,9 @@ struct PINGateView: View {
         case .setup:
             phase = .confirm
         case .verify:
-            if verifyPIN(digits.joined()) {
+            if pinLockoutRemaining() > 0 {
+                triggerError(operatorString("Too many attempts. Try again shortly.", locale: locale))
+            } else if verifyPIN(digits.joined()) {
                 onSuccess()
             } else {
                 triggerError(operatorString("Incorrect PIN. Try again.", locale: locale))
@@ -170,7 +172,10 @@ struct PINGateView: View {
 
     private func commitConfirm() {
         if confirmDigits.joined() == digits.joined() {
-            setPIN(digits.joined())
+            guard setPIN(digits.joined()) else {
+                triggerError(operatorString("Admin PIN could not be saved. Try again.", locale: locale))
+                return
+            }
             onSuccess()
         } else {
             triggerError(operatorString("PINs don't match. Start over.", locale: locale))

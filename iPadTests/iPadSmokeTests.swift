@@ -441,7 +441,7 @@ struct AssetRetryRecoveryTests {
 
     @Test("review actions require decoded authoritative media")
     @MainActor
-    func reviewActionsRequireAuthoritativeMedia() {
+    func reviewActionsRequireAuthoritativeMedia() async {
         let viewModel = iPadViewModel()
         defer { viewModel.multipeer.disconnect() }
         let config = EventConfig(photoCount: 1)
@@ -464,13 +464,25 @@ struct AssetRetryRecoveryTests {
             UIColor.black.setFill()
             context.fill(CGRect(x: 0, y: 0, width: 1, height: 1))
         }
-        viewModel.stateMachine.applyAuthoritativeSnapshot(
-            sessionID: "review-media",
-            config: config,
-            phase: .review(photoIndex: 0),
-            reviewImageData: data
+        viewModel.multipeer.onControlMessage?(
+            .sessionSync(snapshot: SessionSyncSnapshot(
+                config: config,
+                sessionID: "review-media",
+                phase: .review(photoIndex: 0),
+                presentation: nil,
+                reviewThumbnailData: data,
+                isMirrored: false
+            ))
         )
-        #expect(viewModel.isReviewMediaReady)
+
+        for _ in 0..<200 {
+            if viewModel.isReviewMediaReady { break }
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+        #expect(
+            viewModel.isReviewMediaReady,
+            "review image decode failed: \(viewModel.reviewImageDecodeFailed)"
+        )
         #expect(CustomerDisplayWorkflow.canUseReviewActions(
             in: viewModel.stateMachine.phase,
             reviewMediaReady: viewModel.isReviewMediaReady

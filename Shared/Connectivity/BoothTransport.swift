@@ -32,6 +32,10 @@ public struct BoothPreviewDiagnostics: Equatable, Sendable {
     public var framesSubmitted = 0
     public var framesSent = 0
     public var framesCoalesced = 0
+    public var framesReceived = 0
+    public var framesDelivered = 0
+    public var framesCoalescedBeforeMainActor = 0
+    public var pendingFrames = 0
 
     public init() {}
 }
@@ -283,6 +287,26 @@ public final class BoothConnectionStatus {
 
     public func publishPreviewDiagnostics(_ diagnostics: BoothPreviewDiagnostics) {
         previewDiagnostics = diagnostics
+    }
+
+    public func publishPreviewWriteDiagnostics(_ diagnostics: BoothPreviewDiagnostics) {
+        previewDiagnostics.fps = diagnostics.fps
+        previewDiagnostics.bytesPerSecond = diagnostics.bytesPerSecond
+        previewDiagnostics.framesSubmitted = diagnostics.framesSubmitted
+        previewDiagnostics.framesSent = diagnostics.framesSent
+        previewDiagnostics.framesCoalesced = diagnostics.framesCoalesced
+    }
+
+    public func publishPreviewDeliveryDiagnostics(
+        framesReceived: Int,
+        framesDelivered: Int,
+        framesCoalesced: Int,
+        pendingFrames: Int
+    ) {
+        previewDiagnostics.framesReceived = framesReceived
+        previewDiagnostics.framesDelivered = framesDelivered
+        previewDiagnostics.framesCoalescedBeforeMainActor = framesCoalesced
+        previewDiagnostics.pendingFrames = pendingFrames
     }
 
     public func publishControlActivity(at date: Date = Date()) {
@@ -740,6 +764,111 @@ final class BoothPreviewWritePump: @unchecked Sendable {
     }
 }
 
+/// Queue-confined receiver-side preview pump. It deliberately schedules one
+/// MainActor drain for a burst and replaces the pending frame while that drain
+/// is waiting or decoding.
+final class BoothLatestPreviewDeliveryPump: @unchecked Sendable {
+    struct Snapshot: Equatable, Sendable {
+        let framesReceived: Int
+        let framesDelivered: Int
+        let framesCoalesced: Int
+        let pendingFrames: Int
+    }
+
+    private struct PendingFrame: Sendable {
+        let data: Data
+        let generation: Int
+    }
+
+    private let queue: DispatchQueue
+    private var currentGeneration = 0
+    private var pendingFrame: PendingFrame?
+    private var drainScheduled = false
+    private var framesReceived = 0
+    private var framesDelivered = 0
+    private var framesCoalesced = 0
+
+    var onDeliver: (@MainActor @Sendable (Data, Int, Snapshot) -> Void)?
+
+    init(queue: DispatchQueue) {
+        self.queue = queue
+    }
+
+    /// Call only from the transport queue. Keeping this method explicit avoids
+    /// enqueueing one unbounded DispatchWorkItem per incoming preview frame.
+    func enqueueOnQueue(_ data: Data, generation: Int) {
+        guard generation == currentGeneration else { return }
+        framesReceived += 1
+        if pendingFrame != nil { framesCoalesced += 1 }
+        pendingFrame = PendingFrame(data: data, generation: generation)
+        scheduleDrainOnQueue()
+    }
+
+    func reset(generation: Int) {
+        queue.sync {
+            currentGeneration = generation
+            pendingFrame = nil
+        }
+    }
+
+    func resetOnQueue(generation: Int) {
+        currentGeneration = generation
+        pendingFrame = nil
+    }
+
+    func snapshot() -> Snapshot {
+        queue.sync { snapshotOnQueue() }
+    }
+
+    private func snapshotOnQueue() -> Snapshot {
+        Snapshot(
+            framesReceived: framesReceived,
+            framesDelivered: framesDelivered,
+            framesCoalesced: framesCoalesced,
+            pendingFrames: pendingFrame == nil ? 0 : 1
+        )
+    }
+
+    private func scheduleDrainOnQueue() {
+        guard !drainScheduled else { return }
+        drainScheduled = true
+        Task { @MainActor [weak self] in
+            await self?.drainOnMainActor()
+        }
+    }
+
+    @MainActor
+    private func drainOnMainActor() async {
+        while let next = await takeNextOnQueue() {
+            onDeliver?(next.data, next.generation, next.snapshot)
+        }
+    }
+
+    private func takeNextOnQueue() async -> (data: Data, generation: Int, snapshot: Snapshot)? {
+        await withCheckedContinuation { continuation in
+            queue.async { [weak self] in
+                guard let self, let pendingFrame = self.pendingFrame else {
+                    self?.drainScheduled = false
+                    continuation.resume(returning: nil)
+                    return
+                }
+                self.pendingFrame = nil
+                guard pendingFrame.generation == self.currentGeneration else {
+                    self.drainScheduled = false
+                    continuation.resume(returning: nil)
+                    return
+                }
+                self.framesDelivered += 1
+                continuation.resume(returning: (
+                    pendingFrame.data,
+                    pendingFrame.generation,
+                    self.snapshotOnQueue()
+                ))
+            }
+        }
+    }
+}
+
 struct BoothTransportCallbackGate: Sendable {
     private(set) var generation = 0
 
@@ -963,13 +1092,21 @@ final class BoothTransportFrameDecoder: @unchecked Sendable {
                 }
                 return .asset(try BoothAssetTransfer.decode(payload))
             case .heartbeat:
-                guard channel == .control else { throw BoothFrameError.invalidMessage }
-                return .heartbeat
+                // Heartbeats are authenticated Message.heartbeat values on
+                // the ordered control channel. A separate raw channel must
+                // never refresh liveness or bypass the secure channel.
+                throw BoothFrameError.invalidMessage
             case .preview:
+                let payload: Data
                 if let secureChannel, secureChannel.isConfigured {
-                    return .preview(try secureChannel.open(frame.payload, channel: .preview))
+                    payload = try secureChannel.open(frame.payload, channel: .preview)
+                } else {
+                    payload = frame.payload
                 }
-                return .preview(frame.payload)
+                if (try? JSONDecoder().decode(BoothTransportHello.self, from: payload)) != nil {
+                    return .previewHello(payload)
+                }
+                return .preview(payload)
             }
         }
     }

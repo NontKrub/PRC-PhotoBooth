@@ -192,7 +192,7 @@ Execution ledger. Preserve earlier historical checklists below.
 - [x] Guard normal `SessionStateMachine` events and isolate authoritative restore/sync
 - [x] Synchronize Mac/iPad countdowns with absolute capture deadlines
 - [x] Add reliability, preflight, message-gate, state-machine, countdown, and occupied-port tests
-- [x] Build Mac/iPad Debug and Release configurations; preserve macOS 15/iOS 18 and universal Mac architectures
+- [x] Build Mac/iPad Debug and Release configurations; preserve macOS 15/iPadOS 16 and universal Mac architectures
 - [ ] Resolve pre-existing Thai localization test failure
 - [ ] Repeat Computer Use UI matrix when app-window access is available
 - [ ] Run physical Sony ZV-E10 and real-iPad reconnect matrix
@@ -397,3 +397,34 @@ Execution ledger. Preserve earlier historical checklists below.
 - [ ] Release verdict remains `NOT READY` until every mandatory gate has evidence.
 
 - [x] Current closure notes: protocol 6 and the authenticated CryptoKit directional channel are the active v1.4.2 security architecture. Earlier TLS/PSK, protocol-3, and simulator-only entries are historical and superseded, not current implementation TODOs. Generic iOS Release is device compilation evidence only; Device Hub GUI and physical-device validation remain unrun.
+
+## v1.4.2 stability implementation amendment — 2026-09-14
+
+- [x] Queue-confined latest-frame preview delivery with bounded pending state,
+  stale-generation invalidation, and delivery diagnostics.
+- [x] Authenticated Control-only liveness admission; raw heartbeat frames are
+  rejected and heartbeat/reconnect timers are transport-queue owned.
+- [x] Off-main bounded review/preview/asset image decoding with session-generation
+  guards and explicit corrupt-media recovery state.
+- [x] Finalization/automatic-print cancellation propagation and off-main print
+  document validation; AppKit submission remains MainActor-bound.
+- [x] Keychain-backed PIN storage with retry backoff and legacy hash migration;
+  app-level legacy MultipeerConnectivity selection removed.
+- [x] Native accessibility/status refinement for pairing, reconnect, review, and
+  Operations states.
+- [x] Deterministic preview flood, stale-generation, raw-heartbeat, reconnect
+  timer, and bounded-image tests.
+- [ ] Full lifecycle ownership split and the 12-second MainActor/network-failure
+  proof remain open; the current runtime extraction owns heartbeat/reconnect
+  timers, while socket/listener/browser ownership remains in the façade.
+- [x] Final automation rerun: Mac 410/410 in 58 suites; iPad 20/20; Mac/iPad
+  Debug and Release builds; unsigned generic iPadOS Release compile.
+- [x] Mac/iPad TSan reruns passed with no reported race diagnostics or runtime
+  warnings.
+- [x] Single Impeccable detector pass over affected UI returned no findings.
+- [ ] Instruments workload traces, Device Hub UI, required iPad Pro 9.7/iPadOS
+  16 physical network/camera/QR/printer/relaunch checks, and three-hour soak.
+  A paired iPad Air 11-inch (M4) on iOS 27 is available but is not equivalent
+  hardware and was not substituted.
+
+Current amendment verdict: `NOT READY FOR EVENT`.

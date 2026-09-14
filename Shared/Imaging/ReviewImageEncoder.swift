@@ -46,6 +46,10 @@ public enum ReviewImageEncoder {
     public static func thumbnailData(from data: Data, longestDimension: Int = 320) -> Data? {
         guard let source = CGImageSourceCreateWithData(data as CFData, nil),
               let image = CGImageSourceCreateImageAtIndex(source, 0, nil) else { return nil }
+        return thumbnailData(from: image, longestDimension: longestDimension)
+    }
+
+    public static func thumbnailData(from image: CGImage, longestDimension: Int = 320) -> Data? {
         return jpegData(image: image, longestDimension: longestDimension, quality: 0.65)
     }
 

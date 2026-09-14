@@ -1,8 +1,10 @@
 import SwiftUI
+import UIKit
 
 struct iPadContentView: View {
     @EnvironmentObject private var vm: iPadViewModel
     @State private var showingConnectionSettings = false
+    @AccessibilityFocusState private var reconnectOverlayFocused: Bool
 
     private var isThai: Bool { vm.selectedLanguage == .thai }
 
@@ -63,6 +65,8 @@ struct iPadContentView: View {
                         ? "กำลังเชื่อมต่อใหม่ กรุณารอเจ้าหน้าที่"
                         : "Reconnecting. Please wait for staff."
                 )
+                .accessibilityAddTraits(.isModal)
+                .accessibilityFocused($reconnectOverlayFocused)
             }
 
             if vm.isBoothSessionActive,
@@ -137,6 +141,29 @@ struct iPadContentView: View {
         .statusBarHidden(true)
         .persistentSystemOverlays(.hidden)
         .environment(\.locale, Locale(identifier: vm.selectedLanguage.localeIdentifier))
+        .onChange(of: vm.shouldShowReconnectOverlay) { isShowing in
+            guard isShowing else {
+                reconnectOverlayFocused = false
+                return
+            }
+            reconnectOverlayFocused = true
+            UIAccessibility.post(
+                notification: .announcement,
+                argument: isThai
+                    ? "กำลังเชื่อมต่อใหม่ กรุณารอเจ้าหน้าที่"
+                    : "Reconnecting. Please wait for staff."
+            )
+        }
+        .onChange(of: vm.assetRecoveryStatus) { recoveryStatus in
+            guard recoveryStatus == .reconnectRequired
+                || recoveryStatus == .operatorRecoveryRequired else { return }
+            let title = recoveryStatus.title(for: vm.selectedLanguage)
+            let detail = recoveryStatus.detail(for: vm.selectedLanguage)
+            UIAccessibility.post(
+                notification: .announcement,
+                argument: [title, detail].compactMap { $0 }.joined(separator: ". ")
+            )
+        }
         .sheet(isPresented: $showingConnectionSettings) {
             iPadConnectionSettingsView()
         }

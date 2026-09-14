@@ -212,6 +212,31 @@ private final class ControlStressServer: @unchecked Sendable {
 
 @Suite("Network route policy")
 struct NetworkRouteTests {
+    @Test("reconnect timer fires while MainActor is blocked")
+    func reconnectTimerIsQueueOwned() {
+        let queue = DispatchQueue(
+            label: "PRC-PhotoBooth.Tests.ReconnectRuntime",
+            qos: .userInitiated
+        )
+        let runtime = BoothNetworkTransportRuntime(queue: queue)
+        let mainEntered = DispatchSemaphore(value: 0)
+        let releaseMain = DispatchSemaphore(value: 0)
+        let reconnectFired = DispatchSemaphore(value: 0)
+        runtime.onReconnectDue = { _ in reconnectFired.signal() }
+
+        DispatchQueue.main.async(qos: .userInitiated) {
+            mainEntered.signal()
+            releaseMain.wait()
+        }
+        #expect(mainEntered.wait(timeout: .now() + 1) == .success)
+
+        runtime.scheduleReconnect(after: 0.05, attempt: 2)
+        #expect(reconnectFired.wait(timeout: .now() + 1) == .success)
+
+        releaseMain.signal()
+        runtime.cancelReconnect()
+    }
+
     @Test("Wi-Fi preference never selects LAN")
     func wifiPreferenceWins() {
         var route = BoothNetworkRouteMachine(preference: .wifi)
@@ -887,12 +912,9 @@ struct TransportRecoveryPolicyTests {
         let oldDecoder = BoothTransportFrameDecoder()
         #expect(try oldDecoder.decode(Data(frame.prefix(4)), channel: .control).isEmpty)
 
-        let newFrames = try BoothTransportFrameDecoder().decode(frame, channel: .control)
-        #expect(newFrames.count == 1)
-        if case .heartbeat = newFrames[0] {
-            return
+        #expect(throws: BoothFrameError.invalidMessage) {
+            try BoothTransportFrameDecoder().decode(frame, channel: .control)
         }
-        Issue.record("The replacement decoder did not receive the heartbeat frame.")
     }
 
     @Test("Control writer delivers 10,000 ordered secure messages")

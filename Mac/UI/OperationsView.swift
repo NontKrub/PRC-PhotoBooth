@@ -112,7 +112,9 @@ enum OperationsStatusLogic {
         authenticated: Bool,
         previewConnected: Bool,
         secureConnected: Bool = true,
-        assetReady: Bool = true
+        assetReady: Bool = true,
+        fallbackActive: Bool = false,
+        reconnectInProgress: Bool = false
     ) -> OperationsSectionStatus {
         guard case .connected = state else {
             return OperationsSectionStatus(
@@ -122,6 +124,12 @@ enum OperationsStatusLogic {
         }
         guard authenticated else {
             return OperationsSectionStatus(summary: "Trust pending", severity: .warning)
+        }
+        if reconnectInProgress {
+            return OperationsSectionStatus(summary: "Reconnecting…", severity: .warning)
+        }
+        if fallbackActive {
+            return OperationsSectionStatus(summary: "Wi-Fi fallback active", severity: .warning)
         }
         guard secureConnected else {
             return OperationsSectionStatus(summary: "Secure channel unavailable", severity: .failure)
@@ -691,8 +699,14 @@ struct OperationsView: View {
             authenticated: connectionStatus.isPeerAuthenticated,
             previewConnected: connectionStatus.isPreviewChannelConnected,
             secureConnected: connectionStatus.isSecureChannelEstablished,
-            assetReady: connectionStatus.isAssetChannelReady
+            assetReady: connectionStatus.isAssetChannelReady,
+            fallbackActive: connectionStatus.isFallbackActive,
+            reconnectInProgress: connectionStatus.isReconnectInProgress
         )
+    }
+
+    private var connectionPresentation: BoothConnectionPresentation {
+        BoothConnectionPresentationResolver.resolve(connectionStatus)
     }
 
     private var connectionStabilitySection: some View {
@@ -716,6 +730,12 @@ struct OperationsView: View {
                 healthValue("Secure", connectionStatus.isSecureChannelEstablished ? "Established" : "Unavailable")
                 healthValue("Assets", connectionStatus.isAssetChannelReady ? "Ready" : "Unavailable")
                 healthValue("Trust", connectionStatus.isPeerAuthenticated ? "Authenticated" : "Not authenticated")
+            }
+            if let fallbackText = connectionPresentation.fallbackText {
+                Label(fallbackText, systemImage: "wifi.exclamationmark")
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+                    .accessibilityIdentifier("Wi-Fi Fallback Warning")
             }
         }
     }

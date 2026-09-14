@@ -16,6 +16,8 @@ final class SessionJobQueue {
     private var cloudWorkerTask: Task<Void, Never>?
     private var activeCloudJobID: String?
     private var activeCloudExecutionTask: Task<Void, Error>?
+    private var activeFinalizationJobID: String?
+    private var activeFinalizationExecutionTask: Task<Void, Error>?
     private var persistentQueueError: String?
 
     private let finalizationKinds: [SessionJobKind] = [
@@ -50,11 +52,14 @@ final class SessionJobQueue {
         finalizationWorkerTask?.cancel()
         cloudWorkerTask?.cancel()
         activeCloudExecutionTask?.cancel()
+        activeFinalizationExecutionTask?.cancel()
         startupTask = nil
         finalizationWorkerTask = nil
         cloudWorkerTask = nil
         activeCloudJobID = nil
         activeCloudExecutionTask = nil
+        activeFinalizationJobID = nil
+        activeFinalizationExecutionTask = nil
     }
 
     func refresh() {
@@ -127,6 +132,9 @@ final class SessionJobQueue {
                 if activeCloudJobID == jobID {
                     activeCloudExecutionTask?.cancel()
                 }
+                if activeFinalizationJobID == jobID {
+                    activeFinalizationExecutionTask?.cancel()
+                }
                 await reload()
             } catch {
                 lastQueueError = error.localizedDescription
@@ -142,6 +150,12 @@ final class SessionJobQueue {
                 if let activeCloudJobID,
                    await store.snapshot().contains(where: { $0.id == activeCloudJobID && $0.sessionID == sessionID }) {
                     activeCloudExecutionTask?.cancel()
+                }
+                if let activeFinalizationJobID,
+                   await store.snapshot().contains(where: {
+                       $0.id == activeFinalizationJobID && $0.sessionID == sessionID
+                   }) {
+                    activeFinalizationExecutionTask?.cancel()
                 }
                 await reload()
             } catch {
@@ -291,20 +305,27 @@ final class SessionJobQueue {
     }
 
     private func execute(_ job: SessionJob) async throws {
-        guard job.kind == .cloudUpload else {
-            try await executor.execute(job)
-            return
+        let task: Task<Void, Error> = Task { @MainActor [weak self] in
+            guard let self else { throw CancellationError() }
+            try Task.checkCancellation()
+            try await self.executor.execute(job)
+            try Task.checkCancellation()
         }
-
-        let task: Task<Void, Error> = Task { @MainActor in
-            try await executor.execute(job)
+        if job.kind == .cloudUpload {
+            activeCloudJobID = job.id
+            activeCloudExecutionTask = task
+        } else {
+            activeFinalizationJobID = job.id
+            activeFinalizationExecutionTask = task
         }
-        activeCloudJobID = job.id
-        activeCloudExecutionTask = task
         defer {
             if activeCloudJobID == job.id {
                 activeCloudJobID = nil
                 activeCloudExecutionTask = nil
+            }
+            if activeFinalizationJobID == job.id {
+                activeFinalizationJobID = nil
+                activeFinalizationExecutionTask = nil
             }
         }
         try await task.value

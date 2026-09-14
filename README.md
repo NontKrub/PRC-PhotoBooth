@@ -10,7 +10,7 @@ Version 1.4.2 keeps iPadOS 16 as the minimum and adds stability fixes, trusted M
 - Camera support through AVFoundation for built-in, USB, and Continuity Cameras.
 - USB-tethered DSLR/mirrorless capture through ImageCaptureCore, including live preview for supported Sony PTP cameras.
 - Customer workflow with countdowns, photo review, keep/retake decisions, and operator overrides.
-- Network.framework Mac↔iPad control and preview transport with Bonjour discovery, framing, heartbeat, reconnect, and state resynchronization. MultipeerConnectivity remains a debug fallback.
+- Network.framework Mac↔iPad control and preview transport with Bonjour discovery, framing, heartbeat, reconnect, and state resynchronization. `NetworkBoothTransport` is the app-selected production transport.
 - Persistent Mac/iPad identities, editable device names, one-time six-digit PIN or QR pairing, Keychain-backed trusted reconnect, and explicit preferred-peer selection. Discovery never silently selects an unknown device.
 - Ethernet-first routing with conservative idle recovery, explicit manual LAN retry, and Wi-Fi fallback shown as a warning when the preferred wired route is unavailable.
 - Recoverable capture failures with Try Receive Again, Retake, Continue Session, and Keep Previous Photo actions.
@@ -39,7 +39,7 @@ Version 1.2 has no audio countdown. Countdown and pose prompts are visual only.
            └── Shared models, session state machine, and message protocol
 ```
 
-Control messages are JSON-encoded and sent reliably over a framed Network.framework control connection. Preview JPEGs use a separate latest-frame-wins connection within the same `NetworkBoothTransport`, so preview traffic cannot delay session controls. Pairing runs over that existing control channel: the operator starts a two-minute Mac pairing session, then pairs an explicitly selected iPad with a six-digit PIN or QR payload. Reconnect uses mutual nonce/HMAC authentication with the long-lived secret kept in each device's Keychain. Bonjour advertises `_prc-control._tcp` and `_prc-preview._tcp` with public identity metadata only; it never advertises PINs, QR tokens, or secrets. A DEBUG-only `--legacy-multipeer` flag keeps the old adapter available while hardware migration is validated.
+Control messages are JSON-encoded and sent reliably over a framed Network.framework control connection. Preview JPEGs use a separate latest-frame-wins connection within the same `NetworkBoothTransport`, so preview traffic cannot delay session controls. Pairing runs over that existing control channel: the operator starts a two-minute Mac pairing session, then pairs an explicitly selected iPad with a six-digit PIN or QR payload. Reconnect uses mutual nonce/HMAC authentication with the long-lived secret kept in each device's Keychain. Bonjour advertises `_prc-control._tcp` and `_prc-preview._tcp` with public identity metadata only; it never advertises PINs, QR tokens, or secrets.
 
 ## Requirements
 
@@ -49,6 +49,11 @@ Control messages are JSON-encoded and sent reliably over a framed Network.framew
 - [XcodeGen](https://github.com/yonaskolb/XcodeGen) when regenerating the project from `project.yml`
 - A camera supported by AVFoundation or a compatible USB-tethered camera for DSLR mode
 - Local-network access between the Mac and iPad for discovery and control
+
+Xcode 27 uses Device Hub for simulated and physical iPad devices. For command-line
+builds and tests, simulated destinations continue to use `platform=iOS Simulator`.
+Wi-Fi preference accepts the working local TCP path, including a Personal Hotspot;
+it does not require the path monitor to classify that path as `InterfaceType.wifi`.
 
 The Mac target is configured as a universal application for Apple Silicon and Intel Macs. Camera, microphone, and local-network permissions must be granted at first launch. LAN mode requires a reachable wired Ethernet path on both devices; otherwise the transport reports and uses Wi-Fi fallback.
 
@@ -94,7 +99,8 @@ xcodebuild \
 
 ### Build the iPad app
 
-Replace `<simulator-uuid>` with an available iPad simulator identifier, or use a connected iPad destination.
+Replace `<simulator-uuid>` with an available iPad simulator identifier. Physical iPad
+build/install/inspection is performed through Xcode 27 Device Hub.
 
 ```bash
 xcodebuild \

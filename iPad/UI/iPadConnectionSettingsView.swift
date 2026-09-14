@@ -168,7 +168,7 @@ struct iPadConnectionSettingsView: View {
                 Text(code)
                     .font(.system(size: 32, weight: .bold, design: .monospaced))
                     .tracking(4)
-                    .accessibilityLabel("Verification code " + code)
+                    .accessibilityLabel("Verification code " + code.map { String($0) }.joined(separator: " "))
                     .accessibilityIdentifier("Pairing Verification Code")
                 Text("Ask the operator to tap Codes Match on the Mac.")
                     .font(.caption)
@@ -304,6 +304,7 @@ struct iPadConnectionSettingsView: View {
                 Label("Scan Pairing QR", systemImage: "qrcode.viewfinder")
             }
             .disabled(!vm.canChangeConnection)
+            .accessibilityHint("Recommended for the fastest pairing.")
             .accessibilityIdentifier("Scan Pairing QR")
 
             Button {
@@ -409,11 +410,12 @@ private struct PairingPINEntryView: View {
                         }
                     }
                 }
-                TextField("6-digit PIN", text: $pin)
+                SecureField("6-digit PIN", text: $pin)
                     .keyboardType(.numberPad)
                     .onChange(of: pin) { value in
                         pin = String(value.filter { $0 >= "0" && $0 <= "9" }.prefix(6))
                     }
+                    .accessibilityLabel("6-digit PIN")
                     .accessibilityIdentifier("Pairing PIN Entry")
 
                 Button("Pair") {

@@ -6,13 +6,6 @@ struct ReviewView: View {
 
     private var isThai: Bool { vm.selectedLanguage == .thai }
 
-    var reviewImage: CGImage? {
-        guard let data = vm.stateMachine.reviewImageData,
-              let src = CGImageSourceCreateWithData(data as CFData, nil)
-        else { return nil }
-        return CGImageSourceCreateImageAtIndex(src, 0, nil)
-    }
-
     var body: some View {
         ZStack {
             Color.black.ignoresSafeArea()
@@ -35,11 +28,27 @@ struct ReviewView: View {
                 ZStack {
                     RoundedRectangle(cornerRadius: 18)
                         .fill(Color(white: 0.1))
-                    if let img = reviewImage {
+                    if let img = vm.reviewImage {
                         Image(img, scale: 1, label: Text("Shot"))
                             .resizable()
                             .scaledToFit()
                             .clipShape(RoundedRectangle(cornerRadius: 18))
+                    } else if vm.reviewImageDecodeFailed {
+                        VStack(spacing: 14) {
+                            Image(systemName: "exclamationmark.triangle")
+                                .font(.title)
+                            Text(isThai ? "ไม่สามารถกู้คืนรูปภาพได้" : "Photo could not be restored.")
+                                .font(.headline)
+                            Text(isThai ? "กรุณาแจ้งผู้ควบคุมให้ลองอีกครั้ง" : "Ask the operator to try again.")
+                                .font(.caption)
+                        }
+                        .foregroundStyle(.white.opacity(0.78))
+                        .multilineTextAlignment(.center)
+                        .accessibilityElement(children: .combine)
+                        .accessibilityLabel(
+                            isThai ? "ไม่สามารถกู้คืนรูปภาพได้ กรุณาแจ้งผู้ควบคุมให้ลองอีกครั้ง" :
+                                "Photo could not be restored. Ask the operator to try again."
+                        )
                     } else {
                         VStack(spacing: 14) {
                             ProgressView()
@@ -48,6 +57,12 @@ struct ReviewView: View {
                             Text(isThai ? "กำลังกู้คืนรูปภาพ…" : "Restoring photo…")
                                 .font(.headline)
                                 .foregroundStyle(.white.opacity(0.78))
+                            if let detail = vm.assetRecoveryStatus.detail(for: vm.selectedLanguage) {
+                                Text(detail)
+                                    .font(.caption)
+                                    .foregroundStyle(.white.opacity(0.65))
+                                    .multilineTextAlignment(.center)
+                            }
                         }
                         .accessibilityElement(children: .combine)
                         .accessibilityLabel(

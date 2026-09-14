@@ -265,8 +265,10 @@ final class SessionJobExecutor: SessionJobExecuting {
     }
 
     private func printStrip(_ manifest: SessionManifest) async throws {
+        try Task.checkCancellation()
         let url = sessionDirectory(for: manifest).appendingPathComponent(manifest.stripFileName ?? "strip.png")
         try await printer.printStrip(at: url, showPrintDialog: false)
+        try Task.checkCancellation()
     }
 
     private func sessionDirectory(for manifest: SessionManifest) -> URL {

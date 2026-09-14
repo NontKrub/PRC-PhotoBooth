@@ -75,6 +75,15 @@ enum PrintLayoutGeometry {
     }
 }
 
+nonisolated enum PrinterDocumentValidator {
+    static func isReadableImage(at url: URL) -> Bool {
+        guard FileManager.default.fileExists(atPath: url.path),
+              let source = CGImageSourceCreateWithURL(url as CFURL, nil) else { return false }
+        return CGImageSourceGetCount(source) > 0
+            && CGImageSourceCreateImageAtIndex(source, 0, nil) != nil
+    }
+}
+
 @MainActor
 struct PrinterPrintRequest {
     let document: PrinterDocument
@@ -177,10 +186,13 @@ final class PrinterService {
 
     func printStrip(at url: URL, showPrintDialog: Bool) async throws {
         refreshPrinters()
+        let isReadableImage = await Task.detached(priority: .utility) {
+            PrinterDocumentValidator.isReadableImage(at: url)
+        }.value
         guard FileManager.default.fileExists(atPath: url.path) else {
             throw JobExecutionError.permanent(PrinterServiceError.missingSource(url).localizedDescription)
         }
-        guard Self.isReadableImage(at: url) else {
+        guard isReadableImage else {
             throw JobExecutionError.permanent(PrinterServiceError.invalidImage(url).localizedDescription)
         }
 
@@ -208,10 +220,6 @@ final class PrinterService {
         }
     }
 
-    private static func isReadableImage(at url: URL) -> Bool {
-        guard let source = CGImageSourceCreateWithURL(url as CFURL, nil) else { return false }
-        return CGImageSourceCreateImageAtIndex(source, 0, nil) != nil
-    }
 }
 
 @MainActor

@@ -950,9 +950,9 @@ private struct MacPairingPanel: View {
                 Text(code)
                     .font(.system(size: 32, weight: .bold, design: .monospaced))
                     .tracking(4)
-                    .accessibilityLabel("Verification code " + code)
+                    .accessibilityLabel("Verification code " + code.map { String($0) }.joined(separator: " "))
                     .accessibilityIdentifier("Pairing Verification Code")
-                Button("Codes Match") {
+                Button("Codes Match — Continue") {
                     transport.confirmPairingVerification()
                 }
                 .buttonStyle(.borderedProminent)
@@ -1003,7 +1003,7 @@ private struct MacPairingPanel: View {
                     Text(pin)
                         .font(.system(size: 32, weight: .bold, design: .monospaced))
                         .tracking(4)
-                        .accessibilityLabel("Pairing PIN " + pin)
+                        .accessibilityLabel("Pairing PIN " + pin.map { String($0) }.joined(separator: " "))
                         .accessibilityIdentifier("Pairing PIN Display")
                 }
 

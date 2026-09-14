@@ -57,6 +57,20 @@ struct ReviewImageEncoderTests {
         #expect(payload.count < BoothFrameParser.maximumPayloadLength)
     }
 
+    @Test("Display decoding downsamples before bitmap creation")
+    func displayDecodingIsBounded() throws {
+        let context = SessionMessageContext(sessionID: "session", sequence: 4)
+        let data = try ReviewImageEncoder.encode(
+            image: makeImage(width: 1_200, height: 900),
+            context: context,
+            index: 0
+        )
+        let image = try #require(BoothImageDecoder.decode(data, maxPixelSize: 120))
+
+        #expect(max(image.width, image.height) <= 120)
+        #expect(BoothImageDecoder.decode(Data("not-an-image".utf8)) == nil)
+    }
+
     private func makeImage(width: Int, height: Int, noisy: Bool = false) -> CGImage {
         var bytes = [UInt8](repeating: 0, count: width * height * 4)
         for index in stride(from: 0, to: bytes.count, by: 4) {

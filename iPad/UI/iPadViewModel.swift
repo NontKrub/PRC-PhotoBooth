@@ -15,6 +15,8 @@ final class iPadViewModel: ObservableObject {
     let stateMachine: SessionStateMachine
 
     @Published var latestPreviewImage: CGImage?
+    @Published private(set) var reviewImage: CGImage?
+    @Published private(set) var reviewImageDecodeFailed = false
     @Published var eventConfig: EventConfig = EventConfig()
     @Published var experienceCatalog: CustomerExperienceCatalog?
     @Published var experienceAssets: [String: CGImage] = [:]
@@ -37,6 +39,14 @@ final class iPadViewModel: ObservableObject {
     private var previewDecodeTask: Task<Void, Never>?
     private var previewStaleTask: Task<Void, Never>?
     private var lastPreviewFrameAt: Date?
+    private struct ReviewImageCacheKey: Equatable, Sendable {
+        let sessionID: String
+        let photoIndex: Int
+        let digest: Data
+    }
+    private var reviewImageCacheKey: ReviewImageCacheKey?
+    private var reviewImageDecodeTask: Task<Void, Never>?
+    private var reviewImageDecodeGeneration: UInt64 = 0
 #if DEBUG
     private var previewMetricsStartedAt = Date()
     private var previewFramesReceived = 0
@@ -103,9 +113,8 @@ final class iPadViewModel: ObservableObject {
             && connectionStatus.isAssetChannelReady
     }
     var isReviewMediaReady: Bool {
-        guard case .review = stateMachine.phase,
-              let data = stateMachine.reviewImageData else { return false }
-        return Self.cgImage(from: data) != nil
+        guard case .review = stateMachine.phase else { return false }
+        return reviewImage != nil
     }
     var isReviewMediaMissing: Bool {
         guard case .review = stateMachine.phase else { return false }
@@ -180,15 +189,7 @@ final class iPadViewModel: ObservableObject {
     }
 
     init() {
-#if DEBUG
-        if ProcessInfo.processInfo.arguments.contains("--legacy-multipeer") {
-            multipeer = MultipeerService(role: .iPad)
-        } else {
-            multipeer = NetworkBoothTransport(role: .iPad)
-        }
-#else
         multipeer = NetworkBoothTransport(role: .iPad)
-#endif
         stateMachine = SessionStateMachine()
         stateMachine.objectWillChange
             .sink { [weak self] _ in self?.objectWillChange.send() }
@@ -332,7 +333,7 @@ final class iPadViewModel: ObservableObject {
                   packet.eventID == catalog.eventID,
                   packet.revision == catalog.revision,
                   packet.kind == .templatePreview,
-                  let image = Self.cgImage(from: packet.jpegData) else { break }
+                  let image = BoothImageDecoder.decode(packet.jpegData, maxPixelSize: 2_048) else { break }
             experienceAssets[packet.assetID] = image
 
         case .setMirrored(let mirrored):
@@ -370,6 +371,7 @@ final class iPadViewModel: ObservableObject {
                 .countdown(photoIndex: descriptor.photoIndex, secondsRemaining: max(0, Int(ceil(descriptor.captureAt.timeIntervalSinceNow)))),
                 countdownDeadline: descriptor.captureAt
             )
+            clearReviewImage()
             runCountdown(descriptor)
 
         case .shotCaptured(let context, let index, let thumbData):
@@ -377,12 +379,12 @@ final class iPadViewModel: ObservableObject {
             cancelCountdown()
             clearTransientRequestState()
             stateMachine.applyAuthoritativePhase(.captured(photoIndex: index))
-            let historyThumbnail = ReviewImageEncoder.thumbnailData(from: thumbData) ?? thumbData
             stateMachine.enterReview(
                 photoIndex: index,
-                thumbnailData: historyThumbnail,
+                thumbnailData: thumbData,
                 reviewImageData: thumbData
             )
+            scheduleReviewImageDecode(photoIndex: index)
 
         case .shotCapturedAsset(let context, let index, let asset):
             guard accept(context, message: "shotCapturedAsset") else { break }
@@ -401,6 +403,7 @@ final class iPadViewModel: ObservableObject {
             cancelCountdown()
             clearTransientRequestState()
             stateMachine.applyAuthoritativePhase(.captureRecovery(photoIndex: index, failure: failure))
+            clearReviewImage()
 
         case .reviewDecision(let context, let action):
             guard accept(context, message: "reviewDecision") else { break }
@@ -414,13 +417,17 @@ final class iPadViewModel: ObservableObject {
             case .keep: stateMachine.keepShot(photoIndex: idx)
             case .retake: stateMachine.retakeShot(photoIndex: idx)
             }
+            clearReviewImage()
 
         case .sessionFinished(let context, let qr, let stripData, _):
             guard accept(context, message: "sessionFinished") else { break }
             cancelCountdown()
             clearTransientRequestState()
-            stripThumbImage = stripData.flatMap(Self.cgImage(from:))
+            stripThumbImage = stripData.flatMap {
+                BoothImageDecoder.decode($0, maxPixelSize: 2_048)
+            }
             stateMachine.applyAuthoritativePhase(.finished(qrPayload: qr))
+            clearReviewImage()
 
         case .sessionFinishedAssets(let context, let qr, let stripAsset, _):
             guard accept(context, message: "sessionFinishedAssets") else { break }
@@ -429,9 +436,10 @@ final class iPadViewModel: ObservableObject {
             stripThumbImage = nil
             if let stripAsset { registerExpectedAsset(stripAsset) }
             if let stripAsset, let data = cachedAsset(for: stripAsset) {
-                stripThumbImage = Self.cgImage(from: data)
+                stripThumbImage = BoothImageDecoder.decode(data, maxPixelSize: 2_048)
             }
             stateMachine.applyAuthoritativePhase(.finished(qrPayload: qr))
+            clearReviewImage()
             requestMissingExpectedAssets()
 
         case .assetUnavailable(let reference, _):
@@ -448,9 +456,17 @@ final class iPadViewModel: ObservableObject {
             } else if !stateMachine.currentSessionID.isEmpty {
                 break
             }
-            clearTransientRequestState()
-            if case .cancelSession = action { cancelCountdown() }
+            if case .cancelSession = action {
+                cancelCountdown()
+                clearSessionMedia()
+            } else {
+                clearTransientRequestState()
+            }
             stateMachine.operatorOverride(action)
+            clearReviewImage()
+            if case .cancelSession = action {
+                sessionMessageGate.synchronize(sessionID: nil, sequence: 0)
+            }
 
         default: break
         }
@@ -460,6 +476,7 @@ final class iPadViewModel: ObservableObject {
         clearTransientRequestState()
         previewDecodeTask?.cancel()
         previewDecodeTask = nil
+        clearReviewImage()
         pendingPreviewJPEG = nil
         lastPreviewFrameAt = nil
         latestPreviewImage = nil
@@ -646,12 +663,13 @@ final class iPadViewModel: ObservableObject {
 
     private func installPresentationImages(_ presentation: SessionPresentation) {
         promptImages = presentation.prompts.reduce(into: [String: CGImage]()) { result, prompt in
-            if let data = prompt.imageData, let image = Self.cgImage(from: data) {
+            if let data = prompt.imageData,
+               let image = BoothImageDecoder.decode(data, maxPixelSize: 2_048) {
                 result[prompt.promptID] = image
             }
             if let asset = prompt.imageAsset,
                let data = cachedAsset(for: asset),
-               let image = Self.cgImage(from: data) {
+               let image = BoothImageDecoder.decode(data, maxPixelSize: 2_048) {
                 result[prompt.promptID] = image
             }
         }
@@ -676,7 +694,7 @@ final class iPadViewModel: ObservableObject {
                     generation: generation
                 ) else { return }
                 let image = await Task.detached(priority: .userInitiated) {
-                    Self.cgImage(from: data)
+                    Self.decodeAsset(data, kind: chunk.metadata.kind)
                 }.value
                 guard let self else { return }
                 guard let image else {
@@ -876,7 +894,7 @@ final class iPadViewModel: ObservableObject {
             return
         }
         var keptShots = stateMachine.keptShots
-        keptShots[photoIndex] = ReviewImageEncoder.thumbnailData(from: data) ?? data
+        keptShots[photoIndex] = data
         stateMachine.applyAuthoritativeSnapshot(
             sessionID: currentSessionID,
             config: eventConfig,
@@ -888,6 +906,7 @@ final class iPadViewModel: ObservableObject {
             acceptedPhotoIndices: stateMachine.acceptedPhotoIndices,
             deferredPhotoIndices: stateMachine.deferredPhotoIndices
         )
+        scheduleReviewImageDecode(photoIndex: photoIndex)
     }
 
     private func applySessionSync(_ snapshot: SessionSyncSnapshot) {
@@ -918,16 +937,16 @@ final class iPadViewModel: ObservableObject {
                 reviewAssetIndices[reviewAsset.assetID] = index
                 if let data = cachedAsset(for: reviewAsset) {
                     reviewImageData = data
-                    keptShots[index] = ReviewImageEncoder.thumbnailData(from: data) ?? data
+                    keptShots[index] = data
                 }
             } else if let data = snapshot.reviewThumbnailData {
                 reviewImageData = data
-                keptShots[index] = ReviewImageEncoder.thumbnailData(from: data) ?? data
+                keptShots[index] = data
             }
         }
         for (index, reference) in snapshot.keptShotAssets {
             if let data = cachedAsset(for: reference) {
-                keptShots[index] = ReviewImageEncoder.thumbnailData(from: data) ?? data
+                keptShots[index] = data
             }
         }
         stateMachine.applyAuthoritativeSnapshot(
@@ -941,13 +960,18 @@ final class iPadViewModel: ObservableObject {
             acceptedPhotoIndices: Set(snapshot.acceptedPhotoIndices),
             deferredPhotoIndices: Set(snapshot.deferredPhotoIndices)
         )
+        if case .review(let index) = snapshot.phase, reviewImageData != nil {
+            scheduleReviewImageDecode(photoIndex: index)
+        } else {
+            clearReviewImage()
+        }
         if case .finished = snapshot.phase {
             stripThumbImage = nil
             if let stripAsset = snapshot.stripAsset,
                let data = cachedAsset(for: stripAsset) {
-                stripThumbImage = Self.cgImage(from: data)
+                stripThumbImage = BoothImageDecoder.decode(data, maxPixelSize: 2_048)
             } else if let data = snapshot.stripThumbnailData {
-                stripThumbImage = Self.cgImage(from: data)
+                stripThumbImage = BoothImageDecoder.decode(data, maxPixelSize: 2_048)
             }
         }
         if let presentation = snapshot.presentation { installPresentationImages(presentation) }
@@ -981,6 +1005,71 @@ final class iPadViewModel: ObservableObject {
         countdownTask = nil
     }
 
+    private func scheduleReviewImageDecode(photoIndex: Int) {
+        guard case .review(let currentPhotoIndex) = stateMachine.phase,
+              currentPhotoIndex == photoIndex,
+              let data = stateMachine.reviewImageData,
+              !stateMachine.currentSessionID.isEmpty else {
+            clearReviewImage()
+            return
+        }
+
+        let key = ReviewImageCacheKey(
+            sessionID: stateMachine.currentSessionID,
+            photoIndex: photoIndex,
+            digest: Data(SHA256.hash(data: data))
+        )
+        guard key != reviewImageCacheKey else { return }
+
+        reviewImageDecodeGeneration &+= 1
+        let generation = reviewImageDecodeGeneration
+        reviewImageDecodeTask?.cancel()
+        reviewImageCacheKey = key
+        reviewImage = nil
+        reviewImageDecodeFailed = false
+        let sessionID = stateMachine.currentSessionID
+        reviewImageDecodeTask = Task { @MainActor [weak self] in
+            let image = await Task.detached(priority: .userInitiated) {
+                BoothImageDecoder.decode(data, maxPixelSize: ReviewImageEncoder.targetLongestDimension)
+            }.value
+            guard let self,
+                  !Task.isCancelled,
+                  self.reviewImageDecodeGeneration == generation,
+                  self.reviewImageCacheKey == key,
+                  self.stateMachine.currentSessionID == sessionID,
+                  case .review(let currentPhotoIndex) = self.stateMachine.phase,
+                  currentPhotoIndex == photoIndex else { return }
+            self.reviewImage = image
+            self.reviewImageDecodeFailed = image == nil
+            if let image,
+               let thumbnail = ReviewImageEncoder.thumbnailData(from: image) {
+                var keptShots = self.stateMachine.keptShots
+                keptShots[photoIndex] = thumbnail
+                self.stateMachine.applyAuthoritativeSnapshot(
+                    sessionID: sessionID,
+                    config: self.eventConfig,
+                    phase: .review(photoIndex: photoIndex),
+                    keptShots: keptShots,
+                    reviewImageData: data,
+                    nextPhotoIndex: self.stateMachine.nextPhotoIndex,
+                    countdownDeadline: nil,
+                    acceptedPhotoIndices: self.stateMachine.acceptedPhotoIndices,
+                    deferredPhotoIndices: self.stateMachine.deferredPhotoIndices
+                )
+            }
+            self.reviewImageDecodeTask = nil
+        }
+    }
+
+    private func clearReviewImage() {
+        reviewImageDecodeGeneration &+= 1
+        reviewImageDecodeTask?.cancel()
+        reviewImageDecodeTask = nil
+        reviewImageCacheKey = nil
+        reviewImage = nil
+        reviewImageDecodeFailed = false
+    }
+
     private func updatePreview(_ jpegData: Data) {
         if pendingPreviewJPEG != nil, previewDecodeTask != nil {
 #if DEBUG
@@ -1000,7 +1089,7 @@ final class iPadViewModel: ObservableObject {
             while let jpeg = self.pendingPreviewJPEG {
                 self.pendingPreviewJPEG = nil
                 let image = await Task.detached(priority: .userInitiated) {
-                    Self.cgImage(from: jpeg)
+                    BoothImageDecoder.decode(jpeg, maxPixelSize: 1_600)
                 }.value
                 guard !Task.isCancelled else { return }
                 if let image {
@@ -1046,9 +1135,13 @@ final class iPadViewModel: ObservableObject {
 #endif
     }
 
-    private nonisolated static func cgImage(from data: Data) -> CGImage? {
-        guard let src = CGImageSourceCreateWithData(data as CFData, nil) else { return nil }
-        return CGImageSourceCreateImageAtIndex(src, 0, nil)
+    private nonisolated static func decodeAsset(_ data: Data, kind: BoothAssetKind) -> CGImage? {
+        let maxPixelSize: Int
+        switch kind {
+        case .reviewImage: maxPixelSize = ReviewImageEncoder.targetLongestDimension
+        case .stripThumbnail, .promptImage, .templatePreview, .gifThumbnail: maxPixelSize = 2_048
+        }
+        return BoothImageDecoder.decode(data, maxPixelSize: maxPixelSize)
     }
 
     // MARK: - Customer decisions
@@ -1418,11 +1511,13 @@ final class iPadViewModel: ObservableObject {
                   let data = jpegDataForDemo(filtered) else { return }
             self.reviewDecisionPending = false
             self.stateMachine.enterReview(photoIndex: photoIndex, thumbnailData: data)
+            self.scheduleReviewImageDecode(photoIndex: photoIndex)
         }
     }
 
     private func demoAdvance(afterKeeping photoIndex: Int) {
         stateMachine.keepShot(photoIndex: photoIndex)
+        clearReviewImage()
         if photoIndex + 1 < eventConfig.photoCount {
             scheduleDemoShot(photoIndex: photoIndex + 1)
         } else {
