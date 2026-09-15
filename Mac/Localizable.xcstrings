@@ -1874,6 +1874,28 @@
         }
       }
     },
+    "Customer sessions remain available while printing." : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "เซสชันของลูกค้ายังดำเนินต่อได้ขณะกำลังพิมพ์"
+          }
+        }
+      }
+    },
+    "A print is already in progress." : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "มีงานพิมพ์กำลังดำเนินการอยู่"
+          }
+        }
+      }
+    },
     "Date" : {
       "extractionState" : "manual",
       "localizations" : {
@@ -1881,6 +1903,17 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "วันที่"
+          }
+        }
+      }
+    },
+    "Elapsed" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "เวลาที่ผ่านไป"
           }
         }
       }
@@ -3448,6 +3481,39 @@
         }
       }
     },
+    "Last print" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "พิมพ์ล่าสุด"
+          }
+        }
+      }
+    },
+    "Last print error" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ข้อผิดพลาดในการพิมพ์ล่าสุด"
+          }
+        }
+      }
+    },
+    "No host window is available for printing." : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ไม่พบหน้าต่างสำหรับการพิมพ์"
+          }
+        }
+      }
+    },
     "Layout" : {
       "extractionState" : "manual",
       "localizations" : {
@@ -4998,6 +5064,17 @@
         }
       }
     },
+    "Printing" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "กำลังพิมพ์"
+          }
+        }
+      }
+    },
     "Processing" : {
       "extractionState" : "manual",
       "localizations" : {
@@ -6441,6 +6518,17 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "ค่าเริ่มต้นของระบบ: %1$@"
+          }
+        }
+      }
+    },
+    "System printer unavailable: %@" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "เครื่องพิมพ์ระบบไม่พร้อมใช้งาน: %1$@"
           }
         }
       }

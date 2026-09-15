@@ -68,6 +68,18 @@ struct OperationsStatusLogicTests {
         #expect(status.summary == "Test cancelled")
     }
 
+    @Test("active printer reports printing before stale test results")
+    func activePrinterIsPrinting() {
+        let status = OperationsStatusLogic.printer(
+            .unavailable(name: "temporarily unavailable"),
+            lastTestResult: nil,
+            isPrinting: true
+        )
+        #expect(status.severity == .normal)
+        #expect(status.summary == "Printing")
+        #expect(OperationsStatusLogic.printer(.systemDefault, lastTestResult: nil).summary == "Idle")
+    }
+
     @Test("connection health separates control failures from channel degradation")
     func connectionHealth() {
         #expect(OperationsStatusLogic.connection(.connecting, authenticated: false, previewConnected: false).severity == .warning)

@@ -83,6 +83,148 @@ struct SessionJobQueueTests {
         #expect(await executor.snapshot().kinds.first == .autoPrint)
     }
 
+    @Test("a blocked automatic print does not block another session's finalization")
+    @MainActor
+    func blockedPrintDoesNotBlockFinalization() async throws {
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let executor = BlockingPrintJobExecutor()
+        let queue = SessionJobQueue(
+            store: JobQueueStore(fileURL: directory.appendingPathComponent("jobs.json")),
+            executor: executor
+        )
+        let first = makeManifest()
+        let second = makeManifest()
+
+        queue.start()
+        queue.enqueueFinalizationJobs(for: first)
+        try await waitUntil("first finalization") {
+            await queue.job(sessionID: first.id, status: .succeeded, kind: .updateGallery) != nil
+        }
+        queue.enqueueAutoPrint(for: first)
+        try await waitUntil("first print start") { await executor.snapshot().printStarted }
+
+        queue.enqueueFinalizationJobs(for: second)
+        try await waitUntil("second finalization") {
+            await queue.job(sessionID: second.id, status: .succeeded, kind: .updateGallery) != nil
+        }
+
+        #expect(await executor.snapshot().printCompleted == false)
+        await executor.releaseFirstPrint()
+        try await waitUntil("first print completion") {
+            await queue.job(sessionID: first.id, status: .succeeded, kind: .autoPrint) != nil
+        }
+    }
+
+    @Test("automatic print jobs execute serially")
+    @MainActor
+    func automaticPrintsAreSerialized() async throws {
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let executor = BlockingPrintJobExecutor()
+        let queue = SessionJobQueue(
+            store: JobQueueStore(fileURL: directory.appendingPathComponent("jobs.json")),
+            executor: executor
+        )
+        let first = makeManifest()
+        let second = makeManifest()
+
+        queue.start()
+        queue.enqueueFinalizationJobs(for: first)
+        queue.enqueueFinalizationJobs(for: second)
+        try await waitUntil("both strips") {
+            let firstReady = await queue.job(sessionID: first.id, status: .succeeded, kind: .renderStrip) != nil
+            let secondReady = await queue.job(sessionID: second.id, status: .succeeded, kind: .renderStrip) != nil
+            return firstReady && secondReady
+        }
+        queue.enqueueAutoPrint(for: first)
+        queue.enqueueAutoPrint(for: second)
+
+        try await waitUntil("first print start") { await executor.snapshot().printStarted }
+        #expect(await executor.snapshot().printStartCount == 1)
+        await executor.releaseFirstPrint()
+        try await waitUntil("second print start") { await executor.snapshot().printStartCount == 2 }
+        try await waitUntil("both prints") {
+            let firstReady = await queue.job(sessionID: first.id, status: .succeeded, kind: .autoPrint) != nil
+            let secondReady = await queue.job(sessionID: second.id, status: .succeeded, kind: .autoPrint) != nil
+            return firstReady && secondReady
+        }
+
+        #expect(await executor.snapshot().maximumConcurrentPrintExecutions == 1)
+    }
+
+    @Test("a failed print does not poison the next print job")
+    @MainActor
+    func failedPrintDoesNotPoisonNextJob() async throws {
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let executor = FailingPrintJobExecutor()
+        let queue = SessionJobQueue(
+            store: JobQueueStore(fileURL: directory.appendingPathComponent("jobs.json")),
+            executor: executor
+        )
+        let first = makeManifest()
+        let second = makeManifest()
+
+        queue.start()
+        queue.enqueueFinalizationJobs(for: first)
+        queue.enqueueFinalizationJobs(for: second)
+        try await waitUntil("both strips") {
+            let firstReady = await queue.job(sessionID: first.id, status: .succeeded, kind: .renderStrip) != nil
+            let secondReady = await queue.job(sessionID: second.id, status: .succeeded, kind: .renderStrip) != nil
+            return firstReady && secondReady
+        }
+        queue.enqueueAutoPrint(for: first)
+        queue.enqueueAutoPrint(for: second)
+
+        try await waitUntil("failed first print") {
+            await queue.job(sessionID: first.id, status: .failed, kind: .autoPrint) != nil
+        }
+        try await waitUntil("successful second print") {
+            await queue.job(sessionID: second.id, status: .succeeded, kind: .autoPrint) != nil
+        }
+        #expect(await executor.snapshot().printStartCount == 2)
+    }
+
+    @Test("cancelling a cooperative print keeps it cancelled and releases the lane")
+    @MainActor
+    func cancellingPrintReleasesLane() async throws {
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let executor = CancellablePrintJobExecutor()
+        let queue = SessionJobQueue(
+            store: JobQueueStore(fileURL: directory.appendingPathComponent("jobs.json")),
+            executor: executor
+        )
+        let first = makeManifest()
+        let second = makeManifest()
+
+        queue.start()
+        queue.enqueueFinalizationJobs(for: first)
+        queue.enqueueFinalizationJobs(for: second)
+        try await waitUntil("both strips") {
+            let firstReady = await queue.job(sessionID: first.id, status: .succeeded, kind: .renderStrip) != nil
+            let secondReady = await queue.job(sessionID: second.id, status: .succeeded, kind: .renderStrip) != nil
+            return firstReady && secondReady
+        }
+        queue.enqueueAutoPrint(for: first)
+        try await waitUntil("first print start") { await executor.snapshot().printStartCount == 1 }
+        guard let firstJob = await queue.job(sessionID: first.id, status: .running, kind: .autoPrint) else {
+            Issue.record("Expected first print to be running")
+            return
+        }
+        queue.cancel(jobID: firstJob.id)
+
+        try await waitUntil("cancelled first print") {
+            await queue.job(sessionID: first.id, status: .cancelled, kind: .autoPrint) != nil
+        }
+        queue.enqueueAutoPrint(for: second)
+        try await waitUntil("successful second print") {
+            await queue.job(sessionID: second.id, status: .succeeded, kind: .autoPrint) != nil
+        }
+        #expect(await executor.snapshot().printCancelled)
+    }
+
     @Test("retryable errors wait for retry and manual retry resets the job")
     @MainActor
     func retriesRetryableErrors() async throws {
@@ -304,6 +446,88 @@ private final class CancellableCloudJobExecutor: SessionJobExecuting {
             snapshotValue.completed = true
         } catch {
             snapshotValue.cancelled = Task.isCancelled
+            throw error
+        }
+    }
+
+    func snapshot() -> Snapshot { snapshotValue }
+}
+
+@MainActor
+private final class BlockingPrintJobExecutor: SessionJobExecuting {
+    struct Snapshot: Sendable {
+        var printStarted = false
+        var printStartCount = 0
+        var printCompleted = false
+        var maximumConcurrentPrintExecutions = 0
+    }
+
+    private let firstPrintGate = AsyncGate()
+    private var snapshotValue = Snapshot()
+    private var activePrintExecutions = 0
+
+    func execute(_ job: SessionJob) async throws {
+        guard job.kind == .autoPrint else { return }
+        activePrintExecutions += 1
+        snapshotValue.printStarted = true
+        snapshotValue.printStartCount += 1
+        snapshotValue.maximumConcurrentPrintExecutions = max(
+            snapshotValue.maximumConcurrentPrintExecutions,
+            activePrintExecutions
+        )
+        defer { activePrintExecutions -= 1 }
+        if snapshotValue.printStartCount == 1 {
+            await firstPrintGate.wait()
+        }
+        try Task.checkCancellation()
+        snapshotValue.printCompleted = true
+    }
+
+    func snapshot() -> Snapshot { snapshotValue }
+
+    func releaseFirstPrint() async {
+        await firstPrintGate.open()
+    }
+}
+
+@MainActor
+private final class FailingPrintJobExecutor: SessionJobExecuting {
+    struct Snapshot: Sendable {
+        var printStartCount = 0
+    }
+
+    private var snapshotValue = Snapshot()
+    private var shouldFail = true
+
+    func execute(_ job: SessionJob) async throws {
+        guard job.kind == .autoPrint else { return }
+        snapshotValue.printStartCount += 1
+        if shouldFail {
+            shouldFail = false
+            throw JobExecutionError.permanent("Printer offline")
+        }
+    }
+
+    func snapshot() -> Snapshot { snapshotValue }
+}
+
+@MainActor
+private final class CancellablePrintJobExecutor: SessionJobExecuting {
+    struct Snapshot: Sendable {
+        var printStartCount = 0
+        var printCancelled = false
+    }
+
+    private var snapshotValue = Snapshot()
+
+    func execute(_ job: SessionJob) async throws {
+        guard job.kind == .autoPrint else { return }
+        snapshotValue.printStartCount += 1
+        guard snapshotValue.printStartCount == 1 else { return }
+        do {
+            try await Task.sleep(for: .seconds(10))
+        } catch {
+            snapshotValue.printCancelled = Task.isCancelled
             throw error
         }
     }

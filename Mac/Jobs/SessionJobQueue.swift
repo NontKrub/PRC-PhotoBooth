@@ -13,19 +13,21 @@ final class SessionJobQueue {
     private let executor: any SessionJobExecuting
     private var startupTask: Task<Void, Never>?
     private var finalizationWorkerTask: Task<Void, Never>?
+    private var printWorkerTask: Task<Void, Never>?
     private var cloudWorkerTask: Task<Void, Never>?
     private var activeCloudJobID: String?
     private var activeCloudExecutionTask: Task<Void, Error>?
     private var activeFinalizationJobID: String?
     private var activeFinalizationExecutionTask: Task<Void, Error>?
+    private var activePrintJobID: String?
+    private var activePrintExecutionTask: Task<Void, Error>?
     private var persistentQueueError: String?
 
     private let finalizationKinds: [SessionJobKind] = [
         .renderStrip,
         .registerDownload,
         .updateGallery,
-        .renderGIF,
-        .autoPrint
+        .renderGIF
     ]
 
     private(set) var jobs: [SessionJob] = []
@@ -39,7 +41,10 @@ final class SessionJobQueue {
     }
 
     func start() {
-        guard startupTask == nil, finalizationWorkerTask == nil, cloudWorkerTask == nil else { return }
+        guard startupTask == nil,
+              finalizationWorkerTask == nil,
+              printWorkerTask == nil,
+              cloudWorkerTask == nil else { return }
         isRunning = true
         startupTask = Task { [weak self] in
             await self?.prepareWorkers()
@@ -50,16 +55,21 @@ final class SessionJobQueue {
         isRunning = false
         startupTask?.cancel()
         finalizationWorkerTask?.cancel()
+        printWorkerTask?.cancel()
         cloudWorkerTask?.cancel()
         activeCloudExecutionTask?.cancel()
         activeFinalizationExecutionTask?.cancel()
+        activePrintExecutionTask?.cancel()
         startupTask = nil
         finalizationWorkerTask = nil
+        printWorkerTask = nil
         cloudWorkerTask = nil
         activeCloudJobID = nil
         activeCloudExecutionTask = nil
         activeFinalizationJobID = nil
         activeFinalizationExecutionTask = nil
+        activePrintJobID = nil
+        activePrintExecutionTask = nil
     }
 
     func refresh() {
@@ -135,6 +145,9 @@ final class SessionJobQueue {
                 if activeFinalizationJobID == jobID {
                     activeFinalizationExecutionTask?.cancel()
                 }
+                if activePrintJobID == jobID {
+                    activePrintExecutionTask?.cancel()
+                }
                 await reload()
             } catch {
                 lastQueueError = error.localizedDescription
@@ -156,6 +169,12 @@ final class SessionJobQueue {
                        $0.id == activeFinalizationJobID && $0.sessionID == sessionID
                    }) {
                     activeFinalizationExecutionTask?.cancel()
+                }
+                if let activePrintJobID,
+                   await store.snapshot().contains(where: {
+                       $0.id == activePrintJobID && $0.sessionID == sessionID
+                   }) {
+                    activePrintExecutionTask?.cancel()
                 }
                 await reload()
             } catch {
@@ -242,6 +261,9 @@ final class SessionJobQueue {
         finalizationWorkerTask = Task { [weak self] in
             await self?.runWorker(kinds: workerKinds)
         }
+        printWorkerTask = Task { [weak self] in
+            await self?.runWorker(kinds: [.autoPrint])
+        }
         cloudWorkerTask = Task { [weak self] in
             await self?.runWorker(kinds: [.cloudUpload])
         }
@@ -314,6 +336,9 @@ final class SessionJobQueue {
         if job.kind == .cloudUpload {
             activeCloudJobID = job.id
             activeCloudExecutionTask = task
+        } else if job.kind == .autoPrint {
+            activePrintJobID = job.id
+            activePrintExecutionTask = task
         } else {
             activeFinalizationJobID = job.id
             activeFinalizationExecutionTask = task
@@ -326,6 +351,10 @@ final class SessionJobQueue {
             if activeFinalizationJobID == job.id {
                 activeFinalizationJobID = nil
                 activeFinalizationExecutionTask = nil
+            }
+            if activePrintJobID == job.id {
+                activePrintJobID = nil
+                activePrintExecutionTask = nil
             }
         }
         try await task.value

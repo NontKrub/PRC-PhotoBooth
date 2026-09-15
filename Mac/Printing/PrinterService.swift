@@ -88,6 +88,9 @@ nonisolated enum PrinterDocumentValidator {
 struct PrinterPrintRequest {
     let document: PrinterDocument
     let showsPrintDialog: Bool
+
+    var showsProgressPanel: Bool { showsPrintDialog }
+    var canSpawnSeparateThread: Bool { true }
 }
 
 @MainActor
@@ -110,6 +113,7 @@ final class PrinterService {
     private(set) var printFailureCount = 0
     private(set) var lastPrintAt: Date?
     private(set) var lastPrintError: String?
+    private(set) var currentPrintStartedAt: Date?
 
     init(backend: any PrinterBackend = AppKitPrinterBackend()) {
         self.backend = backend
@@ -143,10 +147,9 @@ final class PrinterService {
             document: .testPage(date: date),
             showsPrintDialog: true
         )
-        isPrinting = true
-        printRequestCount += 1
-        defer { isPrinting = false }
         do {
+            try beginPrint()
+            defer { endPrint() }
             try await backend.submit(request)
             printSuccessCount += 1
             lastPrintAt = date
@@ -200,10 +203,9 @@ final class PrinterService {
             document: .photoStrip(url),
             showsPrintDialog: showPrintDialog
         )
-        isPrinting = true
-        printRequestCount += 1
-        defer { isPrinting = false }
         do {
+            try beginPrint()
+            defer { endPrint() }
             try await backend.submit(request)
             printSuccessCount += 1
             lastPrintAt = Date()
@@ -220,10 +222,24 @@ final class PrinterService {
         }
     }
 
+    private func beginPrint() throws {
+        guard !isPrinting else { throw PrinterServiceError.busy }
+        isPrinting = true
+        currentPrintStartedAt = Date()
+        printRequestCount += 1
+    }
+
+    private func endPrint() {
+        isPrinting = false
+        currentPrintStartedAt = nil
+    }
+
 }
 
 @MainActor
 private final class AppKitPrinterBackend: PrinterBackend {
+    private var activeDelegates: [ObjectIdentifier: PrintOperationDelegate] = [:]
+
     func availablePrinterNames() -> [String] {
         NSPrinter.printerNames
     }
@@ -256,8 +272,9 @@ private final class AppKitPrinterBackend: PrinterBackend {
         }
 
         let operation = NSPrintOperation(view: view, printInfo: printInfo)
+        operation.canSpawnSeparateThread = request.canSpawnSeparateThread
         operation.showsPrintPanel = request.showsPrintDialog
-        operation.showsProgressPanel = true
+        operation.showsProgressPanel = request.showsProgressPanel
         if request.showsPrintDialog {
             var options = operation.printPanel.options
             options.formUnion([
@@ -275,9 +292,73 @@ private final class AppKitPrinterBackend: PrinterBackend {
                 )
             }
         }
-        guard operation.run() else {
+
+        guard let hostWindow = Self.hostWindow() else {
+            throw PrinterServiceError.unavailable("No host window is available for printing.")
+        }
+        let operationID = ObjectIdentifier(operation)
+        let success = await withCheckedContinuation { (continuation: CheckedContinuation<Bool, Never>) in
+            let delegate = PrintOperationDelegate(
+                continuation: continuation,
+                onCompletion: { [weak self] in
+                    Task { @MainActor [weak self] in
+                        self?.activeDelegates.removeValue(forKey: operationID)
+                    }
+                }
+            )
+            activeDelegates[operationID] = delegate
+            operation.runModal(
+                for: hostWindow,
+                delegate: delegate,
+                didRun: #selector(PrintOperationDelegate.printOperationDidRun(_:success:contextInfo:)),
+                contextInfo: nil
+            )
+        }
+        guard success else {
             throw request.showsPrintDialog ? PrinterServiceError.cancelled : PrinterServiceError.rejected
         }
+    }
+
+    private static func hostWindow() -> NSWindow? {
+        NSApp.mainWindow
+            ?? NSApp.keyWindow
+            ?? NSApp.windows.first(where: { $0.isVisible && !$0.styleMask.contains(.borderless) })
+            ?? NSApp.windows.first(where: { $0.isVisible })
+    }
+}
+
+private final class PrintOperationDelegate: NSObject, @unchecked Sendable {
+    private let lock = NSLock()
+    private var continuation: CheckedContinuation<Bool, Never>?
+    private var completed = false
+    private let onCompletion: @Sendable () -> Void
+
+    init(
+        continuation: CheckedContinuation<Bool, Never>,
+        onCompletion: @escaping @Sendable () -> Void
+    ) {
+        self.continuation = continuation
+        self.onCompletion = onCompletion
+    }
+
+    @objc
+    func printOperationDidRun(
+        _ printOperation: NSPrintOperation,
+        success: Bool,
+        contextInfo: UnsafeMutableRawPointer?
+    ) {
+        lock.lock()
+        guard !completed else {
+            lock.unlock()
+            return
+        }
+        completed = true
+        let continuation = self.continuation
+        self.continuation = nil
+        lock.unlock()
+
+        continuation?.resume(returning: success)
+        onCompletion()
     }
 }
 
@@ -441,6 +522,7 @@ private final class PrinterTestPageView: NSView {
 
 enum PrinterServiceError: LocalizedError {
     case unavailable(String)
+    case busy
     case cancelled
     case rejected
     case missingSource(URL)
@@ -449,13 +531,14 @@ enum PrinterServiceError: LocalizedError {
     var isPermanent: Bool {
         switch self {
         case .missingSource, .invalidImage: return true
-        case .unavailable, .cancelled, .rejected: return false
+        case .unavailable, .busy, .cancelled, .rejected: return false
         }
     }
 
     var errorDescription: String? {
         switch self {
         case .unavailable(let name): return "Configured printer unavailable: \(name)"
+        case .busy: return "A print is already in progress."
         case .cancelled: return "Print dialog cancelled."
         case .rejected: return "The print operation was rejected."
         case .missingSource(let url): return "Photo strip is missing: \(url.path)"

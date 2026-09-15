@@ -73,8 +73,12 @@ enum OperationsStatusLogic {
 
     static func printer(
         _ status: ConfiguredPrinterStatus,
-        lastTestResult: PrinterTestResult?
+        lastTestResult: PrinterTestResult?,
+        isPrinting: Bool = false
     ) -> OperationsSectionStatus {
+        if isPrinting {
+            return OperationsSectionStatus(summary: "Printing", severity: .normal)
+        }
         if case .unavailable = status {
             return OperationsSectionStatus(summary: "Unavailable", severity: .failure)
         }
@@ -86,7 +90,7 @@ enum OperationsStatusLogic {
                 return OperationsSectionStatus(summary: "Test failed", severity: .failure)
             }
         }
-        return OperationsSectionStatus(summary: "System Default", severity: .normal)
+        return OperationsSectionStatus(summary: "Idle", severity: .normal)
     }
 
     static func server(_ status: LocalWebServerStatus) -> OperationsSectionStatus {
@@ -525,8 +529,19 @@ struct OperationsView: View {
         GroupBox("Printer Diagnostics") {
             VStack(alignment: .leading, spacing: 8) {
                 Text(printerStatusText)
-                Text("System default: \(NSPrintInfo.shared.printer.name)")
-                    .font(.caption).foregroundStyle(.secondary)
+                if case .systemDefault = coordinator.printer.configuredPrinterStatus() {
+                    Text(operatorFormat("System default: %@", locale: locale, NSPrintInfo.shared.printer.name))
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+                if let startedAt = coordinator.printer.currentPrintStartedAt {
+                    LabeledContent("Elapsed") {
+                        Text(startedAt, style: .timer)
+                            .monospacedDigit()
+                    }
+                    Text("Customer sessions remain available while printing.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
                 if let result = coordinator.printer.lastTestResult {
                     let cancelled = result.outcome == .cancelled
                     let resultColor: Color = cancelled ? .secondary : result.isSuccess ? .green : .red
@@ -539,11 +554,24 @@ struct OperationsView: View {
                 } else {
                     Text("Printer test: Not run this launch.").font(.caption).foregroundStyle(.secondary)
                 }
+                if let lastPrintAt = coordinator.printer.lastPrintAt {
+                    LabeledContent("Last print") {
+                        Text(lastPrintAt, style: .relative)
+                    }
+                }
+                if let lastPrintError = coordinator.printer.lastPrintError {
+                    LabeledContent("Last print error") {
+                        Text(lastPrintError)
+                            .foregroundStyle(.red)
+                            .multilineTextAlignment(.trailing)
+                    }
+                }
                 HStack {
                     Button("Print Test Page") {
                         Task { _ = try? await coordinator.printer.printTestPage(); await coordinator.runSafePreflight() }
                     }
                     .buttonStyle(.bordered)
+                    .disabled(coordinator.printer.isPrinting)
                     .accessibilityIdentifier("Print Test Page")
                     Button("Open System Print Settings…") {
                         _ = SystemSettingsRouter.open(.printersAndScanners)
@@ -774,7 +802,8 @@ struct OperationsView: View {
     private var printerSectionStatus: OperationsSectionStatus {
         OperationsStatusLogic.printer(
             coordinator.printer.configuredPrinterStatus(),
-            lastTestResult: coordinator.printer.lastTestResult
+            lastTestResult: coordinator.printer.lastTestResult,
+            isPrinting: coordinator.printer.isPrinting
         )
     }
 
@@ -825,9 +854,14 @@ struct OperationsView: View {
     }
 
     private var printerStatusText: String {
+        if coordinator.printer.isPrinting {
+            return operatorString("Printing", locale: locale)
+        }
         switch coordinator.printer.configuredPrinterStatus() {
-        case .systemDefault: return "System default: \(NSPrintInfo.shared.printer.name)"
-        case .unavailable(let name): return "System printer unavailable: \(name)"
+        case .systemDefault:
+            return operatorFormat("System default: %@", locale: locale, NSPrintInfo.shared.printer.name)
+        case .unavailable(let name):
+            return operatorFormat("System printer unavailable: %@", locale: locale, name)
         }
     }
 

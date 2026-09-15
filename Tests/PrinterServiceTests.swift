@@ -36,6 +36,8 @@ struct PrinterServiceTests {
         #expect(outcome == .submitted)
         #expect(printer.lastTestResult?.isSuccess == true)
         #expect(backend.requests.last?.showsPrintDialog == true)
+        #expect(backend.requests.last?.showsProgressPanel == true)
+        #expect(backend.requests.last?.canSpawnSeparateThread == true)
 
         backend.failNext(with: TestPrinterError.offline)
         do {
@@ -73,6 +75,8 @@ struct PrinterServiceTests {
 
         try await printer.printStrip(at: file, showPrintDialog: true)
         #expect(backend.requests.last?.showsPrintDialog == true)
+        #expect(backend.requests.last?.showsProgressPanel == true)
+        #expect(backend.requests.last?.canSpawnSeparateThread == true)
         if case .photoStrip(let submittedURL) = backend.requests.last?.document {
             #expect(submittedURL == file)
         } else {
@@ -80,6 +84,8 @@ struct PrinterServiceTests {
         }
         try await printer.printStrip(at: file, showPrintDialog: false)
         #expect(backend.requests.last?.showsPrintDialog == false)
+        #expect(backend.requests.last?.showsProgressPanel == false)
+        #expect(backend.requests.last?.canSpawnSeparateThread == true)
     }
 
     @Test("missing strip fails permanently without submitting a test page")
@@ -141,22 +147,22 @@ struct PrinterServiceTests {
         }
     }
 
-@Test("cancelling the system panel is not a retryable print failure")
-@MainActor
-func cancellationIsHandled() async throws {
-    let backend = TestPrinterBackend(names: ["Canon"], defaultName: "Canon")
-    let printer = PrinterService(backend: backend)
-    backend.failNext(with: PrinterServiceError.cancelled)
-    let successesBefore = printer.printSuccessCount
-    let failuresBefore = printer.printFailureCount
+    @Test("cancelling the system panel is not a retryable print failure")
+    @MainActor
+    func cancellationIsHandled() async throws {
+        let backend = TestPrinterBackend(names: ["Canon"], defaultName: "Canon")
+        let printer = PrinterService(backend: backend)
+        backend.failNext(with: PrinterServiceError.cancelled)
+        let successesBefore = printer.printSuccessCount
+        let failuresBefore = printer.printFailureCount
 
-    let outcome = try await printer.printTestPage()
+        let outcome = try await printer.printTestPage()
 
-    #expect(outcome == .cancelled)
-    #expect(printer.lastTestResult?.message == "Print dialog cancelled by operator.")
-    #expect(printer.printFailureCount == failuresBefore)
-    #expect(printer.printSuccessCount == successesBefore)
-}
+        #expect(outcome == .cancelled)
+        #expect(printer.lastTestResult?.message == "Print dialog cancelled by operator.")
+        #expect(printer.printFailureCount == failuresBefore)
+        #expect(printer.printSuccessCount == successesBefore)
+    }
 }
 
 @MainActor
@@ -164,6 +170,8 @@ private final class TestPrinterBackend: PrinterBackend {
     struct Request: Sendable {
         var document: PrinterDocument
         var showsPrintDialog: Bool
+        var showsProgressPanel: Bool
+        var canSpawnSeparateThread: Bool
     }
 
     let names: [String]
@@ -184,7 +192,12 @@ private final class TestPrinterBackend: PrinterBackend {
             self.nextError = nil
             throw nextError
         }
-        requests.append(Request(document: request.document, showsPrintDialog: request.showsPrintDialog))
+        requests.append(Request(
+            document: request.document,
+            showsPrintDialog: request.showsPrintDialog,
+            showsProgressPanel: request.showsProgressPanel,
+            canSpawnSeparateThread: request.canSpawnSeparateThread
+        ))
     }
 
     func failNext(with error: Error) {
