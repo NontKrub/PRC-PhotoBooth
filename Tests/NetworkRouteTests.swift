@@ -1,5 +1,6 @@
 import Foundation
 import Network
+import CryptoKit
 import Testing
 
 @testable import PRC_PhotoBooth_Mac
@@ -210,6 +211,262 @@ private final class ControlStressServer: @unchecked Sendable {
     }
 }
 
+private final class TransportLivenessObserver: @unchecked Sendable {
+    struct Snapshot: Sendable {
+        var activityCount = 0
+        var deliveredFrameCount = 0
+        var transportClosedCount = 0
+        var closeDeliveredCount = 0
+        var timeoutCount = 0
+        var reconnectDueCount = 0
+    }
+
+    private let lock = NSLock()
+    private var value = Snapshot()
+
+    func markActivity() {
+        lock.lock()
+        value.activityCount += 1
+        lock.unlock()
+    }
+
+    func markDelivered(_ count: Int) {
+        lock.lock()
+        value.deliveredFrameCount += count
+        lock.unlock()
+    }
+
+    func markTransportClosed() {
+        lock.lock()
+        value.transportClosedCount += 1
+        lock.unlock()
+    }
+
+    func markCloseDelivered() {
+        lock.lock()
+        value.closeDeliveredCount += 1
+        lock.unlock()
+    }
+
+    func markTimeout() {
+        lock.lock()
+        value.timeoutCount += 1
+        lock.unlock()
+    }
+
+    func markReconnectDue() {
+        lock.lock()
+        value.reconnectDueCount += 1
+        lock.unlock()
+    }
+
+    func snapshot() -> Snapshot {
+        lock.lock()
+        defer { lock.unlock() }
+        return value
+    }
+}
+
+private final class TransportLivenessServer: @unchecked Sendable {
+    private let queue: DispatchQueue
+    private let listener: NWListener
+    private let secureChannel: BoothSecureChannel
+    private let runtime: BoothNetworkTransportRuntime
+    private let writer: BoothControlWritePump
+    private let observer = TransportLivenessObserver()
+    private let scheduleReconnectOnClose: Bool
+    private let connectionReady = DispatchSemaphore(value: 0)
+    private var readyContinuation: CheckedContinuation<NWEndpoint.Port, Error>?
+    private var connection: NWConnection?
+    private var receiveToken: BoothTransportReceiveToken?
+    private var generation = 0
+    private var reconnectWasScheduled = false
+
+    init(secureChannel: BoothSecureChannel, scheduleReconnectOnClose: Bool = false) throws {
+        let queue = DispatchQueue(label: "PRC-PhotoBooth.Tests.TransportLiveness")
+        self.queue = queue
+        listener = try NWListener(using: .tcp)
+        self.secureChannel = secureChannel
+        self.scheduleReconnectOnClose = scheduleReconnectOnClose
+        runtime = BoothNetworkTransportRuntime(queue: queue)
+        writer = BoothControlWritePump(queue: queue, secureChannel: secureChannel)
+        runtime.onHeartbeatTimeout = { [weak observer] connection, _ in
+            observer?.markTimeout()
+            connection.cancel()
+        }
+        runtime.onReconnectDue = { [weak observer] _ in
+            observer?.markReconnectDue()
+        }
+    }
+
+    func start() async throws -> NWEndpoint.Port {
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<NWEndpoint.Port, Error>) in
+            queue.async { [weak self] in
+                guard let self else { return }
+                readyContinuation = continuation
+                listener.stateUpdateHandler = { [weak self] state in
+                    guard let self else { return }
+                    switch state {
+                    case .ready:
+                        guard let port = listener.port else {
+                            resolveReady(.failure(ControlStressError.listenerHasNoPort))
+                            return
+                        }
+                        resolveReady(.success(port))
+                    case .failed(let error):
+                        resolveReady(.failure(error))
+                    default:
+                        break
+                    }
+                }
+                listener.newConnectionHandler = { [weak self] connection in
+                    self?.accept(connection)
+                }
+                listener.start(queue: queue)
+            }
+        }
+    }
+
+    func waitForConnection() -> Bool {
+        connectionReady.wait(timeout: .now() + 1) == .success
+    }
+
+    func terminateConnection() {
+        queue.async { [weak self] in
+            self?.connection?.cancel()
+        }
+    }
+
+    func snapshot() -> TransportLivenessObserver.Snapshot {
+        observer.snapshot()
+    }
+
+    func stop() {
+        receiveToken?.invalidate()
+        runtime.stopHeartbeat()
+        writer.invalidate(generation: 2)
+        connection?.cancel()
+        listener.cancel()
+    }
+
+    private func accept(_ connection: NWConnection) {
+        queue.async { [weak self] in
+            guard let self else {
+                connection.cancel()
+                return
+            }
+            guard self.connection == nil else {
+                connection.cancel()
+                return
+            }
+            self.connection = connection
+            connection.stateUpdateHandler = { [weak self, weak connection] state in
+                guard let self, let connection else { return }
+                switch state {
+                case .ready:
+                    guard self.receiveToken == nil else { return }
+                    self.generation += 1
+                    let token = BoothTransportReceiveToken()
+                    self.receiveToken = token
+                    self.writer.bind(connection, generation: self.generation)
+                    self.runtime.startHeartbeat(
+                        connection: connection,
+                        generation: self.generation,
+                        writer: self.writer,
+                        interval: 0.25,
+                        timeout: 1
+                    )
+                    self.connectionReady.signal()
+                    NetworkBoothTransport.receive(
+                        on: connection,
+                        channel: .control,
+                        decoder: BoothTransportFrameDecoder(),
+                        token: token,
+                        secureChannel: self.secureChannel,
+                        activity: { [weak self] in
+                            self?.observer.markActivity()
+                            self?.runtime.markControlActivityOnQueue()
+                        },
+                        deliver: { [weak self] frames in
+                            self?.observer.markDelivered(frames.count)
+                        },
+                        deliverPreview: { _ in },
+                        close: { [weak self] _ in
+                            self?.observer.markCloseDelivered()
+                        }
+                    )
+                case .failed, .cancelled:
+                    self.observer.markTransportClosed()
+                    self.receiveToken = nil
+                    if self.connection === connection { self.connection = nil }
+                    self.runtime.stopHeartbeat()
+                    if self.scheduleReconnectOnClose && !self.reconnectWasScheduled {
+                        self.reconnectWasScheduled = true
+                        self.runtime.scheduleReconnect(after: 0.05, attempt: 1)
+                        self.runtime.scheduleReconnect(after: 0.05, attempt: 1)
+                    }
+                default:
+                    break
+                }
+            }
+            connection.start(queue: self.queue)
+        }
+    }
+
+    private func resolveReady(_ result: Result<NWEndpoint.Port, Error>) {
+        guard let readyContinuation else { return }
+        self.readyContinuation = nil
+        switch result {
+        case .success(let port): readyContinuation.resume(returning: port)
+        case .failure(let error): readyContinuation.resume(throwing: error)
+        }
+    }
+}
+
+private func drainConnection(_ connection: NWConnection) {
+    connection.receive(minimumIncompleteLength: 1, maximumLength: 64 * 1024) { _, _, isComplete, error in
+        guard !isComplete, error == nil else { return }
+        drainConnection(connection)
+    }
+}
+
+private func soakMessages(sessionID: String, photoCount: Int, index: Int) -> [Message] {
+    let snapshot = SessionSyncSnapshot(
+        config: EventConfig(photoCount: photoCount),
+        sessionID: sessionID,
+        phase: .review(photoIndex: max(0, photoCount - 1)),
+        presentation: nil,
+        isMirrored: false
+    )
+    let firstContext = SessionMessageContext(sessionID: sessionID, sequence: 1)
+    var messages: [Message] = [
+        .sessionSync(snapshot: snapshot),
+        .beginCountdown(
+            context: firstContext,
+            descriptor: CountdownDescriptor(
+                photoIndex: 0,
+                captureAt: Date(timeIntervalSince1970: Double(index))
+            )
+        ),
+        .reviewDecision(
+            context: firstContext,
+            action: index.isMultiple(of: 7) ? .retake : .keep
+        )
+    ]
+    if index.isMultiple(of: 7) {
+        let retakeContext = SessionMessageContext(sessionID: sessionID, sequence: 2)
+        messages.append(.beginCountdown(
+            context: retakeContext,
+            descriptor: CountdownDescriptor(
+                photoIndex: 0,
+                captureAt: Date(timeIntervalSince1970: Double(index) + 1)
+            )
+        ))
+        messages.append(.reviewDecision(context: retakeContext, action: .keep))
+    }
+    return messages
+}
+
 @Suite("Network route policy")
 struct NetworkRouteTests {
     @Test("reconnect timer fires while MainActor is blocked")
@@ -235,6 +492,320 @@ struct NetworkRouteTests {
 
         releaseMain.signal()
         runtime.cancelReconnect()
+    }
+
+    @Test("runtime cleanup is safe from its own queue")
+    func runtimeCleanupDoesNotDeadlock() {
+        let queue = DispatchQueue(label: "PRC-PhotoBooth.Tests.RuntimeCleanup")
+        let runtime = BoothNetworkTransportRuntime(queue: queue)
+        let completed = DispatchSemaphore(value: 0)
+
+        queue.async {
+            runtime.cancelReconnect()
+            runtime.stopHeartbeat()
+            completed.signal()
+        }
+
+        #expect(completed.wait(timeout: .now() + 1) == .success)
+        runtime.cancelReconnect()
+    }
+
+    @Test("authenticated control traffic remains live during a real 12-second MainActor stall")
+    func authenticatedControlTrafficSurvivesTwelveSecondMainActorStall() async throws {
+        let sessionID = "main-actor-stall"
+        let secret = Data(repeating: 0xA5, count: 32)
+        let macHello = BoothSecureChannelHello(
+            sessionID: sessionID,
+            challenge: Data(repeating: 0x01, count: 32),
+            senderRole: .mac,
+            senderDeviceID: "mac",
+            receiverDeviceID: "ipad"
+        )
+        let iPadHello = BoothSecureChannelHello(
+            sessionID: sessionID,
+            challenge: Data(repeating: 0x02, count: 32),
+            senderRole: .iPad,
+            senderDeviceID: "ipad",
+            receiverDeviceID: "mac"
+        )
+        let macChannel = BoothSecureChannel()
+        let iPadChannel = BoothSecureChannel()
+        try macChannel.configure(secret: secret, localHello: macHello, peerHello: iPadHello)
+        try iPadChannel.configure(secret: secret, localHello: iPadHello, peerHello: macHello)
+
+        let server = try TransportLivenessServer(secureChannel: macChannel)
+        let port = try await server.start()
+        let clientQueue = DispatchQueue(label: "PRC-PhotoBooth.Tests.TransportLivenessClient")
+        let clientConnection = NWConnection(host: "127.0.0.1", port: port, using: .tcp)
+        let clientPump = BoothControlWritePump(queue: clientQueue, secureChannel: iPadChannel)
+        let clientReady = DispatchSemaphore(value: 0)
+        clientConnection.stateUpdateHandler = { state in
+            if case .ready = state { clientReady.signal() }
+        }
+        clientConnection.start(queue: clientQueue)
+        drainConnection(clientConnection)
+        defer {
+            clientPump.invalidate(generation: 2)
+            clientConnection.cancel()
+            server.stop()
+        }
+
+        #expect(clientReady.wait(timeout: .now() + 1) == .success)
+        clientPump.bind(clientConnection, generation: 1)
+        #expect(server.waitForConnection())
+
+        let traffic = DispatchSource.makeTimerSource(queue: clientQueue)
+        traffic.schedule(deadline: .now() + 0.1, repeating: 0.1)
+        traffic.setEventHandler {
+            _ = clientPump.enqueue(
+                .heartbeat,
+                connection: clientConnection,
+                generation: 1,
+                secure: true,
+                completion: nil
+            )
+        }
+        traffic.resume()
+        defer { traffic.cancel() }
+
+        let mainEntered = DispatchSemaphore(value: 0)
+        let releaseMain = DispatchSemaphore(value: 0)
+        defer { releaseMain.signal() }
+        DispatchQueue.main.async {
+            mainEntered.signal()
+            releaseMain.wait()
+        }
+        #expect(mainEntered.wait(timeout: .now() + 1) == .success)
+
+        let stallStartedAt = Date()
+        try await Task.sleep(for: .seconds(12))
+        let stallDuration = Date().timeIntervalSince(stallStartedAt)
+        #expect(stallDuration >= 11.5)
+        let stalledSnapshot = server.snapshot()
+        #expect(stalledSnapshot.activityCount >= 20)
+        #expect(stalledSnapshot.timeoutCount == 0)
+        #expect(stalledSnapshot.transportClosedCount == 0)
+
+        releaseMain.signal()
+        try await Task.sleep(for: .milliseconds(250))
+        #expect(server.snapshot().deliveredFrameCount > 0)
+    }
+
+    @Test("control closure is observed and reconnect stays single during a MainActor stall")
+    func controlFailureDuringMainActorStallSchedulesOneReconnect() async throws {
+        let sessionID = "main-actor-failure-stall"
+        let secret = Data(repeating: 0x5A, count: 32)
+        let macHello = BoothSecureChannelHello(
+            sessionID: sessionID,
+            challenge: Data(repeating: 0x03, count: 32),
+            senderRole: .mac,
+            senderDeviceID: "mac",
+            receiverDeviceID: "ipad"
+        )
+        let iPadHello = BoothSecureChannelHello(
+            sessionID: sessionID,
+            challenge: Data(repeating: 0x04, count: 32),
+            senderRole: .iPad,
+            senderDeviceID: "ipad",
+            receiverDeviceID: "mac"
+        )
+        let macChannel = BoothSecureChannel()
+        let iPadChannel = BoothSecureChannel()
+        try macChannel.configure(secret: secret, localHello: macHello, peerHello: iPadHello)
+        try iPadChannel.configure(secret: secret, localHello: iPadHello, peerHello: macHello)
+
+        let server = try TransportLivenessServer(
+            secureChannel: macChannel,
+            scheduleReconnectOnClose: true
+        )
+        let port = try await server.start()
+        let clientQueue = DispatchQueue(label: "PRC-PhotoBooth.Tests.TransportFailureClient")
+        let clientConnection = NWConnection(host: "127.0.0.1", port: port, using: .tcp)
+        let clientPump = BoothControlWritePump(queue: clientQueue, secureChannel: iPadChannel)
+        let clientReady = DispatchSemaphore(value: 0)
+        clientConnection.stateUpdateHandler = { state in
+            if case .ready = state { clientReady.signal() }
+        }
+        clientConnection.start(queue: clientQueue)
+        drainConnection(clientConnection)
+        defer {
+            clientPump.invalidate(generation: 2)
+            clientConnection.cancel()
+            server.stop()
+        }
+
+        #expect(clientReady.wait(timeout: .now() + 1) == .success)
+        clientPump.bind(clientConnection, generation: 1)
+        #expect(server.waitForConnection())
+
+        let traffic = DispatchSource.makeTimerSource(queue: clientQueue)
+        traffic.schedule(deadline: .now() + 0.1, repeating: 0.1)
+        traffic.setEventHandler {
+            _ = clientPump.enqueue(
+                .heartbeat,
+                connection: clientConnection,
+                generation: 1,
+                secure: true,
+                completion: nil
+            )
+        }
+        traffic.resume()
+
+        let mainEntered = DispatchSemaphore(value: 0)
+        let releaseMain = DispatchSemaphore(value: 0)
+        defer { releaseMain.signal() }
+        DispatchQueue.main.async {
+            mainEntered.signal()
+            releaseMain.wait()
+        }
+        #expect(mainEntered.wait(timeout: .now() + 1) == .success)
+
+        try await Task.sleep(for: .seconds(1))
+        server.terminateConnection()
+        for _ in 0..<20 where server.snapshot().transportClosedCount == 0 {
+            try await Task.sleep(for: .milliseconds(25))
+        }
+        let stalledSnapshot = server.snapshot()
+        #expect(stalledSnapshot.transportClosedCount >= 1)
+        #expect(stalledSnapshot.closeDeliveredCount == 0)
+        #expect(stalledSnapshot.reconnectDueCount == 1)
+
+        traffic.cancel()
+        try await Task.sleep(for: .seconds(11))
+        releaseMain.signal()
+        try await Task.sleep(for: .milliseconds(250))
+        #expect(server.snapshot().closeDeliveredCount >= 1)
+    }
+
+    @Test("release gate: 500 loopback transport sessions")
+    @MainActor
+    func loopbackTransportFiveHundredSessionSoak() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("PRC-TransportSoak-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let jobStore = JobQueueStore(fileURL: directory.appendingPathComponent("jobs.json"))
+        var sessionGate = SessionMessageGate()
+        var callbackGate = BoothTransportCallbackGate()
+
+        for index in 0..<500 {
+            let sessionID = "soak-session-\(index)"
+            let photoCount = [1, 4, 8][index % 3]
+            let messages = soakMessages(sessionID: sessionID, photoCount: photoCount, index: index)
+            let secret = Data(repeating: UInt8((index % 251) + 1), count: 32)
+            let macHello = BoothSecureChannelHello(
+                sessionID: sessionID,
+                challenge: Data(repeating: UInt8((index % 31) + 1), count: 32),
+                senderRole: .mac,
+                senderDeviceID: "mac",
+                receiverDeviceID: "ipad"
+            )
+            let iPadHello = BoothSecureChannelHello(
+                sessionID: sessionID,
+                challenge: Data(repeating: UInt8((index % 29) + 2), count: 32),
+                senderRole: .iPad,
+                senderDeviceID: "ipad",
+                receiverDeviceID: "mac"
+            )
+            let macChannel = BoothSecureChannel()
+            let iPadChannel = BoothSecureChannel()
+            try macChannel.configure(secret: secret, localHello: macHello, peerHello: iPadHello)
+            try iPadChannel.configure(secret: secret, localHello: iPadHello, peerHello: macHello)
+
+            let server = try ControlStressServer(expected: messages, secureChannel: macChannel)
+            let port = try await server.start()
+            let queue = DispatchQueue(label: "PRC-PhotoBooth.Tests.TransportSoak.\(index)")
+            let connection = NWConnection(host: "127.0.0.1", port: port, using: .tcp)
+            let pump = BoothControlWritePump(queue: queue, secureChannel: iPadChannel)
+            connection.start(queue: queue)
+            pump.bind(connection, generation: index + 1)
+            defer {
+                pump.invalidate(generation: index + 2)
+                connection.cancel()
+                server.stop()
+            }
+
+            for message in messages {
+                let outcome = await withCheckedContinuation { continuation in
+                    _ = pump.enqueue(
+                        message,
+                        connection: connection,
+                        generation: index + 1,
+                        secure: true,
+                        completion: { outcome in continuation.resume(returning: outcome) }
+                    )
+                }
+                #expect(outcome == .sent)
+            }
+            try await server.wait()
+            #expect(pump.pendingMessageCount == 0)
+            #expect(pump.pendingByteCount == 0)
+
+            sessionGate.synchronize(sessionID: sessionID, sequence: 0)
+            let actionCount = index.isMultiple(of: 7) ? 2 : 1
+            for sequence in 1...actionCount {
+                #expect(sessionGate.accept(SessionMessageContext(sessionID: sessionID, sequence: UInt64(sequence))))
+            }
+            #expect(!sessionGate.accept(SessionMessageContext(
+                sessionID: "stale-session",
+                sequence: UInt64.max
+            )))
+
+            let assetData = Data(repeating: UInt8(index % 239), count: 4096 + photoCount)
+            let assetReference = BoothAssetReference(
+                assetID: "review-\(sessionID)",
+                sessionID: sessionID,
+                revision: "1",
+                kind: .reviewImage,
+                byteCount: assetData.count,
+                sha256: Data(SHA256.hash(data: assetData))
+            )
+            let chunks = try BoothAssetTransfer.chunks(
+                data: assetData,
+                reference: assetReference,
+                chunkSize: 1024
+            )
+            var assembler = BoothAssetAssembler()
+            var assembled: Data?
+            for chunk in chunks.reversed() {
+                if let result = try assembler.append(chunk) { assembled = result.1 }
+            }
+            #expect(assembled == assetData)
+
+            if index == 97 {
+                var corruptedAssembler = BoothAssetAssembler()
+                let corruptedChunks = chunks.enumerated().map { offset, chunk in
+                    guard offset == 0 else { return chunk }
+                    return BoothAssetChunk(metadata: chunk.metadata, data: Data(repeating: 0xFF, count: chunk.data.count))
+                }
+                var sawHashMismatch = false
+                do {
+                    for chunk in corruptedChunks { _ = try corruptedAssembler.append(chunk) }
+                } catch let error as BoothAssetTransferError {
+                    sawHashMismatch = error == .hashMismatch
+                }
+                #expect(sawHashMismatch)
+            }
+
+            if index == 173 {
+                let oldGeneration = callbackGate.generation
+                callbackGate.invalidate()
+                #expect(!callbackGate.accepts(oldGeneration))
+            }
+
+            let job = try await jobStore.enqueue(sessionID: sessionID, kind: .renderStrip)
+            var finished = job
+            finished.status = .succeeded
+            finished.updatedAt = Date()
+            try await jobStore.update(finished)
+        }
+
+        let persisted = await jobStore.snapshot()
+        #expect(persisted.count == 500)
+        #expect(persisted.allSatisfy { $0.status == .succeeded })
+        #expect(sessionGate.currentSessionID == "soak-session-499")
+        #expect(sessionGate.latestAcceptedSequence > 0)
     }
 
     @Test("Wi-Fi preference never selects LAN")

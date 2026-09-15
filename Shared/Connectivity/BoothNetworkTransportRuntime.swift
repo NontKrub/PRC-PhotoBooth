@@ -6,6 +6,7 @@ import Network
 /// policy; socket cancellation and timer expiry do not depend on it.
 final class BoothNetworkTransportRuntime: @unchecked Sendable {
     private let queue: DispatchQueue
+    private let queueKey = DispatchSpecificKey<Void>()
     private let heartbeatState = BoothTransportHeartbeatState()
     private var heartbeatSource: DispatchSourceTimer?
     private var heartbeatConnection: NWConnection?
@@ -19,6 +20,7 @@ final class BoothNetworkTransportRuntime: @unchecked Sendable {
 
     init(queue: DispatchQueue) {
         self.queue = queue
+        queue.setSpecific(key: queueKey, value: ())
     }
 
     func startHeartbeat(
@@ -28,7 +30,7 @@ final class BoothNetworkTransportRuntime: @unchecked Sendable {
         interval: TimeInterval,
         timeout: TimeInterval
     ) {
-        queue.sync {
+        onQueue {
             startHeartbeatOnQueue(
                 connection: connection,
                 generation: generation,
@@ -83,7 +85,7 @@ final class BoothNetworkTransportRuntime: @unchecked Sendable {
     }
 
     func stopHeartbeat() {
-        queue.sync {
+        onQueue {
             stopHeartbeatOnQueue()
         }
     }
@@ -113,10 +115,17 @@ final class BoothNetworkTransportRuntime: @unchecked Sendable {
     }
 
     func cancelReconnect() {
-        queue.sync {
+        onQueue {
             reconnectSource?.cancel()
             reconnectSource = nil
             reconnectAttempt = 0
         }
+    }
+
+    private func onQueue<T>(_ operation: () -> T) -> T {
+        if DispatchQueue.getSpecific(key: queueKey) != nil {
+            return operation()
+        }
+        return queue.sync(execute: operation)
     }
 }

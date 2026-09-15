@@ -2542,7 +2542,7 @@ public final class NetworkBoothTransport: BoothTransport {
         return true
     }
 
-    private nonisolated static func receive(
+    nonisolated static func receive(
         on connection: NWConnection,
         channel: BoothTransportChannel,
         decoder: BoothTransportFrameDecoder,
