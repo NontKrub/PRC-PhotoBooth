@@ -2092,24 +2092,31 @@ final class BoothCoordinator {
     }
 
     func operatorOverride(_ action: OperatorAction) {
-        multipeer.sendControl(.operatorOverride(context: nextSessionMessageContext(), action: action))
         switch action {
         case .forceStart:
-            if stateMachine.phase == .idle || stateMachine.phase == .readyToStart { startSession() }
+            guard stateMachine.phase == .idle || stateMachine.phase == .readyToStart else { return }
+            multipeer.sendControl(.operatorOverride(context: nextSessionMessageContext(), action: action))
+            startSession()
         case .forceRetake:
-            if case .review(let idx) = stateMachine.phase,
-               !reviewDecisionPending,
-               CustomerDisplayWorkflow.canApply(.retake(photoIndex: idx), in: stateMachine.phase) {
-                reviewDecisionPending = true
-                Task { @MainActor [weak self] in
-                    guard let self else { return }
-                    defer { self.reviewDecisionPending = false }
-                    await self.requestRetake(photoIndex: idx, source: .operatorSource)
-                }
+            guard case .review(let idx) = stateMachine.phase,
+                  !reviewDecisionPending,
+                  CustomerDisplayWorkflow.canApply(.retake(photoIndex: idx), in: stateMachine.phase) else { return }
+            multipeer.sendControl(.operatorOverride(context: nextSessionMessageContext(), action: action))
+            reviewDecisionPending = true
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                defer { self.reviewDecisionPending = false }
+                await self.requestRetake(photoIndex: idx, source: .operatorSource)
             }
         case .skip:
-            if case .review(let idx) = stateMachine.phase { handleReviewDecision(photoIndex: idx, action: .keep) }
+            guard case .review(let idx) = stateMachine.phase,
+                  !reviewDecisionPending,
+                  CustomerDisplayWorkflow.canApply(.keep(photoIndex: idx), in: stateMachine.phase) else { return }
+            multipeer.sendControl(.operatorOverride(context: nextSessionMessageContext(), action: action))
+            handleReviewDecision(photoIndex: idx, action: .keep)
         case .cancelSession:
+            guard currentSession != nil else { return }
+            multipeer.sendControl(.operatorOverride(context: nextSessionMessageContext(), action: action))
             Task { @MainActor [weak self] in
                 await self?.cancelCurrentSession()
             }
@@ -2919,7 +2926,7 @@ final class BoothCoordinator {
     private func handleCustomerFinished(_ context: SessionMessageContext) {
         guard let sessionID = finishedAwaitingCustomerAckSessionID,
               context.sessionID == sessionID,
-              context.sequence == sessionMessageSequence,
+              context.sequence <= sessionMessageSequence,
               acceptsClientSessionMessage(context),
               case .finished = stateMachine.phase,
               customerFinishedInFlightSessionID == nil else { return }
