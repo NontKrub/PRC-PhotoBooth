@@ -378,10 +378,23 @@ public enum BoothTransportDiagnosticKind: String, Codable, Sendable {
     case routeDiscoveryStarted
     case routeDiscoveryRestarted
     case routeDiscoveryReused
+    case routeDiscoveryResult
+    case targetSelected
+    case targetMatched
+    case routeSelected
+    case browserReady
+    case browserFailed
+    case browserCancelled
     case routeCandidateDiscovered
     case controlConnectionCreated
     case controlConnectionPreparing
+    case helloSent
     case controlHelloReceived
+    case authenticated
+    case pairingIntentSent
+    case pairingSessionReceived
+    case pairingRequestSent
+    case pairingResultReceived
     case pairingRequestSubmitted
     case transportDiscoveryStarted
     case transportConnecting
@@ -407,6 +420,8 @@ public enum BoothTransportDiagnosticKind: String, Codable, Sendable {
     case assetChannelDisconnected
     case secureChannelEstablished
     case secureChannelFailed
+    case previewReady
+    case assetReady
     case routeViabilityChanged
     case pathHintUnavailableIgnored
     case secondaryCandidateRejected
@@ -414,6 +429,55 @@ public enum BoothTransportDiagnosticKind: String, Codable, Sendable {
     case waitingRecoveryCancelled
     case ipadAppForegrounded
     case ipadAppBackgrounded
+}
+
+public struct BoothDiscoveryDiagnostics: Codable, Sendable, Equatable {
+    public let generation: Int
+    public let activeBrowserCount: Int
+    public let discoveredPeerCount: Int
+    public let targetPeerID: String?
+    public let targetCandidateAvailable: Bool
+    public let targetCandidateSource: String?
+    public let controlConnectionState: String
+    public let controlConnectionGeneration: Int
+    public let helloSent: Bool
+    public let helloReceived: Bool
+    public let authenticated: Bool
+    public let secureChannelReady: Bool
+    public let previewReady: Bool
+    public let assetReady: Bool
+
+    public init(
+        generation: Int,
+        activeBrowserCount: Int,
+        discoveredPeerCount: Int,
+        targetPeerID: String?,
+        targetCandidateAvailable: Bool,
+        targetCandidateSource: String?,
+        controlConnectionState: String,
+        controlConnectionGeneration: Int,
+        helloSent: Bool,
+        helloReceived: Bool,
+        authenticated: Bool,
+        secureChannelReady: Bool,
+        previewReady: Bool,
+        assetReady: Bool
+    ) {
+        self.generation = generation
+        self.activeBrowserCount = activeBrowserCount
+        self.discoveredPeerCount = discoveredPeerCount
+        self.targetPeerID = targetPeerID
+        self.targetCandidateAvailable = targetCandidateAvailable
+        self.targetCandidateSource = targetCandidateSource
+        self.controlConnectionState = controlConnectionState
+        self.controlConnectionGeneration = controlConnectionGeneration
+        self.helloSent = helloSent
+        self.helloReceived = helloReceived
+        self.authenticated = authenticated
+        self.secureChannelReady = secureChannelReady
+        self.previewReady = previewReady
+        self.assetReady = assetReady
+    }
 }
 
 public struct BoothTransportDiagnosticEvent: Codable, Sendable, Equatable {
@@ -459,6 +523,224 @@ public struct BoothTransportDiagnosticEvent: Codable, Sendable, Equatable {
         self.routeGeneration = routeGeneration
         self.networkPreference = networkPreference
         self.candidateSource = candidateSource
+    }
+}
+
+public enum BoothConnectionDiagnosticsReport {
+    @MainActor
+    public static func make(
+        appVersion: String,
+        appBuild: String,
+        operatingSystem: String,
+        deviceName: String,
+        status: BoothConnectionStatus,
+        discoveryDiagnostics: BoothDiscoveryDiagnostics?,
+        recentEvents: [BoothTransportDiagnosticEvent] = []
+    ) -> String {
+        let metrics = status.previewDiagnostics
+        let version = safe(appVersion) ?? "Unknown"
+        let build = safe(appBuild) ?? "Unknown"
+        let os = safe(operatingSystem) ?? "Unknown"
+        let device = safe(deviceName) ?? "Unknown"
+        let peer = safe(status.peerDisplayName) ?? "None"
+        let fallback = safe(status.fallbackReason) ?? "Inactive"
+        let error = safe(status.lastNetworkError) ?? "None"
+        let preferredPeer = safe(status.preferredPeerID) ?? "None"
+        let authentication = status.isPeerAuthenticated ? "Authenticated" : "Not authenticated"
+        let secureChannel = status.isSecureChannelEstablished ? "Ready" : "Not ready"
+        let previewChannel = status.isPreviewChannelConnected ? "Ready" : "Not ready"
+        let assetChannel = status.isAssetChannelReady ? "Ready" : "Not ready"
+        let reconnect = status.isReconnectInProgress ? "In progress" : "Idle"
+
+        return [
+            "PRC PhotoBooth Connection Log",
+            "",
+            "App",
+            "Version: \(version)",
+            "Build: \(build)",
+            "Operating system: \(os)",
+            "Device: \(device)",
+            "Generated: \(dateText(Date()))",
+            "",
+            "Connection",
+            "Requested: \(networkText(status.requestedNetwork))",
+            "Effective: \(networkText(status.effectiveNetwork))",
+            "State: \(connectionText(status.state))",
+            "Peer: \(peer)",
+            "Fallback: \(fallback)",
+            "Ethernet path: \(pathText(status.lanPathObservation))",
+            "Wi-Fi path: \(pathText(status.wifiPathObservation))",
+            "LAN handshake: \(handshakeText(status.lanHandshake))",
+            "Authentication: \(authentication)",
+            "Secure channel: \(secureChannel)",
+            "Preview channel: \(previewChannel)",
+            "Asset channel: \(assetChannel)",
+            "Last network error: \(error)",
+            "",
+            "Pairing",
+            "Pairing state: \(pairingStateText(status.pairingState))",
+            "Pairing stage: \(status.pairingStage.rawValue)",
+            "Preferred peer: \(preferredPeer)",
+            "Trusted peers: \(status.trustedPeerIDs.count)",
+            "Discovered peers: \(status.discoveredPeers.count)",
+            "Reconnect: \(reconnect) (attempt \(status.reconnectAttempt))",
+            "",
+            "Discovery",
+            discoveryText(discoveryDiagnostics),
+            "",
+            "Preview",
+            "FPS: \(decimal(metrics.fps))",
+            "Throughput: \(decimal(metrics.bytesPerSecond / 1_000_000)) MB/s",
+            "Frames submitted: \(metrics.framesSubmitted)",
+            "Frames sent: \(metrics.framesSent)",
+            "Frames received: \(metrics.framesReceived)",
+            "Frames delivered: \(metrics.framesDelivered)",
+            "Frames coalesced: \(metrics.framesCoalesced + metrics.framesCoalescedBeforeMainActor)",
+            "",
+            "Recent transport events",
+            recentEventsText(recentEvents)
+        ].joined(separator: "\n")
+    }
+
+    static func redacted(_ event: BoothTransportDiagnosticEvent) -> BoothTransportDiagnosticEvent {
+        BoothTransportDiagnosticEvent(
+            kind: event.kind,
+            timestamp: event.timestamp,
+            channel: safe(event.channel),
+            generation: event.generation,
+            route: safe(event.route),
+            attempt: event.attempt,
+            byteCount: event.byteCount,
+            duration: event.duration,
+            reason: safe(event.reason),
+            targetPeerID: safe(event.targetPeerID),
+            routeGeneration: event.routeGeneration,
+            networkPreference: event.networkPreference,
+            candidateSource: safe(event.candidateSource)
+        )
+    }
+
+    private static func networkText(_ network: BoothNetworkPreference) -> String {
+        network == .lan ? "LAN" : "Wi-Fi"
+    }
+
+    private static func networkText(_ network: BoothEffectiveNetworkTransport) -> String {
+        switch network {
+        case .wifi: return "Wi-Fi"
+        case .lan: return "LAN (Ethernet)"
+        case .unavailable: return "Unavailable"
+        }
+    }
+
+    private static func connectionText(_ state: BoothConnectionState) -> String {
+        switch state {
+        case .disconnected: return "Disconnected"
+        case .connecting: return "Connecting"
+        case .connected: return "Connected"
+        }
+    }
+
+    private static func pathText(_ path: BoothPathObservation) -> String {
+        switch path {
+        case .unknown: return "Unknown"
+        case .unavailable: return "Unavailable"
+        case .available: return "Available"
+        }
+    }
+
+    private static func handshakeText(_ state: BoothLANHandshakeState) -> String {
+        switch state {
+        case .unknown: return "Unknown"
+        case .waiting: return "Waiting"
+        case .ready: return "Ready"
+        case .timeout: return "Timeout"
+        case .failed: return "Failed"
+        }
+    }
+
+    private static func pairingStateText(_ state: BoothPairingState) -> String {
+        switch state {
+        case .idle: return "Idle"
+        case .waitingForMac: return "Waiting for Mac"
+        case .pairing: return "Pairing"
+        case .incoming: return "Incoming"
+        case .authenticating: return "Authenticating"
+        case .authenticated: return "Authenticated"
+        case .failed(let reason): return "Failed: \(safe(reason) ?? "Unknown")"
+        }
+    }
+
+    private static func discoveryText(_ diagnostics: BoothDiscoveryDiagnostics?) -> String {
+        guard let diagnostics else { return "Snapshot: Unavailable" }
+        let target = safe(diagnostics.targetPeerID) ?? "None"
+        let source = safe(diagnostics.targetCandidateSource) ?? "None"
+        let state = safe(diagnostics.controlConnectionState) ?? "Unknown"
+        let candidate = diagnostics.targetCandidateAvailable ? "Available" : "Unavailable"
+        let helloSent = diagnostics.helloSent ? "Yes" : "No"
+        let helloReceived = diagnostics.helloReceived ? "Yes" : "No"
+        let authenticated = diagnostics.authenticated ? "Yes" : "No"
+        let secure = diagnostics.secureChannelReady ? "Ready" : "Not ready"
+        let preview = diagnostics.previewReady ? "Yes" : "No"
+        let asset = diagnostics.assetReady ? "Yes" : "No"
+
+        return [
+            "Generation: \(diagnostics.generation)",
+            "Active browsers: \(diagnostics.activeBrowserCount)",
+            "Discovered peers: \(diagnostics.discoveredPeerCount)",
+            "Target: \(target)",
+            "Candidate: \(candidate)",
+            "Candidate source: \(source)",
+            "Control state: \(state)",
+            "Control generation: \(diagnostics.controlConnectionGeneration)",
+            "Hello sent: \(helloSent)",
+            "Hello received: \(helloReceived)",
+            "Authenticated: \(authenticated)",
+            "Secure channel: \(secure)",
+            "Preview ready: \(preview)",
+            "Asset ready: \(asset)"
+        ].joined(separator: "\n")
+    }
+
+    private static func recentEventsText(_ events: [BoothTransportDiagnosticEvent]) -> String {
+        guard !events.isEmpty else { return "None" }
+        return events.suffix(50).map { event in
+            let target = event.targetPeerID.flatMap { safe($0) }.map { "target=\($0)" }
+            let details = [
+                event.channel,
+                event.route,
+                target,
+                event.routeGeneration.map { "routeGen=\($0)" },
+                event.networkPreference.map { "preference=\($0.rawValue)" },
+                event.candidateSource,
+                event.reason
+            ].compactMap { $0 }.joined(separator: " · ")
+            let suffix = details.isEmpty ? "" : " — \(details)"
+            return "\(dateText(event.timestamp)) \(event.kind.rawValue)\(suffix)"
+        }.joined(separator: "\n")
+    }
+
+    private static func decimal(_ value: Double) -> String {
+        String(format: "%.1f", locale: Locale(identifier: "en_US_POSIX"), value)
+    }
+
+    private static func dateText(_ date: Date) -> String {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withColonSeparatorInTime]
+        return formatter.string(from: date)
+    }
+
+    private static func safe(_ value: String?) -> String? {
+        guard let value, !value.isEmpty else { return nil }
+        let normalized = value.lowercased()
+        let sensitiveWords = [
+            "token", "password", "secret", "private key", "credential",
+            "authorization", "bearer", "pin", "keychain", "access_token",
+            "pairing-v2:"
+        ]
+        guard !sensitiveWords.contains(where: normalized.contains) else { return "[redacted]" }
+        return value
+            .replacingOccurrences(of: "\n", with: " ")
+            .replacingOccurrences(of: "\r", with: " ")
     }
 }
 

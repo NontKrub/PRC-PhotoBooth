@@ -1,4 +1,5 @@
 import SwiftUI
+import UniformTypeIdentifiers
 
 struct iPadConnectionSettingsView: View {
     @EnvironmentObject private var vm: iPadViewModel
@@ -13,6 +14,9 @@ struct iPadConnectionSettingsView: View {
     @State private var selectedPairingMacName: String?
     @State private var peerToForget: String?
     @State private var pairingError: String?
+    @State private var diagnosticsExportError: String?
+    @State private var diagnosticsDocument = ConnectionLogDocument(text: "")
+    @State private var isExportingDiagnostics = false
 
     private var transport: NetworkBoothTransport? { vm.networkTransport }
     private var status: BoothConnectionStatus { vm.connectionStatus }
@@ -26,6 +30,7 @@ struct iPadConnectionSettingsView: View {
                 connectedMacSection
                 nearbyMacsSection
                 pairingSection
+                diagnosticsSection
             }
             .navigationTitle("Mac Connection")
             .toolbar {
@@ -35,6 +40,16 @@ struct iPadConnectionSettingsView: View {
             }
         }
         .preferredColorScheme(.dark)
+        .fileExporter(
+            isPresented: $isExportingDiagnostics,
+            document: diagnosticsDocument,
+            contentType: .plainText,
+            defaultFilename: "PRC-PhotoBooth-iPad-connection-log"
+        ) { result in
+            if case .failure(let error) = result {
+                diagnosticsExportError = error.localizedDescription
+            }
+        }
         .task {
             if editedDeviceName.isEmpty {
                 editedDeviceName = transport?.deviceIdentity.displayName ?? "PRC Booth iPad"
@@ -99,6 +114,14 @@ struct iPadConnectionSettingsView: View {
         } message: {
             Text(pairingError ?? "")
         }
+        .alert("Export Failed", isPresented: Binding(
+            get: { diagnosticsExportError != nil },
+            set: { if !$0 { diagnosticsExportError = nil } }
+        )) {
+            Button("OK", role: .cancel) { diagnosticsExportError = nil }
+        } message: {
+            Text(diagnosticsExportError ?? "")
+        }
     }
 
     private var thisIPadSection: some View {
@@ -120,11 +143,20 @@ struct iPadConnectionSettingsView: View {
                 let preferred = nearbyMacs.first { $0.id == preferredID }
                 let trusted = transport?.trustedPeers.first { $0.id == preferredID }
                 Text(preferred?.displayName ?? trusted?.displayName ?? "Preferred Mac")
-                if preferred == nil && status.peerID != preferredID {
-                    Label("Preferred Mac unavailable", systemImage: "exclamationmark.triangle")
+                if status.peerID != preferredID || !status.isPeerAuthenticated {
+                    Label(
+                        preferred == nil ? "Preferred Mac unavailable" : "Preferred Mac not connected",
+                        systemImage: "exclamationmark.triangle"
+                    )
                         .foregroundStyle(.orange)
                     HStack {
-                        Button("Retry") { vm.refreshNearbyMacs() }
+                        Button(trusted == nil ? "Retry" : "Reconnect") {
+                            if trusted == nil {
+                                vm.refreshNearbyMacs()
+                            } else {
+                                vm.connect(to: preferredID)
+                            }
+                        }
                             .accessibilityIdentifier("Retry Preferred Mac")
                         Button("Choose Another Mac") {
                             transport?.selectPreferredPeer(nil)
@@ -259,7 +291,8 @@ struct iPadConnectionSettingsView: View {
                             }
                         }
 
-                        if peer.protocolVersion != BoothTransportHello.currentProtocolVersion {
+                        if peer.protocolVersion != 0,
+                           peer.protocolVersion != BoothTransportHello.currentProtocolVersion {
                             Text("Version incompatible")
                                 .font(.caption)
                                 .foregroundStyle(.orange)
@@ -321,6 +354,23 @@ struct iPadConnectionSettingsView: View {
         }
     }
 
+    private var diagnosticsSection: some View {
+        Section("Diagnostics") {
+            Button {
+                diagnosticsDocument = ConnectionLogDocument(text: vm.connectionDiagnosticsReport())
+                isExportingDiagnostics = true
+            } label: {
+                Label("Export Connection Log", systemImage: "square.and.arrow.up")
+            }
+            .accessibilityHint("Saves a text log you can send to support. Pairing secrets are not included.")
+            .accessibilityIdentifier("Export Connection Log")
+
+            Text("Includes current connection, pairing, discovery, preview, and recent transport events.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+    }
+
     private var pairingStateText: String {
         switch status.pairingState {
         case .idle:
@@ -372,6 +422,27 @@ struct iPadConnectionSettingsView: View {
         if interfaces.contains(.wiredEthernet) { return "Ethernet" }
         if interfaces.contains(.wifi) { return "Wi-Fi" }
         return "Available"
+    }
+}
+
+private struct ConnectionLogDocument: FileDocument {
+    static var readableContentTypes: [UTType] { [.plainText] }
+
+    var text: String
+
+    init(text: String) {
+        self.text = text
+    }
+
+    init(configuration: ReadConfiguration) throws {
+        text = String(
+            data: configuration.file.regularFileContents ?? Data(),
+            encoding: .utf8
+        ) ?? ""
+    }
+
+    func fileWrapper(configuration: WriteConfiguration) throws -> FileWrapper {
+        FileWrapper(regularFileWithContents: Data(text.utf8))
     }
 }
 

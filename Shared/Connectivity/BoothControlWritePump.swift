@@ -31,6 +31,7 @@ final class BoothControlWritePump: @unchecked Sendable {
     }
 
     private let queue: DispatchQueue
+    private let queueKey = DispatchSpecificKey<Void>()
     private let secureChannel: BoothSecureChannel
     private var connection: NWConnection?
     private var connectionGeneration = 0
@@ -44,6 +45,7 @@ final class BoothControlWritePump: @unchecked Sendable {
     init(queue: DispatchQueue, secureChannel: BoothSecureChannel) {
         self.queue = queue
         self.secureChannel = secureChannel
+        queue.setSpecific(key: queueKey, value: ())
     }
 
     func bind(_ connection: NWConnection, generation: Int) {
@@ -56,7 +58,7 @@ final class BoothControlWritePump: @unchecked Sendable {
     }
 
     func invalidate(generation: Int) {
-        queue.sync { [weak self] in
+        onQueue { [weak self] in
             guard let self else { return }
             self.connection = nil
             self.connectionGeneration = generation
@@ -76,9 +78,8 @@ final class BoothControlWritePump: @unchecked Sendable {
         secure: Bool,
         completion: (@MainActor (BoothControlSendOutcome) -> Void)?
     ) -> BoothControlSendOutcome {
-        var outcome: BoothControlSendOutcome = .sent
-        queue.sync {
-            outcome = self.enqueueOnQueue(
+        onQueue {
+            enqueueOnQueue(
                 message,
                 connection: expectedConnection,
                 generation: generation,
@@ -86,7 +87,6 @@ final class BoothControlWritePump: @unchecked Sendable {
                 completion: completion
             )
         }
-        return outcome
     }
 
     @discardableResult
@@ -135,11 +135,18 @@ final class BoothControlWritePump: @unchecked Sendable {
     }
 
     var pendingMessageCount: Int {
-        queue.sync { pending.count + (inFlight == nil ? 0 : 1) }
+        onQueue { pending.count + (inFlight == nil ? 0 : 1) }
     }
 
     var pendingByteCount: Int {
-        queue.sync { pendingBytes + (inFlight?.estimatedBytes ?? 0) }
+        onQueue { pendingBytes + (inFlight?.estimatedBytes ?? 0) }
+    }
+
+    private func onQueue<T>(_ operation: () -> T) -> T {
+        if DispatchQueue.getSpecific(key: queueKey) != nil {
+            return operation()
+        }
+        return queue.sync(execute: operation)
     }
 
     private func flush() {

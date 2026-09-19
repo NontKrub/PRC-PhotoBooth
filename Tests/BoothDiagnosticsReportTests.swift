@@ -18,6 +18,8 @@ struct BoothDiagnosticsReportTests {
             "Control channel: Connected",
             "Preview channel: Connected",
             "Authentication: Not authenticated",
+            "Discovery",
+            "Snapshot: Unavailable",
             "FPS: 29.8",
             "Throughput: 2.4 MB/s",
             "Default status: System Default",

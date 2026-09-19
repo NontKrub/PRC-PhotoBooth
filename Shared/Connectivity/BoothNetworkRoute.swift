@@ -12,7 +12,7 @@ public enum BoothNetworkInterfacePolicy: String, Equatable, Hashable, Sendable {
     case wiredEthernet
 }
 
-enum BoothRouteCandidateProvenance: String, Codable, Equatable, Sendable {
+enum BoothRouteCandidateProvenance: String, Codable, Equatable, Hashable, Sendable {
     case localNetworkBonjour = "Wi-Fi Bonjour"
     case ethernetConstrainedBonjour = "Ethernet-constrained Bonjour"
     case ethernetCompatibilityBonjour = "Ethernet compatibility Bonjour"
@@ -24,6 +24,76 @@ enum BoothRouteCandidateProvenance: String, Codable, Equatable, Sendable {
             return .wifi
         case .ethernetConstrainedBonjour, .ethernetCompatibilityBonjour, .directStaticLAN:
             return .wiredEthernet
+        }
+    }
+}
+
+enum BoothRouteDiscoveryMechanism: Equatable, Sendable {
+    case wifiBonjour
+    case wiredEthernetBonjour
+    case wiredEthernetCompatibilityBonjour
+}
+
+struct BoothRouteDiscoveryPlan: Equatable, Sendable {
+    let mechanisms: [BoothRouteDiscoveryMechanism]
+
+    init(preference: BoothNetworkPreference) {
+        switch preference {
+        case .wifi:
+            mechanisms = [.wifiBonjour]
+        case .lan:
+            mechanisms = [
+                .wiredEthernetBonjour,
+                .wiredEthernetCompatibilityBonjour,
+                .wifiBonjour
+            ]
+        }
+    }
+}
+
+struct BoothBonjourServiceIdentity: Equatable, Sendable {
+    let channel: BoothTransportChannel
+    let deviceID: String
+
+    static func serviceName(channel: BoothTransportChannel, deviceID: String) -> String {
+        let channelName: String
+        switch channel {
+        case .control: channelName = "Control"
+        case .preview: channelName = "Preview"
+        case .asset: channelName = "Asset"
+        case .heartbeat: channelName = "Control"
+        }
+        return "PRC PhotoBooth \(channelName) \(deviceID)"
+    }
+
+    static func parse(_ serviceName: String) -> Self? {
+        let prefix = "PRC PhotoBooth "
+        guard serviceName.hasPrefix(prefix) else { return nil }
+        let components = serviceName.dropFirst(prefix.count).split(separator: " ", maxSplits: 1)
+        guard components.count == 2,
+              let channel = channel(for: String(components[0])) else {
+            return nil
+        }
+
+        var deviceID = String(components[1])
+        if let collisionStart = deviceID.range(of: " (", options: .backwards),
+           deviceID.hasSuffix(")") {
+            deviceID.removeSubrange(collisionStart.lowerBound..<deviceID.endIndex)
+        }
+        guard UUID(uuidString: deviceID) != nil else { return nil }
+        return Self(channel: channel, deviceID: deviceID)
+    }
+
+    static func deviceID(from serviceName: String) -> String? {
+        parse(serviceName)?.deviceID
+    }
+
+    private static func channel(for name: String) -> BoothTransportChannel? {
+        switch name {
+        case "Control": return .control
+        case "Preview": return .preview
+        case "Asset": return .asset
+        default: return nil
         }
     }
 }
@@ -148,7 +218,6 @@ enum BoothRouteDiscoveryPolicy {
         hasActiveControlAttempt: Bool
     ) -> BoothRouteDiscoveryDecision {
         guard hasActiveDiscovery || hasActiveControlAttempt,
-              targetPeerID == activeTargetPeerID,
               requestedPreference == activePreference else {
             return .restart
         }

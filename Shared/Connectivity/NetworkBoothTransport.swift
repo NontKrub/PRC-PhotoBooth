@@ -65,6 +65,15 @@ public final class NetworkBoothTransport: BoothTransport {
         let source: String
     }
 
+    private struct RouteCandidate {
+        let endpoint: NWEndpoint
+        let interface: BoothNetworkInterfacePolicy
+        let provenance: BoothRouteCandidateProvenance
+        let connectionParameters: NWParameters?
+        let advertisedPreference: BoothNetworkPreference?
+        let generation: Int
+    }
+
     public let role: DeviceRole
     public let connectionStatus: BoothConnectionStatus
     public private(set) var connectionState: BoothConnectionState = .disconnected
@@ -136,6 +145,7 @@ public final class NetworkBoothTransport: BoothTransport {
     private var deferredAuthChallenge: BoothAuthChallenge?
     private var peerHello: BoothTransportHello?
     private var peerAuthenticated = false
+    private var didSendTransportHello = false
     private let secureChannel = BoothSecureChannel()
     private var secureNegotiator = BoothSecureChannelNegotiator(role: .mac, localDeviceID: "")
     private var localSecureChannelHello: BoothSecureChannelHello?
@@ -162,6 +172,7 @@ public final class NetworkBoothTransport: BoothTransport {
     // `.wiredEthernet`. This browser only discovers a LAN-advertised peer.
     private var lanCompatibilityRouteDiscoveryBrowser: NWBrowser?
     private var discoveredPeerProvenanceByID: [String: Set<BoothRouteCandidateProvenance>] = [:]
+    private var routeCandidatesByPeerID: [String: [BoothRouteCandidateProvenance: RouteCandidate]] = [:]
     private var routeDiscoverySelection = BoothRouteDiscoverySelection()
     private var routeDiscoveryTargetPeerID: String?
     private var routeDiscoveryPreference: BoothNetworkPreference?
@@ -406,6 +417,29 @@ public final class NetworkBoothTransport: BoothTransport {
     }
 
     public var deviceIdentity: BoothDeviceIdentity { localIdentity }
+    public var discoveryDiagnostics: BoothDiscoveryDiagnostics {
+        let candidate = targetPeerID.flatMap(cachedRouteCandidate(for:))
+        return BoothDiscoveryDiagnostics(
+            generation: routeDiscoveryGate.generation,
+            activeBrowserCount: [
+                wifiRouteDiscoveryBrowser,
+                lanRouteDiscoveryBrowser,
+                lanCompatibilityRouteDiscoveryBrowser
+            ].compactMap { $0 }.count,
+            discoveredPeerCount: discoveredPeersByID.count,
+            targetPeerID: targetPeerID,
+            targetCandidateAvailable: candidate != nil,
+            targetCandidateSource: candidate?.provenance.rawValue,
+            controlConnectionState: controlConnection.map { String(describing: $0.state) } ?? "none",
+            controlConnectionGeneration: controlConnectionGeneration,
+            helloSent: didSendTransportHello,
+            helloReceived: didReceiveHello,
+            authenticated: peerAuthenticated,
+            secureChannelReady: secureChannelEstablished,
+            previewReady: connectionStatus.isPreviewChannelConnected,
+            assetReady: connectionStatus.isAssetChannelReady
+        )
+    }
     public var trustedPeers: [TrustedBoothPeer] { trustedStore.trustedPeers }
     public var preferredPeerID: String? { trustedStore.preferredPeerID }
     public var currentPairingSessionInfo: BoothPairingSessionInfo? { currentPairingSession?.info }
@@ -459,8 +493,10 @@ public final class NetworkBoothTransport: BoothTransport {
         set {
             trustedStore.autoReconnect = newValue
             if role == .iPad {
-                targetPeerID = newValue ? trustedStore.preferredPeerID : nil
-                restartDiscoveryForPeerSelection()
+                let newTarget = newValue ? trustedStore.preferredPeerID : nil
+                prepareForPeerSelection(newTarget)
+                targetPeerID = newTarget
+                ensureDiscoveryForPeerSelection()
             }
             publishPairingStatus()
         }
@@ -726,11 +762,16 @@ public final class NetworkBoothTransport: BoothTransport {
 
     public func selectPreferredPeer(_ peerID: String?) {
         guard peerID.map(trustedStore.trustedPeerIDs.contains) ?? true else { return }
+        if role == .iPad { prepareForPeerSelection(peerID) }
         trustedStore.preferredPeerID = peerID
         if role == .iPad {
             targetPeerID = peerID
             trustedStore.autoReconnect = peerID != nil
-            restartDiscoveryForPeerSelection()
+            emitTransportEvent(
+                .targetSelected,
+                reason: peerID == nil ? "Peer target cleared." : "Preferred peer selected."
+            )
+            ensureDiscoveryForPeerSelection()
         } else if let currentPeerID = peerDeviceID, currentPeerID != peerID {
             controlConnection?.cancel()
         }
@@ -739,12 +780,35 @@ public final class NetworkBoothTransport: BoothTransport {
 
     public func connectToPeer(_ peerID: String) {
         guard role == .iPad, trustedStore.trustedPeerIDs.contains(peerID) else { return }
+        guard !(targetPeerID == peerID && peerDeviceID == peerID && peerAuthenticated) else { return }
+        prepareForPeerSelection(peerID)
         resetPairingState(clearTarget: false, clearPendingCommit: true, clearFailure: true)
         pendingPairingIntent = nil
         trustedStore.preferredPeerID = peerID
         targetPeerID = peerID
+        emitTransportEvent(.targetSelected, reason: "Trusted peer selected for connection.")
         setPairingStage(.idle, state: .idle)
-        restartDiscoveryForPeerSelection()
+        ensureDiscoveryForPeerSelection()
+    }
+
+    public func refreshPeerDiscovery() {
+        guard role == .iPad, shouldReconnect else { return }
+        let targetPeerID = self.targetPeerID
+        cancelRouteDiscovery()
+        discoveredPeersByID.removeAll()
+        discoveredPeerProvenanceByID.removeAll()
+        routeCandidatesByPeerID.removeAll()
+        publishPairingStatus()
+
+        let generation = routeDiscoveryGate.begin()
+        routeDiscoveryTargetPeerID = targetPeerID
+        routeDiscoveryPreference = requestedPreference
+        emitTransportEvent(
+            .routeDiscoveryStarted,
+            reason: "Non-destructive peer discovery refresh.",
+            routeGeneration: generation
+        )
+        startRouteDiscoveryBrowsers(generation: generation)
     }
 
     public func requestPairing(with peerID: String) {
@@ -764,7 +828,7 @@ public final class NetworkBoothTransport: BoothTransport {
                 setPairingStage(.failed, state: .failed(reason))
                 return
             }
-            guard peer.protocolVersion == BoothTransportHello.currentProtocolVersion else {
+            guard peer.protocolVersion == 0 || peer.protocolVersion == BoothTransportHello.currentProtocolVersion else {
                 let reason = BoothPairingError.incompatibleProtocol.localizedDescription
                 pendingPairingFailure = reason
                 setPairingStage(.failed, state: .failed(reason))
@@ -780,6 +844,7 @@ public final class NetworkBoothTransport: BoothTransport {
         resetPairingState(clearTarget: false, clearPendingCommit: true, clearFailure: true)
         pendingPairingRequest = nil
         targetPeerID = peerID
+        emitTransportEvent(.targetSelected, reason: "Pairing target selected.")
         pendingPairingIntent = BoothPairingIntent(
             iPadIdentity: localIdentity,
             targetMacDeviceID: peerID
@@ -791,6 +856,11 @@ public final class NetworkBoothTransport: BoothTransport {
             expiresAt: Date().addingTimeInterval(BoothPairingSession.lifetime)
         )
         setPairingStage(.discovering, state: .waitingForMac(peerID: peerID))
+        if didReceiveHello, peerDeviceID == peerID, controlConnection != nil,
+           let pendingPairingIntent {
+            sendPairingIntent(pendingPairingIntent, on: controlConnection)
+            return
+        }
         if restartDiscovery {
             restartDiscoveryForPeerSelection()
         } else {
@@ -814,6 +884,7 @@ public final class NetworkBoothTransport: BoothTransport {
             return
         }
         if let discoveredPeer,
+           discoveredPeer.protocolVersion != 0,
            discoveredPeer.protocolVersion != BoothTransportHello.currentProtocolVersion {
             let reason = BoothPairingError.incompatibleProtocol.localizedDescription
             pendingPairingFailure = reason
@@ -1391,6 +1462,7 @@ public final class NetworkBoothTransport: BoothTransport {
         directLANControlAttemptInFlight = false
         discoveredPeersByID.removeAll()
         discoveredPeerProvenanceByID.removeAll()
+        routeCandidatesByPeerID.removeAll()
         publishPairingStatus()
         cancelRouteDiscovery()
         tearDownActiveTransport()
@@ -1409,14 +1481,25 @@ public final class NetworkBoothTransport: BoothTransport {
         )
         if !skipDirectLANFallback,
            startDirectLANPairingFallbackIfNeeded(routeGeneration: generation) { return }
-        startRouteDiscoveryBrowser(on: .wifi, generation: generation)
-        startRouteDiscoveryBrowser(on: .wiredEthernet, generation: generation)
-        startRouteDiscoveryBrowser(
-            on: .wiredEthernet,
-            generation: generation,
-            parameters: .tcp,
-            isLANCompatibilityFallback: true
-        )
+        startRouteDiscoveryBrowsers(generation: generation)
+    }
+
+    private func startRouteDiscoveryBrowsers(generation: Int) {
+        for mechanism in BoothRouteDiscoveryPlan(preference: requestedPreference).mechanisms {
+            switch mechanism {
+            case .wifiBonjour:
+                startRouteDiscoveryBrowser(on: .wifi, generation: generation)
+            case .wiredEthernetBonjour:
+                startRouteDiscoveryBrowser(on: .wiredEthernet, generation: generation)
+            case .wiredEthernetCompatibilityBonjour:
+                startRouteDiscoveryBrowser(
+                    on: .wiredEthernet,
+                    generation: generation,
+                    parameters: .tcp,
+                    isLANCompatibilityFallback: true
+                )
+            }
+        }
     }
 
     private func startDirectLANPairingFallbackIfNeeded(routeGeneration: Int) -> Bool {
@@ -1487,13 +1570,35 @@ public final class NetworkBoothTransport: BoothTransport {
                         isLANCompatibilityFallback: isLANCompatibilityFallback
                       ) else { return }
 
+                self.emitTransportEvent(
+                    .routeDiscoveryResult,
+                    route: interface.rawValue,
+                    reason: "Bonjour result set count=\(results.count).",
+                    routeGeneration: generation,
+                    candidateSource: candidateProvenance.rawValue
+                )
+                self.updateRouteCandidates(
+                    from: results,
+                    interface: interface,
+                    provenance: candidateProvenance,
+                    generation: generation,
+                    connectionParameters: isLANCompatibilityFallback ? .tcp : nil
+                )
                 self.updateDiscoveredPeers(from: results, provenance: candidateProvenance)
                 for result in results {
+                    guard self.controlConnection == nil || !self.peerAuthenticated else { continue }
                     guard let peer = self.discoveredPeer(from: result, interface: interface),
                           peer.role == .mac,
                           let targetPeerID = self.targetPeerID,
                           peer.id == targetPeerID else { continue }
-                    guard peer.protocolVersion == BoothTransportHello.currentProtocolVersion else {
+                    self.emitTransportEvent(
+                        .targetMatched,
+                        route: interface.rawValue,
+                        reason: "Bonjour candidate matched the selected peer.",
+                        routeGeneration: generation,
+                        candidateSource: candidateProvenance.rawValue
+                    )
+                    guard peer.protocolVersion == 0 || peer.protocolVersion == BoothTransportHello.currentProtocolVersion else {
                         let reason = BoothPairingError.incompatibleProtocol.localizedDescription
                         self.pendingPairingFailure = reason
                         self.setPairingStage(.failed, state: .failed(reason))
@@ -1529,6 +1634,13 @@ public final class NetworkBoothTransport: BoothTransport {
                         continue
                     case .accepted:
                         self.emitTransportEvent(
+                            .routeSelected,
+                            route: interface.rawValue,
+                            reason: "Route candidate accepted for control connection.",
+                            routeGeneration: generation,
+                            candidateSource: candidateProvenance.rawValue
+                        )
+                        self.emitTransportEvent(
                             .routeCandidateDiscovered,
                             route: interface.rawValue,
                             reason: advertisedPreference.map { "Bonjour network hint=\($0.rawValue)" },
@@ -1547,7 +1659,6 @@ public final class NetworkBoothTransport: BoothTransport {
             }
         }
         browser.stateUpdateHandler = { [weak self, weak browser] state in
-            guard case .failed(let error) = state else { return }
             Task { @MainActor [weak self, weak browser] in
                 guard let self, let browser,
                       self.routeDiscoveryGate.accepts(generation),
@@ -1556,16 +1667,43 @@ public final class NetworkBoothTransport: BoothTransport {
                         interface: interface,
                         isLANCompatibilityFallback: isLANCompatibilityFallback
                       ) else { return }
-                print("[NetworkRoute] \(interface.rawValue) discovery failed: \(error.localizedDescription)")
-                if isLANCompatibilityFallback {
-                    self.lanCompatibilityRouteDiscoveryBrowser = nil
-                    return
-                } else if interface == .wifi {
-                    self.wifiRouteDiscoveryBrowser = nil
-                } else {
-                    self.lanRouteDiscoveryBrowser = nil
+
+                switch state {
+                case .ready:
+                    self.emitTransportEvent(
+                        .browserReady,
+                        route: interface.rawValue,
+                        routeGeneration: generation,
+                        candidateSource: candidateProvenance.rawValue
+                    )
+                case .failed(let error):
+                    self.emitTransportEvent(
+                        .browserFailed,
+                        route: interface.rawValue,
+                        reason: error.localizedDescription,
+                        routeGeneration: generation,
+                        candidateSource: candidateProvenance.rawValue
+                    )
+                    print("[NetworkRoute] \(interface.rawValue) discovery failed: \(error.localizedDescription)")
+                    if isLANCompatibilityFallback {
+                        self.lanCompatibilityRouteDiscoveryBrowser = nil
+                        return
+                    } else if interface == .wifi {
+                        self.wifiRouteDiscoveryBrowser = nil
+                    } else {
+                        self.lanRouteDiscoveryBrowser = nil
+                    }
+                    self.scheduleReconnect()
+                case .cancelled:
+                    self.emitTransportEvent(
+                        .browserCancelled,
+                        route: interface.rawValue,
+                        routeGeneration: generation,
+                        candidateSource: candidateProvenance.rawValue
+                    )
+                default:
+                    break
                 }
-                self.scheduleReconnect()
             }
         }
         browser.start(queue: transportQueue)
@@ -1696,6 +1834,84 @@ public final class NetworkBoothTransport: BoothTransport {
             : browser === lanRouteDiscoveryBrowser
     }
 
+    private func prepareForPeerSelection(_ peerID: String?) {
+        guard role == .iPad,
+              peerDeviceID != peerID,
+              activeInterface != nil || controlConnection != nil || controlBrowser != nil else {
+            return
+        }
+        tearDownActiveTransport()
+    }
+
+    private func cachedRouteCandidate(for peerID: String) -> RouteCandidate? {
+        guard let candidates = routeCandidatesByPeerID[peerID] else { return nil }
+        let orderedProvenances: [BoothRouteCandidateProvenance]
+        switch requestedPreference {
+        case .wifi:
+            orderedProvenances = [.localNetworkBonjour]
+        case .lan:
+            orderedProvenances = [
+                .ethernetConstrainedBonjour,
+                .ethernetCompatibilityBonjour,
+                .localNetworkBonjour
+            ]
+        }
+        return orderedProvenances.lazy
+            .compactMap { candidates[$0] }
+            .first {
+                $0.generation == routeDiscoveryGate.generation
+                    && ($0.provenance != .ethernetCompatibilityBonjour
+                        || $0.advertisedPreference == .lan)
+            }
+    }
+
+    private func connectCachedRouteIfAvailable() -> Bool {
+        guard let targetPeerID = targetPeerID,
+              controlConnection == nil || !peerAuthenticated,
+              let candidate = cachedRouteCandidate(for: targetPeerID) else {
+            return false
+        }
+
+        switch routeDiscoverySelection.consider(
+            candidate.interface,
+            preferredPreference: requestedPreference,
+            advertisedPreference: candidate.advertisedPreference
+        ) {
+        case .ignored:
+            return true
+        case .waitingForPreferredInterface:
+            storePendingRouteEndpoint(
+                candidate.endpoint,
+                for: candidate.interface,
+                provenance: candidate.provenance
+            )
+            scheduleRouteDiscoveryFallback()
+            return true
+        case .accepted:
+            emitTransportEvent(
+                .routeSelected,
+                route: candidate.interface.rawValue,
+                reason: "Cached route candidate accepted for control connection.",
+                routeGeneration: candidate.generation,
+                candidateSource: candidate.provenance.rawValue
+            )
+            emitTransportEvent(
+                .routeCandidateDiscovered,
+                route: candidate.interface.rawValue,
+                reason: candidate.advertisedPreference.map { "Bonjour network hint=\($0.rawValue)" },
+                routeGeneration: candidate.generation,
+                candidateSource: candidate.provenance.rawValue
+            )
+            connectDiscoveredRoute(
+                interface: candidate.interface,
+                endpoint: candidate.endpoint,
+                connectionParameters: candidate.connectionParameters,
+                provenance: candidate.provenance
+            )
+            return true
+        }
+    }
+
     private func ensureDiscoveryForPeerSelection() {
         guard role == .iPad, shouldReconnect else { return }
 
@@ -1714,6 +1930,9 @@ public final class NetworkBoothTransport: BoothTransport {
             hasActiveDiscovery: hasActiveDiscovery,
             hasActiveControlAttempt: hasActiveControlAttempt
         )
+        routeDiscoveryTargetPeerID = targetPeerID
+        routeDiscoveryPreference = requestedPreference
+        if connectCachedRouteIfAvailable() { return }
         guard decision == .restart else {
             emitTransportEvent(
                 .routeDiscoveryReused,
@@ -1780,6 +1999,7 @@ public final class NetworkBoothTransport: BoothTransport {
         previewWritePump.invalidate(generation: previewConnectionGeneration)
         previewDeliveryPump.reset(generation: previewConnectionGeneration)
         didReceiveHello = false
+        didSendTransportHello = false
         peerAuthenticated = false
         secureChannel.reset()
         secureNegotiationTimeoutSource?.cancel()
@@ -1829,7 +2049,7 @@ public final class NetworkBoothTransport: BoothTransport {
     }
 
     private func advertisedService(for channel: BoothTransportChannel) -> NWListener.Service {
-        var metadata = [
+        let metadata = [
             "network": requestedPreference.rawValue,
             "deviceID": localIdentity.id,
             "deviceName": localIdentity.displayName,
@@ -1837,11 +2057,6 @@ public final class NetworkBoothTransport: BoothTransport {
             "appVersion": Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "dev",
             "protocolVersion": String(BoothTransportHello.currentProtocolVersion)
         ]
-        if role == .mac, let session = currentPairingSession, session.isActive() {
-            metadata["pairingSessionID"] = session.info.sessionID
-            metadata["pairingExpiresAt"] = String(session.info.expiresAt.timeIntervalSince1970)
-            metadata["pairingMacKey"] = session.info.macEphemeralPublicKey.base64URLEncodedString()
-        }
         let serviceType: String
         switch channel {
         case .control: serviceType = Self.controlServiceType
@@ -1850,7 +2065,10 @@ public final class NetworkBoothTransport: BoothTransport {
         case .heartbeat: serviceType = Self.controlServiceType
         }
         return NWListener.Service(
-            name: "PRC PhotoBooth \(channel == .control ? "Control" : channel == .preview ? "Preview" : "Asset") \(localIdentity.id)",
+            name: BoothBonjourServiceIdentity.serviceName(
+                channel: channel,
+                deviceID: localIdentity.id
+            ),
             type: serviceType,
             txtRecord: NWTXTRecord(metadata)
         )
@@ -1866,27 +2084,70 @@ public final class NetworkBoothTransport: BoothTransport {
         from result: NWBrowser.Result,
         interface: BoothNetworkInterfacePolicy
     ) -> BoothDiscoveredPeer? {
-        guard case .bonjour(let txtRecord) = result.metadata,
-              let id = txtRecord["deviceID"], !id.isEmpty,
-              let roleRaw = txtRecord["role"],
-              let peerRole = DeviceRole(rawValue: roleRaw) else { return nil }
+        let txtRecord: NWTXTRecord?
+        if case .bonjour(let record) = result.metadata {
+            txtRecord = record
+        } else {
+            txtRecord = nil
+        }
+        guard let serviceIdentity = serviceName(from: result.endpoint)
+                .flatMap(BoothBonjourServiceIdentity.parse),
+              serviceIdentity.channel == .control else {
+            return nil
+        }
+        let serviceDeviceID = serviceIdentity.deviceID
+        let advertisedDeviceID = txtRecord?["deviceID"]
+        let id = advertisedDeviceID ?? serviceDeviceID
+        guard !id.isEmpty,
+              advertisedDeviceID == nil || advertisedDeviceID == serviceDeviceID else {
+            return nil
+        }
+        let peerRole = txtRecord?["role"].flatMap(DeviceRole.init(rawValue:)) ?? .mac
         let preferred = trustedStore.preferredPeerID
-        let expiresAt = txtRecord["pairingExpiresAt"].flatMap(Double.init).map(Date.init(timeIntervalSince1970:))
-        let macEphemeralPublicKey = txtRecord["pairingMacKey"].flatMap(Data.init(base64URLString:))
         return BoothDiscoveredPeer(
             id: id,
-            displayName: txtRecord["deviceName"] ?? id,
+            displayName: txtRecord?["deviceName"] ?? id,
             role: peerRole,
-            appVersion: txtRecord["appVersion"] ?? "unknown",
-            protocolVersion: Int(txtRecord["protocolVersion"] ?? "0") ?? 0,
-            networkPreference: txtRecord["network"].flatMap(BoothNetworkPreference.init(rawValue:)),
+            appVersion: txtRecord?["appVersion"] ?? "unknown",
+            protocolVersion: Int(txtRecord?["protocolVersion"] ?? "0") ?? 0,
+            networkPreference: txtRecord?["network"].flatMap(BoothNetworkPreference.init(rawValue:)),
             availableInterfaces: [interface],
-            pairingSessionID: txtRecord["pairingSessionID"],
-            pairingExpiresAt: expiresAt,
-            pairingMacEphemeralPublicKey: macEphemeralPublicKey,
             isTrusted: trustedStore.trustedPeerIDs.contains(id),
             isPreferred: preferred == id
         )
+    }
+
+    private func updateRouteCandidates(
+        from results: Set<NWBrowser.Result>,
+        interface: BoothNetworkInterfacePolicy,
+        provenance: BoothRouteCandidateProvenance,
+        generation: Int,
+        connectionParameters: NWParameters?
+    ) {
+        for peerID in Array(routeCandidatesByPeerID.keys) {
+            var candidates = routeCandidatesByPeerID[peerID] ?? [:]
+            candidates.removeValue(forKey: provenance)
+            if candidates.isEmpty {
+                routeCandidatesByPeerID.removeValue(forKey: peerID)
+            } else {
+                routeCandidatesByPeerID[peerID] = candidates
+            }
+        }
+
+        for result in results {
+            guard let peer = discoveredPeer(from: result, interface: interface),
+                  peer.role == .mac else { continue }
+            var candidates = routeCandidatesByPeerID[peer.id] ?? [:]
+            candidates[provenance] = RouteCandidate(
+                endpoint: result.endpoint,
+                interface: interface,
+                provenance: provenance,
+                connectionParameters: connectionParameters,
+                advertisedPreference: peer.networkPreference,
+                generation: generation
+            )
+            routeCandidatesByPeerID[peer.id] = candidates
+        }
     }
 
     private func updateDiscoveredPeers(
@@ -2081,10 +2342,18 @@ public final class NetworkBoothTransport: BoothTransport {
         guard !endpoints.isEmpty else { return nil }
         if channel == .preview || channel == .asset {
             guard let expectedPeerDeviceID else { return nil }
-            return endpoints.first { serviceName(from: $0)?.contains(expectedPeerDeviceID) == true }
+            return endpoints.first {
+                guard let identity = serviceName(from: $0).flatMap(BoothBonjourServiceIdentity.parse) else {
+                    return false
+                }
+                return identity.channel == channel && identity.deviceID == expectedPeerDeviceID
+            }
         }
         if let selectedPeerID = expectedPeerDeviceID ?? targetPeerID {
-            return endpoints.first { serviceName(from: $0)?.contains(selectedPeerID) == true }
+            return endpoints.first {
+                serviceName(from: $0)
+                    .flatMap(BoothBonjourServiceIdentity.parse)?.deviceID == selectedPeerID
+            }
         }
         return role == .iPad ? nil : endpoints[0]
     }
@@ -2825,7 +3094,10 @@ public final class NetworkBoothTransport: BoothTransport {
             sessionID: pendingPairingSessionID
         ) { [weak self] result in
             guard let self else { return }
-            if case .failure(let error) = result {
+            switch result {
+            case .success:
+                self.emitTransportEvent(.pairingIntentSent, channel: .control)
+            case .failure(let error):
                 self.failPairing("Pairing request could not be delivered: \(error.message)")
             }
         }
@@ -2875,6 +3147,7 @@ public final class NetworkBoothTransport: BoothTransport {
                   self.pendingPairingRequest?.sessionID == request.sessionID else { return }
             switch result {
             case .success:
+                self.emitTransportEvent(.pairingRequestSent, channel: .control)
                 self.setPairingStage(.requestSent, state: .pairing(expiresAt: self.pendingPairingStateExpiry))
             case .failure(let error):
                 self.pairingRequestSubmission.resetIfMatches(
@@ -3081,6 +3354,7 @@ public final class NetworkBoothTransport: BoothTransport {
         pendingPairingSessionID = session.sessionID
         schedulePairingExpiry(sessionID: session.sessionID, expiresAt: session.expiresAt)
         pendingPairingFailure = nil
+        emitTransportEvent(.pairingSessionReceived, channel: .control)
         setPairingStage(.sessionReceived, state: .pairing(expiresAt: session.expiresAt))
         setPairingStage(.waitingForPIN, state: .pairing(expiresAt: session.expiresAt))
     }
@@ -3269,6 +3543,11 @@ public final class NetworkBoothTransport: BoothTransport {
 
     private func handlePairingResult(_ result: BoothPairingResult) {
         guard role == .iPad else { return }
+        emitTransportEvent(
+            .pairingResultReceived,
+            channel: .control,
+            reason: result.accepted ? "Pairing result accepted." : "Pairing result rejected."
+        )
         if !result.accepted, pendingPairingRequest == nil {
             // The Mac can cancel or expire after receiving an intent but before
             // the iPad has submitted its PIN. End that local intent immediately;
@@ -3611,6 +3890,7 @@ public final class NetworkBoothTransport: BoothTransport {
         }
         publishStatus()
         setPairingStage(.authenticated, state: .authenticated(peerID: hello.deviceID))
+        emitTransportEvent(.authenticated, channel: .control)
         emitTransportEvent(.transportReconnectSucceeded, channel: .control, attempt: completedReconnectAttempt)
         if role == .mac {
             startSecureChannelHandshake()
@@ -3885,10 +4165,14 @@ public final class NetworkBoothTransport: BoothTransport {
             connectionDidClose(assetConnection, channel: .asset, reason: "Asset channel identity did not match control")
             return
         }
+        let wasAssetIdentityVerified = assetIdentityVerified
         assetIdentityVerified = true
         connectionStatus.publishAssetChannel(connected: true, verified: true)
         emitTransportEvent(.assetChannelVerified, channel: .asset)
         emitTransportEvent(.transportReady, channel: .asset)
+        if !wasAssetIdentityVerified {
+            emitTransportEvent(.assetReady, channel: .asset)
+        }
         if role == .mac, !deferredAssetRequests.isEmpty {
             let references = deferredAssetRequests
             deferredAssetRequests.removeAll()
@@ -3910,15 +4194,13 @@ public final class NetworkBoothTransport: BoothTransport {
         guard shouldReconnect, assetReconnectSource == nil else { return }
         assetReconnectToken &+= 1
         let token = assetReconnectToken
-        let source = DispatchSource.makeTimerSource(queue: transportQueue)
+        let source = DispatchSource.makeTimerSource(queue: .main)
         source.schedule(deadline: .now() + 0.5)
         source.setEventHandler { [weak self] in
-            Task { @MainActor [weak self] in
-                guard let self else { return }
-                guard self.assetReconnectToken == token else { return }
-                self.assetReconnectSource = nil
-                self.startAssetChannelIfNeeded()
-            }
+            guard let self else { return }
+            guard self.assetReconnectToken == token else { return }
+            self.assetReconnectSource = nil
+            self.startAssetChannelIfNeeded()
         }
         assetReconnectSource = source
         source.resume()
@@ -4135,7 +4417,7 @@ public final class NetworkBoothTransport: BoothTransport {
     }
 
     private func sendTransportHello() {
-        send(
+        let outcome = send(
             .helloDetails(hello: BoothTransportHello(
                 role: role,
                 deviceID: localIdentity.id,
@@ -4145,6 +4427,10 @@ public final class NetworkBoothTransport: BoothTransport {
             on: controlConnection,
             channel: .control
         )
+        if outcome == .sent {
+            didSendTransportHello = true
+            emitTransportEvent(.helloSent, channel: .control)
+        }
     }
 
     private func requiresSecureChannel(_ message: Message) -> Bool {
@@ -4233,8 +4519,12 @@ public final class NetworkBoothTransport: BoothTransport {
             connectionDidClose(previewConnection, channel: .preview, reason: "preview peer does not match control peer")
             return
         }
+        let wasPreviewIdentityVerified = previewIdentityVerified
         previewIdentityVerified = true
         connectionStatus.publishPreviewChannel(connected: true)
+        if !wasPreviewIdentityVerified {
+            emitTransportEvent(.previewReady, channel: .preview)
+        }
         if didSendPreviewHello, let connection = previewConnection {
             previewWritePump.markReady(connection, generation: previewConnectionGeneration)
         }
@@ -4630,14 +4920,15 @@ public final class NetworkBoothTransport: BoothTransport {
 
     private func resetPreviewIdentity() {
         previewPeerID = nil
-        previewPeerSupportsIdentity = false
         didSendPreviewHello = false
         previewIdentityVerified = false
     }
 
     private func resetControlAuthentication() {
         didReceiveHello = false
+        didSendTransportHello = false
         peerAuthenticated = false
+        previewPeerSupportsIdentity = false
         secureChannel.reset()
         resetAssetBinding()
         deferredAssetRequests.removeAll()

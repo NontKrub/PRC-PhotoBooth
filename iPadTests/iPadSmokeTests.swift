@@ -8,6 +8,83 @@ import Testing
 
 @Suite("iPad smoke tests")
 struct iPadSmokeTests {
+    @Test("connection log includes actionable state and redacts secrets")
+    @MainActor
+    func connectionLogIsSafeAndActionable() {
+        let status = BoothConnectionStatus(requestedNetwork: .lan)
+        status.publish(
+            requestedNetwork: .lan,
+            state: .connecting,
+            peerID: "mac-1",
+            peerDisplayName: "Operator Mac",
+            routeState: .connectingLAN,
+            effectiveNetwork: .unavailable,
+            fallbackReason: "Ethernet unavailable",
+            isLANPathAvailable: false,
+            isWiFiPathAvailable: true,
+            lanPathObservation: .unavailable,
+            wifiPathObservation: .available,
+            lanHandshake: .timeout,
+            lastNetworkError: "Authorization: Bearer do-not-export"
+        )
+        status.publishPairing(
+            trustedPeerIDs: ["mac-1"],
+            preferredPeerID: "mac-1",
+            updatePreferredPeer: true,
+            authenticated: false,
+            state: .failed("Pairing timed out"),
+            stage: .failed
+        )
+
+        let event = BoothTransportDiagnosticEvent(
+            kind: .browserFailed,
+            timestamp: Date(timeIntervalSince1970: 0),
+            reason: "token=do-not-export"
+        )
+        let redactedEvent = BoothConnectionDiagnosticsReport.redacted(event)
+        #expect(redactedEvent.reason == "[redacted]")
+
+        let report = BoothConnectionDiagnosticsReport.make(
+            appVersion: "1.4.2",
+            appBuild: "6",
+            operatingSystem: "iPadOS test",
+            deviceName: "Booth iPad",
+            status: status,
+            discoveryDiagnostics: BoothDiscoveryDiagnostics(
+                generation: 7,
+                activeBrowserCount: 1,
+                discoveredPeerCount: 2,
+                targetPeerID: "mac-1",
+                targetCandidateAvailable: false,
+                targetCandidateSource: nil,
+                controlConnectionState: "preparing",
+                controlConnectionGeneration: 3,
+                helloSent: true,
+                helloReceived: false,
+                authenticated: false,
+                secureChannelReady: false,
+                previewReady: false,
+                assetReady: false
+            ),
+            recentEvents: [redactedEvent]
+        )
+
+        for line in [
+            "PRC PhotoBooth Connection Log",
+            "Version: 1.4.2",
+            "Requested: LAN",
+            "Fallback: Ethernet unavailable",
+            "Pairing stage: failed",
+            "Discovery",
+            "Generation: 7",
+            "browserFailed"
+        ] {
+            #expect(report.contains(line))
+        }
+        #expect(!report.contains("do-not-export"))
+        #expect(report.contains("[redacted]"))
+    }
+
     @Test("view model forwards language, session, state, and connection changes")
     @MainActor
     func observationForwarding() {

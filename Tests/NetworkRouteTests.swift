@@ -467,6 +467,13 @@ private func soakMessages(sessionID: String, photoCount: Int, index: Int) -> [Me
     return messages
 }
 
+private func waitForSemaphore(
+    _ semaphore: DispatchSemaphore,
+    timeout: TimeInterval = 1
+) -> Bool {
+    semaphore.wait(timeout: .now() + timeout) == .success
+}
+
 @Suite("Network route policy")
 struct NetworkRouteTests {
     @Test("reconnect timer fires while MainActor is blocked")
@@ -510,6 +517,26 @@ struct NetworkRouteTests {
         runtime.cancelReconnect()
     }
 
+    @Test("control writer accepts work from its own queue")
+    func controlWriterCanEnqueueFromItsOwnQueue() {
+        let queue = DispatchQueue(label: "PRC-PhotoBooth.Tests.ControlWriterReentry")
+        let writer = BoothControlWritePump(queue: queue, secureChannel: BoothSecureChannel())
+        let completed = DispatchSemaphore(value: 0)
+
+        queue.async {
+            writer.enqueue(
+                .heartbeat,
+                connection: nil,
+                generation: 1,
+                secure: false,
+                completion: nil
+            )
+            completed.signal()
+        }
+
+        #expect(completed.wait(timeout: .now() + 1) == .success)
+    }
+
     @Test("authenticated control traffic remains live during a real 12-second MainActor stall")
     func authenticatedControlTrafficSurvivesTwelveSecondMainActorStall() async throws {
         let sessionID = "main-actor-stall"
@@ -550,7 +577,7 @@ struct NetworkRouteTests {
             server.stop()
         }
 
-        #expect(clientReady.wait(timeout: .now() + 1) == .success)
+        #expect(waitForSemaphore(clientReady))
         clientPump.bind(clientConnection, generation: 1)
         #expect(server.waitForConnection())
 
@@ -575,7 +602,7 @@ struct NetworkRouteTests {
             mainEntered.signal()
             releaseMain.wait()
         }
-        #expect(mainEntered.wait(timeout: .now() + 1) == .success)
+        #expect(waitForSemaphore(mainEntered))
 
         let stallStartedAt = Date()
         try await Task.sleep(for: .seconds(12))
@@ -634,7 +661,7 @@ struct NetworkRouteTests {
             server.stop()
         }
 
-        #expect(clientReady.wait(timeout: .now() + 1) == .success)
+        #expect(waitForSemaphore(clientReady))
         clientPump.bind(clientConnection, generation: 1)
         #expect(server.waitForConnection())
 
@@ -658,7 +685,7 @@ struct NetworkRouteTests {
             mainEntered.signal()
             releaseMain.wait()
         }
-        #expect(mainEntered.wait(timeout: .now() + 1) == .success)
+        #expect(waitForSemaphore(mainEntered))
 
         try await Task.sleep(for: .seconds(1))
         server.terminateConnection()
@@ -745,12 +772,16 @@ struct NetworkRouteTests {
             sessionGate.synchronize(sessionID: sessionID, sequence: 0)
             let actionCount = index.isMultiple(of: 7) ? 2 : 1
             for sequence in 1...actionCount {
-                #expect(sessionGate.accept(SessionMessageContext(sessionID: sessionID, sequence: UInt64(sequence))))
+                let accepted = sessionGate.accept(
+                    SessionMessageContext(sessionID: sessionID, sequence: UInt64(sequence))
+                )
+                #expect(accepted)
             }
-            #expect(!sessionGate.accept(SessionMessageContext(
+            let rejected = sessionGate.accept(SessionMessageContext(
                 sessionID: "stale-session",
                 sequence: UInt64.max
-            )))
+            ))
+            #expect(!rejected)
 
             let assetData = Data(repeating: UInt8(index % 239), count: 4096 + photoCount)
             let assetReference = BoothAssetReference(
@@ -1099,6 +1130,44 @@ private func fallbackLANRoute() -> BoothNetworkRouteMachine {
 
 @Suite("iPad route discovery policy")
 struct RouteDiscoveryPolicyTests {
+    @Test("Wi-Fi preference uses one local Bonjour discovery plan")
+    func wifiDiscoveryPlanIsSingleBrowser() {
+        #expect(
+            BoothRouteDiscoveryPlan(preference: .wifi).mechanisms
+                == [.wifiBonjour]
+        )
+    }
+
+    @Test("LAN preference keeps wired Bonjour ahead of Wi-Fi fallback")
+    func lanDiscoveryPlanKeepsWiredFirst() {
+        #expect(
+            BoothRouteDiscoveryPlan(preference: .lan).mechanisms
+                == [.wiredEthernetBonjour, .wiredEthernetCompatibilityBonjour, .wifiBonjour]
+        )
+    }
+
+    @Test("Bonjour service identity survives an optional TXT record")
+    func bonjourServiceIdentityParsesStableDeviceID() {
+        let deviceID = "D2C8B2B7-2B1C-4A84-A4D5-2F7AABED5E19"
+
+        let control = BoothBonjourServiceIdentity.parse(
+            "PRC PhotoBooth Control \(deviceID)"
+        )
+        let preview = BoothBonjourServiceIdentity.parse(
+            "PRC PhotoBooth Preview \(deviceID)"
+        )
+        let asset = BoothBonjourServiceIdentity.parse(
+            "PRC PhotoBooth Asset \(deviceID) (2)"
+        )
+
+        #expect(control == BoothBonjourServiceIdentity(channel: .control, deviceID: deviceID))
+        #expect(preview?.channel == .preview)
+        #expect(asset == BoothBonjourServiceIdentity(channel: .asset, deviceID: deviceID))
+        #expect(BoothBonjourServiceIdentity.parse("Unrelated Service") == nil)
+        #expect(BoothBonjourServiceIdentity.parse("PRC PhotoBooth Control \(deviceID.prefix(8))") == nil)
+        #expect(BoothBonjourServiceIdentity.parse("PRC PhotoBooth Control foo-\(deviceID)-bar") == nil)
+    }
+
     @Test("route discovery gives preferred Ethernet two seconds before fallback")
     @MainActor
     func routeDiscoveryGraceIsTwoSeconds() {
@@ -1173,7 +1242,7 @@ struct RouteDiscoveryPolicyTests {
         #expect(selection.promotePending() == nil)
     }
 
-    @Test("Discovery ensure reuses the same target and local preference")
+    @Test("Discovery ensure reuses the active browser for a new target")
     func ensureReusesMatchingAttempt() {
         #expect(
             BoothRouteDiscoveryPolicy.decision(
@@ -1193,7 +1262,7 @@ struct RouteDiscoveryPolicyTests {
                 activePreference: .wifi,
                 hasActiveDiscovery: true,
                 hasActiveControlAttempt: false
-            ) == .restart
+            ) == .reuse
         )
         #expect(
             BoothRouteDiscoveryPolicy.decision(

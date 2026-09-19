@@ -3,7 +3,11 @@ import Foundation
 enum OperationsEventKind: String, Codable, Sendable, CaseIterable {
     case routeDiscoveryStarted
     case routeDiscoveryRestarted, routeDiscoveryReused, routeCandidateDiscovered
+    case routeDiscoveryResult, targetSelected, targetMatched, routeSelected
+    case browserReady, browserFailed, browserCancelled
     case controlConnectionCreated, controlConnectionPreparing, controlHelloReceived
+    case helloSent, authenticated
+    case pairingIntentSent, pairingSessionReceived, pairingRequestSent, pairingResultReceived
     case pairingRequestSubmitted
     case sessionStarted, sessionCompleted, sessionCancelled
     case captureStarted, captureSucceeded, captureFailed, captureRecovered
@@ -20,6 +24,7 @@ enum OperationsEventKind: String, Codable, Sendable, CaseIterable {
     case criticalSendQueued, criticalSendCompleted
     case assetSent, assetRejected, assetChannelConnected, assetChannelVerified, assetChannelDisconnected
     case secureChannelEstablished, secureChannelFailed
+    case previewReady, assetReady
     case routeViabilityChanged, pathHintUnavailableIgnored, secondaryCandidateRejected
     case waitingRecoveryScheduled, waitingRecoveryCancelled
     case ipadAppForegrounded, ipadAppBackgrounded

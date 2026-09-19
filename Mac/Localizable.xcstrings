@@ -271,6 +271,17 @@
         }
       }
     },
+    "A print is already in progress." : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "มีงานพิมพ์กำลังดำเนินการอยู่"
+          }
+        }
+      }
+    },
     "A printer test submits one diagnostic page and does not use a guest session." : {
       "localizations" : {
         "th" : {
@@ -1426,6 +1437,17 @@
         }
       }
     },
+    "Codes Match" : {
+      "extractionState" : "stale",
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "รหัสตรงกัน"
+          }
+        }
+      }
+    },
     "Compact — Smaller file, fastest guest download" : {
       "extractionState" : "manual",
       "localizations" : {
@@ -1510,6 +1532,16 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "ยืนยัน PIN"
+          }
+        }
+      }
+    },
+    "Confirm this code is also shown on the iPad:" : {
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ยืนยันว่ารหัสนี้แสดงบน iPad ด้วย:"
           }
         }
       }
@@ -1885,17 +1917,6 @@
         }
       }
     },
-    "A print is already in progress." : {
-      "extractionState" : "manual",
-      "localizations" : {
-        "th" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "มีงานพิมพ์กำลังดำเนินการอยู่"
-          }
-        }
-      }
-    },
     "Date" : {
       "extractionState" : "manual",
       "localizations" : {
@@ -1903,17 +1924,6 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "วันที่"
-          }
-        }
-      }
-    },
-    "Elapsed" : {
-      "extractionState" : "manual",
-      "localizations" : {
-        "th" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "เวลาที่ผ่านไป"
           }
         }
       }
@@ -2249,6 +2259,17 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "แก้ไขเทมเพลต ฟิลเตอร์ และแกลเลอรี"
+          }
+        }
+      }
+    },
+    "Elapsed" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "เวลาที่ผ่านไป"
           }
         }
       }
@@ -3409,6 +3430,28 @@
         }
       }
     },
+    "Last print" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "พิมพ์ล่าสุด"
+          }
+        }
+      }
+    },
+    "Last print error" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ข้อผิดพลาดในการพิมพ์ล่าสุด"
+          }
+        }
+      }
+    },
     "Last Run" : {
       "extractionState" : "manual",
       "localizations" : {
@@ -3477,39 +3520,6 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "การทดสอบล่าสุด"
-          }
-        }
-      }
-    },
-    "Last print" : {
-      "extractionState" : "manual",
-      "localizations" : {
-        "th" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "พิมพ์ล่าสุด"
-          }
-        }
-      }
-    },
-    "Last print error" : {
-      "extractionState" : "manual",
-      "localizations" : {
-        "th" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "ข้อผิดพลาดในการพิมพ์ล่าสุด"
-          }
-        }
-      }
-    },
-    "No host window is available for printing." : {
-      "extractionState" : "manual",
-      "localizations" : {
-        "th" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "ไม่พบหน้าต่างสำหรับการพิมพ์"
           }
         }
       }
@@ -3995,6 +4005,17 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "ไม่มีเซสชันแกลเลอรีที่ตรงกับตัวกรองนี้"
+          }
+        }
+      }
+    },
+    "No host window is available for printing." : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ไม่พบหน้าต่างสำหรับการพิมพ์"
           }
         }
       }
@@ -4495,36 +4516,6 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "ยอมรับการจับคู่แล้ว"
-          }
-        }
-      }
-    },
-    "Codes Match" : {
-      "localizations" : {
-        "th" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "รหัสตรงกัน"
-          }
-        }
-      }
-    },
-    "Confirm this code is also shown on the iPad:" : {
-      "localizations" : {
-        "th" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "ยืนยันว่ารหัสนี้แสดงบน iPad ด้วย:"
-          }
-        }
-      }
-    },
-    "Verify connection" : {
-      "localizations" : {
-        "th" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "ยืนยันการเชื่อมต่อ"
           }
         }
       }
@@ -5796,6 +5787,7 @@
       }
     },
     "Scan to connect an operator device." : {
+      "extractionState" : "stale",
       "localizations" : {
         "th" : {
           "stringUnit" : {
@@ -6522,17 +6514,6 @@
         }
       }
     },
-    "System printer unavailable: %@" : {
-      "extractionState" : "manual",
-      "localizations" : {
-        "th" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "เครื่องพิมพ์ระบบไม่พร้อมใช้งาน: %1$@"
-          }
-        }
-      }
-    },
     "System Printer" : {
       "extractionState" : "stale",
       "localizations" : {
@@ -6546,6 +6527,17 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "เครื่องพิมพ์ระบบ"
+          }
+        }
+      }
+    },
+    "System printer unavailable: %@" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "เครื่องพิมพ์ระบบไม่พร้อมใช้งาน: %1$@"
           }
         }
       }
@@ -7048,6 +7040,16 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "ใช้เครื่องพิมพ์ค่าเริ่มต้นของ macOS"
+          }
+        }
+      }
+    },
+    "Verify connection" : {
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ยืนยันการเชื่อมต่อ"
           }
         }
       }

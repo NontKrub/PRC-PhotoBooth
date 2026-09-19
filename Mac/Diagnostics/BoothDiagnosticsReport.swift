@@ -38,6 +38,7 @@ struct BoothDiagnosticsReport {
         var queueFailedCount: Int = 0
         var oldestCriticalJobAge: TimeInterval?
         var recentEvents: [OperationsEvent] = []
+        var discoveryDiagnostics: BoothDiscoveryDiagnostics?
     }
 
     static func make(_ snapshot: Snapshot) -> String {
@@ -72,6 +73,9 @@ struct BoothDiagnosticsReport {
             "Preview channel: \(snapshot.previewConnected ? "Connected" : "Disconnected")",
             "Authentication: \(snapshot.authenticated ? "Authenticated" : "Not authenticated")",
             "Last network error: \(safe(snapshot.lastNetworkError) ?? "None")",
+            "",
+            "Discovery",
+            discoveryText(snapshot.discoveryDiagnostics),
             "",
             "Preview",
             "FPS: \(decimal(metrics.fps))",
@@ -193,6 +197,25 @@ struct BoothDiagnosticsReport {
             ].compactMap { $0 }.joined(separator: " · ")
             return "\(dateText(event.timestamp)) \(event.kind.rawValue)\(details.isEmpty ? "" : " — \(details)")"
         }.joined(separator: "\n")
+    }
+
+    private static func discoveryText(_ diagnostics: BoothDiscoveryDiagnostics?) -> String {
+        guard let diagnostics else { return "Snapshot: Unavailable" }
+        return [
+            "Generation: \(diagnostics.generation)",
+            "Active browsers: \(diagnostics.activeBrowserCount)",
+            "Discovered peers: \(diagnostics.discoveredPeerCount)",
+            "Target: \(safe(diagnostics.targetPeerID) ?? "None")",
+            "Candidate: \(diagnostics.targetCandidateAvailable ? "Available" : "Unavailable")",
+            "Candidate source: \(safe(diagnostics.targetCandidateSource) ?? "None")",
+            "Control state: \(safe(diagnostics.controlConnectionState) ?? "Unknown")",
+            "Hello sent: \(diagnostics.helloSent ? "Yes" : "No")",
+            "Hello received: \(diagnostics.helloReceived ? "Yes" : "No")",
+            "Authenticated: \(diagnostics.authenticated ? "Yes" : "No")",
+            "Secure channel: \(diagnostics.secureChannelReady ? "Ready" : "Not ready")",
+            "Preview ready: \(diagnostics.previewReady ? "Yes" : "No")",
+            "Asset ready: \(diagnostics.assetReady ? "Yes" : "No")"
+        ].joined(separator: "\n")
     }
 
     private static func safe(_ value: String?) -> String? {

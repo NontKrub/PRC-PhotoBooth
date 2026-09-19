@@ -1,6 +1,7 @@
 import Foundation
 import AppKit
 import SwiftUI
+import UniformTypeIdentifiers
 import CoreGraphics
 import ImageIO
 import SwiftData
@@ -675,6 +676,7 @@ final class BoothCoordinator {
     @discardableResult
     private func sendAsset(data: Data, reference: BoothAssetReference) -> Bool {
         assetSources[reference] = data
+        guard connectionStatus.isAssetChannelReady else { return false }
         guard let chunks = try? BoothAssetTransfer.chunks(data: data, reference: reference) else {
             errorMessage = "Asset could not be prepared for transfer: \(reference.assetID)"
             return false
@@ -1056,68 +1058,91 @@ final class BoothCoordinator {
     func copyDiagnostics() {
         Task { @MainActor [weak self] in
             guard let self else { return }
-            let printerDefaultStatus: String = switch printer.configuredPrinterStatus() {
+            let report = await self.diagnosticsReport()
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString(report, forType: .string)
+        }
+    }
+
+    func exportDiagnostics() {
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            let report = await self.diagnosticsReport()
+            let panel = NSSavePanel()
+            panel.allowedContentTypes = [.plainText]
+            panel.nameFieldStringValue = "PRC-PhotoBooth-diagnostics.txt"
+            guard panel.runModal() == .OK, let url = panel.url else { return }
+            do {
+                try report.write(to: url, atomically: true, encoding: .utf8)
+            } catch {
+                errorMessage = "Could not export diagnostics: \(error.localizedDescription)"
+            }
+        }
+    }
+
+    private func diagnosticsReport() async -> String {
+        let printerDefaultStatus: String = switch printer.configuredPrinterStatus() {
             case .systemDefault: "System Default"
             case .unavailable(let name): "Unavailable: \(name)"
-            }
-#if arch(arm64)
-            let architecture = "arm64"
-#elseif arch(x86_64)
-            let architecture = "x86_64"
-#else
-            let architecture = "unknown"
-#endif
-            let jobs = jobQueue.jobs
-            let allEvents = await operationsEvents.load()
-            let criticalJobs = jobs.filter {
-                !$0.kind.isOptional && ($0.status == .pending || $0.status == .running || $0.status == .waitingRetry)
-            }
-            let snapshot = BoothDiagnosticsReport.Snapshot(
-                appVersion: Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "Unknown",
-                appBuild: Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "Unknown",
-                macOS: ProcessInfo.processInfo.operatingSystemVersionString,
-                architecture: architecture,
-                generatedAt: Date(),
-                requestedNetwork: connectionStatus.requestedNetwork,
-                effectiveNetwork: connectionStatus.effectiveNetwork,
-                connectionState: connectionStatus.state,
-                fallbackReason: connectionStatus.isFallbackActive
-                    ? connectionStatus.fallbackReason ?? "Active"
-                    : nil,
-                peerName: connectionStatus.peerDisplayName,
-                ethernetPath: connectionStatus.lanPathObservation,
-                wifiPath: connectionStatus.wifiPathObservation,
-                lanHandshake: connectionStatus.lanHandshake,
-                controlConnected: {
-                    if case .connected = connectionStatus.state { return true }
-                    return false
-                }(),
-                previewConnected: connectionStatus.isPreviewChannelConnected,
-                lastNetworkError: connectionStatus.lastNetworkError,
-                previewDiagnostics: connectionStatus.previewDiagnostics,
-                printerDefaultStatus: printerDefaultStatus,
-                printerName: printerLabel,
-                lastPrinterTest: printer.lastTestResult,
-                printRequestCount: printer.printRequestCount,
-                printSuccessCount: printer.printSuccessCount,
-                printFailureCount: printer.printFailureCount,
-                lastPrintError: printer.lastPrintError,
-                preflightReadiness: preflight.readiness,
-                preflightResults: preflight.results,
-                authenticated: connectionStatus.isPeerAuthenticated,
-                reconnectCount: allEvents.filter { $0.kind == .transportReconnectSucceeded }.count,
-                heartbeatTimeoutCount: allEvents.filter { $0.kind == .heartbeatTimedOut }.count,
-                controlSendFailureCount: allEvents.filter { $0.kind == .controlSendFailed || $0.kind == .controlPayloadRejected }.count,
-                queuePendingCount: jobs.filter { $0.status == .pending }.count,
-                queueRunningCount: jobs.filter { $0.status == .running }.count,
-                queueRetryingCount: jobs.filter { $0.status == .waitingRetry }.count,
-                queueFailedCount: jobs.filter { $0.status == .failed }.count,
-                oldestCriticalJobAge: criticalJobs.map { Date().timeIntervalSince($0.createdAt) }.max(),
-                recentEvents: Array(allEvents.suffix(50))
-            )
-            NSPasteboard.general.clearContents()
-            NSPasteboard.general.setString(BoothDiagnosticsReport.make(snapshot), forType: .string)
         }
+#if arch(arm64)
+        let architecture = "arm64"
+#elseif arch(x86_64)
+        let architecture = "x86_64"
+#else
+        let architecture = "unknown"
+#endif
+        let jobs = jobQueue.jobs
+        let allEvents = await operationsEvents.load()
+        let criticalJobs = jobs.filter {
+            !$0.kind.isOptional && ($0.status == .pending || $0.status == .running || $0.status == .waitingRetry)
+        }
+        let discoveryDiagnostics = (multipeer as? NetworkBoothTransport)?.discoveryDiagnostics
+        let snapshot = BoothDiagnosticsReport.Snapshot(
+            appVersion: Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "Unknown",
+            appBuild: Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "Unknown",
+            macOS: ProcessInfo.processInfo.operatingSystemVersionString,
+            architecture: architecture,
+            generatedAt: Date(),
+            requestedNetwork: connectionStatus.requestedNetwork,
+            effectiveNetwork: connectionStatus.effectiveNetwork,
+            connectionState: connectionStatus.state,
+            fallbackReason: connectionStatus.isFallbackActive
+                ? connectionStatus.fallbackReason ?? "Active"
+                : nil,
+            peerName: connectionStatus.peerDisplayName,
+            ethernetPath: connectionStatus.lanPathObservation,
+            wifiPath: connectionStatus.wifiPathObservation,
+            lanHandshake: connectionStatus.lanHandshake,
+            controlConnected: {
+                if case .connected = connectionStatus.state { return true }
+                return false
+            }(),
+            previewConnected: connectionStatus.isPreviewChannelConnected,
+            lastNetworkError: connectionStatus.lastNetworkError,
+            previewDiagnostics: connectionStatus.previewDiagnostics,
+            printerDefaultStatus: printerDefaultStatus,
+            printerName: printerLabel,
+            lastPrinterTest: printer.lastTestResult,
+            printRequestCount: printer.printRequestCount,
+            printSuccessCount: printer.printSuccessCount,
+            printFailureCount: printer.printFailureCount,
+            lastPrintError: printer.lastPrintError,
+            preflightReadiness: preflight.readiness,
+            preflightResults: preflight.results,
+            authenticated: connectionStatus.isPeerAuthenticated,
+            reconnectCount: allEvents.filter { $0.kind == .transportReconnectSucceeded }.count,
+            heartbeatTimeoutCount: allEvents.filter { $0.kind == .heartbeatTimedOut }.count,
+            controlSendFailureCount: allEvents.filter { $0.kind == .controlSendFailed || $0.kind == .controlPayloadRejected }.count,
+            queuePendingCount: jobs.filter { $0.status == .pending }.count,
+            queueRunningCount: jobs.filter { $0.status == .running }.count,
+            queueRetryingCount: jobs.filter { $0.status == .waitingRetry }.count,
+            queueFailedCount: jobs.filter { $0.status == .failed }.count,
+            oldestCriticalJobAge: criticalJobs.map { Date().timeIntervalSince($0.createdAt) }.max(),
+            recentEvents: Array(allEvents.suffix(50)),
+            discoveryDiagnostics: discoveryDiagnostics
+        )
+        return BoothDiagnosticsReport.make(snapshot)
     }
 
     private func attemptPendingLANRecoveryIfIdle() {

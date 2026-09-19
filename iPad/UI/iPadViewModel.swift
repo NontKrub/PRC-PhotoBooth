@@ -76,6 +76,7 @@ final class iPadViewModel: ObservableObject {
     private var nextAssetResponseDeadlineToken: UInt64 = 0
     private var assetResponseDeadlines = BoothAssetResponseDeadlineRegistry()
     private var lastAssetRecycleGeneration: Int?
+    private var recentTransportEvents: [BoothTransportDiagnosticEvent] = []
 #if DEBUG
     @Published private(set) var demoKioskMode = false
 #endif
@@ -161,7 +162,19 @@ final class iPadViewModel: ObservableObject {
 
     func refreshNearbyMacs() {
         guard canChangeConnection else { return }
-        networkTransport?.restart()
+        networkTransport?.refreshPeerDiscovery()
+    }
+
+    func connectionDiagnosticsReport() -> String {
+        BoothConnectionDiagnosticsReport.make(
+            appVersion: Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "Unknown",
+            appBuild: Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "Unknown",
+            operatingSystem: "\(UIDevice.current.systemName) \(UIDevice.current.systemVersion)",
+            deviceName: networkTransport?.deviceIdentity.displayName ?? UIDevice.current.model,
+            status: connectionStatus,
+            discoveryDiagnostics: networkTransport?.discoveryDiagnostics,
+            recentEvents: recentTransportEvents
+        )
     }
 
     func handleScenePhase(_ phase: ScenePhase) {
@@ -218,8 +231,9 @@ final class iPadViewModel: ObservableObject {
             self?.handleAssetChunk(chunk)
         }
         multipeer.onTransportEvent = { [weak self] event in
-            guard let self,
-                  event.channel == String(describing: BoothTransportChannel.asset) else { return }
+            guard let self else { return }
+            self.recordTransportEvent(event)
+            guard event.channel == String(describing: BoothTransportChannel.asset) else { return }
             switch event.kind {
             case .transportReady:
                 let transition = self.assetRetryTracker.activate(
@@ -256,6 +270,13 @@ final class iPadViewModel: ObservableObject {
         multipeer.onPreviewFrame = { [weak self] jpegData in
             guard let self else { return }
             self.updatePreview(jpegData)
+        }
+    }
+
+    private func recordTransportEvent(_ event: BoothTransportDiagnosticEvent) {
+        recentTransportEvents.append(BoothConnectionDiagnosticsReport.redacted(event))
+        if recentTransportEvents.count > 50 {
+            recentTransportEvents.removeFirst(recentTransportEvents.count - 50)
         }
     }
 

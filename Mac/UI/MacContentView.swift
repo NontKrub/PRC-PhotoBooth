@@ -410,13 +410,22 @@ struct SettingsView: View {
                             .accessibilityIdentifier("Retry LAN")
                         }
 
-                        Button {
-                            coordinator.copyDiagnostics()
-                            diagnosticsCopied = true
+                        Menu {
+                            Button {
+                                coordinator.copyDiagnostics()
+                                diagnosticsCopied = true
+                            } label: {
+                                Label("Copy Diagnostics", systemImage: "doc.on.clipboard")
+                            }
+                            Button {
+                                coordinator.exportDiagnostics()
+                            } label: {
+                                Label("Export Diagnostics…", systemImage: "square.and.arrow.up")
+                            }
                         } label: {
                             Label(
-                                diagnosticsCopied ? "Copied" : "Copy Diagnostics",
-                                systemImage: diagnosticsCopied ? "checkmark" : "doc.on.clipboard"
+                                diagnosticsCopied ? "Copied" : "Diagnostics",
+                                systemImage: diagnosticsCopied ? "checkmark" : "doc.text"
                             )
                         }
                         .buttonStyle(.bordered)
