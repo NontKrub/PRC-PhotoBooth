@@ -27,6 +27,7 @@ final class iPadViewModel: ObservableObject {
     @Published var promptImages: [String: CGImage] = [:]
     @Published private(set) var isSessionRequestPending = false
     @Published private(set) var reviewDecisionPending = false
+    @Published private(set) var reviewDecisionAwaitingReconciliation = false
     @Published private(set) var recoveryActionPending = false
     @Published private(set) var finishRequestPending = false
     @Published var sessionRequestError: String?
@@ -55,6 +56,7 @@ final class iPadViewModel: ObservableObject {
 #endif
     private var sessionRequestTimeoutTask: Task<Void, Never>?
     private var reviewDecisionTimeoutTask: Task<Void, Never>?
+    private var pendingReviewDecision: (state: ReviewStateToken, requestID: UUID, action: ReviewAction)?
     private var recoveryActionTimeoutTask: Task<Void, Never>?
     private var finishRequestTimeoutTask: Task<Void, Never>?
     private var transientRequestGeneration: UInt64 = 0
@@ -288,6 +290,17 @@ final class iPadViewModel: ObservableObject {
         )
     }
 
+    private func currentReviewStateToken(photoIndex: Int) -> ReviewStateToken? {
+        guard let sessionID = sessionMessageGate.currentSessionID,
+              case .review(let currentIndex) = stateMachine.phase,
+              currentIndex == photoIndex else { return nil }
+        return ReviewStateToken(
+            sessionID: sessionID,
+            photoIndex: photoIndex,
+            revision: sessionMessageGate.latestAcceptedSequence
+        )
+    }
+
     private func accept(_ context: SessionMessageContext, message: String) -> Bool {
         guard sessionMessageGate.accept(context) else {
 #if DEBUG
@@ -306,7 +319,7 @@ final class iPadViewModel: ObservableObject {
     }
 
     private func acceptSessionChange(_ context: SessionMessageContext, message: String) -> Bool {
-        guard sessionMessageGate.currentSessionID == nil || context.sequence > sessionMessageGate.latestAcceptedSequence else {
+        guard context.sequence > sessionMessageGate.latestAcceptedSequence else {
 #if DEBUG
             NSLog(
                 "[Session] Ignored stale %@: session=%@ current=%@ sequence=%llu latest=%llu",
@@ -426,19 +439,26 @@ final class iPadViewModel: ObservableObject {
             stateMachine.applyAuthoritativePhase(.captureRecovery(photoIndex: index, failure: failure))
             clearReviewImage()
 
-        case .reviewDecision(let context, let action):
-            guard accept(context, message: "reviewDecision") else { break }
-            guard case .review(let idx) = stateMachine.phase else { break }
-            let customerAction: CustomerDisplayAction = action == .keep
-                ? .keep(photoIndex: idx)
-                : .retake(photoIndex: idx)
-            guard CustomerDisplayWorkflow.canApply(customerAction, in: stateMachine.phase) else { break }
-            clearTransientRequestState()
-            switch action {
-            case .keep: stateMachine.keepShot(photoIndex: idx)
-            case .retake: stateMachine.retakeShot(photoIndex: idx)
+        case .reviewDecisionResult(let requestID, let result):
+            guard let pending = pendingReviewDecision,
+                  pending.requestID == requestID else { break }
+            pendingReviewDecision = nil
+            reviewDecisionTimeoutTask?.cancel()
+            reviewDecisionTimeoutTask = nil
+            reviewDecisionPending = false
+            reviewDecisionAwaitingReconciliation = false
+            switch result {
+            case .accepted, .duplicate:
+                sessionRequestError = nil
+            case .stale:
+                setSessionRequestError("That choice is no longer current. Please wait for the booth to update.")
+            case .wrongPhoto:
+                setSessionRequestError("That photograph is no longer current.")
+            case .sessionChanged:
+                setSessionRequestError("The booth moved to another session. Please wait for the update.")
+            case .persistenceFailed:
+                setSessionRequestError("The booth could not save that choice. Please try again.")
             }
-            clearReviewImage()
 
         case .sessionFinished(let context, let qr, let stripData, _):
             guard accept(context, message: "sessionFinished") else { break }
@@ -480,14 +500,15 @@ final class iPadViewModel: ObservableObject {
             if case .cancelSession = action {
                 cancelCountdown()
                 clearSessionMedia()
+                stateMachine.reset()
+                sessionMessageGate.synchronize(
+                    sessionID: nil,
+                    sequence: context?.sequence ?? sessionMessageGate.latestAcceptedSequence
+                )
             } else {
                 clearTransientRequestState()
             }
-            stateMachine.operatorOverride(action)
             clearReviewImage()
-            if case .cancelSession = action {
-                sessionMessageGate.synchronize(sessionID: nil, sequence: 0)
-            }
 
         default: break
         }
@@ -529,6 +550,8 @@ final class iPadViewModel: ObservableObject {
         finishRequestTimeoutTask = nil
         isSessionRequestPending = false
         reviewDecisionPending = false
+        reviewDecisionAwaitingReconciliation = false
+        pendingReviewDecision = nil
         recoveryActionPending = false
         finishRequestPending = false
         sessionRequestError = nil
@@ -931,18 +954,26 @@ final class iPadViewModel: ObservableObject {
     }
 
     private func applySessionSync(_ snapshot: SessionSyncSnapshot) {
+        let hasSyncBaseline = sessionMessageGate.currentSessionID != nil
+            || sessionMessageGate.latestAcceptedSequence > 0
+        if hasSyncBaseline && snapshot.sequence <= sessionMessageGate.latestAcceptedSequence {
+#if DEBUG
+            NSLog(
+                "[Session] Ignored non-newer sessionSync: session=%@ sequence=%llu latest=%llu",
+                snapshot.sessionID ?? "none",
+                snapshot.sequence,
+                sessionMessageGate.latestAcceptedSequence
+            )
+#endif
+            return
+        }
         clearTransientRequestState()
         let previousSessionID = sessionMessageGate.currentSessionID
         if previousSessionID != snapshot.sessionID || snapshot.sessionID == nil {
             clearSessionMedia()
         }
         cancelCountdown()
-        // sessionSync is authoritative about phase, but the gate every other
-        // message is checked against must never move backwards.
-        let syncedSequence = snapshot.sessionID == sessionMessageGate.currentSessionID
-            ? max(snapshot.sequence, sessionMessageGate.latestAcceptedSequence)
-            : snapshot.sequence
-        sessionMessageGate.synchronize(sessionID: snapshot.sessionID, sequence: syncedSequence)
+        sessionMessageGate.synchronize(sessionID: snapshot.sessionID, sequence: snapshot.sequence)
         eventConfig = snapshot.config
         stateMachine.config = snapshot.config
         selectedLanguage = snapshot.presentation?.language ?? snapshot.config.customerLanguage
@@ -1355,7 +1386,8 @@ final class iPadViewModel: ObservableObject {
                   self.reviewDecisionPending else { return }
             self.reviewDecisionTimeoutTask = nil
             self.reviewDecisionPending = false
-            self.setSessionRequestError("The booth did not confirm that choice. Please try again.")
+            self.reviewDecisionAwaitingReconciliation = true
+            self.setSessionRequestError("The booth did not confirm that choice. Tap the same choice to retry safely.")
         }
     }
 
@@ -1395,6 +1427,28 @@ final class iPadViewModel: ObservableObject {
         }
     }
 
+    private func sendReviewDecision(
+        state: ReviewStateToken,
+        requestID: UUID,
+        action: ReviewAction,
+        generation: UInt64
+    ) {
+        reviewDecisionPending = true
+        reviewDecisionAwaitingReconciliation = false
+        cancelCountdown()
+        multipeer.sendControl(.reviewDecision(state: state, requestID: requestID, action: action)) { [weak self] outcome in
+            guard let self,
+                  self.transientRequestGeneration == generation,
+                  self.pendingReviewDecision?.requestID == requestID,
+                  outcome != .sent else { return }
+            self.reviewDecisionPending = false
+            self.reviewDecisionAwaitingReconciliation = true
+            self.setSessionRequestError("The booth did not receive that choice. Tap the same choice to retry safely.")
+        }
+        guard reviewDecisionPending else { return }
+        armReviewDecisionTimeout(generation: generation)
+    }
+
     func customerKeep(photoIndex: Int) {
         guard CustomerDisplayWorkflow.canUseReviewActions(
                   in: stateMachine.phase,
@@ -1408,19 +1462,24 @@ final class iPadViewModel: ObservableObject {
             return
         }
 #endif
-        guard let context = currentSessionMessageContext else { return }
-        let generation = beginTransientRequest()
-        reviewDecisionPending = true
-        cancelCountdown()
-        multipeer.sendControl(.reviewDecision(context: context, action: .keep)) { [weak self] outcome in
-            guard let self,
-                  self.transientRequestGeneration == generation,
-                  outcome != .sent else { return }
-            self.reviewDecisionPending = false
-            self.setSessionRequestError("The booth did not receive that choice. Please try again.")
+        guard let state = currentReviewStateToken(photoIndex: photoIndex) else { return }
+        if reviewDecisionAwaitingReconciliation,
+           let pending = pendingReviewDecision,
+           pending.action == .keep,
+           pending.state == state {
+            sendReviewDecision(
+                state: pending.state,
+                requestID: pending.requestID,
+                action: pending.action,
+                generation: transientRequestGeneration
+            )
+            return
         }
-        guard reviewDecisionPending else { return }
-        armReviewDecisionTimeout(generation: generation)
+        let generation = beginTransientRequest()
+        let requestID = UUID()
+        pendingReviewDecision = (state: state, requestID: requestID, action: .keep)
+        reviewDecisionPending = true
+        sendReviewDecision(state: state, requestID: requestID, action: .keep, generation: generation)
     }
 
     func customerRetake(photoIndex: Int) {
@@ -1437,19 +1496,24 @@ final class iPadViewModel: ObservableObject {
             return
         }
 #endif
-        guard let context = currentSessionMessageContext else { return }
-        let generation = beginTransientRequest()
-        reviewDecisionPending = true
-        cancelCountdown()
-        multipeer.sendControl(.reviewDecision(context: context, action: .retake)) { [weak self] outcome in
-            guard let self,
-                  self.transientRequestGeneration == generation,
-                  outcome != .sent else { return }
-            self.reviewDecisionPending = false
-            self.setSessionRequestError("The booth did not receive that choice. Please try again.")
+        guard let state = currentReviewStateToken(photoIndex: photoIndex) else { return }
+        if reviewDecisionAwaitingReconciliation,
+           let pending = pendingReviewDecision,
+           pending.action == .retake,
+           pending.state == state {
+            sendReviewDecision(
+                state: pending.state,
+                requestID: pending.requestID,
+                action: pending.action,
+                generation: transientRequestGeneration
+            )
+            return
         }
-        guard reviewDecisionPending else { return }
-        armReviewDecisionTimeout(generation: generation)
+        let generation = beginTransientRequest()
+        let requestID = UUID()
+        pendingReviewDecision = (state: state, requestID: requestID, action: .retake)
+        reviewDecisionPending = true
+        sendReviewDecision(state: state, requestID: requestID, action: .retake, generation: generation)
     }
 
     func customerRetryReceive(photoIndex: Int) {

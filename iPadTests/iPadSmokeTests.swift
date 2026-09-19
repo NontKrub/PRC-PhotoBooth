@@ -141,31 +141,56 @@ struct iPadSmokeTests {
         #expect(stateMachine.phase == .readyToStart)
     }
 
-    @Test("same-session sync never rewinds the sequence gate")
+    @Test("same-session sync rejects stale and duplicate snapshots without side effects")
     @MainActor
     func sameSessionSyncDoesNotRewindMessageGate() {
         let viewModel = iPadViewModel()
         defer { viewModel.multipeer.disconnect() }
-        let config = EventConfig(photoCount: 1)
+        let config = EventConfig(photoCount: 3)
         let current = SessionSyncSnapshot(
             config: config,
             sessionID: "sync-session",
-            phase: .readyToStart,
+            phase: .countdown(photoIndex: 2, secondsRemaining: 1),
             presentation: nil,
-            isMirrored: false,
-            sequence: 20
+            isMirrored: true,
+            isBoothPaused: true,
+            sequence: 20,
+            keptShots: [0: Data([0x01])],
+            acceptedPhotoIndices: [0],
+            deferredPhotoIndices: [1],
+            nextPhotoIndex: 2
         )
         viewModel.multipeer.onControlMessage?(.sessionSync(snapshot: current))
 
         var stale = current
         stale.sequence = 4
+        stale.config = EventConfig(photoCount: 1)
+        stale.phase = .idle
+        stale.isMirrored = false
+        stale.isBoothPaused = false
+        stale.keptShots = [:]
+        stale.acceptedPhotoIndices = []
+        stale.deferredPhotoIndices = []
+        stale.nextPhotoIndex = 0
         viewModel.multipeer.onControlMessage?(.sessionSync(snapshot: stale))
+
+        var duplicate = stale
+        duplicate.sequence = current.sequence
+        viewModel.multipeer.onControlMessage?(.sessionSync(snapshot: duplicate))
+
         viewModel.multipeer.onControlMessage?(.operatorOverride(
             context: SessionMessageContext(sessionID: "sync-session", sequence: 5),
             action: .forceStart
         ))
 
-        #expect(viewModel.stateMachine.phase == .readyToStart)
+        #expect(viewModel.eventConfig == current.config)
+        #expect(viewModel.stateMachine.phase == current.phase)
+        #expect(viewModel.stateMachine.keptShots == current.keptShots)
+        #expect(viewModel.stateMachine.acceptedPhotoIndices == Set(current.acceptedPhotoIndices))
+        #expect(viewModel.stateMachine.deferredPhotoIndices == Set(current.deferredPhotoIndices))
+        #expect(viewModel.stateMachine.nextPhotoIndex == current.nextPhotoIndex)
+        #expect(viewModel.isMirrored)
+        #expect(viewModel.isBoothPaused)
     }
 
     @Test("all customer phases construct with the environment object")

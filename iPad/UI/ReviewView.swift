@@ -111,6 +111,26 @@ struct ReviewView: View {
                     .disabled(!vm.isReviewMediaReady || vm.reviewDecisionPending)
                 }
                 .padding(.bottom, 56)
+
+                if vm.reviewDecisionPending {
+                    HStack(spacing: 8) {
+                        ProgressView()
+                            .tint(.white)
+                        Text("Saving your choice…")
+                            .font(.callout)
+                    }
+                    .foregroundStyle(.white.opacity(0.72))
+                    .accessibilityElement(children: .combine)
+                    .accessibilityLabel("Saving your choice")
+                    .padding(.bottom, 20)
+                } else if vm.reviewDecisionAwaitingReconciliation {
+                    Text("The booth did not confirm that choice. Tap the same choice to retry safely.")
+                        .font(.callout)
+                        .foregroundStyle(.orange)
+                        .multilineTextAlignment(.center)
+                        .padding(.horizontal, 36)
+                        .padding(.bottom, 20)
+                }
             }
         }
     }

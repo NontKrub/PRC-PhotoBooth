@@ -26,6 +26,17 @@ struct CaptureRecoveryView: View {
                 .foregroundStyle(.white.opacity(0.65))
                 .padding(.horizontal, 32)
 
+            if vm.recoveryActionPending {
+                HStack(spacing: 8) {
+                    ProgressView()
+                        .tint(.white)
+                    Text(thai ? "กำลังประมวลผลตัวเลือกการกู้คืน…" : "Processing recovery choice…")
+                }
+                .foregroundStyle(.white.opacity(0.72))
+                .accessibilityElement(children: .combine)
+                .accessibilityLabel(thai ? "กำลังประมวลผลตัวเลือกการกู้คืน" : "Processing recovery choice")
+            }
+
             VStack(spacing: 12) {
                 if failure.canRetryReceive {
                     actionButton(

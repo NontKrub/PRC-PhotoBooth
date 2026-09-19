@@ -591,7 +591,14 @@
       }
     },
     "Includes current connection, pairing, discovery, preview, and recent transport events." : {
-
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "รวมการเชื่อมต่อ การจับคู่ การค้นหา การแสดงตัวอย่าง และเหตุการณ์การส่งข้อมูลล่าสุด"
+          }
+        }
+      }
     },
     "Keep & finish" : {
       "extractionState" : "stale",
@@ -968,6 +975,16 @@
         }
       }
     },
+    "Processing recovery choice…" : {
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "กำลังประมวลผลตัวเลือกการกู้คืน…"
+          }
+        }
+      }
+    },
     "QR code" : {
       "localizations" : {
         "th" : {
@@ -1307,6 +1324,26 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "กำลังรอกล้อง…"
+          }
+        }
+      }
+    },
+    "Saving your choice…" : {
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "กำลังบันทึกตัวเลือกของคุณ…"
+          }
+        }
+      }
+    },
+    "The booth did not confirm that choice. Tap the same choice to retry safely." : {
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "บูธยังไม่ยืนยันตัวเลือกนี้ แตะตัวเลือกเดิมเพื่อทดลองใหม่อย่างปลอดภัย"
           }
         }
       }
