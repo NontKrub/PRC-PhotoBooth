@@ -103,6 +103,8 @@ protocol PrinterBackend: AnyObject {
 @MainActor
 @Observable
 final class PrinterService {
+    nonisolated static let printOperationTimeout: TimeInterval = 300
+
     private let backend: any PrinterBackend
 
     private(set) var availablePrinterNames: [String] = []
@@ -297,22 +299,42 @@ private final class AppKitPrinterBackend: PrinterBackend {
             throw PrinterServiceError.unavailable("No host window is available for printing.")
         }
         let operationID = ObjectIdentifier(operation)
-        let success = await withCheckedContinuation { (continuation: CheckedContinuation<Bool, Never>) in
-            let delegate = PrintOperationDelegate(
-                continuation: continuation,
-                onCompletion: { [weak self] in
-                    Task { @MainActor [weak self] in
-                        self?.activeDelegates.removeValue(forKey: operationID)
+        let timeout = request.showsPrintDialog ? PrinterService.printOperationTimeout : 120
+        let success = await withTaskGroup(of: Bool.self) { group in
+            group.addTask {
+                await withCheckedContinuation { (continuation: CheckedContinuation<Bool, Never>) in
+                    Task { @MainActor in
+                        let delegate = PrintOperationDelegate(
+                            continuation: continuation,
+                            onCompletion: { [weak self] in
+                                Task { @MainActor [weak self] in
+                                    self?.activeDelegates.removeValue(forKey: operationID)
+                                }
+                            }
+                        )
+                        self.activeDelegates[operationID] = delegate
+                        operation.runModal(
+                            for: hostWindow,
+                            delegate: delegate,
+                            didRun: #selector(PrintOperationDelegate.printOperationDidRun(_:success:contextInfo:)),
+                            contextInfo: nil
+                        )
                     }
                 }
-            )
-            activeDelegates[operationID] = delegate
-            operation.runModal(
-                for: hostWindow,
-                delegate: delegate,
-                didRun: #selector(PrintOperationDelegate.printOperationDidRun(_:success:contextInfo:)),
-                contextInfo: nil
-            )
+            }
+            group.addTask {
+                // AppKit normally always calls back. When it does not, the
+                // print lane would block for the rest of the app's life.
+                try? await Task.sleep(for: .seconds(timeout))
+                guard !Task.isCancelled else { return false }
+                await MainActor.run {
+                    self.activeDelegates[operationID]?.complete(false)
+                }
+                return false
+            }
+            let first = await group.next() ?? false
+            group.cancelAll()
+            return first
         }
         guard success else {
             throw request.showsPrintDialog ? PrinterServiceError.cancelled : PrinterServiceError.rejected
@@ -341,12 +363,7 @@ private final class PrintOperationDelegate: NSObject, @unchecked Sendable {
         self.onCompletion = onCompletion
     }
 
-    @objc
-    func printOperationDidRun(
-        _ printOperation: NSPrintOperation,
-        success: Bool,
-        contextInfo: UnsafeMutableRawPointer?
-    ) {
+    func complete(_ success: Bool) {
         lock.lock()
         guard !completed else {
             lock.unlock()
@@ -359,6 +376,15 @@ private final class PrintOperationDelegate: NSObject, @unchecked Sendable {
 
         continuation?.resume(returning: success)
         onCompletion()
+    }
+
+    @objc
+    func printOperationDidRun(
+        _ printOperation: NSPrintOperation,
+        success: Bool,
+        contextInfo: UnsafeMutableRawPointer?
+    ) {
+        complete(success)
     }
 }
 
