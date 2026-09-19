@@ -47,6 +47,34 @@ struct StateMachineTests {
         #expect(sm.keptShots[0] == nil)
     }
 
+    @Test("continue after failure never returns the photo it just deferred")
+    func continueDoesNotReturnSelf() async {
+        let sm = SessionStateMachine()
+        sm.startSession(config: EventConfig(photoCount: 3, countdownSeconds: 3))
+        sm.beginCountdown(photoIndex: 0)
+        let failure = CaptureFailureSummary(
+            photoIndex: 0, reason: .transferTimeout, message: "t",
+            shutterLikelyFired: true, canRetryReceive: false,
+            canUsePreviousPhoto: false, canContinueSession: true
+        )
+        sm.enterCaptureRecovery(photoIndex: 0, failure: failure)
+        #expect(sm.continueAfterCaptureFailure(photoIndex: 0) == 1)
+
+        sm.enterCaptureRecovery(photoIndex: 1, failure: failure)
+        #expect(sm.continueAfterCaptureFailure(photoIndex: 1) == 2)
+
+        sm.enterReview(photoIndex: 2, thumbnailData: Data([0x01]))
+        sm.keepShot(photoIndex: 2)
+        guard case .countdown(let resumed, _) = sm.phase else {
+            Issue.record("expected countdown, got \(sm.phase)")
+            return
+        }
+        #expect(resumed == 0)
+
+        sm.enterCaptureRecovery(photoIndex: 0, failure: failure)
+        #expect(sm.continueAfterCaptureFailure(photoIndex: 0) == 1)
+    }
+
     @Test("current review image is separate from synchronized history thumbnail")
     func currentReviewImageIsSeparate() {
         let sm = SessionStateMachine()

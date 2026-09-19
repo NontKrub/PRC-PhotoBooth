@@ -1879,6 +1879,15 @@ final class BoothCoordinator {
         }
         guard !reviewDecisionPending,
               CustomerDisplayWorkflow.canApply(customerAction, in: stateMachine.phase) else { return }
+        if case .continueSession(let photoIndex) = action {
+            // The iPad decides which buttons to show; the Mac decides what is
+            // legal. Without this the client can request a deferral that has
+            // nowhere to go.
+            let hasOtherMissing = currentManifest?.shots.contains {
+                $0.photoIndex != photoIndex && $0.imageFileName == nil
+            } ?? false
+            guard hasOtherMissing else { return }
+        }
         reviewDecisionPending = true
         Task { @MainActor [weak self] in
             guard let self else { return }
