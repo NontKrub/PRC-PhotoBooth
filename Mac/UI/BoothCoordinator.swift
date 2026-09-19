@@ -147,6 +147,15 @@ final class BoothCoordinator {
     private var countdownTask: Task<Void, Never>?
     private var currentCountdown: CountdownDescriptor?
     private var sessionMessageSequence: UInt64 = 0
+    private var sessionLifecycleGeneration: UInt64 = 0
+    private var currentReviewStateToken: ReviewStateToken?
+    private struct ReviewRequestRecord {
+        let state: ReviewStateToken
+        let result: ReviewDecisionResult
+    }
+    private var recentReviewRequests: [UUID: ReviewRequestRecord] = [:]
+    private var recentReviewRequestOrder: [UUID] = []
+    private var activeReviewRequestID: UUID?
     private var currentCaptureAttempt: CaptureAttempt?
     private var hasSeenDSLRConnection = false
     private let networkMonitor = NWPathMonitor()
@@ -1440,6 +1449,10 @@ final class BoothCoordinator {
               finishedAwaitingCustomerAckSessionID == nil,
               let event = activeEvent else { return }
         reviewDecisionPending = false
+        currentReviewStateToken = nil
+        recentReviewRequests.removeAll(keepingCapacity: true)
+        recentReviewRequestOrder.removeAll(keepingCapacity: true)
+        activeReviewRequestID = nil
         sessionAssetReferences = [:]
         stripAssetReference = nil
         assetSources = [:]
@@ -1514,11 +1527,17 @@ final class BoothCoordinator {
             errorMessage = "Session persistence is unavailable: \(detail)"
             return
         }
+        sessionLifecycleGeneration &+= 1
+        let lifecycleGeneration = sessionLifecycleGeneration
         let frameURL = selectedTemplateFrameURL(validated.template, eventID: event.id)
         let foregroundURL = selectedTemplateForegroundOverlayURL(validated.template, eventID: event.id)
 
         Task { @MainActor [weak self] in
             guard let self else { return }
+            guard self.sessionLifecycleGeneration == lifecycleGeneration else {
+                self.store.deleteSession(session)
+                return
+            }
             var createdDirectory: URL?
             do {
                 let descriptor = try workspace.createWorkspace(
@@ -1563,6 +1582,11 @@ final class BoothCoordinator {
                     updatedAt: Date()
                 )
                 try await manifestStore.create(manifest)
+                guard self.sessionLifecycleGeneration == lifecycleGeneration else {
+                    try? workspace.removeEntireSession(manifest: manifest)
+                    store.deleteSession(session)
+                    return
+                }
                 currentSession = session
                 currentManifest = manifest
                 currentManifestID = manifest.id
@@ -1577,6 +1601,7 @@ final class BoothCoordinator {
                     config: config,
                     document: document
                 )
+                guard self.sessionLifecycleGeneration == lifecycleGeneration else { return }
                 try workspace.savePresentationSnapshot(
                     presentation: presentation,
                     prompts: config.posePrompts,
@@ -1624,6 +1649,7 @@ final class BoothCoordinator {
         )
         stateMachine.beginCountdown(photoIndex: photoIndex, captureAt: descriptor.captureAt)
         guard case .countdown(let index, _) = stateMachine.phase, index == photoIndex else { return }
+        currentReviewStateToken = nil
         currentCountdown = descriptor
         if let context = nextSessionMessageContext() {
             multipeer.sendControl(.beginCountdown(context: context, descriptor: descriptor))
@@ -1657,7 +1683,9 @@ final class BoothCoordinator {
     private func captureShot(photoIndex: Int) async {
         guard !Task.isCancelled,
               case .countdown(let currentIndex, _) = stateMachine.phase,
-              currentIndex == photoIndex else { return }
+              currentIndex == photoIndex,
+              let sessionID = currentManifest?.id else { return }
+        let lifecycleGeneration = sessionLifecycleGeneration
         let attempt = CaptureAttempt()
         currentCaptureAttempt = attempt
         recordOperation(.captureStarted, sessionID: currentManifest?.id, photoIndex: photoIndex)
@@ -1669,10 +1697,20 @@ final class BoothCoordinator {
             reason: "in_progress",
             receiveDuration: nil
         )
+        guard sessionLifecycleGeneration == lifecycleGeneration,
+              currentManifest?.id == sessionID else {
+            currentCaptureAttempt = nil
+            return
+        }
         do {
             gifFrames[photoIndex] = capture.drainBufferForGIF()
             let image = try await capture.captureStill(for: photoIndex)
             let filtered = try await filterPipeline.apply(stateMachine.config.selectedFilterID, to: image)
+            guard sessionLifecycleGeneration == lifecycleGeneration,
+                  currentManifest?.id == sessionID else {
+                currentCaptureAttempt = nil
+                return
+            }
             currentFilteredReviewImages[photoIndex] = filtered
             guard let thumbData = capture.thumbnail(for: filtered) else {
                 throw PhotoFilterError.failedToCreateOutput(stateMachine.config.selectedFilterID)
@@ -1685,6 +1723,13 @@ final class BoothCoordinator {
                 reviewData = thumbData
             }
             stateMachine.enterReview(photoIndex: photoIndex, thumbnailData: thumbData, reviewImageData: reviewData)
+            if let context {
+                currentReviewStateToken = ReviewStateToken(
+                    sessionID: context.sessionID,
+                    photoIndex: photoIndex,
+                    revision: context.sequence
+                )
+            }
             reviewDecisionPending = false
             await recordCaptureAttempt(
                 attempt,
@@ -1694,11 +1739,22 @@ final class BoothCoordinator {
                 reason: nil,
                 receiveDuration: Date().timeIntervalSince(attempt.startedAt)
             )
+            guard sessionLifecycleGeneration == lifecycleGeneration,
+                  currentManifest?.id == sessionID,
+                  stateMachine.phase == .review(photoIndex: photoIndex) else {
+                currentCaptureAttempt = nil
+                return
+            }
             recordOperation(.captureSucceeded, sessionID: currentManifest?.id, photoIndex: photoIndex, duration: Date().timeIntervalSince(attempt.startedAt))
             currentCaptureAttempt = nil
             if let context { sendReviewAsset(context: context, photoIndex: photoIndex, data: reviewData) }
             updateStripPreview()
         } catch {
+            guard sessionLifecycleGeneration == lifecycleGeneration,
+                  currentManifest?.id == sessionID else {
+                currentCaptureAttempt = nil
+                return
+            }
             let summary = captureFailureSummary(photoIndex: photoIndex, error: error)
             await recordCaptureAttempt(
                 attempt,
@@ -1709,9 +1765,15 @@ final class BoothCoordinator {
                 receiveDuration: Date().timeIntervalSince(attempt.startedAt)
             )
             recordOperation(.captureFailed, sessionID: currentManifest?.id, photoIndex: photoIndex, duration: Date().timeIntervalSince(attempt.startedAt), reason: summary.reason.rawValue)
-            await persistCaptureFailure(photoIndex: photoIndex, error: error)
+            guard sessionLifecycleGeneration == lifecycleGeneration,
+                  currentManifest?.id == sessionID,
+                  await persistCaptureFailure(photoIndex: photoIndex, error: error) else {
+                currentCaptureAttempt = nil
+                return
+            }
             currentCaptureAttempt = nil
             stateMachine.enterCaptureRecovery(photoIndex: photoIndex, failure: summary)
+            currentReviewStateToken = nil
             reviewDecisionPending = false
             if let context = nextSessionMessageContext() {
                 multipeer.sendControl(.captureRecovery(context: context, photoIndex: photoIndex, failure: summary))
@@ -1729,6 +1791,8 @@ final class BoothCoordinator {
     ) async {
         guard var manifest = currentManifest,
               currentManifestID == manifest.id else { return }
+        let lifecycleGeneration = sessionLifecycleGeneration
+        let sessionID = manifest.id
         var records = manifest.captureAttempts ?? []
         let record = CaptureAttemptRecord(
             id: attempt.id.uuidString,
@@ -1748,6 +1812,8 @@ final class BoothCoordinator {
         manifest.updatedAt = Date()
         do {
             try await manifestStore.save(manifest)
+            guard sessionLifecycleGeneration == lifecycleGeneration,
+                  currentManifest?.id == sessionID else { return }
             currentManifest = manifest
         } catch {
             recoveryService.recordError("Capture attempt could not be persisted: \(error.localizedDescription)")
@@ -1755,19 +1821,25 @@ final class BoothCoordinator {
         }
     }
 
-    private func persistCaptureFailure(photoIndex: Int, error: Error) async {
+    private func persistCaptureFailure(photoIndex: Int, error: Error) async -> Bool {
         guard var manifest = currentManifest,
-              currentManifestID == manifest.id else { return }
+              currentManifestID == manifest.id else { return false }
+        let lifecycleGeneration = sessionLifecycleGeneration
+        let sessionID = manifest.id
         manifest.lastError = error.localizedDescription
         manifest.nextPhotoIndex = photoIndex
         manifest.updatedAt = Date()
         do {
             try await manifestStore.save(manifest)
+            guard sessionLifecycleGeneration == lifecycleGeneration,
+                  currentManifest?.id == sessionID else { return false }
             currentManifest = manifest
         } catch {
             recoveryService.recordError("Capture failure could not be persisted: \(error.localizedDescription)")
+            return false
         }
         errorMessage = error.localizedDescription
+        return true
     }
 
     private func captureFailureSummary(photoIndex: Int, error: Error) -> CaptureFailureSummary {
@@ -1855,13 +1927,15 @@ final class BoothCoordinator {
             Task { @MainActor [weak self] in
                 guard let self else { return }
                 defer { self.reviewDecisionPending = false }
-                await self.acceptShot(photoIndex: photoIndex)
+                let result = await self.acceptShot(photoIndex: photoIndex)
+                if result == .accepted { self.sendAuthoritativeReviewDecision() }
             }
         case .retake:
             Task { @MainActor [weak self] in
                 guard let self else { return }
                 defer { self.reviewDecisionPending = false }
-                await self.requestRetake(photoIndex: photoIndex, source: .guest)
+                let result = await self.requestRetake(photoIndex: photoIndex, source: .guest)
+                if result == .accepted { self.sendAuthoritativeReviewDecision() }
             }
         }
     }
@@ -1908,7 +1982,9 @@ final class BoothCoordinator {
 
     private func retryReceive(photoIndex: Int) async {
         guard case .captureRecovery(let currentIndex, _) = stateMachine.phase,
-              currentIndex == photoIndex else { return }
+              currentIndex == photoIndex,
+              let sessionID = currentManifest?.id else { return }
+        let lifecycleGeneration = sessionLifecycleGeneration
         let attempt = CaptureAttempt()
         currentCaptureAttempt = attempt
         do {
@@ -1917,6 +1993,8 @@ final class BoothCoordinator {
             guard let thumbData = capture.thumbnail(for: filtered) else {
                 throw PhotoFilterError.failedToCreateOutput(stateMachine.config.selectedFilterID)
             }
+            guard sessionLifecycleGeneration == lifecycleGeneration,
+                  currentManifest?.id == sessionID else { return }
             let context = nextSessionMessageContext()
             let reviewData: Data
             if let context {
@@ -1927,6 +2005,13 @@ final class BoothCoordinator {
             capture.storeStill(image, for: photoIndex)
             currentFilteredReviewImages[photoIndex] = filtered
             stateMachine.enterReview(photoIndex: photoIndex, thumbnailData: thumbData, reviewImageData: reviewData)
+            if let context {
+                currentReviewStateToken = ReviewStateToken(
+                    sessionID: context.sessionID,
+                    photoIndex: photoIndex,
+                    revision: context.sequence
+                )
+            }
             await recordCaptureAttempt(
                 attempt,
                 photoIndex: photoIndex,
@@ -1935,11 +2020,19 @@ final class BoothCoordinator {
                 reason: nil,
                 receiveDuration: Date().timeIntervalSince(attempt.startedAt)
             )
+            guard sessionLifecycleGeneration == lifecycleGeneration,
+                  currentManifest?.id == sessionID,
+                  stateMachine.phase == .review(photoIndex: photoIndex) else {
+                currentCaptureAttempt = nil
+                return
+            }
             recordOperation(.captureRecovered, sessionID: currentManifest?.id, photoIndex: photoIndex, duration: Date().timeIntervalSince(attempt.startedAt))
             currentCaptureAttempt = nil
             if let context { sendReviewAsset(context: context, photoIndex: photoIndex, data: reviewData) }
             updateStripPreview()
         } catch {
+            guard sessionLifecycleGeneration == lifecycleGeneration,
+                  currentManifest?.id == sessionID else { return }
             let summary = captureFailureSummary(photoIndex: photoIndex, error: error)
             await recordCaptureAttempt(
                 attempt,
@@ -1949,7 +2042,12 @@ final class BoothCoordinator {
                 reason: error.localizedDescription,
                 receiveDuration: Date().timeIntervalSince(attempt.startedAt)
             )
-            await persistCaptureFailure(photoIndex: photoIndex, error: error)
+            guard sessionLifecycleGeneration == lifecycleGeneration,
+                  currentManifest?.id == sessionID,
+                  await persistCaptureFailure(photoIndex: photoIndex, error: error) else {
+                currentCaptureAttempt = nil
+                return
+            }
             stateMachine.enterCaptureRecovery(photoIndex: photoIndex, failure: summary)
             currentCaptureAttempt = nil
             if let context = nextSessionMessageContext() {
@@ -1962,8 +2060,9 @@ final class BoothCoordinator {
         guard case .captureRecovery(let currentIndex, _) = stateMachine.phase,
               currentIndex == photoIndex,
               var manifest = currentManifest else { return }
+        let lifecycleGeneration = sessionLifecycleGeneration
         let current = manifest.shots.first(where: { $0.photoIndex == photoIndex })
-        let count = incrementRetakeCount(in: &retakeCounts, photoIndex: photoIndex)
+        let count = retakeCounts[photoIndex, default: 0] + 1
         upsertManifestShot(
             &manifest,
             photoIndex: photoIndex,
@@ -1982,7 +2081,10 @@ final class BoothCoordinator {
         manifest.lastError = nil
         do {
             try await manifestStore.save(manifest)
+            guard sessionLifecycleGeneration == lifecycleGeneration,
+                  currentManifest?.id == manifest.id else { return }
             currentManifest = manifest
+            retakeCounts[photoIndex] = count
             await recordCaptureAttempt(
                 CaptureAttempt(),
                 photoIndex: photoIndex,
@@ -1991,6 +2093,8 @@ final class BoothCoordinator {
                 reason: "retaken",
                 receiveDuration: nil
             )
+            guard sessionLifecycleGeneration == lifecycleGeneration,
+                  currentManifest?.id == manifest.id else { return }
             recordOperation(.captureRetried, sessionID: manifest.id, photoIndex: photoIndex)
             currentCaptureAttempt = nil
             stateMachine.retakeFailedCapture(photoIndex: photoIndex)
@@ -2004,7 +2108,8 @@ final class BoothCoordinator {
         guard case .captureRecovery(let currentIndex, _) = stateMachine.phase,
               currentIndex == photoIndex,
               var manifest = currentManifest else { return }
-        let next = stateMachine.continueAfterCaptureFailure(photoIndex: photoIndex)
+        let lifecycleGeneration = sessionLifecycleGeneration
+        let next = stateMachine.nextPhotoAfterCaptureFailure(photoIndex: photoIndex)
         guard let next else {
             errorMessage = "Cannot continue while a required photograph is missing."
             return
@@ -2014,6 +2119,11 @@ final class BoothCoordinator {
         manifest.updatedAt = Date()
         do {
             try await manifestStore.save(manifest)
+            guard case .captureRecovery(let current, _) = stateMachine.phase,
+                  current == photoIndex,
+                  sessionLifecycleGeneration == lifecycleGeneration,
+                  currentManifest?.id == manifest.id else { return }
+            guard stateMachine.continueAfterCaptureFailure(photoIndex: photoIndex) == next else { return }
             currentManifest = manifest
             await recordCaptureAttempt(
                 CaptureAttempt(),
@@ -2023,6 +2133,8 @@ final class BoothCoordinator {
                 reason: "deferred",
                 receiveDuration: nil
             )
+            guard sessionLifecycleGeneration == lifecycleGeneration,
+                  currentManifest?.id == manifest.id else { return }
             recordOperation(.captureDeferred, sessionID: manifest.id, photoIndex: photoIndex)
             currentCaptureAttempt = nil
             beginCountdown(photoIndex: next)
@@ -2037,6 +2149,7 @@ final class BoothCoordinator {
               var manifest = currentManifest,
               let previous = manifest.shots.first(where: { $0.photoIndex == photoIndex }),
               let imageFileName = previous.previousImageFileName else { return }
+        let lifecycleGeneration = sessionLifecycleGeneration
         let directory = URL(fileURLWithPath: manifest.absoluteDirectoryPath, isDirectory: true)
         guard let image = loadCGImage(from: directory.appendingPathComponent(imageFileName)) else {
             errorMessage = "The previous photograph is no longer available."
@@ -2068,6 +2181,8 @@ final class BoothCoordinator {
             manifest.status = manifest.nextPhotoIndex == manifest.eventConfig.photoCount ? .finalizing : .capturing
             manifest.lastError = nil
             try await manifestStore.save(manifest)
+            guard sessionLifecycleGeneration == lifecycleGeneration,
+                  currentManifest?.id == manifest.id else { return }
             currentManifest = manifest
             capture.storeStill(image, for: photoIndex)
             currentFilteredReviewImages[photoIndex] = filtered
@@ -2080,10 +2195,14 @@ final class BoothCoordinator {
                 reason: "previous_photo_used",
                 receiveDuration: nil
             )
+            guard sessionLifecycleGeneration == lifecycleGeneration,
+                  currentManifest?.id == manifest.id else { return }
             recordOperation(.previousPhotoUsed, sessionID: manifest.id, photoIndex: photoIndex)
             currentCaptureAttempt = nil
             if case .processing = stateMachine.phase {
                 await finalizeSession()
+                guard sessionLifecycleGeneration == lifecycleGeneration,
+                      currentManifest?.id == manifest.id else { return }
             } else if case .countdown(let next, _) = stateMachine.phase {
                 beginCountdown(photoIndex: next)
             }
@@ -2096,28 +2215,25 @@ final class BoothCoordinator {
         switch action {
         case .forceStart:
             guard stateMachine.phase == .idle || stateMachine.phase == .readyToStart else { return }
-            multipeer.sendControl(.operatorOverride(context: nextSessionMessageContext(), action: action))
             startSession()
         case .forceRetake:
             guard case .review(let idx) = stateMachine.phase,
                   !reviewDecisionPending,
                   CustomerDisplayWorkflow.canApply(.retake(photoIndex: idx), in: stateMachine.phase) else { return }
-            multipeer.sendControl(.operatorOverride(context: nextSessionMessageContext(), action: action))
             reviewDecisionPending = true
             Task { @MainActor [weak self] in
                 guard let self else { return }
                 defer { self.reviewDecisionPending = false }
-                await self.requestRetake(photoIndex: idx, source: .operatorSource)
+                let result = await self.requestRetake(photoIndex: idx, source: .operatorSource)
+                if result == .accepted { self.sendAuthoritativeReviewDecision() }
             }
         case .skip:
             guard case .review(let idx) = stateMachine.phase,
                   !reviewDecisionPending,
                   CustomerDisplayWorkflow.canApply(.keep(photoIndex: idx), in: stateMachine.phase) else { return }
-            multipeer.sendControl(.operatorOverride(context: nextSessionMessageContext(), action: action))
             handleReviewDecision(photoIndex: idx, action: .keep)
         case .cancelSession:
             guard currentSession != nil else { return }
-            multipeer.sendControl(.operatorOverride(context: nextSessionMessageContext(), action: action))
             Task { @MainActor [weak self] in
                 await self?.cancelCurrentSession()
             }
@@ -2129,15 +2245,16 @@ final class BoothCoordinator {
         case operatorSource
     }
 
-    private func acceptShot(photoIndex: Int) async {
+    private func acceptShot(photoIndex: Int) async -> ReviewDecisionResult {
         guard case .review(let currentIndex) = stateMachine.phase,
               currentIndex == photoIndex,
               var manifest = currentManifest,
               currentManifestID == manifest.id,
               let image = capture.capturedStills[photoIndex] else {
             errorMessage = "Cannot keep this photograph because its review state is unavailable."
-            return
+            return .wrongPhoto
         }
+        let lifecycleGeneration = sessionLifecycleGeneration
 
         do {
             let saved = try workspace.saveAcceptedCapture(
@@ -2162,6 +2279,8 @@ final class BoothCoordinator {
             manifest.status = isComplete ? .finalizing : .capturing
             manifest.lastError = nil
             try await manifestStore.save(manifest)
+            guard sessionLifecycleGeneration == lifecycleGeneration,
+                  currentManifest?.id == manifest.id else { return .stale }
             currentManifest = manifest
             let session = currentSession ?? store.restoreSessionRecord(from: manifest)
             store.upsertShot(
@@ -2172,31 +2291,104 @@ final class BoothCoordinator {
             )
 
             stateMachine.keepShot(photoIndex: photoIndex)
-            sendAuthoritativeReviewDecision(.keep)
             if case .processing = stateMachine.phase {
                 await finalizeSession()
+                guard sessionLifecycleGeneration == lifecycleGeneration,
+                      currentManifest?.id == manifest.id else { return .stale }
             } else if case .countdown(let next, _) = stateMachine.phase {
                 beginCountdown(photoIndex: next)
             }
+            currentReviewStateToken = nil
+            return .accepted
         } catch {
             errorMessage = "Could not save photograph \(photoIndex + 1): \(error.localizedDescription)"
+            return .persistenceFailed
         }
     }
 
-    private func sendAuthoritativeReviewDecision(_ action: ReviewAction) {
-        guard let context = nextSessionMessageContext() else { return }
-        multipeer.sendControl(.reviewDecision(context: context, action: action))
+    private func sendAuthoritativeReviewDecision() {
+        resynciPad()
     }
 
-    private func requestRetake(photoIndex: Int, source: RetakeSource) async {
+    private func rememberReviewRequest(
+        _ requestID: UUID,
+        state: ReviewStateToken,
+        result: ReviewDecisionResult
+    ) {
+        recentReviewRequests[requestID] = ReviewRequestRecord(state: state, result: result)
+        recentReviewRequestOrder.removeAll { $0 == requestID }
+        recentReviewRequestOrder.append(requestID)
+        if recentReviewRequestOrder.count > 32 {
+            let expired = recentReviewRequestOrder.removeFirst()
+            recentReviewRequests.removeValue(forKey: expired)
+        }
+    }
+
+    private func sendReviewDecisionResult(_ requestID: UUID, _ result: ReviewDecisionResult) {
+        multipeer.sendControl(.reviewDecisionResult(requestID: requestID, result: result))
+    }
+
+    private func handleClientReviewDecision(
+        state: ReviewStateToken,
+        requestID: UUID,
+        action: ReviewAction
+    ) {
+        if let record = recentReviewRequests[requestID] {
+            guard record.state == state else {
+                sendReviewDecisionResult(requestID, .stale)
+                return
+            }
+            sendReviewDecisionResult(requestID, .duplicate)
+            sendAuthoritativeReviewDecision()
+            return
+        }
+
+        let phasePhotoIndex: Int? = if case .review(let photoIndex) = stateMachine.phase {
+            photoIndex
+        } else {
+            nil
+        }
+        let validation = ReviewDecisionGate.validate(
+            current: currentReviewStateToken,
+            phasePhotoIndex: phasePhotoIndex,
+            requested: state
+        )
+        guard validation == .accepted else {
+            sendReviewDecisionResult(requestID, validation)
+            return
+        }
+        if reviewDecisionPending {
+            guard activeReviewRequestID != requestID else { return }
+            sendReviewDecisionResult(requestID, .stale)
+            return
+        }
+
+        reviewDecisionPending = true
+        activeReviewRequestID = requestID
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            let result: ReviewDecisionResult = switch action {
+            case .keep: await self.acceptShot(photoIndex: state.photoIndex)
+            case .retake: await self.requestRetake(photoIndex: state.photoIndex, source: .guest)
+            }
+            self.reviewDecisionPending = false
+            self.activeReviewRequestID = nil
+            if result != .persistenceFailed {
+                self.rememberReviewRequest(requestID, state: state, result: result)
+            }
+            self.sendReviewDecisionResult(requestID, result)
+            if result == .accepted { self.sendAuthoritativeReviewDecision() }
+        }
+    }
+
+    private func requestRetake(photoIndex: Int, source: RetakeSource) async -> ReviewDecisionResult {
         _ = source
         guard case .review(let currentIndex) = stateMachine.phase,
               currentIndex == photoIndex,
-              var manifest = currentManifest else { return }
+              var manifest = currentManifest else { return .wrongPhoto }
+        let lifecycleGeneration = sessionLifecycleGeneration
 
-        sessionAssetReferences.removeValue(forKey: photoIndex)
-        currentFilteredReviewImages.removeValue(forKey: photoIndex)
-        let count = incrementRetakeCount(in: &retakeCounts, photoIndex: photoIndex)
+        let count = retakeCounts[photoIndex, default: 0] + 1
         let previous = manifest.shots.first(where: { $0.photoIndex == photoIndex })
         upsertManifestShot(
             &manifest,
@@ -2213,7 +2405,12 @@ final class BoothCoordinator {
         )
         do {
             try await manifestStore.save(manifest)
+            guard sessionLifecycleGeneration == lifecycleGeneration,
+                  currentManifest?.id == manifest.id else { return .stale }
             currentManifest = manifest
+            retakeCounts[photoIndex] = count
+            sessionAssetReferences.removeValue(forKey: photoIndex)
+            currentFilteredReviewImages.removeValue(forKey: photoIndex)
             if let session = currentSession {
                 store.upsertShot(
                     session: session,
@@ -2223,18 +2420,25 @@ final class BoothCoordinator {
                 )
             }
             stateMachine.retakeShot(photoIndex: photoIndex)
-            sendAuthoritativeReviewDecision(.retake)
             beginCountdown(photoIndex: photoIndex)
+            currentReviewStateToken = nil
+            return .accepted
         } catch {
-            retakeCounts[photoIndex] = max(0, count - 1)
             errorMessage = "Could not save retake count: \(error.localizedDescription)"
+            return .persistenceFailed
         }
     }
 
     private func cancelCurrentSession() async {
+        sessionLifecycleGeneration &+= 1
+        let cancellationGeneration = sessionLifecycleGeneration
         cancelCountdown()
         guard currentSession != nil, var manifest = currentManifest else {
             reviewDecisionPending = false
+            currentReviewStateToken = nil
+            activeReviewRequestID = nil
+            recentReviewRequests.removeAll(keepingCapacity: true)
+            recentReviewRequestOrder.removeAll(keepingCapacity: true)
             sessionAssetReferences = [:]
             stripAssetReference = nil
             assetSources = [:]
@@ -2245,17 +2449,20 @@ final class BoothCoordinator {
             lastSessionPresentation = nil
             stateMachine.reset()
             attemptPendingLANRecoveryIfIdle()
+            resynciPad()
             return
         }
         manifest.status = .cancelled
         manifest.cancelledAt = Date()
-        recordOperation(.sessionCancelled, sessionID: manifest.id)
         do {
             try await manifestStore.save(manifest)
         } catch {
             recoveryService.recordError("Cancelled session could not be persisted: \(error.localizedDescription)")
             errorMessage = "Session cancellation could not be persisted: \(error.localizedDescription)"
+            return
         }
+        guard sessionLifecycleGeneration == cancellationGeneration else { return }
+        recordOperation(.sessionCancelled, sessionID: manifest.id)
         jobQueue.cancelJobs(sessionID: manifest.id)
         do {
             try workspace.removeEntireSession(manifest: manifest)
@@ -2279,8 +2486,13 @@ final class BoothCoordinator {
         currentStripPreview = nil
         capture.resetStills()
         reviewDecisionPending = false
+        currentReviewStateToken = nil
+        activeReviewRequestID = nil
+        recentReviewRequests.removeAll(keepingCapacity: true)
+        recentReviewRequestOrder.removeAll(keepingCapacity: true)
         stateMachine.reset()
         attemptPendingLANRecoveryIfIdle()
+        resynciPad()
     }
 
     private func resumeRecoveredSession(manifest: SessionManifest, images: [Int: CGImage]) {
@@ -2381,6 +2593,8 @@ final class BoothCoordinator {
 
     private func finalizeSession() async {
         guard var manifest = currentManifest else { return }
+        let lifecycleGeneration = sessionLifecycleGeneration
+        let sessionID = manifest.id
         guard (0..<manifest.eventConfig.photoCount).allSatisfy({ index in
             manifest.shots.first(where: { $0.photoIndex == index })?.imageFileName != nil
         }) else {
@@ -2396,6 +2610,8 @@ final class BoothCoordinator {
             errorMessage = "Could not start session processing: \(error.localizedDescription)"
             return
         }
+        guard sessionLifecycleGeneration == lifecycleGeneration,
+              currentManifest?.id == sessionID else { return }
         currentManifest = manifest
         jobQueue.enqueueFinalizationJobs(for: manifest)
         if manifest.cloudDelivery != nil || UserDefaults.standard.bool(forKey: "cloudUploadEnabled") {
@@ -2526,6 +2742,7 @@ final class BoothCoordinator {
               stateMachine.phase == .processing,
               completionInFlightSessionID != original.id,
               finishedAwaitingCustomerAckSessionID != original.id else { return }
+        let lifecycleGeneration = sessionLifecycleGeneration
         // Claimed synchronously, before the first suspension point, so a
         // second job-change task cannot overtake this one mid-await.
         completionInFlightSessionID = original.id
@@ -2536,6 +2753,8 @@ final class BoothCoordinator {
             return
         }
         let serverStatus = await server.statusSnapshot()
+        guard sessionLifecycleGeneration == lifecycleGeneration,
+              currentManifest?.id == original.id else { return }
         guard case .ready = serverStatus.state else {
             errorMessage = "Session finished, but the local download server is unavailable. QR/download links were not published."
             return
@@ -2547,6 +2766,8 @@ final class BoothCoordinator {
             recoveryService.recordError("Failed to reload session before completion: \(error.localizedDescription)")
             latest = original
         }
+        guard sessionLifecycleGeneration == lifecycleGeneration,
+              currentManifest?.id == original.id else { return }
         var manifest = latest
         guard manifest.status != .completed else { return }
         manifest.status = .completed
@@ -2559,6 +2780,8 @@ final class BoothCoordinator {
             errorMessage = "Completed session could not be persisted: \(error.localizedDescription)"
             return
         }
+        guard sessionLifecycleGeneration == lifecycleGeneration,
+              currentManifest?.id == original.id else { return }
         currentManifest = manifest
         lastCompletedSessionID = manifest.id
         recordOperation(.sessionCompleted, sessionID: manifest.id, duration: Date().timeIntervalSince(manifest.startedAt))
@@ -2871,10 +3094,8 @@ final class BoothCoordinator {
                 return
             }
             startSession(selection: selection)
-        case .reviewDecision(let context, let action):
-            if acceptsClientSessionMessage(context), case .review(let idx) = stateMachine.phase {
-                handleReviewDecision(photoIndex: idx, action: action)
-            }
+        case .reviewDecision(let state, let requestID, let action):
+            handleClientReviewDecision(state: state, requestID: requestID, action: action)
         case .captureRecoveryAction(let context, let action):
             if acceptsClientSessionMessage(context) { handleCaptureRecoveryAction(action) }
         case .customerFinished(let context):
@@ -2938,13 +3159,14 @@ final class BoothCoordinator {
               case .finished = stateMachine.phase,
               customerFinishedInFlightSessionID == nil else { return }
         customerFinishedInFlightSessionID = sessionID
+        sessionMessageSequence &+= 1
         let idle = SessionSyncSnapshot(
             config: stateMachine.config,
             sessionID: nil,
             phase: .idle,
             presentation: nil,
             isMirrored: capture.camera.isMirrored,
-            sequence: 0
+            sequence: sessionMessageSequence
         )
         multipeer.sendControl(.sessionSync(snapshot: idle)) { [weak self] outcome in
             guard let self else { return }
@@ -2957,6 +3179,7 @@ final class BoothCoordinator {
             }
             self.customerFinishedInFlightSessionID = nil
             self.finishedAwaitingCustomerAckSessionID = nil
+            self.sessionLifecycleGeneration &+= 1
             self.currentManifest = nil
             self.currentManifestID = nil
             self.retakeCounts = [:]
@@ -2974,8 +3197,11 @@ final class BoothCoordinator {
             self.assetAssembler = BoothAssetAssembler()
             self.capture.resetStills()
             self.reviewDecisionPending = false
+            self.currentReviewStateToken = nil
+            self.activeReviewRequestID = nil
+            self.recentReviewRequests.removeAll(keepingCapacity: true)
+            self.recentReviewRequestOrder.removeAll(keepingCapacity: true)
             self.stateMachine.reset()
-            self.sessionMessageSequence = 0
             self.attemptPendingLANRecoveryIfIdle()
         }
     }
@@ -3006,7 +3232,23 @@ final class BoothCoordinator {
         case .readyToStart: currentSession?.id
         default: currentSession?.id ?? lastCompletedSessionID
         }
-        let sequence = sessionID == nil ? 0 : (nextSessionMessageContext()?.sequence ?? 0)
+        let context = sessionID == nil ? nil : nextSessionMessageContext()
+        let sequence: UInt64
+        if let context {
+            sequence = context.sequence
+        } else {
+            sessionMessageSequence &+= 1
+            sequence = sessionMessageSequence
+        }
+        if case .review(let index) = phase, let context {
+            currentReviewStateToken = ReviewStateToken(
+                sessionID: context.sessionID,
+                photoIndex: index,
+                revision: context.sequence
+            )
+        } else {
+            currentReviewStateToken = nil
+        }
         multipeer.sendControl(.sessionSync(snapshot: SessionSyncSnapshot(
             config: stateMachine.config,
             sessionID: sessionID,
