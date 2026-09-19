@@ -346,6 +346,19 @@ struct SessionWorkspace: Sendable {
         if fileManager.fileExists(atPath: directory.path) { try fileManager.removeItem(at: directory) }
     }
 
+    func removeAbandonedGIFTemporaries(manifest: SessionManifest) throws {
+        let directory = try manifestDirectory(for: manifest)
+        guard fileManager.fileExists(atPath: directory.path) else { return }
+        let files = try fileManager.contentsOfDirectory(
+            at: directory,
+            includingPropertiesForKeys: nil,
+            options: []
+        )
+        for file in files where file.lastPathComponent.hasPrefix(".booth-") && file.pathExtension == "gif" {
+            try fileManager.removeItem(at: file)
+        }
+    }
+
     static func safeEventFolderName(_ name: String) -> String {
         let invalid = CharacterSet(charactersIn: "/:\\*?\"<>|")
         let safe = name.unicodeScalars.map { invalid.contains($0) ? "-" : String($0) }.joined()

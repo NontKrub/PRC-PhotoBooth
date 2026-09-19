@@ -220,6 +220,36 @@ struct MessageTests {
         #expect(accepted)
     }
 
+    @Test("old authority epochs cannot rewind a newer baseline")
+    func authorityEpochRejectsOldSync() {
+        let oldEpoch = UUID(uuidString: "00000000-0000-0000-0000-000000000001")!
+        let newEpoch = UUID(uuidString: "00000000-0000-0000-0000-000000000002")!
+        var gate = SessionMessageGate(
+            currentSessionID: "old-session",
+            latestAcceptedSequence: 90,
+            authorityEpoch: oldEpoch
+        )
+
+        let acceptedNewEpoch = gate.acceptSessionChange(SessionMessageContext(
+            sessionID: "new-session",
+            sequence: 1,
+            authorityEpoch: newEpoch
+        ))
+        #expect(acceptedNewEpoch)
+        let acceptedOldEpochSync = gate.acceptSessionChange(SessionMessageContext(
+            sessionID: "old-session",
+            sequence: 91,
+            authorityEpoch: oldEpoch
+        ))
+        #expect(!acceptedOldEpochSync)
+        let acceptedOldEpochMessage = gate.accept(SessionMessageContext(
+            sessionID: "old-session",
+            sequence: 92,
+            authorityEpoch: oldEpoch
+        ))
+        #expect(!acceptedOldEpochMessage)
+    }
+
     @Test("session gate accepts a deterministic 500-message soak")
     func sessionGateSoak() {
         var gate = SessionMessageGate(currentSessionID: "soak", latestAcceptedSequence: 0)
@@ -315,9 +345,9 @@ struct MessageTests {
         #expect(legacyHello.deviceName == "legacy-id")
         #expect(legacyHello.networkPreference == nil)
     }
-    @Test("v1.4.3 connection protocol is version 8 and legacy protocol 2 remains decodable but incompatible")
+    @Test("v1.4.3 connection protocol is version 9 and legacy protocol 2 remains decodable but incompatible")
     func protocolVersionMismatchIsVisible() throws {
-        #expect(BoothTransportHello.currentProtocolVersion == 8)
+        #expect(BoothTransportHello.currentProtocolVersion == 9)
         let legacy = Data(#"{"protocolVersion":2,"appVersion":"1.4.1","role":"iPad","deviceID":"legacy-id","capabilities":["control"]}"#.utf8)
         let hello = try JSONDecoder().decode(BoothTransportHello.self, from: legacy)
         #expect(hello.protocolVersion == 2)

@@ -89,6 +89,8 @@ enum SessionManifestError: LocalizedError, Equatable {
     case corrupt(URL, String)
     case unsupportedSchemaVersion(Int)
     case alreadyOwned(URL, String)
+    case invalidTransition(sessionID: String, from: RuntimeSessionStatus, to: RuntimeSessionStatus)
+    case staleWrite(sessionID: String)
 
     var errorDescription: String? {
         switch self {
@@ -102,6 +104,10 @@ enum SessionManifestError: LocalizedError, Equatable {
             return "Unsupported session manifest schema version: \(version)"
         case .alreadyOwned(let url, let id):
             return "Manifest file \(url.lastPathComponent) belongs to another session: \(id)"
+        case .invalidTransition(let sessionID, let from, let to):
+            return "Invalid session transition for \(sessionID): \(from.rawValue) -> \(to.rawValue)"
+        case .staleWrite(let sessionID):
+            return "Stale session manifest write rejected: \(sessionID)"
         }
     }
 }

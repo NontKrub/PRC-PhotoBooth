@@ -296,10 +296,12 @@ final class iPadViewModel: ObservableObject {
     }
 
     private var currentSessionMessageContext: SessionMessageContext? {
-        guard let sessionID = sessionMessageGate.currentSessionID else { return nil }
+        guard let sessionID = sessionMessageGate.currentSessionID,
+              let authorityEpoch = sessionMessageGate.authorityEpoch else { return nil }
         return SessionMessageContext(
             sessionID: sessionID,
-            sequence: sessionMessageGate.latestAcceptedSequence
+            sequence: sessionMessageGate.latestAcceptedSequence,
+            authorityEpoch: authorityEpoch
         )
     }
 
@@ -332,7 +334,7 @@ final class iPadViewModel: ObservableObject {
     }
 
     private func acceptSessionChange(_ context: SessionMessageContext, message: String) -> Bool {
-        guard context.sequence > sessionMessageGate.latestAcceptedSequence else {
+        guard sessionMessageGate.acceptSessionChange(context) else {
 #if DEBUG
             NSLog(
                 "[Session] Ignored stale %@: session=%@ current=%@ sequence=%llu latest=%llu",
@@ -345,7 +347,6 @@ final class iPadViewModel: ObservableObject {
 #endif
             return false
         }
-        sessionMessageGate.synchronize(sessionID: context.sessionID, sequence: context.sequence)
         return true
     }
 
@@ -1010,9 +1011,14 @@ final class iPadViewModel: ObservableObject {
     }
 
     private func applySessionSync(_ snapshot: SessionSyncSnapshot) {
+        guard !sessionMessageGate.isRetiredAuthorityEpoch(snapshot.authorityEpoch) else { return }
+        let authorityChanged = sessionMessageGate.authorityEpoch.map {
+            $0 != snapshot.authorityEpoch
+        } ?? false
         let hasSyncBaseline = sessionMessageGate.currentSessionID != nil
             || sessionMessageGate.latestAcceptedSequence > 0
         if hasSyncBaseline,
+           !authorityChanged,
            snapshot.sessionID == sessionMessageGate.currentSessionID,
            snapshot.sequence <= sessionMessageGate.latestAcceptedSequence {
 #if DEBUG
@@ -1028,11 +1034,15 @@ final class iPadViewModel: ObservableObject {
         let pendingRecovery = pendingCaptureRecovery
         clearTransientRequestState()
         let previousSessionID = sessionMessageGate.currentSessionID
-        if previousSessionID != snapshot.sessionID || snapshot.sessionID == nil {
+        if authorityChanged || previousSessionID != snapshot.sessionID || snapshot.sessionID == nil {
             clearSessionMedia()
         }
         cancelCountdown()
-        sessionMessageGate.synchronize(sessionID: snapshot.sessionID, sequence: snapshot.sequence)
+        sessionMessageGate.synchronize(
+            sessionID: snapshot.sessionID,
+            sequence: snapshot.sequence,
+            authorityEpoch: snapshot.authorityEpoch
+        )
         currentCaptureRecoveryStateToken = snapshot.captureRecoveryState
         if pendingRecovery?.state == snapshot.captureRecoveryState {
             pendingCaptureRecovery = pendingRecovery

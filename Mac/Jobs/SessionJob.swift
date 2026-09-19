@@ -31,11 +31,17 @@ enum SessionJobFailureDisposition: String, Codable, Sendable {
     case sideEffectUnknown
 }
 
+enum UnknownPrintResolution: Sendable, Equatable {
+    case printed
+    case notPrinted
+}
+
 enum CloudUploadRequeueResult: String, Sendable, Equatable {
     case queued
     case alreadyQueued
     case alreadyRunning
     case notFound
+    case sessionCancelled
 }
 
 struct SessionJob: Codable, Sendable, Identifiable, Equatable {

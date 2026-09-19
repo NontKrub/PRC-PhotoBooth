@@ -139,6 +139,13 @@ final class PrinterService {
     }
 
     var isPrinting: Bool { lifecycleState != .idle }
+    var isIdle: Bool { lifecycleState == .idle }
+
+    func resolveUnknownPrint(as outcome: PrintSubmissionOutcome) {
+        guard case .unknownAwaitingAppKitCompletion = lifecycleState,
+              outcome != .unknown else { return }
+        endPrint()
+    }
 
     func refreshPrinters() {
         availablePrinterNames = backend.availablePrinterNames()

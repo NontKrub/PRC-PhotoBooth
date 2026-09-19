@@ -1167,6 +1167,28 @@
         }
       }
     },
+    "Cancelled — cleanup pending" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ยกเลิกแล้ว — รอการล้างข้อมูล"
+          }
+        }
+      }
+    },
+    "The session is cancelled. Its files remain protected until background work stops." : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "เซสชันถูกยกเลิกแล้ว ไฟล์จะยังคงได้รับการปกป้องจนกว่างานเบื้องหลังจะหยุดทำงาน"
+          }
+        }
+      }
+    },
     "Canvas" : {
       "localizations" : {
         "th" : {
@@ -1194,6 +1216,17 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "ขนาดผืนงาน"
+          }
+        }
+      }
+    },
+    "Cleanup pending" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "รอการล้างข้อมูล"
           }
         }
       }
@@ -7029,6 +7062,50 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "ใช้โหมดรับแสง AUTO หรือ P ของ ZV-E10 ค่า ISO ความเร็วชัตเตอร์ และรูรับแสงจะเป็นอัตโนมัติ"
+          }
+        }
+      }
+    },
+    "Printed successfully" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "พิมพ์สำเร็จ"
+          }
+        }
+      }
+    },
+    "Not printed" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ยังไม่ได้พิมพ์"
+          }
+        }
+      }
+    },
+    "Confirm printer outcome" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ยืนยันผลลัพธ์การพิมพ์"
+          }
+        }
+      }
+    },
+    "Confirm the physical printer result before releasing this print lane." : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ยืนยันผลลัพธ์จริงของเครื่องพิมพ์ก่อนปล่อยช่องพิมพ์นี้"
           }
         }
       }

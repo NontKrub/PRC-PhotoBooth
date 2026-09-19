@@ -34,6 +34,7 @@ struct SessionManifestStoreTests {
         var manifest = makeManifest()
 
         try await store.create(manifest)
+        manifest = try await store.load(sessionID: manifest.id)
         manifest.lastError = "temporary"
         try await store.save(manifest)
 
@@ -110,6 +111,54 @@ struct SessionManifestStoreTests {
         #expect(decoded.captureAttempts == nil)
         #expect(decoded.cloudDelivery == nil)
         #expect(decoded.shots[0].previousImageFileName == nil)
+    }
+
+    @Test("status changes require an explicit compare-and-set transition")
+    func statusTransitionsAreAuthoritative() async throws {
+        let root = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = SessionManifestStore(baseDirectory: root)
+        let manifest = makeManifest()
+        try await store.create(manifest)
+
+        _ = try await store.transition(sessionID: manifest.id, allowedFrom: [.capturing]) {
+            $0.status = .finalizing
+        }
+        var stale = try await store.load(sessionID: manifest.id)
+        stale.updatedAt = Date(timeIntervalSince1970: 1)
+        do {
+            try await store.save(stale)
+            Issue.record("Stale manifest write was accepted")
+        } catch let error as SessionManifestError {
+            guard case .staleWrite = error else {
+                Issue.record("Unexpected stale-write error: \(error)")
+                return
+            }
+        }
+        do {
+            _ = try await store.update(sessionID: manifest.id) { $0.status = .capturing }
+            Issue.record("Generic manifest update changed status")
+        } catch let error as SessionManifestError {
+            guard case .invalidTransition = error else {
+                Issue.record("Unexpected manifest error: \(error)")
+                return
+            }
+        }
+
+        _ = try await store.transition(sessionID: manifest.id, allowedFrom: [.finalizing]) {
+            $0.status = .completed
+        }
+        do {
+            _ = try await store.transition(sessionID: manifest.id, allowedFrom: [.completed]) {
+                $0.status = .capturing
+            }
+            Issue.record("Terminal manifest was resurrected")
+        } catch let error as SessionManifestError {
+            guard case .invalidTransition = error else {
+                Issue.record("Unexpected terminal transition error: \(error)")
+                return
+            }
+        }
     }
 
     @Test("persists session-stable cloud delivery settings")

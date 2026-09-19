@@ -30,8 +30,11 @@ enum OperationsStatusLogic {
         return OperationsSectionStatus(summary: "\(results.count) checks", severity: .normal)
     }
 
-    static func recovery(isAvailable: Bool) -> OperationsSectionStatus {
-        OperationsSectionStatus(summary: isAvailable ? "Available" : nil, severity: isAvailable ? .warning : .normal)
+    static func recovery(isAvailable: Bool, cleanupPending: Bool = false) -> OperationsSectionStatus {
+        if cleanupPending {
+            return OperationsSectionStatus(summary: "Cleanup pending", severity: .warning)
+        }
+        return OperationsSectionStatus(summary: isAvailable ? "Available" : nil, severity: isAvailable ? .warning : .normal)
     }
 
     static func webDelivery(_ jobs: [SessionJob], configured: Bool) -> OperationsSectionStatus {
@@ -160,6 +163,9 @@ struct OperationsView: View {
     @Environment(BoothConnectionStatus.self) private var connectionStatus
     @Environment(\.locale) private var locale
     @State private var showPrinterConfirmation = false
+    @State private var showPrintResolutionConfirmation = false
+    @State private var printResolutionJobID: String?
+    @State private var printResolutionPrinted = false
     @State private var showDiscardConfirmation = false
     @State private var serverStatus = LocalWebServerStatus(state: .stopped, registeredTokenCount: 0)
     @State private var boothHealth = BoothHealthSnapshot.empty
@@ -193,7 +199,8 @@ struct OperationsView: View {
                 } label: {
                     operationsHeader(title: "Connection Stability", status: connectionStabilityStatus)
                 }
-                if coordinator.recoveryService.recoverableCaptureSession != nil {
+                if coordinator.recoveryService.recoverableCaptureSession != nil
+                    || !coordinator.recoveryService.cleanupPendingSessionIDs.isEmpty {
                     DisclosureGroup(isExpanded: $recoveryExpanded) {
                         recoverySection
                     } label: {
@@ -284,6 +291,20 @@ struct OperationsView: View {
         } message: {
             Text("Accepted files and the unfinished SwiftData session will be removed. The cancelled manifest remains for diagnostics.")
         }
+        .confirmationDialog(
+            "Confirm printer outcome",
+            isPresented: $showPrintResolutionConfirmation,
+            titleVisibility: .visible
+        ) {
+            Button(printResolutionPrinted ? "Printed successfully" : "Not printed") {
+                guard let jobID = printResolutionJobID else { return }
+                coordinator.resolveUnknownPrint(jobID: jobID, printed: printResolutionPrinted)
+                printResolutionJobID = nil
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("Confirm the physical printer result before releasing this print lane.")
+        }
     }
 
     private func operationsHeader(title: String, status: OperationsSectionStatus) -> some View {
@@ -354,6 +375,20 @@ struct OperationsView: View {
 
     @ViewBuilder
     private var recoverySection: some View {
+        if !coordinator.recoveryService.cleanupPendingSessionIDs.isEmpty {
+            GroupBox("Cancelled — cleanup pending") {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("The session is cancelled. Its files remain protected until background work stops.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    ForEach(coordinator.recoveryService.cleanupPendingSessionIDs.sorted(), id: \.self) { sessionID in
+                        Text(sessionID)
+                            .font(.caption2.monospaced())
+                            .foregroundStyle(.tertiary)
+                    }
+                }
+            }
+        }
         if let recoverable = coordinator.recoveryService.recoverableCaptureSession {
             GroupBox("Session Recovery") {
                 VStack(alignment: .leading, spacing: 8) {
@@ -522,6 +557,16 @@ struct OperationsView: View {
                                 if job.lastFailureDisposition == .sideEffectUnknown {
                                     Text(operatorString("Verify printer", locale: locale))
                                         .foregroundStyle(.orange)
+                                    Button(operatorString("Printed successfully", locale: locale)) {
+                                        printResolutionJobID = job.id
+                                        printResolutionPrinted = true
+                                        showPrintResolutionConfirmation = true
+                                    }
+                                    Button(operatorString("Not printed", locale: locale)) {
+                                        printResolutionJobID = job.id
+                                        printResolutionPrinted = false
+                                        showPrintResolutionConfirmation = true
+                                    }
                                 } else {
                                     Button("Retry") { coordinator.jobQueue.retry(jobID: job.id) }
                                 }
@@ -820,7 +865,10 @@ struct OperationsView: View {
     }
 
     private var recoveryStatus: OperationsSectionStatus {
-        OperationsStatusLogic.recovery(isAvailable: coordinator.recoveryService.recoverableCaptureSession != nil)
+        OperationsStatusLogic.recovery(
+            isAvailable: coordinator.recoveryService.recoverableCaptureSession != nil,
+            cleanupPending: !coordinator.recoveryService.cleanupPendingSessionIDs.isEmpty
+        )
     }
 
     private var webDeliveryHeaderStatus: OperationsSectionStatus {

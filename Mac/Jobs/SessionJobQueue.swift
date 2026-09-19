@@ -3,7 +3,13 @@ import Observation
 
 @MainActor
 protocol SessionJobExecuting: AnyObject {
+    var isAutoPrintLaneAvailable: Bool { get }
     func execute(_ job: SessionJob) async throws
+}
+
+@MainActor
+extension SessionJobExecuting {
+    var isAutoPrintLaneAvailable: Bool { true }
 }
 
 enum SessionJobCancellationResult: Sendable, Equatable {
@@ -26,6 +32,8 @@ final class SessionJobQueue {
     private var activeFinalizationExecutionTask: Task<Void, Error>?
     private var activePrintJobID: String?
     private var activePrintExecutionTask: Task<Void, Error>?
+    private var activeReservations: [String: String] = [:]
+    private var quiescenceWaiters: [UUID: (sessionID: String, continuation: CheckedContinuation<Bool, Never>)] = [:]
     private var persistentQueueError: String?
 
     private let finalizationKinds: [SessionJobKind] = [
@@ -75,6 +83,11 @@ final class SessionJobQueue {
         activeFinalizationExecutionTask = nil
         activePrintJobID = nil
         activePrintExecutionTask = nil
+        let waiters = quiescenceWaiters.values
+        quiescenceWaiters.removeAll()
+        for waiter in waiters {
+            waiter.continuation.resume(returning: false)
+        }
     }
 
     func refresh() {
@@ -83,20 +96,20 @@ final class SessionJobQueue {
         }
     }
 
-    func enqueueFinalizationJobs(for manifest: SessionManifest) {
+    func enqueueFinalizationJobs(for manifest: SessionManifest) async throws {
         var kinds: [SessionJobKind] = [.renderStrip, .registerDownload, .updateGallery]
         if manifest.shots.contains(where: { !$0.gifFrameFileNames.isEmpty }) {
             kinds.append(.renderGIF)
         }
-        enqueue(kinds: kinds, sessionID: manifest.id)
+        try await enqueue(kinds: kinds, sessionID: manifest.id)
     }
 
-    func enqueueAutoPrint(for manifest: SessionManifest) {
-        enqueue(kinds: [.autoPrint], sessionID: manifest.id)
+    func enqueueAutoPrint(for manifest: SessionManifest) async throws {
+        try await enqueue(kinds: [.autoPrint], sessionID: manifest.id)
     }
 
-    func enqueueCloudUpload(for manifest: SessionManifest) {
-        enqueue(kinds: [.cloudUpload], sessionID: manifest.id)
+    func enqueueCloudUpload(for manifest: SessionManifest) async throws {
+        try await enqueue(kinds: [.cloudUpload], sessionID: manifest.id)
     }
 
     func retry(jobID: String) {
@@ -108,6 +121,16 @@ final class SessionJobQueue {
             } catch {
                 lastQueueError = error.localizedDescription
             }
+        }
+    }
+
+    func resolveUnknownPrint(jobID: String, resolution: UnknownPrintResolution) async throws {
+        do {
+            _ = try await store.resolveUnknownPrint(jobID: jobID, resolution: resolution)
+            await reload()
+        } catch {
+            lastQueueError = error.localizedDescription
+            throw error
         }
     }
 
@@ -163,28 +186,32 @@ final class SessionJobQueue {
     func cancelAndQuiesceJobs(sessionID: String) async throws -> SessionJobCancellationResult {
         try await store.cancelJobs(sessionID: sessionID)
         let snapshot = await store.snapshot()
-        var activeTasks: [Task<Void, Error>] = []
         if let activeCloudJobID,
            snapshot.contains(where: { $0.id == activeCloudJobID && $0.sessionID == sessionID }) {
             activeCloudExecutionTask?.cancel()
-            if let activeCloudExecutionTask { activeTasks.append(activeCloudExecutionTask) }
         }
         if let activeFinalizationJobID,
            snapshot.contains(where: { $0.id == activeFinalizationJobID && $0.sessionID == sessionID }) {
             activeFinalizationExecutionTask?.cancel()
-            if let activeFinalizationExecutionTask { activeTasks.append(activeFinalizationExecutionTask) }
         }
         if let activePrintJobID,
            snapshot.contains(where: { $0.id == activePrintJobID && $0.sessionID == sessionID }) {
             activePrintExecutionTask?.cancel()
-            if let activePrintExecutionTask { activeTasks.append(activePrintExecutionTask) }
         }
-        for task in activeTasks { _ = try? await task.value }
+        // A non-cooperative executor must not keep cancellation suspended
+        // forever. The durable barrier makes later enqueue/claim attempts safe
+        // while this bounded wait decides whether cleanup can delete files.
+        let quiesced = await waitForQuiescence(
+            sessionID: sessionID,
+            timeout: .seconds(10)
+        )
         await reload()
         let remaining = await store.snapshot().contains {
             $0.sessionID == sessionID && $0.status == .running
         }
-        return remaining ? .cleanupPending : .quiesced
+        return !quiesced || remaining || activeReservations.values.contains(sessionID)
+            ? .cleanupPending
+            : .quiesced
     }
 
     func retryAllFailed() {
@@ -226,17 +253,15 @@ final class SessionJobQueue {
         }
     }
 
-    private func enqueue(kinds: [SessionJobKind], sessionID: String) {
-        Task { [weak self] in
-            guard let self else { return }
-            do {
-                for kind in kinds {
-                    _ = try await store.enqueue(sessionID: sessionID, kind: kind)
-                }
-                await reload()
-            } catch {
-                lastQueueError = error.localizedDescription
+    private func enqueue(kinds: [SessionJobKind], sessionID: String) async throws {
+        do {
+            for kind in kinds {
+                _ = try await store.enqueue(sessionID: sessionID, kind: kind)
             }
+            await reload()
+        } catch {
+            lastQueueError = error.localizedDescription
+            throw error
         }
     }
 
@@ -300,6 +325,7 @@ final class SessionJobQueue {
                 return true
             }
             running = claimed
+            reserve(running)
         } catch {
             lastQueueError = error.localizedDescription
             await reload()
@@ -333,22 +359,19 @@ final class SessionJobQueue {
     }
 
     private func execute(_ job: SessionJob) async throws {
+        guard await store.snapshot().first(where: { $0.id == job.id })?.status == .running else {
+            clearReservation(for: job)
+            throw CancellationError()
+        }
         let task: Task<Void, Error> = Task { @MainActor [weak self] in
             guard let self else { throw CancellationError() }
             try Task.checkCancellation()
             try await self.executor.execute(job)
             try Task.checkCancellation()
         }
-        if job.kind == .cloudUpload {
-            activeCloudJobID = job.id
-            activeCloudExecutionTask = task
-        } else if job.kind == .autoPrint {
-            activePrintJobID = job.id
-            activePrintExecutionTask = task
-        } else {
-            activeFinalizationJobID = job.id
-            activeFinalizationExecutionTask = task
-        }
+        if job.kind == .cloudUpload { activeCloudExecutionTask = task }
+        else if job.kind == .autoPrint { activePrintExecutionTask = task }
+        else { activeFinalizationExecutionTask = task }
         defer {
             if activeCloudJobID == job.id {
                 activeCloudJobID = nil
@@ -362,6 +385,7 @@ final class SessionJobQueue {
                 activePrintJobID = nil
                 activePrintExecutionTask = nil
             }
+            clearReservation(for: job)
         }
         try await task.value
     }
@@ -413,6 +437,7 @@ final class SessionJobQueue {
             kinds.contains($0.kind)
                 && isRunnable($0, now: now)
                 && dependenciesSatisfied(for: $0)
+                && ($0.kind != .autoPrint || executor.isAutoPrintLaneAvailable)
         }
         // Required work is globally oldest-first. Optional GIF work only runs
         // when no required job is runnable, so heavy rendering cannot delay a
@@ -487,5 +512,67 @@ final class SessionJobQueue {
     private func reloadFromSnapshot() async {
         jobs = await store.snapshot()
         onJobsChanged?()
+    }
+
+    private func reserve(_ job: SessionJob) {
+        activeReservations[job.id] = job.sessionID
+        switch job.kind {
+        case .cloudUpload:
+            activeCloudJobID = job.id
+        case .autoPrint:
+            activePrintJobID = job.id
+        default:
+            activeFinalizationJobID = job.id
+        }
+    }
+
+    private func clearReservation(for job: SessionJob) {
+        activeReservations.removeValue(forKey: job.id)
+        if activeCloudJobID == job.id {
+            activeCloudJobID = nil
+            activeCloudExecutionTask = nil
+        }
+        if activeFinalizationJobID == job.id {
+            activeFinalizationJobID = nil
+            activeFinalizationExecutionTask = nil
+        }
+        if activePrintJobID == job.id {
+            activePrintJobID = nil
+            activePrintExecutionTask = nil
+        }
+        resumeReadyQuiescenceWaiters()
+    }
+
+    private func waitForQuiescence(sessionID: String, timeout: Duration) async -> Bool {
+        guard activeReservations.values.contains(sessionID) else { return true }
+        let waiterID = UUID()
+        let clock = ContinuousClock()
+        let deadline = clock.now.advanced(by: timeout)
+        return await withCheckedContinuation { continuation in
+            quiescenceWaiters[waiterID] = (sessionID, continuation)
+            Task { [weak self] in
+                do {
+                    try await clock.sleep(until: deadline)
+                } catch {
+                    return
+                }
+                guard !Task.isCancelled else { return }
+                self?.timeoutQuiescenceWaiter(waiterID)
+            }
+            resumeReadyQuiescenceWaiters()
+        }
+    }
+
+    private func resumeReadyQuiescenceWaiters() {
+        let ready = quiescenceWaiters.filter { !activeReservations.values.contains($0.value.sessionID) }
+        for (id, waiter) in ready {
+            quiescenceWaiters.removeValue(forKey: id)
+            waiter.continuation.resume(returning: true)
+        }
+    }
+
+    private func timeoutQuiescenceWaiter(_ id: UUID) {
+        guard let waiter = quiescenceWaiters.removeValue(forKey: id) else { return }
+        waiter.continuation.resume(returning: false)
     }
 }

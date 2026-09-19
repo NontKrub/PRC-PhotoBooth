@@ -193,6 +193,54 @@ struct JobQueueStoreTests {
         #expect(jobs.first { $0.id == optional.id }?.status == .cancelled)
     }
 
+    @Test("durable cancellation blocks delayed enqueue after store recreation")
+    func cancellationBarrierSurvivesReload() async throws {
+        let file = try temporaryFile()
+        defer { try? FileManager.default.removeItem(at: file.deletingLastPathComponent()) }
+        let store = JobQueueStore(fileURL: file)
+
+        try await store.cancelJobs(sessionID: "cancelled")
+        do {
+            _ = try await store.enqueue(sessionID: "cancelled", kind: .renderStrip)
+            Issue.record("Cancelled session accepted an enqueue")
+        } catch let error as JobQueueStoreError {
+            #expect(error == .sessionCancelled("cancelled"))
+        }
+
+        let reloaded = JobQueueStore(fileURL: file)
+        _ = try await reloaded.load()
+        do {
+            _ = try await reloaded.enqueue(sessionID: "cancelled", kind: .cloudUpload)
+            Issue.record("Reloaded cancellation barrier accepted an enqueue")
+        } catch let error as JobQueueStoreError {
+            #expect(error == .sessionCancelled("cancelled"))
+        }
+    }
+
+    @Test("unknown print resolution does not spend a retry")
+    func resolvesUnknownPrintWithoutRetryCost() async throws {
+        let file = try temporaryFile()
+        defer { try? FileManager.default.removeItem(at: file.deletingLastPathComponent()) }
+        let store = JobQueueStore(fileURL: file)
+        var job = try await store.enqueue(sessionID: "print", kind: .autoPrint)
+        job.status = .failed
+        job.attemptCount = 1
+        job.lastFailureDisposition = .sideEffectUnknown
+        try await store.update(job)
+
+        let retried = try await store.resolveUnknownPrint(jobID: job.id, resolution: .notPrinted)
+        #expect(retried.status == .pending)
+        #expect(retried.attemptCount == 0)
+
+        _ = try await store.claim(jobID: job.id)
+        var unknown = try #require(await store.snapshot().first { $0.id == job.id })
+        unknown.status = .failed
+        unknown.lastFailureDisposition = .sideEffectUnknown
+        try await store.update(unknown)
+        let printed = try await store.resolveUnknownPrint(jobID: job.id, resolution: .printed)
+        #expect(printed.status == .succeeded)
+    }
+
     @Test("old succeeded jobs purge while failed jobs remain")
     func purgesOnlyOldSucceeded() async throws {
         let file = try temporaryFile()

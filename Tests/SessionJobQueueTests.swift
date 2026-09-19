@@ -19,12 +19,12 @@ struct SessionJobQueueTests {
         let sessionB = makeManifest()
 
         queue.start()
-        queue.enqueueFinalizationJobs(for: sessionA)
+        try await queue.enqueueFinalizationJobs(for: sessionA)
         try await waitUntil { await executor.snapshot().kinds.count == 3 }
-        queue.enqueueCloudUpload(for: sessionA)
+        try await queue.enqueueCloudUpload(for: sessionA)
         try await waitUntil { await executor.snapshot().cloudUploadStarted }
 
-        queue.enqueueFinalizationJobs(for: sessionB)
+        try await queue.enqueueFinalizationJobs(for: sessionB)
         try await waitUntil {
             await queue.job(sessionID: sessionB.id, status: .succeeded, kind: .renderStrip) != nil
         }
@@ -48,7 +48,7 @@ struct SessionJobQueueTests {
         )
 
         queue.start()
-        queue.enqueueFinalizationJobs(for: makeManifest(withGIFFrames: true))
+        try await queue.enqueueFinalizationJobs(for: makeManifest(withGIFFrames: true))
         try await waitUntil { await executor.snapshot().kinds.count == 4 }
 
         let snapshot = await executor.snapshot()
@@ -97,14 +97,14 @@ struct SessionJobQueueTests {
         let second = makeManifest()
 
         queue.start()
-        queue.enqueueFinalizationJobs(for: first)
+        try await queue.enqueueFinalizationJobs(for: first)
         try await waitUntil("first finalization") {
             await queue.job(sessionID: first.id, status: .succeeded, kind: .updateGallery) != nil
         }
-        queue.enqueueAutoPrint(for: first)
+        try await queue.enqueueAutoPrint(for: first)
         try await waitUntil("first print start") { await executor.snapshot().printStarted }
 
-        queue.enqueueFinalizationJobs(for: second)
+        try await queue.enqueueFinalizationJobs(for: second)
         try await waitUntil("second finalization") {
             await queue.job(sessionID: second.id, status: .succeeded, kind: .updateGallery) != nil
         }
@@ -130,15 +130,15 @@ struct SessionJobQueueTests {
         let second = makeManifest()
 
         queue.start()
-        queue.enqueueFinalizationJobs(for: first)
-        queue.enqueueFinalizationJobs(for: second)
+        try await queue.enqueueFinalizationJobs(for: first)
+        try await queue.enqueueFinalizationJobs(for: second)
         try await waitUntil("both strips") {
             let firstReady = await queue.job(sessionID: first.id, status: .succeeded, kind: .renderStrip) != nil
             let secondReady = await queue.job(sessionID: second.id, status: .succeeded, kind: .renderStrip) != nil
             return firstReady && secondReady
         }
-        queue.enqueueAutoPrint(for: first)
-        queue.enqueueAutoPrint(for: second)
+        try await queue.enqueueAutoPrint(for: first)
+        try await queue.enqueueAutoPrint(for: second)
 
         try await waitUntil("first print start") { await executor.snapshot().printStarted }
         #expect(await executor.snapshot().printStartCount == 1)
@@ -167,15 +167,15 @@ struct SessionJobQueueTests {
         let second = makeManifest()
 
         queue.start()
-        queue.enqueueFinalizationJobs(for: first)
-        queue.enqueueFinalizationJobs(for: second)
+        try await queue.enqueueFinalizationJobs(for: first)
+        try await queue.enqueueFinalizationJobs(for: second)
         try await waitUntil("both strips") {
             let firstReady = await queue.job(sessionID: first.id, status: .succeeded, kind: .renderStrip) != nil
             let secondReady = await queue.job(sessionID: second.id, status: .succeeded, kind: .renderStrip) != nil
             return firstReady && secondReady
         }
-        queue.enqueueAutoPrint(for: first)
-        queue.enqueueAutoPrint(for: second)
+        try await queue.enqueueAutoPrint(for: first)
+        try await queue.enqueueAutoPrint(for: second)
 
         try await waitUntil("failed first print") {
             await queue.job(sessionID: first.id, status: .failed, kind: .autoPrint) != nil
@@ -200,14 +200,14 @@ struct SessionJobQueueTests {
         let second = makeManifest()
 
         queue.start()
-        queue.enqueueFinalizationJobs(for: first)
-        queue.enqueueFinalizationJobs(for: second)
+        try await queue.enqueueFinalizationJobs(for: first)
+        try await queue.enqueueFinalizationJobs(for: second)
         try await waitUntil("both strips") {
             let firstReady = await queue.job(sessionID: first.id, status: .succeeded, kind: .renderStrip) != nil
             let secondReady = await queue.job(sessionID: second.id, status: .succeeded, kind: .renderStrip) != nil
             return firstReady && secondReady
         }
-        queue.enqueueAutoPrint(for: first)
+        try await queue.enqueueAutoPrint(for: first)
         try await waitUntil("first print start") { await executor.snapshot().printStartCount == 1 }
         guard let firstJob = await queue.job(sessionID: first.id, status: .running, kind: .autoPrint) else {
             Issue.record("Expected first print to be running")
@@ -218,11 +218,41 @@ struct SessionJobQueueTests {
         try await waitUntil("cancelled first print") {
             await queue.job(sessionID: first.id, status: .cancelled, kind: .autoPrint) != nil
         }
-        queue.enqueueAutoPrint(for: second)
+        try await queue.enqueueAutoPrint(for: second)
         try await waitUntil("successful second print") {
             await queue.job(sessionID: second.id, status: .succeeded, kind: .autoPrint) != nil
         }
         #expect(await executor.snapshot().printCancelled)
+    }
+
+    @Test("a non-cooperative print keeps cleanup pending until it quiesces")
+    @MainActor
+    func nonCooperativePrintReturnsCleanupPending() async throws {
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let executor = BlockingPrintJobExecutor()
+        let queue = SessionJobQueue(
+            store: JobQueueStore(fileURL: directory.appendingPathComponent("jobs.json")),
+            executor: executor
+        )
+        let manifest = makeManifest()
+
+        queue.start()
+        try await queue.enqueueFinalizationJobs(for: manifest)
+        try await waitUntil("print prerequisites") {
+            await queue.job(sessionID: manifest.id, status: .succeeded, kind: .renderStrip) != nil
+        }
+        try await queue.enqueueAutoPrint(for: manifest)
+        try await waitUntil("print start") { await executor.snapshot().printStarted }
+
+        let result = try await queue.cancelAndQuiesceJobs(sessionID: manifest.id)
+        #expect(result == .cleanupPending)
+        #expect(await queue.job(sessionID: manifest.id, status: .cancelled, kind: .autoPrint) != nil)
+
+        await executor.releaseFirstPrint()
+        try await waitUntil("hung print exit") {
+            await queue.job(sessionID: manifest.id, status: .cancelled, kind: .autoPrint) != nil
+        }
     }
 
     @Test("retryable errors wait for retry and manual retry resets the job")
@@ -238,7 +268,7 @@ struct SessionJobQueueTests {
         )
 
         queue.start()
-        queue.enqueueFinalizationJobs(for: makeManifest())
+        try await queue.enqueueFinalizationJobs(for: makeManifest())
         try await waitUntil {
             await queue.job(status: .waitingRetry, kind: .renderStrip) != nil
         }
@@ -267,7 +297,7 @@ struct SessionJobQueueTests {
         )
 
         queue.start()
-        queue.enqueueFinalizationJobs(for: makeManifest(withGIFFrames: true))
+        try await queue.enqueueFinalizationJobs(for: makeManifest(withGIFFrames: true))
         try await waitUntil { await executor.snapshot().kinds.count == 4 }
         try await waitUntil {
             await queue.job(status: .failed, kind: .renderGIF) != nil
@@ -312,9 +342,9 @@ struct SessionJobQueueTests {
         let manifest = makeManifest()
 
         queue.start()
-        queue.enqueueFinalizationJobs(for: manifest)
+        try await queue.enqueueFinalizationJobs(for: manifest)
         try await waitUntil { await queue.job(sessionID: manifest.id, status: .succeeded, kind: .registerDownload) != nil }
-        queue.enqueueCloudUpload(for: manifest)
+        try await queue.enqueueCloudUpload(for: manifest)
         try await waitUntil { await executor.snapshot().started }
 
         guard let job = await queue.job(sessionID: manifest.id, status: .running, kind: .cloudUpload) else {
@@ -344,9 +374,9 @@ struct SessionJobQueueTests {
         let second = makeManifest()
 
         queue.start()
-        queue.enqueueFinalizationJobs(for: first)
+        try await queue.enqueueFinalizationJobs(for: first)
         try await waitUntil { await queue.job(sessionID: first.id, status: .succeeded, kind: .registerDownload) != nil }
-        queue.enqueueCloudUpload(for: first)
+        try await queue.enqueueCloudUpload(for: first)
         try await waitUntil { await executor.snapshot().started }
         guard let firstJob = await queue.job(sessionID: first.id, status: .running, kind: .cloudUpload) else {
             Issue.record("Expected first cloud upload to be running")
@@ -355,9 +385,9 @@ struct SessionJobQueueTests {
         queue.cancel(jobID: firstJob.id)
         try await waitUntil { await queue.job(sessionID: first.id, status: .cancelled, kind: .cloudUpload) != nil }
 
-        queue.enqueueFinalizationJobs(for: second)
+        try await queue.enqueueFinalizationJobs(for: second)
         try await waitUntil("second register-download") { await queue.job(sessionID: second.id, status: .succeeded, kind: .registerDownload) != nil }
-        queue.enqueueCloudUpload(for: second)
+        try await queue.enqueueCloudUpload(for: second)
         try await waitUntil("second cloud-upload") { await queue.job(sessionID: second.id, status: .succeeded, kind: .cloudUpload) != nil }
 
         let snapshot = await executor.snapshot()

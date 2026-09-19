@@ -430,11 +430,12 @@ public final class NetworkBoothTransport: BoothTransport {
                 )
             }
         }
-        self.transportRuntime.onReconnectDue = { [weak self] _, generation in
+        self.transportRuntime.onReconnectDue = { [weak self] attempt, generation in
             Task { @MainActor [weak self] in
                 guard let self,
                       self.callbackGate.accepts(generation),
                       self.shouldReconnect else { return }
+                self.reconnectAttempt = max(self.reconnectAttempt, attempt)
                 self.handleReconnectDue()
             }
         }
@@ -2598,6 +2599,13 @@ public final class NetworkBoothTransport: BoothTransport {
         let connectionGenerationAtStart = connectionGeneration(for: channel)
         let recoveryScheduler = waitingRecoveryScheduler
         let receiveToken = replaceReceiveToken(for: channel)
+        let scheduleQueueOwnedRecovery: @Sendable () -> Void = { [transportRuntime, receiveToken] in
+            receiveToken.invalidate()
+            _ = transportRuntime.scheduleRecoveryReconnect(
+                after: 0,
+                generation: generationAtStart
+            )
+        }
         connection.viabilityUpdateHandler = { [weak self, weak connection, recoveryScheduler] isViable in
             let reason = isViable ? nil : "Network path is not viable."
             if let connection {
@@ -2612,7 +2620,8 @@ public final class NetworkBoothTransport: BoothTransport {
                         connection: connection,
                         channel: channel,
                         generation: connectionGenerationAtStart,
-                        after: 2
+                        after: 2,
+                        onDeadline: scheduleQueueOwnedRecovery
                     )
                 }
             }
@@ -2659,7 +2668,8 @@ public final class NetworkBoothTransport: BoothTransport {
                         connection: connection,
                         channel: channel,
                         generation: connectionGenerationAtStart,
-                        after: 2
+                        after: 2,
+                        onDeadline: scheduleQueueOwnedRecovery
                     )
                 }
             case .ready, .failed, .cancelled:
@@ -2669,6 +2679,11 @@ public final class NetworkBoothTransport: BoothTransport {
                         channel: channel,
                         generation: connectionGenerationAtStart
                     )
+                }
+                if case .failed = state {
+                    scheduleQueueOwnedRecovery()
+                } else if case .cancelled = state {
+                    scheduleQueueOwnedRecovery()
                 }
             default:
                 break
@@ -5015,17 +5030,18 @@ public final class NetworkBoothTransport: BoothTransport {
     private func scheduleReconnect() {
         guard shouldReconnect else { return }
         let delay = Self.reconnectDelays[min(reconnectAttempt, Self.reconnectDelays.count - 1)]
-        reconnectAttempt += 1
+        let attempt = reconnectAttempt + 1
+        guard transportRuntime.scheduleReconnect(
+            after: delay,
+            attempt: attempt,
+            generation: callbackGate.generation
+        ) else { return }
+        reconnectAttempt = attempt
         connectionStatus.publishReconnectState(inProgress: true, attempt: reconnectAttempt)
         emitTransportEvent(
             .transportReconnectScheduled,
             attempt: reconnectAttempt,
             duration: delay
-        )
-        transportRuntime.scheduleReconnect(
-            after: delay,
-            attempt: reconnectAttempt,
-            generation: callbackGate.generation
         )
     }
 
@@ -5063,6 +5079,9 @@ public final class NetworkBoothTransport: BoothTransport {
     }
 }
 
+/// All pending recovery state is mutated on the transport queue. The callback
+/// only cancels the exact connection/generation and schedules queue-owned
+/// recovery; presentation reconciliation is delivered separately.
 final class BoothConnectionRecoveryScheduler: @unchecked Sendable {
     private struct Key: Hashable {
         let channel: UInt8

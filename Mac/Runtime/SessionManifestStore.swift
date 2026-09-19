@@ -36,6 +36,17 @@ actor SessionManifestStore {
 
     func save(_ manifest: SessionManifest) throws {
         try validate(sessionID: manifest.id)
+        let current = try load(sessionID: manifest.id)
+        guard manifest.status == current.status else {
+            throw SessionManifestError.invalidTransition(
+                sessionID: manifest.id,
+                from: current.status,
+                to: manifest.status
+            )
+        }
+        guard manifest.updatedAt >= current.updatedAt else {
+            throw SessionManifestError.staleWrite(sessionID: manifest.id)
+        }
         _ = try write(manifest, to: fileURL(for: manifest.id))
     }
 
@@ -46,7 +57,46 @@ actor SessionManifestStore {
         try validate(sessionID: sessionID)
         let url = try fileURL(for: sessionID)
         var manifest = try load(sessionID: sessionID)
+        let originalStatus = manifest.status
         try mutation(&manifest)
+        guard manifest.status == originalStatus else {
+            throw SessionManifestError.invalidTransition(
+                sessionID: sessionID,
+                from: originalStatus,
+                to: manifest.status
+            )
+        }
+        return try write(manifest, to: url)
+    }
+
+    /// Applies one compare-and-set status transition to the latest durable
+    /// manifest. Terminal sessions cannot be resurrected by a stale task.
+    func transition(
+        sessionID: String,
+        allowedFrom: Set<RuntimeSessionStatus>,
+        _ mutation: @Sendable (inout SessionManifest) throws -> Void
+    ) throws -> SessionManifest {
+        try validate(sessionID: sessionID)
+        let url = try fileURL(for: sessionID)
+        var manifest = try load(sessionID: sessionID)
+        let originalStatus = manifest.status
+        guard allowedFrom.contains(originalStatus),
+              originalStatus != .cancelled,
+              originalStatus != .completed else {
+            throw SessionManifestError.invalidTransition(
+                sessionID: sessionID,
+                from: originalStatus,
+                to: originalStatus
+            )
+        }
+        try mutation(&manifest)
+        guard manifest.status != originalStatus else {
+            throw SessionManifestError.invalidTransition(
+                sessionID: sessionID,
+                from: originalStatus,
+                to: manifest.status
+            )
+        }
         return try write(manifest, to: url)
     }
 

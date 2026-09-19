@@ -126,7 +126,7 @@ final class BoothCoordinator {
         switch sessionLifecycleOperation {
         case .cancelling:
             return "Cancelling"
-        case .completing:
+        case .finalizing, .completing:
             return "Finalizing"
         case .idle:
             guard currentSession != nil else { return nil }
@@ -165,11 +165,21 @@ final class BoothCoordinator {
     private var countdownTask: Task<Void, Never>?
     private var currentCountdown: CountdownDescriptor?
     private var sessionMessageSequence: UInt64 = 0
+    private let authorityEpoch = UUID()
     private var sessionLifecycleGeneration: UInt64 = 0
     private enum SessionLifecycleOperation: Equatable {
         case idle
-        case cancelling(sessionID: String)
-        case completing(sessionID: String)
+        case cancelling(sessionID: String, token: UUID)
+        case finalizing(sessionID: String, token: UUID)
+        case completing(sessionID: String, token: UUID)
+
+        var token: UUID? {
+            switch self {
+            case .idle: return nil
+            case .cancelling(_, let token), .finalizing(_, let token), .completing(_, let token):
+                return token
+            }
+        }
     }
     private var sessionLifecycleOperation: SessionLifecycleOperation = .idle
     private var currentReviewStateToken: ReviewStateToken?
@@ -616,7 +626,21 @@ final class BoothCoordinator {
                 case .alreadyQueued: "Web upload is already waiting."
                 case .alreadyRunning: "Web upload is already running."
                 case .notFound: "No web upload job exists for this session."
+                case .sessionCancelled: "This session is cancelled and cannot be requeued."
                 }
+            }
+        }
+    }
+
+    func resolveUnknownPrint(jobID: String, printed: Bool) {
+        let resolution: UnknownPrintResolution = printed ? .printed : .notPrinted
+        printer.resolveUnknownPrint(as: printed ? .submitted : .cancelled)
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            do {
+                try await jobQueue.resolveUnknownPrint(jobID: jobID, resolution: resolution)
+            } catch {
+                errorMessage = "Printer outcome could not be recorded: \(error.localizedDescription)"
             }
         }
     }
@@ -2193,7 +2217,6 @@ final class BoothCoordinator {
                     previousAcceptedAt: current?.acceptedAt ?? current?.previousAcceptedAt
                 )
                 durable.nextPhotoIndex = photoIndex
-                durable.status = .capturing
                 durable.lastError = nil
             }
             guard sessionLifecycleGeneration == lifecycleGeneration,
@@ -2232,7 +2255,6 @@ final class BoothCoordinator {
         do {
             let committedManifest = try await manifestStore.update(sessionID: manifest.id) { durable in
                 durable.nextPhotoIndex = next
-                durable.status = .capturing
             }
             guard case .captureRecovery(let current, _) = stateMachine.phase,
                   current == photoIndex,
@@ -2277,7 +2299,11 @@ final class BoothCoordinator {
             }
             let reviewData = try? ReviewImageEncoder.encode(
                 image: filtered,
-                context: SessionMessageContext(sessionID: stateMachine.currentSessionID, sequence: 0),
+                context: SessionMessageContext(
+                    sessionID: stateMachine.currentSessionID,
+                    sequence: 0,
+                    authorityEpoch: authorityEpoch
+                ),
                 index: photoIndex
             )
             let gifs = previous.previousGifFrameFileNames ?? []
@@ -2294,7 +2320,6 @@ final class BoothCoordinator {
                     .first { index in
                         durable.shots.first(where: { $0.photoIndex == index })?.imageFileName == nil
                     } ?? durable.eventConfig.photoCount
-                durable.status = durable.nextPhotoIndex == durable.eventConfig.photoCount ? .finalizing : .capturing
                 durable.lastError = nil
             }
             guard sessionLifecycleGeneration == lifecycleGeneration,
@@ -2395,7 +2420,6 @@ final class BoothCoordinator {
                     .first { index in
                         durable.shots.first(where: { $0.photoIndex == index })?.imageFileName == nil
                     } ?? durable.eventConfig.photoCount
-                durable.status = durable.nextPhotoIndex == durable.eventConfig.photoCount ? .finalizing : .capturing
                 durable.lastError = nil
             }
             guard sessionLifecycleGeneration == lifecycleGeneration,
@@ -2535,7 +2559,6 @@ final class BoothCoordinator {
                     previousAcceptedAt: previous?.acceptedAt ?? previous?.previousAcceptedAt
                 )
                 durable.nextPhotoIndex = photoIndex
-                durable.status = .capturing
                 durable.lastError = nil
             }
             guard sessionLifecycleGeneration == lifecycleGeneration,
@@ -2586,10 +2609,16 @@ final class BoothCoordinator {
             resynciPad()
             return
         }
-        sessionLifecycleOperation = .cancelling(sessionID: manifest.id)
+        let lifecycleToken = UUID()
+        sessionLifecycleOperation = .cancelling(sessionID: manifest.id, token: lifecycleToken)
+        sessionLifecycleGeneration &+= 1
+        let lifecycleGeneration = sessionLifecycleGeneration
         let cancelledManifest: SessionManifest
         do {
-            cancelledManifest = try await manifestStore.update(sessionID: manifest.id) { durable in
+            cancelledManifest = try await manifestStore.transition(
+                sessionID: manifest.id,
+                allowedFrom: [.capturing, .finalizing, .failed]
+            ) { durable in
                 durable.status = .cancelled
                 durable.cancelledAt = Date()
                 durable.lastError = nil
@@ -2601,14 +2630,17 @@ final class BoothCoordinator {
             return
         }
 
+        guard sessionLifecycleGeneration == lifecycleGeneration,
+              sessionLifecycleOperation == .cancelling(sessionID: manifest.id, token: lifecycleToken) else { return }
         currentManifest = cancelledManifest
-        sessionLifecycleGeneration &+= 1
         cancelCountdown()
         reviewDecisionPending = false
         do {
             let result = try await jobQueue.cancelAndQuiesceJobs(sessionID: manifest.id)
+            guard sessionLifecycleGeneration == lifecycleGeneration,
+                  sessionLifecycleOperation == .cancelling(sessionID: manifest.id, token: lifecycleToken) else { return }
             if result == .cleanupPending {
-                recoveryService.recordError("Cancelled session cleanup is pending because a job did not quiesce.")
+                recoveryService.markCleanupPending(sessionID: manifest.id)
                 errorMessage = "Session cancellation was saved; its files were retained while background work stops."
             } else {
                 recordOperation(.sessionCancelled, sessionID: manifest.id)
@@ -2619,10 +2651,14 @@ final class BoothCoordinator {
                 }
             }
         } catch {
+            recoveryService.markCleanupPending(sessionID: manifest.id)
             recoveryService.recordError("Cancelled session jobs could not be quiesced: \(error.localizedDescription)")
             errorMessage = "Session cancellation was saved; files were retained because background work could not be stopped."
         }
 
+        // Keep the durable cancelled manifest when cleanup is pending so a
+        // later startup can retry the retained workspace without making the
+        // session recoverable to the customer.
         store.deleteSession(session)
         currentManifest = nil
         currentManifestID = nil
@@ -2750,33 +2786,54 @@ final class BoothCoordinator {
     // MARK: - Finalize session
 
     private func finalizeSession() async {
-        guard var manifest = currentManifest else { return }
+        guard case .idle = sessionLifecycleOperation,
+              let current = currentManifest else { return }
+        let sessionID = current.id
+        let lifecycleToken = UUID()
+        sessionLifecycleOperation = .finalizing(sessionID: sessionID, token: lifecycleToken)
         let lifecycleGeneration = sessionLifecycleGeneration
-        let sessionID = manifest.id
-        guard (0..<manifest.eventConfig.photoCount).allSatisfy({ index in
-            manifest.shots.first(where: { $0.photoIndex == index })?.imageFileName != nil
-        }) else {
-            errorMessage = "Session cannot finish until every photograph is accepted."
-            return
+        defer {
+            if sessionLifecycleOperation == .finalizing(sessionID: sessionID, token: lifecycleToken) {
+                sessionLifecycleOperation = .idle
+            }
         }
 
-        manifest.status = .finalizing
-        manifest.lastError = nil
+        let manifest: SessionManifest
         do {
-            try await manifestStore.save(manifest)
+            manifest = try await manifestStore.transition(
+                sessionID: sessionID,
+                allowedFrom: [.capturing]
+            ) { durable in
+                guard (0..<durable.eventConfig.photoCount).allSatisfy({ index in
+                    durable.shots.first(where: { $0.photoIndex == index })?.imageFileName != nil
+                }) else {
+                    throw SessionManifestError.invalidTransition(
+                        sessionID: durable.id,
+                        from: durable.status,
+                        to: .finalizing
+                    )
+                }
+                durable.status = .finalizing
+                durable.lastError = nil
+            }
         } catch {
             errorMessage = "Could not start session processing: \(error.localizedDescription)"
             return
         }
         guard sessionLifecycleGeneration == lifecycleGeneration,
-              currentManifest?.id == sessionID else { return }
+              currentManifest?.id == sessionID,
+              sessionLifecycleOperation == .finalizing(sessionID: sessionID, token: lifecycleToken) else { return }
         currentManifest = manifest
-        jobQueue.enqueueFinalizationJobs(for: manifest)
-        if manifest.cloudDelivery != nil || UserDefaults.standard.bool(forKey: "cloudUploadEnabled") {
-            jobQueue.enqueueCloudUpload(for: manifest)
-        }
-        if UserDefaults.standard.bool(forKey: "selphyAutoPrintAfterSession") {
-            jobQueue.enqueueAutoPrint(for: manifest)
+        do {
+            try await jobQueue.enqueueFinalizationJobs(for: manifest)
+            if manifest.cloudDelivery != nil || UserDefaults.standard.bool(forKey: "cloudUploadEnabled") {
+                try await jobQueue.enqueueCloudUpload(for: manifest)
+            }
+            if UserDefaults.standard.bool(forKey: "selphyAutoPrintAfterSession") {
+                try await jobQueue.enqueueAutoPrint(for: manifest)
+            }
+        } catch {
+            errorMessage = "Could not queue session processing: \(error.localizedDescription)"
         }
     }
 
@@ -2830,7 +2887,10 @@ final class BoothCoordinator {
                     ($0.kind == .renderStrip || $0.kind == .registerDownload) && $0.status == .failed
                 }) {
                     do {
-                        _ = try await manifestStore.update(sessionID: manifest.id) { durable in
+                        _ = try await manifestStore.transition(
+                            sessionID: manifest.id,
+                            allowedFrom: [.finalizing]
+                        ) { durable in
                             durable.status = .failed
                             durable.lastError = failed.lastError ?? "Required job failed."
                         }
@@ -2844,7 +2904,10 @@ final class BoothCoordinator {
                     continue
                 }
                 do {
-                    let completed = try await manifestStore.update(sessionID: manifest.id) { durable in
+                    let completed = try await manifestStore.transition(
+                        sessionID: manifest.id,
+                        allowedFrom: [.finalizing]
+                    ) { durable in
                         durable.status = .completed
                         durable.completedAt = Date()
                         durable.lastError = nil
@@ -2874,7 +2937,10 @@ final class BoothCoordinator {
     private func markCurrentSessionFailed(message: String) async {
         guard let current = currentManifest, current.status != .failed else { return }
         do {
-            let updated = try await manifestStore.update(sessionID: current.id) { durable in
+            let updated = try await manifestStore.transition(
+                sessionID: current.id,
+                allowedFrom: [.finalizing]
+            ) { durable in
                 durable.status = .failed
                 durable.lastError = message
             }
@@ -2893,10 +2959,17 @@ final class BoothCoordinator {
               completionInFlightSessionID != original.id,
               finishedAwaitingCustomerAckSessionID != original.id else { return }
         let lifecycleGeneration = sessionLifecycleGeneration
+        let lifecycleToken = UUID()
         // Claimed synchronously, before the first suspension point, so a
         // second job-change task cannot overtake this one mid-await.
         completionInFlightSessionID = original.id
-        defer { completionInFlightSessionID = nil }
+        sessionLifecycleOperation = .completing(sessionID: original.id, token: lifecycleToken)
+        defer {
+            completionInFlightSessionID = nil
+            if sessionLifecycleOperation == .completing(sessionID: original.id, token: lifecycleToken) {
+                sessionLifecycleOperation = .idle
+            }
+        }
         let jobs = jobQueue.jobs.filter { $0.sessionID == original.id }
         guard jobs.first(where: { $0.kind == .renderStrip })?.status == .succeeded,
               jobs.first(where: { $0.kind == .registerDownload })?.status == .succeeded else {
@@ -2904,35 +2977,31 @@ final class BoothCoordinator {
         }
         let serverStatus = await server.statusSnapshot()
         guard sessionLifecycleGeneration == lifecycleGeneration,
-              currentManifest?.id == original.id else { return }
+              currentManifest?.id == original.id,
+              sessionLifecycleOperation == .completing(sessionID: original.id, token: lifecycleToken) else { return }
         guard case .ready = serverStatus.state else {
             errorMessage = "Session finished, but the local download server is unavailable. QR/download links were not published."
             return
         }
-        guard sessionLifecycleGeneration == lifecycleGeneration,
-              currentManifest?.id == original.id else { return }
-        sessionLifecycleOperation = .completing(sessionID: original.id)
         let manifest: SessionManifest
         do {
-            manifest = try await manifestStore.update(sessionID: original.id) { durable in
-                guard durable.status != .completed else { return }
+            manifest = try await manifestStore.transition(
+                sessionID: original.id,
+                allowedFrom: [.finalizing]
+            ) { durable in
                 durable.status = .completed
                 durable.completedAt = Date()
                 durable.lastError = nil
             }
         } catch {
-            sessionLifecycleOperation = .idle
             recoveryService.recordError("Completed session could not be persisted: \(error.localizedDescription)")
             errorMessage = "Completed session could not be persisted: \(error.localizedDescription)"
             return
         }
         guard sessionLifecycleGeneration == lifecycleGeneration,
-              currentManifest?.id == original.id else {
-            sessionLifecycleOperation = .idle
-            return
-        }
+              currentManifest?.id == original.id,
+              sessionLifecycleOperation == .completing(sessionID: original.id, token: lifecycleToken) else { return }
         guard manifest.status == .completed else {
-            sessionLifecycleOperation = .idle
             return
         }
         currentManifest = manifest
@@ -3101,11 +3170,13 @@ final class BoothCoordinator {
                     try workspace.removeEntireSession(manifest: manifest)
                 } catch {
                     recoveryService.recordError("Old session files could not be removed: \(error.localizedDescription)")
+                    continue
                 }
                 do {
                     try await manifestStore.delete(sessionID: manifest.id)
                 } catch {
                     recoveryService.recordError("Old session manifest could not be removed: \(error.localizedDescription)")
+                    continue
                 }
                 jobQueue.deleteJobs(sessionID: manifest.id)
                 await server.unregisterToken(manifest.downloadToken)
@@ -3114,11 +3185,18 @@ final class BoothCoordinator {
                       let cancelledAt = manifest.cancelledAt,
                       cancelledAt < Calendar.current.date(byAdding: .day, value: -7, to: Date())! {
                 do {
+                    let result = try await jobQueue.cancelAndQuiesceJobs(sessionID: manifest.id)
+                    guard result == .quiesced else {
+                        recoveryService.markCleanupPending(sessionID: manifest.id)
+                        continue
+                    }
+                    try workspace.removeEntireSession(manifest: manifest)
                     try await manifestStore.delete(sessionID: manifest.id)
+                    jobQueue.deleteJobs(sessionID: manifest.id)
                 } catch {
-                    recoveryService.recordError("Cancelled session manifest could not be removed: \(error.localizedDescription)")
+                    recoveryService.markCleanupPending(sessionID: manifest.id)
+                    recoveryService.recordError("Cancelled session cleanup could not finish: \(error.localizedDescription)")
                 }
-                jobQueue.deleteJobs(sessionID: manifest.id)
             }
         }
         jobQueue.purgeOldSucceededJobs(olderThan: Calendar.current.date(byAdding: .day, value: -7, to: Date())!)
@@ -3320,7 +3398,8 @@ final class BoothCoordinator {
             phase: .idle,
             presentation: nil,
             isMirrored: capture.camera.isMirrored,
-            sequence: sessionMessageSequence
+            sequence: sessionMessageSequence,
+            authorityEpoch: authorityEpoch
         )
         multipeer.sendControl(.sessionSync(snapshot: idle)) { [weak self] outcome in
             guard let self else { return }
@@ -3364,7 +3443,11 @@ final class BoothCoordinator {
         let sessionID = currentSession?.id ?? (stateMachine.currentSessionID.isEmpty ? nil : stateMachine.currentSessionID)
         guard let sessionID else { return nil }
         sessionMessageSequence &+= 1
-        return SessionMessageContext(sessionID: sessionID, sequence: sessionMessageSequence)
+        return SessionMessageContext(
+            sessionID: sessionID,
+            sequence: sessionMessageSequence,
+            authorityEpoch: authorityEpoch
+        )
     }
 
     private func acceptsClientSessionMessage(_ context: SessionMessageContext) -> Bool {
@@ -3375,7 +3458,7 @@ final class BoothCoordinator {
             #endif
             return false
         }
-        return true
+        return context.authorityEpoch == authorityEpoch
     }
 
     // Push current Mac state to iPad after (re)connect so it's never stuck at idle mid-session.
@@ -3428,7 +3511,8 @@ final class BoothCoordinator {
             acceptedPhotoIndices: stateMachine.acceptedPhotoIndices.sorted(),
             deferredPhotoIndices: stateMachine.deferredPhotoIndices.sorted(),
             nextPhotoIndex: stateMachine.nextPhotoIndex,
-            captureRecoveryState: currentCaptureRecoveryStateToken
+            captureRecoveryState: currentCaptureRecoveryStateToken,
+            authorityEpoch: authorityEpoch
         )))
         multipeer.sendControl(.setMirrored(isMirrored: capture.camera.isMirrored))
     }

@@ -20,6 +20,7 @@ final class SessionRecoveryService {
 
     private(set) var recoverableCaptureSession: RecoverableSession?
     private(set) var automaticallyRecoveringSessions: [String] = []
+    private(set) var cleanupPendingSessionIDs: Set<String> = []
     private(set) var recoveryErrors: [String] = []
     private var recordedErrors: [String] = []
 
@@ -41,6 +42,11 @@ final class SessionRecoveryService {
     func recordError(_ message: String) {
         recordedErrors.append(message)
         recoveryErrors.append(message)
+    }
+
+    func markCleanupPending(sessionID: String) {
+        cleanupPendingSessionIDs.insert(sessionID)
+        recordError("Cancelled session cleanup is still pending: \(sessionID)")
     }
 
     func scanAtStartup() {
@@ -85,22 +91,26 @@ final class SessionRecoveryService {
         Task { [weak self] in
             guard let self else { return }
             do {
-                let manifest = try await manifestStore.update(sessionID: sessionID) { durable in
+                let manifest = try await manifestStore.transition(
+                    sessionID: sessionID,
+                    allowedFrom: [.capturing]
+                ) { durable in
                     durable.status = .cancelled
                     durable.cancelledAt = Date()
                     durable.lastError = nil
                 }
-                let quiescence = try await jobQueue.cancelAndQuiesceJobs(sessionID: sessionID)
-                guard quiescence == .quiesced else {
-                    recoveryErrors.append("Cancelled session cleanup is pending: \(sessionID)")
-                    return
-                }
-                try workspace.removeEntireSession(manifest: manifest)
                 if recoverableCaptureSession?.manifest.id == sessionID {
                     recoverableCaptureSession = nil
                 }
+                let quiescence = try await jobQueue.cancelAndQuiesceJobs(sessionID: sessionID)
+                guard quiescence == .quiesced else {
+                    markCleanupPending(sessionID: sessionID)
+                    return
+                }
+                try workspace.removeEntireSession(manifest: manifest)
                 onDiscard?(manifest)
             } catch {
+                cleanupPendingSessionIDs.insert(sessionID)
                 recoveryErrors.append(error.localizedDescription)
             }
         }
@@ -109,6 +119,7 @@ final class SessionRecoveryService {
     private func scan() async {
         recoverableCaptureSession = nil
         automaticallyRecoveringSessions = []
+        cleanupPendingSessionIDs = []
         recoveryErrors = recordedErrors
 
         let results = await manifestStore.loadAll()
@@ -127,12 +138,14 @@ final class SessionRecoveryService {
             .sorted { $0.startedAt > $1.startedAt }
         if let newest = capturing.first {
             for older in capturing.dropFirst() {
-                var failed = older
-                failed.status = .failed
-                failed.lastError = "A newer unfinished capture session exists."
-                failed.updatedAt = Date()
                 do {
-                    try await manifestStore.save(failed)
+                    _ = try await manifestStore.transition(
+                        sessionID: older.id,
+                        allowedFrom: [.capturing]
+                    ) { failed in
+                        failed.status = .failed
+                        failed.lastError = "A newer unfinished capture session exists."
+                    }
                 } catch {
                     recoveryErrors.append(error.localizedDescription)
                 }
@@ -143,14 +156,39 @@ final class SessionRecoveryService {
         }
 
         for manifest in manifests where manifest.status == .finalizing {
-            removeAbandonedGIFTemporaries(for: manifest)
-            automaticallyRecoveringSessions.append(manifest.id)
-            jobQueue.enqueueFinalizationJobs(for: manifest)
-            if defaults.bool(forKey: "cloudUploadEnabled") {
-                jobQueue.enqueueCloudUpload(for: manifest)
+            do {
+                try workspace.removeAbandonedGIFTemporaries(manifest: manifest)
+            } catch {
+                recoveryErrors.append("Temporary GIF cleanup failed for \(manifest.id): \(error.localizedDescription)")
             }
-            if defaults.bool(forKey: "selphyAutoPrintAfterSession") {
-                jobQueue.enqueueAutoPrint(for: manifest)
+            automaticallyRecoveringSessions.append(manifest.id)
+            do {
+                try await jobQueue.enqueueFinalizationJobs(for: manifest)
+                if defaults.bool(forKey: "cloudUploadEnabled") {
+                    try await jobQueue.enqueueCloudUpload(for: manifest)
+                }
+                if defaults.bool(forKey: "selphyAutoPrintAfterSession") {
+                    try await jobQueue.enqueueAutoPrint(for: manifest)
+                }
+            } catch {
+                recoveryErrors.append("Could not restore jobs for \(manifest.id): \(error.localizedDescription)")
+            }
+        }
+
+        for manifest in manifests where manifest.status == .cancelled {
+            do {
+                let result = try await jobQueue.cancelAndQuiesceJobs(sessionID: manifest.id)
+                guard result == .quiesced else {
+                    cleanupPendingSessionIDs.insert(manifest.id)
+                    recoveryErrors.append("Cancelled session cleanup is pending: \(manifest.id)")
+                    continue
+                }
+                try workspace.removeEntireSession(manifest: manifest)
+                try await manifestStore.delete(sessionID: manifest.id)
+                jobQueue.deleteJobs(sessionID: manifest.id)
+            } catch {
+                cleanupPendingSessionIDs.insert(manifest.id)
+                recoveryErrors.append("Cancelled session cleanup failed for \(manifest.id): \(error.localizedDescription)")
             }
         }
 
@@ -179,17 +217,6 @@ final class SessionRecoveryService {
             throw RecoveryError.invalidCapture(issue)
         }
         return try workspace.loadAcceptedImages(manifest: manifest)
-    }
-
-    private func removeAbandonedGIFTemporaries(for manifest: SessionManifest) {
-        let directory = URL(fileURLWithPath: manifest.absoluteDirectoryPath, isDirectory: true)
-        guard let files = try? FileManager.default.contentsOfDirectory(
-            at: directory,
-            includingPropertiesForKeys: nil
-        ) else { return }
-        for file in files where file.lastPathComponent.hasPrefix(".booth-") && file.pathExtension == "gif" {
-            try? FileManager.default.removeItem(at: file)
-        }
     }
 
 }

@@ -42,10 +42,12 @@ public struct CaptureFailureSummary: Codable, Sendable, Equatable {
 public struct SessionMessageContext: Codable, Sendable, Equatable, Hashable {
     public var sessionID: String
     public var sequence: UInt64
+    public var authorityEpoch: UUID
 
-    public init(sessionID: String, sequence: UInt64) {
+    public init(sessionID: String, sequence: UInt64, authorityEpoch: UUID = UUID()) {
         self.sessionID = sessionID
         self.sequence = sequence
+        self.authorityEpoch = authorityEpoch
     }
 }
 
@@ -121,25 +123,63 @@ public struct CountdownDescriptor: Codable, Sendable, Equatable {
 public struct SessionMessageGate: Sendable, Equatable {
     public private(set) var currentSessionID: String?
     public private(set) var latestAcceptedSequence: UInt64
+    public private(set) var authorityEpoch: UUID?
+    private var retiredAuthorityEpochs: Set<UUID>
 
-    public init(currentSessionID: String? = nil, latestAcceptedSequence: UInt64 = 0) {
+    public init(
+        currentSessionID: String? = nil,
+        latestAcceptedSequence: UInt64 = 0,
+        authorityEpoch: UUID? = nil
+    ) {
         self.currentSessionID = currentSessionID
         self.latestAcceptedSequence = latestAcceptedSequence
+        self.authorityEpoch = authorityEpoch
+        self.retiredAuthorityEpochs = []
     }
 
-    public mutating func synchronize(sessionID: String?, sequence: UInt64) {
+    public mutating func synchronize(
+        sessionID: String?,
+        sequence: UInt64,
+        authorityEpoch: UUID? = nil
+    ) {
+        if let authorityEpoch,
+           let current = self.authorityEpoch,
+           current != authorityEpoch {
+            retiredAuthorityEpochs.insert(current)
+        }
         currentSessionID = sessionID
         latestAcceptedSequence = sequence
+        if let authorityEpoch { self.authorityEpoch = authorityEpoch }
     }
 
     public mutating func accept(_ context: SessionMessageContext) -> Bool {
         guard let currentSessionID,
               context.sessionID == currentSessionID,
-              context.sequence > latestAcceptedSequence else {
+              context.sequence > latestAcceptedSequence,
+              !retiredAuthorityEpochs.contains(context.authorityEpoch),
+              authorityEpoch == nil || authorityEpoch == context.authorityEpoch else {
             return false
         }
         latestAcceptedSequence = context.sequence
         return true
+    }
+
+    public mutating func acceptSessionChange(_ context: SessionMessageContext) -> Bool {
+        let epochChanged = authorityEpoch.map { $0 != context.authorityEpoch } ?? true
+        guard !retiredAuthorityEpochs.contains(context.authorityEpoch),
+              epochChanged || context.sequence > latestAcceptedSequence else {
+            return false
+        }
+        synchronize(
+            sessionID: context.sessionID,
+            sequence: context.sequence,
+            authorityEpoch: context.authorityEpoch
+        )
+        return true
+    }
+
+    public func isRetiredAuthorityEpoch(_ epoch: UUID) -> Bool {
+        retiredAuthorityEpochs.contains(epoch)
     }
 }
 
@@ -151,7 +191,7 @@ public enum CaptureRecoveryAction: Codable, Sendable, Equatable {
 }
 
 public struct BoothTransportHello: Codable, Sendable, Equatable {
-    public static let currentProtocolVersion = 8
+    public static let currentProtocolVersion = 9
 
     public var protocolVersion: Int
     public var appVersion: String
@@ -617,6 +657,7 @@ public struct SessionSyncSnapshot: Codable, Sendable, Equatable {
     public var deferredPhotoIndices: [Int]
     public var nextPhotoIndex: Int
     public var captureRecoveryState: CaptureRecoveryStateToken?
+    public var authorityEpoch: UUID
 
     public init(
         config: EventConfig,
@@ -636,7 +677,8 @@ public struct SessionSyncSnapshot: Codable, Sendable, Equatable {
         acceptedPhotoIndices: [Int] = [],
         deferredPhotoIndices: [Int] = [],
         nextPhotoIndex: Int = 0,
-        captureRecoveryState: CaptureRecoveryStateToken? = nil
+        captureRecoveryState: CaptureRecoveryStateToken? = nil,
+        authorityEpoch: UUID = UUID()
     ) {
         self.config = config
         self.sessionID = sessionID
@@ -656,12 +698,13 @@ public struct SessionSyncSnapshot: Codable, Sendable, Equatable {
         self.deferredPhotoIndices = deferredPhotoIndices
         self.nextPhotoIndex = nextPhotoIndex
         self.captureRecoveryState = captureRecoveryState
+        self.authorityEpoch = authorityEpoch
     }
 
     private enum CodingKeys: String, CodingKey {
         case config, sessionID, phase, presentation, reviewAsset, stripAsset
         case keptShotAssets, isMirrored, isBoothPaused, sequence, countdown
-        case acceptedPhotoIndices, deferredPhotoIndices, nextPhotoIndex, captureRecoveryState
+        case acceptedPhotoIndices, deferredPhotoIndices, nextPhotoIndex, captureRecoveryState, authorityEpoch
     }
 
     public init(from decoder: Decoder) throws {
@@ -684,6 +727,7 @@ public struct SessionSyncSnapshot: Codable, Sendable, Equatable {
         deferredPhotoIndices = try container.decodeIfPresent([Int].self, forKey: .deferredPhotoIndices) ?? []
         nextPhotoIndex = try container.decodeIfPresent(Int.self, forKey: .nextPhotoIndex) ?? 0
         captureRecoveryState = try container.decodeIfPresent(CaptureRecoveryStateToken.self, forKey: .captureRecoveryState)
+        authorityEpoch = try container.decodeIfPresent(UUID.self, forKey: .authorityEpoch) ?? UUID()
     }
 }
 

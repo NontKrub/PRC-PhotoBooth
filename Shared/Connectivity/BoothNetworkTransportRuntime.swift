@@ -63,6 +63,11 @@ final class BoothNetworkTransportRuntime: @unchecked Sendable {
                   self.heartbeatGeneration == generation else { return }
             if self.heartbeatState.shouldReportTimeout(after: timeout) {
                 connection.cancel()
+                self.stopHeartbeatOnQueue()
+                _ = self.scheduleRecoveryReconnectOnQueue(
+                    after: 0,
+                    generation: generation
+                )
                 self.onHeartbeatTimeout?(connection, generation)
                 return
             }
@@ -74,6 +79,7 @@ final class BoothNetworkTransportRuntime: @unchecked Sendable {
                 completion: nil
             ) != .sent {
                 connection.cancel()
+                self.stopHeartbeatOnQueue()
             }
         }
         source.resume()
@@ -99,20 +105,19 @@ final class BoothNetworkTransportRuntime: @unchecked Sendable {
         heartbeatState.reset()
     }
 
-    func scheduleReconnect(after delay: TimeInterval, attempt: Int, generation: Int = 0) {
+    @discardableResult
+    func scheduleReconnect(after delay: TimeInterval, attempt: Int, generation: Int = 0) -> Bool {
         onQueue {
-            guard reconnectSource == nil else { return }
-            reconnectAttempt = attempt
-            reconnectGeneration = generation
-            let source = DispatchSource.makeTimerSource(queue: queue)
-            source.schedule(deadline: .now() + delay)
-            source.setEventHandler { [weak self] in
-                guard let self else { return }
-                self.reconnectSource = nil
-                self.onReconnectDue?(self.reconnectAttempt, self.reconnectGeneration)
-            }
-            reconnectSource = source
-            source.resume()
+            scheduleReconnectOnQueue(after: delay, attempt: attempt, generation: generation)
+        }
+    }
+
+    /// Schedules recovery from a Network.framework callback without asking the
+    /// MainActor to make the timing decision first.
+    @discardableResult
+    func scheduleRecoveryReconnect(after delay: TimeInterval, generation: Int) -> Int? {
+        onQueue {
+            scheduleRecoveryReconnectOnQueue(after: delay, generation: generation)
         }
     }
 
@@ -130,5 +135,40 @@ final class BoothNetworkTransportRuntime: @unchecked Sendable {
             return operation()
         }
         return queue.sync(execute: operation)
+    }
+
+    @discardableResult
+    private func scheduleRecoveryReconnectOnQueue(
+        after delay: TimeInterval,
+        generation: Int
+    ) -> Int? {
+        let attempt = reconnectAttempt + 1
+        guard scheduleReconnectOnQueue(
+            after: delay,
+            attempt: attempt,
+            generation: generation
+        ) else { return nil }
+        return attempt
+    }
+
+    @discardableResult
+    private func scheduleReconnectOnQueue(
+        after delay: TimeInterval,
+        attempt: Int,
+        generation: Int
+    ) -> Bool {
+        guard reconnectSource == nil else { return false }
+        reconnectAttempt = attempt
+        reconnectGeneration = generation
+        let source = DispatchSource.makeTimerSource(queue: queue)
+        source.schedule(deadline: .now() + delay)
+        source.setEventHandler { [weak self] in
+            guard let self else { return }
+            self.reconnectSource = nil
+            self.onReconnectDue?(self.reconnectAttempt, self.reconnectGeneration)
+        }
+        reconnectSource = source
+        source.resume()
+        return true
     }
 }

@@ -39,6 +39,8 @@ final class SessionJobExecutor: SessionJobExecuting {
         self.galleryStore = galleryStore
     }
 
+    var isAutoPrintLaneAvailable: Bool { printer.isIdle }
+
     func execute(_ job: SessionJob) async throws {
         let manifest: SessionManifest
         do {
