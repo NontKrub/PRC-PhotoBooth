@@ -163,6 +163,7 @@ final class BoothCoordinator {
     private(set) var currentSessionPresentation: SessionPresentation?
     private var lastSessionPresentation: SessionPresentation?
     private var finishedAwaitingCustomerAckSessionID: String?
+    private var completionInFlightSessionID: String?
     private var customerFinishedInFlightSessionID: String?
     private var sessionAssetReferences: [Int: BoothAssetReference] = [:]
     private var stripAssetReference: BoothAssetReference?
@@ -2522,7 +2523,13 @@ final class BoothCoordinator {
     private func completeCurrentSessionIfReady() async {
         guard let original = currentManifest,
               currentSession != nil,
-              stateMachine.phase == .processing else { return }
+              stateMachine.phase == .processing,
+              completionInFlightSessionID != original.id,
+              finishedAwaitingCustomerAckSessionID != original.id else { return }
+        // Claimed synchronously, before the first suspension point, so a
+        // second job-change task cannot overtake this one mid-await.
+        completionInFlightSessionID = original.id
+        defer { completionInFlightSessionID = nil }
         let jobs = jobQueue.jobs.filter { $0.sessionID == original.id }
         guard jobs.first(where: { $0.kind == .renderStrip })?.status == .succeeded,
               jobs.first(where: { $0.kind == .registerDownload })?.status == .succeeded else {
