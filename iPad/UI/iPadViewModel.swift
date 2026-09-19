@@ -1463,10 +1463,10 @@ final class iPadViewModel: ObservableObject {
         }
 #endif
         guard let state = currentReviewStateToken(photoIndex: photoIndex) else { return }
-        if reviewDecisionAwaitingReconciliation,
-           let pending = pendingReviewDecision,
-           pending.action == .keep,
-           pending.state == state {
+        if reviewDecisionAwaitingReconciliation {
+            guard let pending = pendingReviewDecision,
+                  pending.action == .keep,
+                  pending.state == state else { return }
             sendReviewDecision(
                 state: pending.state,
                 requestID: pending.requestID,
@@ -1497,10 +1497,10 @@ final class iPadViewModel: ObservableObject {
         }
 #endif
         guard let state = currentReviewStateToken(photoIndex: photoIndex) else { return }
-        if reviewDecisionAwaitingReconciliation,
-           let pending = pendingReviewDecision,
-           pending.action == .retake,
-           pending.state == state {
+        if reviewDecisionAwaitingReconciliation {
+            guard let pending = pendingReviewDecision,
+                  pending.action == .retake,
+                  pending.state == state else { return }
             sendReviewDecision(
                 state: pending.state,
                 requestID: pending.requestID,
