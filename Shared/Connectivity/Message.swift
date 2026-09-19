@@ -409,10 +409,13 @@ public enum BoothAssetTransfer {
 }
 
 public struct BoothAssetAssembler: Sendable {
+    public static let assemblyLifetime: TimeInterval = 120
+
     private struct Assembly: Sendable {
         let metadata: BoothAssetChunkMetadata
         var chunks: [Int: Data]
         var receivedBytes: Int
+        var touchedAt: Date
     }
 
     private var assemblies: [String: Assembly] = [:]
@@ -420,7 +423,19 @@ public struct BoothAssetAssembler: Sendable {
 
     public init() {}
 
-    public mutating func append(_ chunk: BoothAssetChunk) throws -> (BoothAssetReference, Data)? {
+    private mutating func evictStale(now: Date) {
+        let staleKeys = assemblies.compactMap { key, assembly in
+            now.timeIntervalSince(assembly.touchedAt) > Self.assemblyLifetime ? key : nil
+        }
+        for key in staleKeys {
+            if let assembly = assemblies.removeValue(forKey: key) {
+                bufferedBytes -= assembly.receivedBytes
+            }
+        }
+    }
+
+    public mutating func append(_ chunk: BoothAssetChunk, now: Date = Date()) throws -> (BoothAssetReference, Data)? {
+        evictStale(now: now)
         guard BoothAssetTransfer.isValidForAssembly(chunk) else {
             throw BoothAssetTransferError.invalidMetadata
         }
@@ -445,6 +460,7 @@ public struct BoothAssetAssembler: Sendable {
                 throw BoothAssetTransferError.bufferedAssetBytesExceeded
             }
             assembly.chunks[chunk.metadata.index] = chunk.data
+            assembly.touchedAt = now
             assembly.receivedBytes += chunk.data.count
             bufferedBytes += chunk.data.count
             guard assembly.receivedBytes <= chunk.metadata.totalBytes else {
@@ -463,7 +479,8 @@ public struct BoothAssetAssembler: Sendable {
             assemblies[key] = Assembly(
                 metadata: chunk.metadata,
                 chunks: [chunk.metadata.index: chunk.data],
-                receivedBytes: chunk.data.count
+                receivedBytes: chunk.data.count,
+                touchedAt: now
             )
             bufferedBytes += chunk.data.count
         }

@@ -177,6 +177,7 @@
 		C55D842174FB79F2BE3A5ADD /* PreviewQualityTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 702ABABD1594C0036555B1EE /* PreviewQualityTests.swift */; };
 		C56A8B06B7BD083168BF2DEA /* iPadViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 89A63D5235B6E51BAE12E4B4 /* iPadViewModel.swift */; };
 		C6094A872CAD1F2892FD9E0B /* Message.swift in Sources */ = {isa = PBXBuildFile; fileRef = 296A07AF6CCBA2CF6A6704FE /* Message.swift */; };
+		C6483CB9B1D3E657DC230C26 /* AssetAssemblerEvictionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 628143FE56606C4B2072B255 /* AssetAssemblerEvictionTests.swift */; };
 		C69A60E8B6A676BD414F31A5 /* GalleryModerationView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AFF2DBEF08DB6D181EC4B68E /* GalleryModerationView.swift */; };
 		C7999C8B196E99D2E0781EBC /* SwiftData.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 553249FDB48038050181108D /* SwiftData.framework */; };
 		C7BB6E3F7CEC197CAC794A06 /* PairingQRScannerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B72602B9F99A795B96F7FC97 /* PairingQRScannerView.swift */; };
@@ -302,6 +303,7 @@
 		5B435DCD844E924213791141 /* OperationsEventStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OperationsEventStore.swift; sourceTree = "<group>"; };
 		5BEE03DC4CC3A6502A9302AB /* HTTPServerRequest.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HTTPServerRequest.swift; sourceTree = "<group>"; };
 		5DCFA7E730DBA662A0316FAD /* LegacyEventMirrorService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LegacyEventMirrorService.swift; sourceTree = "<group>"; };
+		628143FE56606C4B2072B255 /* AssetAssemblerEvictionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AssetAssemblerEvictionTests.swift; sourceTree = "<group>"; };
 		636F46208E1900AED0290A66 /* Network.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Network.framework; path = System/Library/Frameworks/Network.framework; sourceTree = SDKROOT; };
 		662000DAF0ABEA3B57C6D177 /* BoothPairing.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BoothPairing.swift; sourceTree = "<group>"; };
 		66783D018E2EC79A98E7BF6B /* EventGalleryStoreTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EventGalleryStoreTests.swift; sourceTree = "<group>"; };
@@ -786,6 +788,7 @@
 			children = (
 				2B555DBC71B145823AD802CE /* .gitkeep */,
 				8EE3B99F5C1FD036A5A483B7 /* ActiveCameraPreviewTests.swift */,
+				628143FE56606C4B2072B255 /* AssetAssemblerEvictionTests.swift */,
 				0CFE1B69407370A63DD530C9 /* BoothConnectionPresentationTests.swift */,
 				162B4A929E4EF65C80C9A8FF /* BoothCoordinatorNetworkTests.swift */,
 				33146BEF7E0938589DCEC9DD /* BoothDiagnosticsReportTests.swift */,
@@ -1167,6 +1170,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				57B1E22E23EC8495A2B93C4C /* ActiveCameraPreviewTests.swift in Sources */,
+				C6483CB9B1D3E657DC230C26 /* AssetAssemblerEvictionTests.swift in Sources */,
 				5A9597B950AB2A6C1F620FD2 /* BoothConnectionPresentationTests.swift in Sources */,
 				E8AA2531C3A4B2B73E4D3A34 /* BoothCoordinatorNetworkTests.swift in Sources */,
 				C3BC885FDFB69742554FE0D8 /* BoothDiagnosticsReportTests.swift in Sources */,
