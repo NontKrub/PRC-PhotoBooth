@@ -294,7 +294,7 @@ private final class TransportLivenessServer: @unchecked Sendable {
             observer?.markTimeout()
             connection.cancel()
         }
-        runtime.onReconnectDue = { [weak observer] _ in
+        runtime.onReconnectDue = { [weak observer] _, _ in
             observer?.markReconnectDue()
         }
     }
@@ -493,7 +493,7 @@ struct NetworkRouteTests {
         let mainEntered = DispatchSemaphore(value: 0)
         let releaseMain = DispatchSemaphore(value: 0)
         let reconnectFired = DispatchSemaphore(value: 0)
-        runtime.onReconnectDue = { _ in reconnectFired.signal() }
+        runtime.onReconnectDue = { _, _ in reconnectFired.signal() }
 
         DispatchQueue.main.async(qos: .userInitiated) {
             mainEntered.signal()

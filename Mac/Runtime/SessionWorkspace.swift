@@ -128,7 +128,8 @@ struct SessionWorkspace: Sendable {
     ) throws -> SavedCaptureFiles {
         guard photoIndex >= 0 else { throw SessionWorkspaceError.invalidPath("photo_\(photoIndex)") }
         let sessionDirectory = try sessionDirectory(for: workspace)
-        let imageFileName = "shot_\(photoIndex).jpg"
+        let generation = UUID().uuidString
+        let imageFileName = "shot_\(photoIndex)-\(generation).jpg"
         guard let imageData = jpegData(from: image, quality: 0.90) else {
             throw SessionWorkspaceError.imageEncodingFailed
         }
@@ -138,8 +139,8 @@ struct SessionWorkspace: Sendable {
         let temporaryImage = sessionDirectory.appendingPathComponent(".shot_\(photoIndex)-\(UUID().uuidString).tmp")
         try imageData.write(to: temporaryImage, options: [.atomic])
         defer { try? fileManager.removeItem(at: temporaryImage) }
-        let temporaryDirectory = gifRoot.appendingPathComponent(".photo_\(photoIndex)-\(UUID().uuidString)", isDirectory: true)
-        let destinationDirectory = gifRoot.appendingPathComponent("photo_\(photoIndex)", isDirectory: true)
+        let temporaryDirectory = gifRoot.appendingPathComponent(".photo_\(photoIndex)-\(generation)", isDirectory: true)
+        let destinationDirectory = gifRoot.appendingPathComponent("photo_\(photoIndex)-\(generation)", isDirectory: true)
         try createDirectory(temporaryDirectory)
         defer { try? fileManager.removeItem(at: temporaryDirectory) }
 
@@ -150,32 +151,99 @@ struct SessionWorkspace: Sendable {
             }
             let fileName = String(format: "frame_%03d.jpg", index)
             try data.write(to: temporaryDirectory.appendingPathComponent(fileName), options: [.atomic])
-            frameFileNames.append(".work/gif/photo_\(photoIndex)/\(fileName)")
+            frameFileNames.append(".work/gif/photo_\(photoIndex)-\(generation)/\(fileName)")
         }
         let imageDestination = sessionDirectory.appendingPathComponent(imageFileName)
-        let imageBackup = sessionDirectory.appendingPathComponent(".old-shot-\(UUID().uuidString)")
-        let frameBackup = gifRoot.appendingPathComponent(".old-photo-\(UUID().uuidString)")
-        let hadImage = fileManager.fileExists(atPath: imageDestination.path)
-        let hadFrames = fileManager.fileExists(atPath: destinationDirectory.path)
+        var committed = false
+        defer {
+            if !committed {
+                try? fileManager.removeItem(at: imageDestination)
+                try? fileManager.removeItem(at: destinationDirectory)
+            }
+        }
         do {
-            if hadImage { try fileManager.moveItem(at: imageDestination, to: imageBackup) }
-            if hadFrames { try fileManager.moveItem(at: destinationDirectory, to: frameBackup) }
             try fileManager.moveItem(at: temporaryImage, to: imageDestination)
             try fileManager.moveItem(at: temporaryDirectory, to: destinationDirectory)
-            if hadImage { try? fileManager.removeItem(at: imageBackup) }
-            if hadFrames { try? fileManager.removeItem(at: frameBackup) }
+            committed = true
         } catch {
-            try? fileManager.removeItem(at: imageDestination)
-            try? fileManager.removeItem(at: destinationDirectory)
-            if hadImage, fileManager.fileExists(atPath: imageBackup.path) {
-                try? fileManager.moveItem(at: imageBackup, to: imageDestination)
-            }
-            if hadFrames, fileManager.fileExists(atPath: frameBackup.path) {
-                try? fileManager.moveItem(at: frameBackup, to: destinationDirectory)
-            }
             throw error
         }
         return SavedCaptureFiles(imageFileName: imageFileName, gifFrameFileNames: frameFileNames)
+    }
+
+    func removeCaptureFiles(
+        _ files: SavedCaptureFiles,
+        workspace: SessionWorkspaceDescriptor
+    ) throws {
+        let directory = try sessionDirectory(for: workspace)
+        let imageURL = try resolve(files.imageFileName, in: directory)
+        if fileManager.fileExists(atPath: imageURL.path) {
+            try fileManager.removeItem(at: imageURL)
+        }
+        var frameDirectories = Set<URL>()
+        for fileName in files.gifFrameFileNames {
+            let url = try resolve(fileName, in: directory)
+            frameDirectories.insert(url.deletingLastPathComponent())
+            if fileManager.fileExists(atPath: url.path) {
+                try fileManager.removeItem(at: url)
+            }
+        }
+        for directory in frameDirectories where fileManager.fileExists(atPath: directory.path) {
+            let contents = try fileManager.contentsOfDirectory(atPath: directory.path)
+            if contents.isEmpty { try fileManager.removeItem(at: directory) }
+        }
+    }
+
+    func pruneUnreferencedCaptureFiles(manifest: SessionManifest) throws {
+        let directory = try manifestDirectory(for: manifest)
+        guard fileManager.fileExists(atPath: directory.path) else { return }
+        let referenced = Set(manifest.shots.flatMap { shot in
+            [shot.imageFileName]
+                .compactMap { $0 }
+                + shot.gifFrameFileNames
+                + (shot.previousImageFileName.map { [$0] } ?? [])
+                + (shot.previousGifFrameFileNames ?? [])
+        })
+        let gifRoot = try resolve(".work/gif", in: directory)
+        guard fileManager.fileExists(atPath: gifRoot.path) else {
+            try pruneRootCaptureFiles(in: directory, referenced: referenced)
+            return
+        }
+        if let enumerator = fileManager.enumerator(
+            at: gifRoot,
+            includingPropertiesForKeys: [.isRegularFileKey],
+            options: [.skipsHiddenFiles]
+        ) {
+            for case let url as URL in enumerator {
+                guard (try? url.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile) == true else { continue }
+                let relative = String(url.path.dropFirst(directory.path.count + 1))
+                if !referenced.contains(relative) { try fileManager.removeItem(at: url) }
+            }
+        }
+        try pruneEmptyCaptureDirectories(in: gifRoot)
+        try pruneRootCaptureFiles(in: directory, referenced: referenced)
+    }
+
+    private func pruneRootCaptureFiles(in directory: URL, referenced: Set<String>) throws {
+        for url in try fileManager.contentsOfDirectory(at: directory, includingPropertiesForKeys: [.isRegularFileKey], options: [.skipsHiddenFiles]) {
+            guard url.lastPathComponent.hasPrefix("shot_"),
+                  url.pathExtension.lowercased() == "jpg",
+                  (try? url.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile) == true else { continue }
+            let relative = String(url.path.dropFirst(directory.path.count + 1))
+            if !referenced.contains(relative) { try fileManager.removeItem(at: url) }
+        }
+    }
+
+    private func pruneEmptyCaptureDirectories(in root: URL) throws {
+        guard let enumerator = fileManager.enumerator(at: root, includingPropertiesForKeys: [.isDirectoryKey], options: [.skipsHiddenFiles]) else { return }
+        let directories = enumerator.compactMap { $0 as? URL }
+            .filter { (try? $0.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true }
+            .sorted { $0.path.count > $1.path.count }
+        for directory in directories {
+            if (try? fileManager.contentsOfDirectory(atPath: directory.path))?.isEmpty == true {
+                try fileManager.removeItem(at: directory)
+            }
+        }
     }
 
     func savePresentationSnapshot(
@@ -268,13 +336,13 @@ struct SessionWorkspace: Sendable {
     }
 
     func removeWorkingFiles(manifest: SessionManifest) throws {
-        let directory = URL(fileURLWithPath: manifest.absoluteDirectoryPath, isDirectory: true)
+        let directory = try manifestDirectory(for: manifest)
         let work = directory.appendingPathComponent(".work", isDirectory: true)
         if fileManager.fileExists(atPath: work.path) { try fileManager.removeItem(at: work) }
     }
 
     func removeEntireSession(manifest: SessionManifest) throws {
-        let directory = URL(fileURLWithPath: manifest.absoluteDirectoryPath, isDirectory: true)
+        let directory = try manifestDirectory(for: manifest)
         if fileManager.fileExists(atPath: directory.path) { try fileManager.removeItem(at: directory) }
     }
 
@@ -287,8 +355,22 @@ struct SessionWorkspace: Sendable {
 
     private func sessionDirectory(for descriptor: SessionWorkspaceDescriptor) throws -> URL {
         let url = URL(fileURLWithPath: descriptor.absoluteDirectoryPath, isDirectory: true).standardizedFileURL
+        let root = URL(fileURLWithPath: descriptor.outputRootPath, isDirectory: true).standardizedFileURL
+        guard url.path.hasPrefix(root.path + "/") else {
+            throw SessionWorkspaceError.invalidPath(url.path)
+        }
         guard fileManager.fileExists(atPath: url.path) else { throw SessionWorkspaceError.directoryCreationFailed(url) }
         return url
+    }
+
+    private func manifestDirectory(for manifest: SessionManifest) throws -> URL {
+        let root = URL(fileURLWithPath: manifest.outputRootPath, isDirectory: true).standardizedFileURL
+        let directory = URL(fileURLWithPath: manifest.absoluteDirectoryPath, isDirectory: true).standardizedFileURL
+        let expected = root.appendingPathComponent(manifest.relativeDirectoryPath, isDirectory: true).standardizedFileURL
+        guard directory.path.hasPrefix(root.path + "/"), directory == expected else {
+            throw SessionWorkspaceError.invalidPath(directory.path)
+        }
+        return directory
     }
 
     private func resolve(_ path: String, in directory: URL) throws -> URL {

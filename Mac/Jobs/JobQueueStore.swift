@@ -19,6 +19,7 @@ enum JobQueueStoreError: LocalizedError, Equatable {
 actor JobQueueStore {
     private let fileURL: URL
     private var jobs: [SessionJob] = []
+    private var persistedJobs: [SessionJob] = []
     private var hasLoaded = false
     private(set) var lastPersistenceError: String?
 
@@ -39,13 +40,21 @@ actor JobQueueStore {
             let decoder = JSONDecoder()
             decoder.dateDecodingStrategy = .iso8601
             jobs = try decoder.decode([SessionJob].self, from: Data(contentsOf: fileURL))
+            persistedJobs = jobs
             let now = Date()
             var changed = false
             for index in jobs.indices {
                 if jobs[index].status == .running {
-                    jobs[index].status = .pending
-                    jobs[index].lastAttemptAt = nil
-                    jobs[index].nextAttemptAt = now
+                    if jobs[index].kind == .autoPrint {
+                        jobs[index].status = .failed
+                        jobs[index].lastError = "Print submission outcome is unknown after app restart. Verify the printer before retrying."
+                        jobs[index].lastFailureDisposition = .sideEffectUnknown
+                        jobs[index].nextAttemptAt = nil
+                    } else {
+                        jobs[index].status = .pending
+                        jobs[index].lastAttemptAt = nil
+                        jobs[index].nextAttemptAt = now
+                    }
                     jobs[index].updatedAt = now
                     changed = true
                 }
@@ -138,6 +147,7 @@ actor JobQueueStore {
             throw JobQueueStoreError.missingJob(jobID)
         }
         guard jobs[index].status != .succeeded else { return }
+        guard jobs[index].lastFailureDisposition != .sideEffectUnknown else { return }
         jobs[index].status = .pending
         jobs[index].attemptCount = 0
         jobs[index].lastAttemptAt = nil
@@ -274,8 +284,10 @@ actor JobQueueStore {
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         do {
             try encoder.encode(jobs).write(to: fileURL, options: [.atomic])
+            persistedJobs = jobs
             lastPersistenceError = nil
         } catch {
+            jobs = persistedJobs
             lastPersistenceError = error.localizedDescription
             throw error
         }

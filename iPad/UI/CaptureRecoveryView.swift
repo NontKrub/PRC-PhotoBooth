@@ -7,6 +7,12 @@ struct CaptureRecoveryView: View {
 
     private var thai: Bool { vm.selectedLanguage == .thai }
 
+    private func isEnabled(_ action: CaptureRecoveryAction) -> Bool {
+        guard !vm.recoveryActionPending else { return false }
+        guard vm.recoveryActionAwaitingReconciliation else { return true }
+        return vm.recoveryActionToRetry == action
+    }
+
     var body: some View {
         VStack(spacing: 24) {
             Image(systemName: failure.reason == .cameraDisconnected ? "camera.slash" : "exclamationmark.triangle")
@@ -37,47 +43,67 @@ struct CaptureRecoveryView: View {
                 .accessibilityLabel(thai ? "กำลังประมวลผลตัวเลือกการกู้คืน" : "Processing recovery choice")
             }
 
+            if vm.recoveryActionAwaitingReconciliation {
+                Text(thai
+                     ? "บูธยังไม่ยืนยันตัวเลือกนี้ แตะปุ่มเดิมเพื่อลองใหม่อย่างปลอดภัย"
+                     : "The booth did not confirm this choice. Tap the same button to retry safely.")
+                    .font(.callout)
+                    .foregroundStyle(.orange)
+                    .multilineTextAlignment(.center)
+            }
+
             VStack(spacing: 12) {
                 if failure.canRetryReceive {
                     actionButton(
-                        thai ? "ลองรับภาพอีกครั้ง" : "Try Receive Again",
+                        thai ? "ลองรับภาพอีกครั้ง" : (vm.recoveryActionToRetry == .retryReceive(photoIndex: photoIndex) ? "Retry Receive" : "Try Receive Again"),
                         systemImage: "arrow.clockwise",
                         primary: true
                     ) {
                         vm.customerRetryReceive(photoIndex: photoIndex)
                     }
+                    .disabled(!isEnabled(.retryReceive(photoIndex: photoIndex)))
                 }
 
                 actionButton(
-                    thai ? "ถ่ายใหม่" : "Retake Photo",
+                    thai ? "ถ่ายใหม่" : (vm.recoveryActionToRetry == .retake(photoIndex: photoIndex) ? "Retry Retake" : "Retake Photo"),
                     systemImage: "camera",
                     primary: !failure.canRetryReceive
                 ) {
                     vm.customerRetakeFailedCapture(photoIndex: photoIndex)
                 }
+                .disabled(!isEnabled(.retake(photoIndex: photoIndex)))
 
                 if failure.canUsePreviousPhoto {
                     actionButton(
-                        thai ? "ใช้ภาพเดิม" : "Keep Previous Photo",
+                        thai ? "ใช้ภาพเดิม" : (vm.recoveryActionToRetry == .usePrevious(photoIndex: photoIndex) ? "Retry Keep Previous" : "Keep Previous Photo"),
                         systemImage: "photo",
                         primary: false
                     ) {
                         vm.customerUsePreviousCapture(photoIndex: photoIndex)
                     }
+                    .disabled(!isEnabled(.usePrevious(photoIndex: photoIndex)))
                 }
 
                 if failure.canContinueSession {
                     actionButton(
-                        thai ? "ถ่ายภาพถัดไปก่อน" : "Continue Session",
+                        thai ? "ถ่ายภาพถัดไปก่อน" : (vm.recoveryActionToRetry == .continueSession(photoIndex: photoIndex) ? "Retry Continue" : "Continue Session"),
                         systemImage: "forward",
                         primary: false
                     ) {
                         vm.customerContinueAfterCaptureFailure(photoIndex: photoIndex)
                     }
+                    .disabled(!isEnabled(.continueSession(photoIndex: photoIndex)))
                 }
             }
             .frame(maxWidth: 420)
-            .disabled(vm.recoveryActionPending)
+
+            if let error = vm.sessionRequestError {
+                Text(error)
+                    .font(.callout)
+                    .foregroundStyle(.red)
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal, 12)
+            }
         }
         .padding(32)
     }

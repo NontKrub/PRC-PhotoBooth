@@ -165,7 +165,12 @@ struct MessageTests {
                     canContinueSession: true
                 )
             ),
-            .captureRecoveryAction(context: context, action: .retryReceive(photoIndex: 1)),
+            .captureRecoveryAction(
+                state: CaptureRecoveryStateToken(sessionID: context.sessionID, photoIndex: 1, revision: context.sequence),
+                requestID: reviewRequestID,
+                action: .retryReceive(photoIndex: 1)
+            ),
+            .captureRecoveryActionResult(requestID: reviewRequestID, result: .accepted),
             .reviewDecision(state: reviewState, requestID: reviewRequestID, action: .keep),
             .reviewDecision(state: reviewState, requestID: reviewRequestID, action: .retake),
             .reviewDecisionResult(requestID: reviewRequestID, result: .accepted),
@@ -310,9 +315,9 @@ struct MessageTests {
         #expect(legacyHello.deviceName == "legacy-id")
         #expect(legacyHello.networkPreference == nil)
     }
-    @Test("v1.4.3 connection protocol is version 7 and legacy protocol 2 remains decodable but incompatible")
+    @Test("v1.4.3 connection protocol is version 8 and legacy protocol 2 remains decodable but incompatible")
     func protocolVersionMismatchIsVisible() throws {
-        #expect(BoothTransportHello.currentProtocolVersion == 7)
+        #expect(BoothTransportHello.currentProtocolVersion == 8)
         let legacy = Data(#"{"protocolVersion":2,"appVersion":"1.4.1","role":"iPad","deviceID":"legacy-id","capabilities":["control"]}"#.utf8)
         let hello = try JSONDecoder().decode(BoothTransportHello.self, from: legacy)
         #expect(hello.protocolVersion == 2)

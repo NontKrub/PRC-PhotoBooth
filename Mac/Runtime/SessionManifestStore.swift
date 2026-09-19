@@ -22,7 +22,7 @@ actor SessionManifestStore {
             }
             return
         }
-        try write(manifest, to: url)
+        _ = try write(manifest, to: url)
     }
 
     func load(sessionID: String) throws -> SessionManifest {
@@ -36,7 +36,18 @@ actor SessionManifestStore {
 
     func save(_ manifest: SessionManifest) throws {
         try validate(sessionID: manifest.id)
-        try write(manifest, to: fileURL(for: manifest.id))
+        _ = try write(manifest, to: fileURL(for: manifest.id))
+    }
+
+    func update(
+        sessionID: String,
+        _ mutation: @Sendable (inout SessionManifest) throws -> Void
+    ) throws -> SessionManifest {
+        try validate(sessionID: sessionID)
+        let url = try fileURL(for: sessionID)
+        var manifest = try load(sessionID: sessionID)
+        try mutation(&manifest)
+        return try write(manifest, to: url)
     }
 
     func delete(sessionID: String) throws {
@@ -114,12 +125,14 @@ actor SessionManifestStore {
         }
     }
 
-    private func write(_ manifest: SessionManifest, to url: URL) throws {
+    @discardableResult
+    private func write(_ manifest: SessionManifest, to url: URL) throws -> SessionManifest {
         var saved = manifest
         saved.updatedAt = Date()
         let encoder = JSONEncoder()
         encoder.dateEncodingStrategy = .iso8601
         encoder.outputFormatting = [.sortedKeys]
         try encoder.encode(saved).write(to: url, options: [.atomic])
+        return saved
     }
 }

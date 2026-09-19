@@ -14,6 +14,12 @@ enum PrintSubmissionOutcome: Sendable, Equatable {
     case unknown
 }
 
+enum PrinterLifecycleState: Sendable, Equatable {
+    case idle
+    case submitting(operationID: UUID, startedAt: Date)
+    case unknownAwaitingAppKitCompletion(operationID: UUID, startedAt: Date, timedOutAt: Date)
+}
+
 struct PrinterTestResult: Sendable, Equatable {
     var date: Date
     var printerName: String
@@ -99,6 +105,12 @@ protocol PrinterBackend: AnyObject {
     func availablePrinterNames() -> [String]
     func defaultPrinterName() -> String?
     func submit(_ request: PrinterPrintRequest) async throws
+    func setOperationCompletionHandler(_ handler: (@MainActor @Sendable () -> Void)?)
+}
+
+@MainActor
+extension PrinterBackend {
+    func setOperationCompletionHandler(_ handler: (@MainActor @Sendable () -> Void)?) {}
 }
 
 @MainActor
@@ -110,7 +122,7 @@ final class PrinterService {
 
     private(set) var availablePrinterNames: [String] = []
     private(set) var lastTestResult: PrinterTestResult?
-    private(set) var isPrinting = false
+    private(set) var lifecycleState: PrinterLifecycleState = .idle
     private(set) var printRequestCount = 0
     private(set) var printSuccessCount = 0
     private(set) var printFailureCount = 0
@@ -120,8 +132,13 @@ final class PrinterService {
 
     init(backend: any PrinterBackend = AppKitPrinterBackend()) {
         self.backend = backend
+        backend.setOperationCompletionHandler { [weak self] in
+            self?.operationDidComplete()
+        }
         refreshPrinters()
     }
+
+    var isPrinting: Bool { lifecycleState != .idle }
 
     func refreshPrinters() {
         availablePrinterNames = backend.availablePrinterNames()
@@ -150,9 +167,10 @@ final class PrinterService {
             document: .testPage(date: date),
             showsPrintDialog: true
         )
+        try beginPrint()
+        var releaseLane = true
+        defer { if releaseLane { endPrint() } }
         do {
-            try beginPrint()
-            defer { endPrint() }
             try await backend.submit(request)
             printSuccessCount += 1
             lastPrintAt = date
@@ -177,6 +195,8 @@ final class PrinterService {
                 return .cancelled
             }
             if case PrinterServiceError.timeout = error {
+                releaseLane = false
+                markPrintUnknown()
                 printFailureCount += 1
                 lastPrintAt = date
                 lastPrintError = error.localizedDescription
@@ -187,7 +207,7 @@ final class PrinterService {
                     message: error.localizedDescription,
                     outcome: .unknown
                 )
-                throw JobExecutionError.permanent(error.localizedDescription)
+                throw JobExecutionError.sideEffectUnknown(error.localizedDescription)
             }
             printFailureCount += 1
             lastPrintAt = date
@@ -219,9 +239,10 @@ final class PrinterService {
             document: .photoStrip(url),
             showsPrintDialog: showPrintDialog
         )
+        try beginPrint()
+        var releaseLane = true
+        defer { if releaseLane { endPrint() } }
         do {
-            try beginPrint()
-            defer { endPrint() }
             try await backend.submit(request)
             printSuccessCount += 1
             lastPrintAt = Date()
@@ -232,7 +253,9 @@ final class PrinterService {
             lastPrintAt = Date()
             lastPrintError = error.localizedDescription
             if case PrinterServiceError.timeout = error {
-                throw JobExecutionError.permanent(error.localizedDescription)
+                releaseLane = false
+                markPrintUnknown()
+                throw JobExecutionError.sideEffectUnknown(error.localizedDescription)
             }
             if let error = error as? PrinterServiceError, error.isPermanent {
                 throw JobExecutionError.permanent(error.localizedDescription)
@@ -242,15 +265,31 @@ final class PrinterService {
     }
 
     private func beginPrint() throws {
-        guard !isPrinting else { throw PrinterServiceError.busy }
-        isPrinting = true
-        currentPrintStartedAt = Date()
+        guard case .idle = lifecycleState else { throw PrinterServiceError.busy }
+        let operationID = UUID()
+        let startedAt = Date()
+        lifecycleState = .submitting(operationID: operationID, startedAt: startedAt)
+        currentPrintStartedAt = startedAt
         printRequestCount += 1
     }
 
     private func endPrint() {
-        isPrinting = false
+        lifecycleState = .idle
         currentPrintStartedAt = nil
+    }
+
+    private func markPrintUnknown() {
+        guard case .submitting(let operationID, let startedAt) = lifecycleState else { return }
+        lifecycleState = .unknownAwaitingAppKitCompletion(
+            operationID: operationID,
+            startedAt: startedAt,
+            timedOutAt: Date()
+        )
+    }
+
+    private func operationDidComplete() {
+        guard case .unknownAwaitingAppKitCompletion = lifecycleState else { return }
+        endPrint()
     }
 
 }
@@ -263,6 +302,7 @@ private enum PrintRunResult: Sendable {
 @MainActor
 private final class AppKitPrinterBackend: PrinterBackend {
     private var activeDelegates: [ObjectIdentifier: PrintOperationDelegate] = [:]
+    private var operationCompletionHandler: (@MainActor @Sendable () -> Void)?
 
     func availablePrinterNames() -> [String] {
         NSPrinter.printerNames
@@ -270,6 +310,10 @@ private final class AppKitPrinterBackend: PrinterBackend {
 
     func defaultPrinterName() -> String? {
         NSPrintInfo.shared.printer.name
+    }
+
+    func setOperationCompletionHandler(_ handler: (@MainActor @Sendable () -> Void)?) {
+        operationCompletionHandler = handler
     }
 
     func submit(_ request: PrinterPrintRequest) async throws {
@@ -331,6 +375,7 @@ private final class AppKitPrinterBackend: PrinterBackend {
                             onCompletion: { [weak self] in
                                 Task { @MainActor [weak self] in
                                     self?.activeDelegates.removeValue(forKey: operationID)
+                                    self?.operationCompletionHandler?()
                                 }
                             }
                         )
@@ -350,7 +395,7 @@ private final class AppKitPrinterBackend: PrinterBackend {
                 try? await Task.sleep(for: .seconds(timeout))
                 guard !Task.isCancelled else { return .timedOut }
                 await MainActor.run {
-                    self.activeDelegates[operationID]?.complete(.timedOut)
+                    self.activeDelegates[operationID]?.timeout()
                 }
                 return .timedOut
             }
@@ -379,7 +424,8 @@ private final class AppKitPrinterBackend: PrinterBackend {
 private final class PrintOperationDelegate: NSObject, @unchecked Sendable {
     private let lock = NSLock()
     private var continuation: CheckedContinuation<PrintRunResult, Never>?
-    private var completed = false
+    private var resultDelivered = false
+    private var appKitCompleted = false
     private let onCompletion: @Sendable () -> Void
 
     init(
@@ -392,17 +438,31 @@ private final class PrintOperationDelegate: NSObject, @unchecked Sendable {
 
     func complete(_ result: PrintRunResult) {
         lock.lock()
-        guard !completed else {
+        guard !appKitCompleted else {
             lock.unlock()
             return
         }
-        completed = true
-        let continuation = self.continuation
+        appKitCompleted = true
+        let continuation = resultDelivered ? nil : self.continuation
+        resultDelivered = true
         self.continuation = nil
         lock.unlock()
 
         continuation?.resume(returning: result)
         onCompletion()
+    }
+
+    func timeout() {
+        lock.lock()
+        guard !appKitCompleted, !resultDelivered else {
+            lock.unlock()
+            return
+        }
+        resultDelivered = true
+        let continuation = self.continuation
+        self.continuation = nil
+        lock.unlock()
+        continuation?.resume(returning: .timedOut)
     }
 
     @objc

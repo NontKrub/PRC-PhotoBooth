@@ -7054,6 +7054,17 @@
         }
       }
     },
+    "Verify printer" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ตรวจสอบเครื่องพิมพ์"
+          }
+        }
+      }
+    },
     "Version 1.2 options are stored separately from the legacy event layout." : {
       "extractionState" : "stale",
       "localizations" : {

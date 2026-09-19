@@ -14,9 +14,10 @@ final class BoothNetworkTransportRuntime: @unchecked Sendable {
     private var controlTrafficAdmitted = false
     private var reconnectSource: DispatchSourceTimer?
     private var reconnectAttempt = 0
+    private var reconnectGeneration = 0
 
     var onHeartbeatTimeout: (@Sendable (NWConnection, Int) -> Void)?
-    var onReconnectDue: (@Sendable (Int) -> Void)?
+    var onReconnectDue: (@Sendable (Int, Int) -> Void)?
 
     init(queue: DispatchQueue) {
         self.queue = queue
@@ -98,16 +99,17 @@ final class BoothNetworkTransportRuntime: @unchecked Sendable {
         heartbeatState.reset()
     }
 
-    func scheduleReconnect(after delay: TimeInterval, attempt: Int) {
+    func scheduleReconnect(after delay: TimeInterval, attempt: Int, generation: Int = 0) {
         onQueue {
             guard reconnectSource == nil else { return }
             reconnectAttempt = attempt
+            reconnectGeneration = generation
             let source = DispatchSource.makeTimerSource(queue: queue)
             source.schedule(deadline: .now() + delay)
             source.setEventHandler { [weak self] in
                 guard let self else { return }
                 self.reconnectSource = nil
-                self.onReconnectDue?(self.reconnectAttempt)
+                self.onReconnectDue?(self.reconnectAttempt, self.reconnectGeneration)
             }
             reconnectSource = source
             source.resume()
@@ -119,6 +121,7 @@ final class BoothNetworkTransportRuntime: @unchecked Sendable {
             reconnectSource?.cancel()
             reconnectSource = nil
             reconnectAttempt = 0
+            reconnectGeneration = 0
         }
     }
 

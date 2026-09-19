@@ -54,6 +54,10 @@ enum OperationsStatusLogic {
         if persistenceError != nil {
             return OperationsSectionStatus(summary: "Persistence failed", severity: .failure)
         }
+        let unknownSideEffects = jobs.filter { $0.lastFailureDisposition == .sideEffectUnknown }.count
+        if unknownSideEffects > 0 {
+            return OperationsSectionStatus(summary: "\(unknownSideEffects) needs verification", severity: .failure)
+        }
         let requiredFailures = jobs.filter {
             !$0.kind.isOptional && ($0.status == .failed || $0.status == .cancelled)
         }.count
@@ -76,6 +80,9 @@ enum OperationsStatusLogic {
         lastTestResult: PrinterTestResult?,
         isPrinting: Bool = false
     ) -> OperationsSectionStatus {
+        if lastTestResult?.outcome == .unknown {
+            return OperationsSectionStatus(summary: "Verify printer", severity: .failure)
+        }
         if isPrinting {
             return OperationsSectionStatus(summary: "Printing", severity: .normal)
         }
@@ -305,6 +312,11 @@ struct OperationsView: View {
                     .foregroundStyle(readinessColor)
                 VStack(alignment: .leading, spacing: 4) {
                     Text(readinessTitle).font(.title2.bold())
+                    if let sessionStatus = coordinator.operationsSessionStatus {
+                        Text("Session: (sessionStatus)")
+                            .font(.caption)
+                            .foregroundStyle(sessionStatus == "Cancelling" ? .orange : .secondary)
+                    }
                     if let lastRun = coordinator.preflight.lastRunAt {
                         (Text("Last checked ") + Text(lastRun, style: .relative) + Text(" ago"))
                             .font(.caption).foregroundStyle(.secondary)
@@ -489,7 +501,10 @@ struct OperationsView: View {
                     queueCount("Completed", counts.completed)
                     Spacer()
                     Button("Retry All Failed") { coordinator.jobQueue.retryAllFailed() }
-                        .disabled(counts.failed == 0)
+                        .disabled(!coordinator.jobQueue.jobs.contains {
+                            ($0.status == .failed || $0.status == .cancelled)
+                                && $0.lastFailureDisposition == .retryable
+                        })
                 }
                 if let error = coordinator.jobQueue.lastQueueError {
                     Label(error, systemImage: "exclamationmark.triangle")
@@ -503,8 +518,13 @@ struct OperationsView: View {
                             Spacer()
                             Text(operatorJobStatusName(job.status, locale: locale))
                                 .foregroundStyle(job.status == .failed ? .red : .secondary)
-                            if (job.status == .failed || job.status == .cancelled) && job.kind != .cloudUpload {
-                                Button("Retry") { coordinator.jobQueue.retry(jobID: job.id) }
+                            if (job.status == .failed || job.status == .cancelled), job.kind != .cloudUpload {
+                                if job.lastFailureDisposition == .sideEffectUnknown {
+                                    Text(operatorString("Verify printer", locale: locale))
+                                        .foregroundStyle(.orange)
+                                } else {
+                                    Button("Retry") { coordinator.jobQueue.retry(jobID: job.id) }
+                                }
                             }
                             if job.kind.isOptional && job.status != .succeeded && job.status != .cancelled {
                                 Button("Cancel") { coordinator.jobQueue.cancel(jobID: job.id) }
@@ -759,6 +779,21 @@ struct OperationsView: View {
                 healthValue("Assets", connectionStatus.isAssetChannelReady ? "Ready" : "Unavailable")
                 healthValue("Trust", connectionStatus.isPeerAuthenticated ? "Authenticated" : "Not authenticated")
             }
+            HStack(spacing: 18) {
+                healthValue("Route", connectionPresentation.effectiveTransport)
+                healthValue("Reconnect", connectionStatus.isReconnectInProgress ? "Active" : "Idle")
+                healthValue(
+                    "Last Control",
+                    connectionStatus.lastControlActivityAt?.formatted(date: .omitted, time: .standard) ?? "Never"
+                )
+                if let transport = coordinator.multipeer as? NetworkBoothTransport {
+                    let diagnostics = transport.discoveryDiagnostics
+                    healthValue(
+                        "Generation",
+                        "\(diagnostics.generation) / \(diagnostics.controlConnectionGeneration)"
+                    )
+                }
+            }
             if let fallbackText = connectionPresentation.fallbackText {
                 Label(fallbackText, systemImage: "wifi.exclamationmark")
                     .font(.caption)
@@ -854,6 +889,9 @@ struct OperationsView: View {
     }
 
     private var printerStatusText: String {
+        if coordinator.printer.lastTestResult?.outcome == .unknown {
+            return operatorString("Verify printer", locale: locale)
+        }
         if coordinator.printer.isPrinting {
             return operatorString("Printing", locale: locale)
         }

@@ -6,6 +6,11 @@ protocol SessionJobExecuting: AnyObject {
     func execute(_ job: SessionJob) async throws
 }
 
+enum SessionJobCancellationResult: Sendable, Equatable {
+    case quiesced
+    case cleanupPending
+}
+
 @MainActor
 @Observable
 final class SessionJobQueue {
@@ -155,32 +160,31 @@ final class SessionJobQueue {
         }
     }
 
-    func cancelJobs(sessionID: String) {
-        Task { [weak self] in
-            guard let self else { return }
-            do {
-                try await store.cancelJobs(sessionID: sessionID)
-                if let activeCloudJobID,
-                   await store.snapshot().contains(where: { $0.id == activeCloudJobID && $0.sessionID == sessionID }) {
-                    activeCloudExecutionTask?.cancel()
-                }
-                if let activeFinalizationJobID,
-                   await store.snapshot().contains(where: {
-                       $0.id == activeFinalizationJobID && $0.sessionID == sessionID
-                   }) {
-                    activeFinalizationExecutionTask?.cancel()
-                }
-                if let activePrintJobID,
-                   await store.snapshot().contains(where: {
-                       $0.id == activePrintJobID && $0.sessionID == sessionID
-                   }) {
-                    activePrintExecutionTask?.cancel()
-                }
-                await reload()
-            } catch {
-                lastQueueError = error.localizedDescription
-            }
+    func cancelAndQuiesceJobs(sessionID: String) async throws -> SessionJobCancellationResult {
+        try await store.cancelJobs(sessionID: sessionID)
+        let snapshot = await store.snapshot()
+        var activeTasks: [Task<Void, Error>] = []
+        if let activeCloudJobID,
+           snapshot.contains(where: { $0.id == activeCloudJobID && $0.sessionID == sessionID }) {
+            activeCloudExecutionTask?.cancel()
+            if let activeCloudExecutionTask { activeTasks.append(activeCloudExecutionTask) }
         }
+        if let activeFinalizationJobID,
+           snapshot.contains(where: { $0.id == activeFinalizationJobID && $0.sessionID == sessionID }) {
+            activeFinalizationExecutionTask?.cancel()
+            if let activeFinalizationExecutionTask { activeTasks.append(activeFinalizationExecutionTask) }
+        }
+        if let activePrintJobID,
+           snapshot.contains(where: { $0.id == activePrintJobID && $0.sessionID == sessionID }) {
+            activePrintExecutionTask?.cancel()
+            if let activePrintExecutionTask { activeTasks.append(activePrintExecutionTask) }
+        }
+        for task in activeTasks { _ = try? await task.value }
+        await reload()
+        let remaining = await store.snapshot().contains {
+            $0.sessionID == sessionID && $0.status == .running
+        }
+        return remaining ? .cleanupPending : .quiesced
     }
 
     func retryAllFailed() {
@@ -188,7 +192,9 @@ final class SessionJobQueue {
             guard let self else { return }
             let failed = jobs.filter { $0.status == .failed }
             do {
-                for job in failed { try await store.retry(jobID: job.id) }
+                for job in failed where job.lastFailureDisposition == .retryable {
+                    try await store.retry(jobID: job.id)
+                }
                 await reload()
             } catch {
                 lastQueueError = error.localizedDescription
@@ -394,6 +400,10 @@ final class SessionJobQueue {
                     SessionJobRetryPolicy.delay(afterAttempt: job.attemptCount)
                 )
             }
+        case .sideEffectUnknown:
+            job.lastFailureDisposition = .sideEffectUnknown
+            job.status = .failed
+            job.nextAttemptAt = nil
         }
     }
 

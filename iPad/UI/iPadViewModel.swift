@@ -29,6 +29,7 @@ final class iPadViewModel: ObservableObject {
     @Published private(set) var reviewDecisionPending = false
     @Published private(set) var reviewDecisionAwaitingReconciliation = false
     @Published private(set) var recoveryActionPending = false
+    @Published private(set) var recoveryActionAwaitingReconciliation = false
     @Published private(set) var finishRequestPending = false
     @Published var sessionRequestError: String?
     @Published private(set) var assetRecoveryStatus: BoothAssetRecoveryStatus = .idle
@@ -58,6 +59,8 @@ final class iPadViewModel: ObservableObject {
     private var reviewDecisionTimeoutTask: Task<Void, Never>?
     private var pendingReviewDecision: (state: ReviewStateToken, requestID: UUID, action: ReviewAction)?
     private var recoveryActionTimeoutTask: Task<Void, Never>?
+    private var currentCaptureRecoveryStateToken: CaptureRecoveryStateToken?
+    private var pendingCaptureRecovery: (state: CaptureRecoveryStateToken, requestID: UUID, action: CaptureRecoveryAction)?
     private var finishRequestTimeoutTask: Task<Void, Never>?
     private var transientRequestGeneration: UInt64 = 0
     private var countdownTask: Task<Void, Never>?
@@ -84,6 +87,16 @@ final class iPadViewModel: ObservableObject {
 #endif
 
     private var observationCancellables = Set<AnyCancellable>()
+
+    var reviewActionToRetry: ReviewAction? {
+        guard reviewDecisionAwaitingReconciliation else { return nil }
+        return pendingReviewDecision?.action
+    }
+
+    var recoveryActionToRetry: CaptureRecoveryAction? {
+        guard recoveryActionAwaitingReconciliation else { return nil }
+        return pendingCaptureRecovery?.action
+    }
 
     var networkTransport: NetworkBoothTransport? { multipeer as? NetworkBoothTransport }
     var connectionStatus: BoothConnectionStatus { multipeer.connectionStatus }
@@ -434,10 +447,49 @@ final class iPadViewModel: ObservableObject {
 
         case .captureRecovery(let context, let index, let failure):
             guard accept(context, message: "captureRecovery") else { break }
+            let recoveryState = CaptureRecoveryStateToken(
+                sessionID: context.sessionID,
+                photoIndex: index,
+                revision: context.sequence
+            )
+            let pending = pendingCaptureRecovery
             cancelCountdown()
             clearTransientRequestState()
+            currentCaptureRecoveryStateToken = recoveryState
+            if pending?.state == recoveryState {
+                pendingCaptureRecovery = pending
+                recoveryActionAwaitingReconciliation = true
+            }
             stateMachine.applyAuthoritativePhase(.captureRecovery(photoIndex: index, failure: failure))
             clearReviewImage()
+
+        case .captureRecoveryActionResult(let requestID, let result):
+            guard let pending = pendingCaptureRecovery,
+                  pending.requestID == requestID else { break }
+            recoveryActionTimeoutTask?.cancel()
+            recoveryActionTimeoutTask = nil
+            recoveryActionPending = false
+            switch result {
+            case .accepted, .duplicate:
+                pendingCaptureRecovery = nil
+                recoveryActionAwaitingReconciliation = false
+                sessionRequestError = nil
+            case .stale:
+                pendingCaptureRecovery = nil
+                recoveryActionAwaitingReconciliation = false
+                setSessionRequestError("That recovery choice is no longer current. Please wait for the booth to update.")
+            case .wrongPhoto:
+                pendingCaptureRecovery = nil
+                recoveryActionAwaitingReconciliation = false
+                setSessionRequestError("That recovery choice is no longer available.")
+            case .sessionChanged:
+                pendingCaptureRecovery = nil
+                recoveryActionAwaitingReconciliation = false
+                setSessionRequestError("The booth moved to another session. Please wait for the update.")
+            case .persistenceFailed:
+                recoveryActionAwaitingReconciliation = true
+                setSessionRequestError("The booth could not save that recovery choice. Tap the same choice to try again.")
+            }
 
         case .reviewDecisionResult(let requestID, let result):
             guard let pending = pendingReviewDecision,
@@ -536,6 +588,8 @@ final class iPadViewModel: ObservableObject {
         lastAssetRecycleGeneration = nil
         resetAssetProcessing()
         assetRequestPump.reset()
+        currentCaptureRecoveryStateToken = nil
+        pendingCaptureRecovery = nil
     }
 
     private func clearTransientRequestState() {
@@ -553,6 +607,8 @@ final class iPadViewModel: ObservableObject {
         reviewDecisionAwaitingReconciliation = false
         pendingReviewDecision = nil
         recoveryActionPending = false
+        recoveryActionAwaitingReconciliation = false
+        pendingCaptureRecovery = nil
         finishRequestPending = false
         sessionRequestError = nil
     }
@@ -956,7 +1012,9 @@ final class iPadViewModel: ObservableObject {
     private func applySessionSync(_ snapshot: SessionSyncSnapshot) {
         let hasSyncBaseline = sessionMessageGate.currentSessionID != nil
             || sessionMessageGate.latestAcceptedSequence > 0
-        if hasSyncBaseline && snapshot.sequence <= sessionMessageGate.latestAcceptedSequence {
+        if hasSyncBaseline,
+           snapshot.sessionID == sessionMessageGate.currentSessionID,
+           snapshot.sequence <= sessionMessageGate.latestAcceptedSequence {
 #if DEBUG
             NSLog(
                 "[Session] Ignored non-newer sessionSync: session=%@ sequence=%llu latest=%llu",
@@ -967,6 +1025,7 @@ final class iPadViewModel: ObservableObject {
 #endif
             return
         }
+        let pendingRecovery = pendingCaptureRecovery
         clearTransientRequestState()
         let previousSessionID = sessionMessageGate.currentSessionID
         if previousSessionID != snapshot.sessionID || snapshot.sessionID == nil {
@@ -974,6 +1033,11 @@ final class iPadViewModel: ObservableObject {
         }
         cancelCountdown()
         sessionMessageGate.synchronize(sessionID: snapshot.sessionID, sequence: snapshot.sequence)
+        currentCaptureRecoveryStateToken = snapshot.captureRecoveryState
+        if pendingRecovery?.state == snapshot.captureRecoveryState {
+            pendingCaptureRecovery = pendingRecovery
+            recoveryActionAwaitingReconciliation = true
+        }
         eventConfig = snapshot.config
         stateMachine.config = snapshot.config
         selectedLanguage = snapshot.presentation?.language ?? snapshot.config.customerLanguage
@@ -1405,6 +1469,7 @@ final class iPadViewModel: ObservableObject {
                   self.recoveryActionPending else { return }
             self.recoveryActionTimeoutTask = nil
             self.recoveryActionPending = false
+            self.recoveryActionAwaitingReconciliation = true
             self.setSessionRequestError("The booth did not confirm that recovery choice. Please try again.")
         }
     }
@@ -1542,14 +1607,28 @@ final class iPadViewModel: ObservableObject {
         case .usePrevious(let index): customerAction = .usePreviousCapture(photoIndex: index)
         }
         guard CustomerDisplayWorkflow.canApply(customerAction, in: stateMachine.phase) else { return }
-        guard let context = currentSessionMessageContext else { return }
-        let generation = beginTransientRequest()
+        guard let state = currentCaptureRecoveryStateToken else { return }
+        let requestID: UUID
+        let generation: UInt64
+        if recoveryActionAwaitingReconciliation {
+            guard let pendingCaptureRecovery,
+                  pendingCaptureRecovery.state == state,
+                  pendingCaptureRecovery.action == action else { return }
+            requestID = pendingCaptureRecovery.requestID
+            generation = transientRequestGeneration
+        } else {
+            generation = beginTransientRequest()
+            requestID = UUID()
+            pendingCaptureRecovery = (state: state, requestID: requestID, action: action)
+        }
         recoveryActionPending = true
-        multipeer.sendControl(.captureRecoveryAction(context: context, action: action)) { [weak self] outcome in
+        recoveryActionAwaitingReconciliation = false
+        multipeer.sendControl(.captureRecoveryAction(state: state, requestID: requestID, action: action)) { [weak self] outcome in
             guard let self,
                   self.transientRequestGeneration == generation,
                   outcome != .sent else { return }
             self.recoveryActionPending = false
+            self.recoveryActionAwaitingReconciliation = true
             self.setSessionRequestError("The booth did not receive that recovery choice. Please try again.")
         }
         guard recoveryActionPending else { return }

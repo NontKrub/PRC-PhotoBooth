@@ -874,6 +874,11 @@ public protocol BoothTransport: AnyObject {
     )
     @discardableResult
     func sendAsset(_ chunk: BoothAssetChunk) -> BoothControlSendOutcome
+    func sendAsset(
+        _ chunk: BoothAssetChunk,
+        completion: @escaping @MainActor (BoothControlSendOutcome) -> Void
+    )
+    func sendAsset(data: Data, reference: BoothAssetReference) async -> Bool
     func sendPreviewFrame(_ jpegData: Data)
     func recycleAssetChannel()
     func disconnect()
@@ -890,6 +895,51 @@ public extension BoothTransport {
     @discardableResult
     func sendAsset(_ chunk: BoothAssetChunk) -> BoothControlSendOutcome {
         .networkSendFailed
+    }
+
+    func sendAsset(
+        _ chunk: BoothAssetChunk,
+        completion: @escaping @MainActor (BoothControlSendOutcome) -> Void
+    ) {
+        completion(sendAsset(chunk))
+    }
+
+    func sendAsset(data: Data, reference: BoothAssetReference) async -> Bool {
+        let chunkSize = 192 * 1024
+        let count = max(1, (data.count + chunkSize - 1) / chunkSize)
+        guard data.count <= BoothAssetTransfer.maximumAssetBytes,
+              count <= BoothAssetTransfer.maximumChunkCount else { return false }
+        for index in 0..<count {
+            while true {
+                guard !Task.isCancelled else { return false }
+                let outcome: BoothControlSendOutcome = await withCheckedContinuation { continuation in
+                    do {
+                        let chunk = try BoothAssetTransfer.chunk(
+                            data: data,
+                            reference: reference,
+                            index: index,
+                            chunkSize: chunkSize
+                        )
+                        sendAsset(chunk) { result in
+                            continuation.resume(returning: result)
+                        }
+                    } catch {
+                        continuation.resume(returning: .encodingFailed)
+                    }
+                }
+                switch outcome {
+                case .sent:
+                    break
+                case .backpressure:
+                    try? await Task.sleep(for: .milliseconds(25))
+                    continue
+                default:
+                    return false
+                }
+                break
+            }
+        }
+        return true
     }
 
     func recycleAssetChannel() {}

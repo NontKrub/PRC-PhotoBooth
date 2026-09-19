@@ -430,9 +430,12 @@ public final class NetworkBoothTransport: BoothTransport {
                 )
             }
         }
-        self.transportRuntime.onReconnectDue = { [weak self] _ in
+        self.transportRuntime.onReconnectDue = { [weak self] _, generation in
             Task { @MainActor [weak self] in
-                self?.handleReconnectDue()
+                guard let self,
+                      self.callbackGate.accepts(generation),
+                      self.shouldReconnect else { return }
+                self.handleReconnectDue()
             }
         }
         publishPairingStatus()
@@ -1050,10 +1053,18 @@ public final class NetworkBoothTransport: BoothTransport {
 
     @discardableResult
     public func sendAsset(_ chunk: BoothAssetChunk) -> BoothControlSendOutcome {
+        sendAsset(chunk, completion: { _ in })
+    }
+
+    public func sendAsset(
+        _ chunk: BoothAssetChunk,
+        completion userCompletion: @escaping @MainActor (BoothControlSendOutcome) -> Void
+    ) -> BoothControlSendOutcome {
         guard peerAuthenticated,
               secureChannelEstablished,
               assetIdentityVerified else {
             emitTransportEvent(.assetRejected, channel: .asset, reason: "Secure asset channel is not ready")
+            userCompletion(.noConnection)
             return .noConnection
         }
         let outcome = assetWritePump.enqueue(
@@ -1072,6 +1083,7 @@ public final class NetworkBoothTransport: BoothTransport {
                         reason: String(describing: outcome)
                     )
                 }
+                userCompletion(outcome)
             }
         )
         if outcome != .sent {
@@ -1967,6 +1979,7 @@ public final class NetworkBoothTransport: BoothTransport {
 
     private func tearDownActiveTransport() {
         activeInterface = nil
+        directLANControlAttemptInFlight = false
         callbackGate.invalidate()
         transportRuntime.cancelReconnect()
         assetReconnectSource?.cancel()
@@ -4441,6 +4454,7 @@ public final class NetworkBoothTransport: BoothTransport {
         case .shotCapturedAsset: return "shotCapturedAsset"
         case .captureRecovery: return "captureRecovery"
         case .captureRecoveryAction: return "captureRecoveryAction"
+        case .captureRecoveryActionResult: return "captureRecoveryActionResult"
         case .reviewDecision: return "reviewDecision"
         case .reviewDecisionResult: return "reviewDecisionResult"
         case .sessionFinished: return "sessionFinished"
@@ -5008,7 +5022,11 @@ public final class NetworkBoothTransport: BoothTransport {
             attempt: reconnectAttempt,
             duration: delay
         )
-        transportRuntime.scheduleReconnect(after: delay, attempt: reconnectAttempt)
+        transportRuntime.scheduleReconnect(
+            after: delay,
+            attempt: reconnectAttempt,
+            generation: callbackGate.generation
+        )
     }
 
     private func handleReconnectDue() {

@@ -169,7 +169,7 @@ public enum DeviceRole: String, Codable, Sendable {
 
 // MARK: - Review action
 
-public enum ReviewAction: String, Codable, Sendable {
+public enum ReviewAction: String, Codable, Sendable, Equatable {
     case retake
     case keep
 }

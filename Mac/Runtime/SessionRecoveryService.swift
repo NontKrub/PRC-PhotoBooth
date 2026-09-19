@@ -85,12 +85,16 @@ final class SessionRecoveryService {
         Task { [weak self] in
             guard let self else { return }
             do {
-                var manifest = try await manifestStore.load(sessionID: sessionID)
-                manifest.status = .cancelled
-                manifest.cancelledAt = Date()
-                manifest.updatedAt = Date()
-                try await manifestStore.save(manifest)
-                jobQueue.cancelJobs(sessionID: sessionID)
+                let manifest = try await manifestStore.update(sessionID: sessionID) { durable in
+                    durable.status = .cancelled
+                    durable.cancelledAt = Date()
+                    durable.lastError = nil
+                }
+                let quiescence = try await jobQueue.cancelAndQuiesceJobs(sessionID: sessionID)
+                guard quiescence == .quiesced else {
+                    recoveryErrors.append("Cancelled session cleanup is pending: \(sessionID)")
+                    return
+                }
                 try workspace.removeEntireSession(manifest: manifest)
                 if recoverableCaptureSession?.manifest.id == sessionID {
                     recoverableCaptureSession = nil

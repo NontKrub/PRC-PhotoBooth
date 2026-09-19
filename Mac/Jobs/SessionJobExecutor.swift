@@ -74,9 +74,11 @@ final class SessionJobExecutor: SessionJobExecuting {
         let frameName = manifest.frameSnapshotFileName
         let foregroundName = manifest.foregroundOverlaySnapshotFileName
         do {
-            try await Task.detached(priority: .userInitiated) {
+            let worker = Task.detached(priority: .userInitiated) {
+                try Task.checkCancellation()
                 let images = try workspace.loadAcceptedImages(manifest: manifest)
                 for index in 0..<eventConfig.photoCount {
+                    try Task.checkCancellation()
                     guard images[index] != nil else {
                         throw JobExecutionError.permanent("Accepted photograph is missing for index \(index).")
                     }
@@ -101,12 +103,18 @@ final class SessionJobExecutor: SessionJobExecuting {
                     framePNG: frame,
                     foregroundOverlayPNG: foreground
                 ).render(images: filteredImages, qrPayload: qrPayload)
+                try Task.checkCancellation()
                 try Self.savePNGAtomically(
                     strip,
                     compositor: Compositor(config: eventConfig, framePNG: nil),
                     to: directory.appendingPathComponent("strip.png")
                 )
-            }.value
+            }
+            try await withTaskCancellationHandler(operation: {
+                try await worker.value
+            }, onCancel: {
+                worker.cancel()
+            })
         } catch is CancellationError {
             throw CancellationError()
         } catch let error as JobExecutionError {
@@ -116,9 +124,10 @@ final class SessionJobExecutor: SessionJobExecuting {
         }
 
         do {
-            var updated = manifest
-            updated.stripFileName = "strip.png"
-            try await manifestStore.save(updated)
+            try Task.checkCancellation()
+            let updated = try await manifestStore.update(sessionID: manifest.id) {
+                $0.stripFileName = "strip.png"
+            }
             if store.fetchSession(id: manifest.id) == nil {
                 _ = store.restoreSessionRecord(from: updated)
             }
@@ -164,9 +173,15 @@ final class SessionJobExecutor: SessionJobExecuting {
         }
         guard document.gallery.mode != .disabled else { return }
         do {
-            _ = try await Task.detached(priority: .utility) {
+            let worker = Task.detached(priority: .utility) {
+                try Task.checkCancellation()
                 try GalleryThumbnailGenerator().generate(manifest: manifest)
-            }.value
+            }
+            try await withTaskCancellationHandler(operation: {
+                try await worker.value
+            }, onCancel: {
+                worker.cancel()
+            })
         } catch is CancellationError {
             throw CancellationError()
         } catch {
@@ -178,9 +193,10 @@ final class SessionJobExecutor: SessionJobExecuting {
     private func renderGIF(_ manifest: SessionManifest) async throws {
         let directory = sessionDirectory(for: manifest)
         guard manifest.shots.contains(where: { !$0.gifFrameFileNames.isEmpty }) else {
-            var updated = try await manifestStore.load(sessionID: manifest.id)
-            updated.gifFileName = nil
-            try await manifestStore.save(updated)
+            try Task.checkCancellation()
+            _ = try await manifestStore.update(sessionID: manifest.id) {
+                $0.gifFileName = nil
+            }
             return
         }
         let destination = directory.appendingPathComponent("booth.gif")
@@ -191,7 +207,8 @@ final class SessionJobExecutor: SessionJobExecuting {
             let preset = manifest.eventConfig.gifQualityPreset
             let workspace = workspace
             let filterPipeline = filterPipeline
-            let didRender = try await Task.detached(priority: .userInitiated) {
+            let worker = Task.detached(priority: .userInitiated) {
+                try Task.checkCancellation()
                 let acceptedImages = try workspace.loadAcceptedImages(manifest: manifest)
                 let frame = try Self.loadImage(named: manifest.frameSnapshotFileName, label: "Frame", in: directory)
                 let foreground = try Self.loadImage(
@@ -216,14 +233,22 @@ final class SessionJobExecutor: SessionJobExecuting {
                     to: temporary
                 )
                 guard didRender else { return false }
+                try Task.checkCancellation()
                 _ = try Self.validatedFileByteCount(at: temporary)
+                try Task.checkCancellation()
                 try Self.replaceFile(at: destination, with: temporary)
                 return true
-            }.value
+            }
+            let didRender = try await withTaskCancellationHandler(operation: {
+                try await worker.value
+            }, onCancel: {
+                worker.cancel()
+            })
             guard didRender else { return }
-            var updated = try await manifestStore.load(sessionID: manifest.id)
-            updated.gifFileName = "booth.gif"
-            try await manifestStore.save(updated)
+            try Task.checkCancellation()
+            let updated = try await manifestStore.update(sessionID: manifest.id) {
+                $0.gifFileName = "booth.gif"
+            }
             if store.fetchSession(id: manifest.id) == nil {
                 _ = store.restoreSessionRecord(from: updated)
             }

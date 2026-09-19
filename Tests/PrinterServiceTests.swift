@@ -164,7 +164,7 @@ struct PrinterServiceTests {
         #expect(printer.printSuccessCount == successesBefore)
     }
 
-    @Test("timeout is reported as unknown and stops automatic retry")
+    @Test("timeout is reported as unknown until the backend completes")
     @MainActor
     func timeoutIsUnknown() async throws {
         let backend = TestPrinterBackend(names: ["Canon"], defaultName: "Canon")
@@ -175,13 +175,15 @@ struct PrinterServiceTests {
             _ = try await printer.printTestPage()
             Issue.record("Expected unknown print completion")
         } catch let error as JobExecutionError {
-            if case .permanent = error {
+            if case .sideEffectUnknown = error {
                 // Expected: the printer must be verified before another job.
             } else {
                 Issue.record("Expected permanent unknown-print result")
             }
         }
         #expect(printer.lastTestResult?.outcome == .unknown)
+        #expect(printer.isPrinting == true)
+        backend.completeLate()
         #expect(printer.isPrinting == false)
     }
 }
@@ -199,6 +201,7 @@ private final class TestPrinterBackend: PrinterBackend {
     var defaultName: String?
     private(set) var requests: [Request] = []
     private var nextError: Error?
+    private var completionHandler: (@MainActor @Sendable () -> Void)?
 
     init(names: [String], defaultName: String?) {
         self.names = names
@@ -207,6 +210,9 @@ private final class TestPrinterBackend: PrinterBackend {
 
     func availablePrinterNames() -> [String] { names }
     func defaultPrinterName() -> String? { defaultName }
+    func setOperationCompletionHandler(_ handler: (@MainActor @Sendable () -> Void)?) {
+        completionHandler = handler
+    }
 
     func submit(_ request: PrinterPrintRequest) async throws {
         if let nextError {
@@ -223,6 +229,10 @@ private final class TestPrinterBackend: PrinterBackend {
 
     func failNext(with error: Error) {
         nextError = error
+    }
+
+    func completeLate() {
+        completionHandler?()
     }
 }
 

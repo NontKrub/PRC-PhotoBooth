@@ -28,6 +28,7 @@ enum SessionJobStatus: String, Codable, Sendable {
 enum SessionJobFailureDisposition: String, Codable, Sendable {
     case retryable
     case permanent
+    case sideEffectUnknown
 }
 
 enum CloudUploadRequeueResult: String, Sendable, Equatable {
@@ -56,10 +57,11 @@ struct SessionJob: Codable, Sendable, Identifiable, Equatable {
 enum JobExecutionError: LocalizedError, Sendable {
     case retryable(String)
     case permanent(String)
+    case sideEffectUnknown(String)
 
     var errorDescription: String? {
         switch self {
-        case .retryable(let message), .permanent(let message): return message
+        case .retryable(let message), .permanent(let message), .sideEffectUnknown(let message): return message
         }
     }
 }

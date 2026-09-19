@@ -121,6 +121,24 @@ final class BoothCoordinator {
             return true
         }
     }
+
+    var operationsSessionStatus: String? {
+        switch sessionLifecycleOperation {
+        case .cancelling:
+            return "Cancelling"
+        case .completing:
+            return "Finalizing"
+        case .idle:
+            guard currentSession != nil else { return nil }
+            switch stateMachine.phase {
+            case .processing: return "Finalizing"
+            case .captureRecovery: return "Capture recovery"
+            case .finished: return "Finished"
+            case .idle, .selectingExperience, .readyToStart: return "Ready"
+            case .countdown, .captured, .review: return "Capturing"
+            }
+        }
+    }
     var previewFrameRate: PreviewFrameRate {
         get { PreviewFrameRate(rawValue: UserDefaults.standard.integer(forKey: "previewFrameRate")) ?? .standard }
         set {
@@ -148,13 +166,28 @@ final class BoothCoordinator {
     private var currentCountdown: CountdownDescriptor?
     private var sessionMessageSequence: UInt64 = 0
     private var sessionLifecycleGeneration: UInt64 = 0
+    private enum SessionLifecycleOperation: Equatable {
+        case idle
+        case cancelling(sessionID: String)
+        case completing(sessionID: String)
+    }
+    private var sessionLifecycleOperation: SessionLifecycleOperation = .idle
     private var currentReviewStateToken: ReviewStateToken?
+    private var currentCaptureRecoveryStateToken: CaptureRecoveryStateToken?
     private struct ReviewRequestRecord {
         let state: ReviewStateToken
+        let action: ReviewAction
         let result: ReviewDecisionResult
     }
     private var recentReviewRequests: [UUID: ReviewRequestRecord] = [:]
     private var recentReviewRequestOrder: [UUID] = []
+    private struct CaptureRecoveryRequestRecord {
+        let state: CaptureRecoveryStateToken
+        let action: CaptureRecoveryAction
+        let result: CaptureRecoveryActionResult
+    }
+    private var recentCaptureRecoveryRequests: [UUID: CaptureRecoveryRequestRecord] = [:]
+    private var recentCaptureRecoveryRequestOrder: [UUID] = []
     private var activeReviewRequestID: UUID?
     private var currentCaptureAttempt: CaptureAttempt?
     private var hasSeenDSLRConnection = false
@@ -687,18 +720,19 @@ final class BoothCoordinator {
     private func sendAsset(data: Data, reference: BoothAssetReference) -> Bool {
         assetSources[reference] = data
         guard connectionStatus.isAssetChannelReady else { return false }
-        guard let chunks = try? BoothAssetTransfer.chunks(data: data, reference: reference) else {
+        guard data.count <= BoothAssetTransfer.maximumAssetBytes else {
             errorMessage = "Asset could not be prepared for transfer: \(reference.assetID)"
             return false
         }
-        var accepted = true
-        for chunk in chunks {
-            if multipeer.sendAsset(chunk) != .sent { accepted = false }
+        let transport = multipeer
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            guard await transport.sendAsset(data: data, reference: reference) else {
+                self.errorMessage = "Asset transfer is unavailable: \(reference.assetID)"
+                return
+            }
         }
-        if !accepted {
-            errorMessage = "Asset transfer is unavailable: \(reference.assetID)"
-        }
-        return accepted
+        return true
     }
 
     private func sendReviewAsset(
@@ -1650,6 +1684,7 @@ final class BoothCoordinator {
         stateMachine.beginCountdown(photoIndex: photoIndex, captureAt: descriptor.captureAt)
         guard case .countdown(let index, _) = stateMachine.phase, index == photoIndex else { return }
         currentReviewStateToken = nil
+        currentCaptureRecoveryStateToken = nil
         currentCountdown = descriptor
         if let context = nextSessionMessageContext() {
             multipeer.sendControl(.beginCountdown(context: context, descriptor: descriptor))
@@ -1776,6 +1811,11 @@ final class BoothCoordinator {
             currentReviewStateToken = nil
             reviewDecisionPending = false
             if let context = nextSessionMessageContext() {
+                currentCaptureRecoveryStateToken = CaptureRecoveryStateToken(
+                    sessionID: context.sessionID,
+                    photoIndex: photoIndex,
+                    revision: context.sequence
+                )
                 multipeer.sendControl(.captureRecovery(context: context, photoIndex: photoIndex, failure: summary))
             }
         }
@@ -1789,11 +1829,10 @@ final class BoothCoordinator {
         reason: String?,
         receiveDuration: Double?
     ) async {
-        guard var manifest = currentManifest,
+        guard let manifest = currentManifest,
               currentManifestID == manifest.id else { return }
         let lifecycleGeneration = sessionLifecycleGeneration
         let sessionID = manifest.id
-        var records = manifest.captureAttempts ?? []
         let record = CaptureAttemptRecord(
             id: attempt.id.uuidString,
             photoIndex: photoIndex,
@@ -1803,18 +1842,19 @@ final class BoothCoordinator {
             reason: reason,
             receiveDuration: receiveDuration
         )
-        if let index = records.firstIndex(where: { $0.id == record.id }) {
-            records[index] = record
-        } else {
-            records.append(record)
-        }
-        manifest.captureAttempts = records
-        manifest.updatedAt = Date()
         do {
-            try await manifestStore.save(manifest)
+            let saved = try await manifestStore.update(sessionID: sessionID) { durable in
+                var records = durable.captureAttempts ?? []
+                if let index = records.firstIndex(where: { $0.id == record.id }) {
+                    records[index] = record
+                } else {
+                    records.append(record)
+                }
+                durable.captureAttempts = records
+            }
             guard sessionLifecycleGeneration == lifecycleGeneration,
                   currentManifest?.id == sessionID else { return }
-            currentManifest = manifest
+            currentManifest = saved
         } catch {
             recoveryService.recordError("Capture attempt could not be persisted: \(error.localizedDescription)")
             errorMessage = "Capture diagnostics could not be persisted: \(error.localizedDescription)"
@@ -1822,18 +1862,19 @@ final class BoothCoordinator {
     }
 
     private func persistCaptureFailure(photoIndex: Int, error: Error) async -> Bool {
-        guard var manifest = currentManifest,
+        guard let manifest = currentManifest,
               currentManifestID == manifest.id else { return false }
         let lifecycleGeneration = sessionLifecycleGeneration
         let sessionID = manifest.id
-        manifest.lastError = error.localizedDescription
-        manifest.nextPhotoIndex = photoIndex
-        manifest.updatedAt = Date()
+        let persistedErrorMessage = error.localizedDescription
         do {
-            try await manifestStore.save(manifest)
+            let saved = try await manifestStore.update(sessionID: sessionID) { durable in
+                durable.lastError = persistedErrorMessage
+                durable.nextPhotoIndex = photoIndex
+            }
             guard sessionLifecycleGeneration == lifecycleGeneration,
                   currentManifest?.id == sessionID else { return false }
-            currentManifest = manifest
+            currentManifest = saved
         } catch {
             recoveryService.recordError("Capture failure could not be persisted: \(error.localizedDescription)")
             return false
@@ -1941,6 +1982,47 @@ final class BoothCoordinator {
     }
 
     func handleCaptureRecoveryAction(_ action: CaptureRecoveryAction) {
+        guard let state = currentCaptureRecoveryStateToken else { return }
+        handleCaptureRecoveryAction(state: state, requestID: UUID(), action: action)
+    }
+
+    private func handleCaptureRecoveryAction(
+        state: CaptureRecoveryStateToken,
+        requestID: UUID,
+        action: CaptureRecoveryAction
+    ) {
+        if let record = recentCaptureRecoveryRequests[requestID] {
+            guard record.state == state, record.action == action else {
+                multipeer.sendControl(.captureRecoveryActionResult(requestID: requestID, result: .stale))
+                return
+            }
+            let result = record.result == .accepted ? .duplicate : record.result
+            multipeer.sendControl(.captureRecoveryActionResult(requestID: requestID, result: result))
+            if record.result == .accepted { resynciPad() }
+            return
+        }
+
+        guard let current = currentCaptureRecoveryStateToken else {
+            multipeer.sendControl(.captureRecoveryActionResult(requestID: requestID, result: .stale))
+            return
+        }
+        guard current.sessionID == state.sessionID else {
+            multipeer.sendControl(.captureRecoveryActionResult(requestID: requestID, result: .sessionChanged))
+            return
+        }
+        let requestedPhotoIndex: Int = switch action {
+        case .retryReceive(let index), .retake(let index), .continueSession(let index), .usePrevious(let index): index
+        }
+        guard current.photoIndex == state.photoIndex,
+              requestedPhotoIndex == state.photoIndex else {
+            multipeer.sendControl(.captureRecoveryActionResult(requestID: requestID, result: .wrongPhoto))
+            return
+        }
+        guard current == state else {
+            multipeer.sendControl(.captureRecoveryActionResult(requestID: requestID, result: .stale))
+            return
+        }
+
         let customerAction: CustomerDisplayAction
         switch action {
         case .retryReceive(let photoIndex):
@@ -1952,8 +2034,12 @@ final class BoothCoordinator {
         case .usePrevious(let photoIndex):
             customerAction = .usePreviousCapture(photoIndex: photoIndex)
         }
-        guard !reviewDecisionPending,
-              CustomerDisplayWorkflow.canApply(customerAction, in: stateMachine.phase) else { return }
+        guard case .idle = sessionLifecycleOperation,
+              !reviewDecisionPending,
+              CustomerDisplayWorkflow.canApply(customerAction, in: stateMachine.phase) else {
+            multipeer.sendControl(.captureRecoveryActionResult(requestID: requestID, result: .stale))
+            return
+        }
         if case .continueSession(let photoIndex) = action {
             // The iPad decides which buttons to show; the Mac decides what is
             // legal. Without this the client can request a deferral that has
@@ -1961,7 +2047,10 @@ final class BoothCoordinator {
             let hasOtherMissing = currentManifest?.shots.contains {
                 $0.photoIndex != photoIndex && $0.imageFileName == nil
             } ?? false
-            guard hasOtherMissing else { return }
+            guard hasOtherMissing else {
+                multipeer.sendControl(.captureRecoveryActionResult(requestID: requestID, result: .wrongPhoto))
+                return
+            }
         }
         reviewDecisionPending = true
         Task { @MainActor [weak self] in
@@ -1977,6 +2066,25 @@ final class BoothCoordinator {
             case .usePrevious(let photoIndex):
                 await self.usePreviousCapture(photoIndex: photoIndex)
             }
+            let result: CaptureRecoveryActionResult = self.currentCaptureRecoveryStateToken == state
+                ? .persistenceFailed
+                : .accepted
+            if result == .accepted {
+                self.recentCaptureRecoveryRequests[requestID] = CaptureRecoveryRequestRecord(
+                    state: state,
+                    action: action,
+                    result: result
+                )
+                self.recentCaptureRecoveryRequestOrder.removeAll { $0 == requestID }
+                self.recentCaptureRecoveryRequestOrder.append(requestID)
+                if self.recentCaptureRecoveryRequestOrder.count > 32,
+                   let expired = self.recentCaptureRecoveryRequestOrder.first {
+                    self.recentCaptureRecoveryRequestOrder.removeFirst()
+                    self.recentCaptureRecoveryRequests.removeValue(forKey: expired)
+                }
+            }
+            self.multipeer.sendControl(.captureRecoveryActionResult(requestID: requestID, result: result))
+            if result == .accepted { self.resynciPad() }
         }
     }
 
@@ -2005,6 +2113,7 @@ final class BoothCoordinator {
             capture.storeStill(image, for: photoIndex)
             currentFilteredReviewImages[photoIndex] = filtered
             stateMachine.enterReview(photoIndex: photoIndex, thumbnailData: thumbData, reviewImageData: reviewData)
+            currentCaptureRecoveryStateToken = nil
             if let context {
                 currentReviewStateToken = ReviewStateToken(
                     sessionID: context.sessionID,
@@ -2051,6 +2160,11 @@ final class BoothCoordinator {
             stateMachine.enterCaptureRecovery(photoIndex: photoIndex, failure: summary)
             currentCaptureAttempt = nil
             if let context = nextSessionMessageContext() {
+                currentCaptureRecoveryStateToken = CaptureRecoveryStateToken(
+                    sessionID: context.sessionID,
+                    photoIndex: photoIndex,
+                    revision: context.sequence
+                )
                 multipeer.sendControl(.captureRecovery(context: context, photoIndex: photoIndex, failure: summary))
             }
         }
@@ -2059,31 +2173,32 @@ final class BoothCoordinator {
     private func retakeFailedCapture(photoIndex: Int) async {
         guard case .captureRecovery(let currentIndex, _) = stateMachine.phase,
               currentIndex == photoIndex,
-              var manifest = currentManifest else { return }
+              let manifest = currentManifest else { return }
         let lifecycleGeneration = sessionLifecycleGeneration
-        let current = manifest.shots.first(where: { $0.photoIndex == photoIndex })
         let count = retakeCounts[photoIndex, default: 0] + 1
-        upsertManifestShot(
-            &manifest,
-            photoIndex: photoIndex,
-            imageFileName: nil,
-            gifFrameFileNames: [],
-            retakeCount: count,
-            acceptedAt: nil,
-            previousImageFileName: current?.imageFileName ?? current?.previousImageFileName,
-            previousGifFrameFileNames: current?.gifFrameFileNames.isEmpty == false
-                ? current?.gifFrameFileNames
-                : current?.previousGifFrameFileNames,
-            previousAcceptedAt: current?.acceptedAt ?? current?.previousAcceptedAt
-        )
-        manifest.nextPhotoIndex = photoIndex
-        manifest.status = .capturing
-        manifest.lastError = nil
         do {
-            try await manifestStore.save(manifest)
+            let committedManifest = try await manifestStore.update(sessionID: manifest.id) { durable in
+                let current = durable.shots.first(where: { $0.photoIndex == photoIndex })
+                upsertRuntimeShot(
+                    in: &durable.shots,
+                    photoIndex: photoIndex,
+                    imageFileName: nil,
+                    gifFrameFileNames: [],
+                    retakeCount: max(count, (current?.retakeCount ?? 0) + 1),
+                    acceptedAt: nil,
+                    previousImageFileName: current?.imageFileName ?? current?.previousImageFileName,
+                    previousGifFrameFileNames: current?.gifFrameFileNames.isEmpty == false
+                        ? current?.gifFrameFileNames
+                        : current?.previousGifFrameFileNames,
+                    previousAcceptedAt: current?.acceptedAt ?? current?.previousAcceptedAt
+                )
+                durable.nextPhotoIndex = photoIndex
+                durable.status = .capturing
+                durable.lastError = nil
+            }
             guard sessionLifecycleGeneration == lifecycleGeneration,
-                  currentManifest?.id == manifest.id else { return }
-            currentManifest = manifest
+                  currentManifest?.id == committedManifest.id else { return }
+            currentManifest = committedManifest
             retakeCounts[photoIndex] = count
             await recordCaptureAttempt(
                 CaptureAttempt(),
@@ -2094,8 +2209,8 @@ final class BoothCoordinator {
                 receiveDuration: nil
             )
             guard sessionLifecycleGeneration == lifecycleGeneration,
-                  currentManifest?.id == manifest.id else { return }
-            recordOperation(.captureRetried, sessionID: manifest.id, photoIndex: photoIndex)
+                  currentManifest?.id == committedManifest.id else { return }
+            recordOperation(.captureRetried, sessionID: committedManifest.id, photoIndex: photoIndex)
             currentCaptureAttempt = nil
             stateMachine.retakeFailedCapture(photoIndex: photoIndex)
             beginCountdown(photoIndex: photoIndex)
@@ -2107,24 +2222,24 @@ final class BoothCoordinator {
     private func continueAfterCaptureFailure(photoIndex: Int) async {
         guard case .captureRecovery(let currentIndex, _) = stateMachine.phase,
               currentIndex == photoIndex,
-              var manifest = currentManifest else { return }
+              let manifest = currentManifest else { return }
         let lifecycleGeneration = sessionLifecycleGeneration
         let next = stateMachine.nextPhotoAfterCaptureFailure(photoIndex: photoIndex)
         guard let next else {
             errorMessage = "Cannot continue while a required photograph is missing."
             return
         }
-        manifest.nextPhotoIndex = next
-        manifest.status = .capturing
-        manifest.updatedAt = Date()
         do {
-            try await manifestStore.save(manifest)
+            let committedManifest = try await manifestStore.update(sessionID: manifest.id) { durable in
+                durable.nextPhotoIndex = next
+                durable.status = .capturing
+            }
             guard case .captureRecovery(let current, _) = stateMachine.phase,
                   current == photoIndex,
                   sessionLifecycleGeneration == lifecycleGeneration,
-                  currentManifest?.id == manifest.id else { return }
+                  currentManifest?.id == committedManifest.id else { return }
             guard stateMachine.continueAfterCaptureFailure(photoIndex: photoIndex) == next else { return }
-            currentManifest = manifest
+            currentManifest = committedManifest
             await recordCaptureAttempt(
                 CaptureAttempt(),
                 photoIndex: photoIndex,
@@ -2134,8 +2249,8 @@ final class BoothCoordinator {
                 receiveDuration: nil
             )
             guard sessionLifecycleGeneration == lifecycleGeneration,
-                  currentManifest?.id == manifest.id else { return }
-            recordOperation(.captureDeferred, sessionID: manifest.id, photoIndex: photoIndex)
+                  currentManifest?.id == committedManifest.id else { return }
+            recordOperation(.captureDeferred, sessionID: committedManifest.id, photoIndex: photoIndex)
             currentCaptureAttempt = nil
             beginCountdown(photoIndex: next)
         } catch {
@@ -2146,7 +2261,7 @@ final class BoothCoordinator {
     private func usePreviousCapture(photoIndex: Int) async {
         guard case .captureRecovery(let currentIndex, _) = stateMachine.phase,
               currentIndex == photoIndex,
-              var manifest = currentManifest,
+              let manifest = currentManifest,
               let previous = manifest.shots.first(where: { $0.photoIndex == photoIndex }),
               let imageFileName = previous.previousImageFileName else { return }
         let lifecycleGeneration = sessionLifecycleGeneration
@@ -2166,27 +2281,29 @@ final class BoothCoordinator {
                 index: photoIndex
             )
             let gifs = previous.previousGifFrameFileNames ?? []
-            upsertManifestShot(
-                &manifest,
-                photoIndex: photoIndex,
-                imageFileName: imageFileName,
-                gifFrameFileNames: gifs,
-                retakeCount: previous.retakeCount,
-                acceptedAt: previous.previousAcceptedAt ?? Date()
-            )
-            manifest.nextPhotoIndex = (0..<manifest.eventConfig.photoCount)
-                .first { index in
-                    manifest.shots.first(where: { $0.photoIndex == index })?.imageFileName == nil
-                } ?? manifest.eventConfig.photoCount
-            manifest.status = manifest.nextPhotoIndex == manifest.eventConfig.photoCount ? .finalizing : .capturing
-            manifest.lastError = nil
-            try await manifestStore.save(manifest)
+            let committedManifest = try await manifestStore.update(sessionID: manifest.id) { durable in
+                upsertRuntimeShot(
+                    in: &durable.shots,
+                    photoIndex: photoIndex,
+                    imageFileName: imageFileName,
+                    gifFrameFileNames: gifs,
+                    retakeCount: previous.retakeCount,
+                    acceptedAt: previous.previousAcceptedAt ?? Date()
+                )
+                durable.nextPhotoIndex = (0..<durable.eventConfig.photoCount)
+                    .first { index in
+                        durable.shots.first(where: { $0.photoIndex == index })?.imageFileName == nil
+                    } ?? durable.eventConfig.photoCount
+                durable.status = durable.nextPhotoIndex == durable.eventConfig.photoCount ? .finalizing : .capturing
+                durable.lastError = nil
+            }
             guard sessionLifecycleGeneration == lifecycleGeneration,
-                  currentManifest?.id == manifest.id else { return }
-            currentManifest = manifest
+                  currentManifest?.id == committedManifest.id else { return }
+            currentManifest = committedManifest
             capture.storeStill(image, for: photoIndex)
             currentFilteredReviewImages[photoIndex] = filtered
             stateMachine.usePreviousCapture(photoIndex: photoIndex, thumbnailData: thumbData, reviewImageData: reviewData)
+            currentCaptureRecoveryStateToken = nil
             await recordCaptureAttempt(
                 CaptureAttempt(),
                 photoIndex: photoIndex,
@@ -2196,13 +2313,13 @@ final class BoothCoordinator {
                 receiveDuration: nil
             )
             guard sessionLifecycleGeneration == lifecycleGeneration,
-                  currentManifest?.id == manifest.id else { return }
-            recordOperation(.previousPhotoUsed, sessionID: manifest.id, photoIndex: photoIndex)
+                  currentManifest?.id == committedManifest.id else { return }
+            recordOperation(.previousPhotoUsed, sessionID: committedManifest.id, photoIndex: photoIndex)
             currentCaptureAttempt = nil
             if case .processing = stateMachine.phase {
                 await finalizeSession()
                 guard sessionLifecycleGeneration == lifecycleGeneration,
-                      currentManifest?.id == manifest.id else { return }
+                      currentManifest?.id == committedManifest.id else { return }
             } else if case .countdown(let next, _) = stateMachine.phase {
                 beginCountdown(photoIndex: next)
             }
@@ -2248,13 +2365,15 @@ final class BoothCoordinator {
     private func acceptShot(photoIndex: Int) async -> ReviewDecisionResult {
         guard case .review(let currentIndex) = stateMachine.phase,
               currentIndex == photoIndex,
-              var manifest = currentManifest,
+              case .idle = sessionLifecycleOperation,
+              let manifest = currentManifest,
               currentManifestID == manifest.id,
               let image = capture.capturedStills[photoIndex] else {
             errorMessage = "Cannot keep this photograph because its review state is unavailable."
             return .wrongPhoto
         }
         let lifecycleGeneration = sessionLifecycleGeneration
+        let retakeCount = retakeCounts[photoIndex] ?? 0
 
         do {
             let saved = try workspace.saveAcceptedCapture(
@@ -2263,44 +2382,48 @@ final class BoothCoordinator {
                 photoIndex: photoIndex,
                 workspace: workspaceDescriptor(from: manifest)
             )
-            upsertManifestShot(
-                &manifest,
-                photoIndex: photoIndex,
-                imageFileName: saved.imageFileName,
-                gifFrameFileNames: saved.gifFrameFileNames,
-                retakeCount: retakeCounts[photoIndex] ?? 0,
-                acceptedAt: Date()
-            )
-            manifest.nextPhotoIndex = (0..<manifest.eventConfig.photoCount)
-                .first { index in
-                    manifest.shots.first(where: { $0.photoIndex == index })?.imageFileName == nil
-                } ?? manifest.eventConfig.photoCount
-            let isComplete = manifest.nextPhotoIndex == manifest.eventConfig.photoCount
-            manifest.status = isComplete ? .finalizing : .capturing
-            manifest.lastError = nil
-            try await manifestStore.save(manifest)
+            let committedManifest = try await manifestStore.update(sessionID: manifest.id) { durable in
+                upsertRuntimeShot(
+                    in: &durable.shots,
+                    photoIndex: photoIndex,
+                    imageFileName: saved.imageFileName,
+                    gifFrameFileNames: saved.gifFrameFileNames,
+                    retakeCount: retakeCount,
+                    acceptedAt: Date()
+                )
+                durable.nextPhotoIndex = (0..<durable.eventConfig.photoCount)
+                    .first { index in
+                        durable.shots.first(where: { $0.photoIndex == index })?.imageFileName == nil
+                    } ?? durable.eventConfig.photoCount
+                durable.status = durable.nextPhotoIndex == durable.eventConfig.photoCount ? .finalizing : .capturing
+                durable.lastError = nil
+            }
             guard sessionLifecycleGeneration == lifecycleGeneration,
-                  currentManifest?.id == manifest.id else { return .stale }
-            currentManifest = manifest
-            let session = currentSession ?? store.restoreSessionRecord(from: manifest)
+                  currentManifest?.id == committedManifest.id else { return .stale }
+            currentManifest = committedManifest
+            try? workspace.pruneUnreferencedCaptureFiles(manifest: committedManifest)
+            let session = currentSession ?? store.restoreSessionRecord(from: committedManifest)
             store.upsertShot(
                 session: session,
                 photoIndex: photoIndex,
                 imagePath: saved.imageFileName,
-                retakeCount: retakeCounts[photoIndex] ?? 0
+                retakeCount: retakeCount
             )
 
             stateMachine.keepShot(photoIndex: photoIndex)
             if case .processing = stateMachine.phase {
                 await finalizeSession()
                 guard sessionLifecycleGeneration == lifecycleGeneration,
-                      currentManifest?.id == manifest.id else { return .stale }
+                      currentManifest?.id == committedManifest.id else { return .stale }
             } else if case .countdown(let next, _) = stateMachine.phase {
                 beginCountdown(photoIndex: next)
             }
             currentReviewStateToken = nil
             return .accepted
         } catch {
+            if let currentManifest {
+                try? workspace.pruneUnreferencedCaptureFiles(manifest: currentManifest)
+            }
             errorMessage = "Could not save photograph \(photoIndex + 1): \(error.localizedDescription)"
             return .persistenceFailed
         }
@@ -2313,9 +2436,10 @@ final class BoothCoordinator {
     private func rememberReviewRequest(
         _ requestID: UUID,
         state: ReviewStateToken,
+        action: ReviewAction,
         result: ReviewDecisionResult
     ) {
-        recentReviewRequests[requestID] = ReviewRequestRecord(state: state, result: result)
+        recentReviewRequests[requestID] = ReviewRequestRecord(state: state, action: action, result: result)
         recentReviewRequestOrder.removeAll { $0 == requestID }
         recentReviewRequestOrder.append(requestID)
         if recentReviewRequestOrder.count > 32 {
@@ -2334,12 +2458,15 @@ final class BoothCoordinator {
         action: ReviewAction
     ) {
         if let record = recentReviewRequests[requestID] {
-            guard record.state == state else {
+            guard record.state == state, record.action == action else {
                 sendReviewDecisionResult(requestID, .stale)
                 return
             }
-            sendReviewDecisionResult(requestID, .duplicate)
-            sendAuthoritativeReviewDecision()
+            sendReviewDecisionResult(
+                requestID,
+                record.result == .accepted ? .duplicate : record.result
+            )
+            if record.result == .accepted { sendAuthoritativeReviewDecision() }
             return
         }
 
@@ -2374,7 +2501,7 @@ final class BoothCoordinator {
             self.reviewDecisionPending = false
             self.activeReviewRequestID = nil
             if result != .persistenceFailed {
-                self.rememberReviewRequest(requestID, state: state, result: result)
+                self.rememberReviewRequest(requestID, state: state, action: action, result: result)
             }
             self.sendReviewDecisionResult(requestID, result)
             if result == .accepted { self.sendAuthoritativeReviewDecision() }
@@ -2385,37 +2512,43 @@ final class BoothCoordinator {
         _ = source
         guard case .review(let currentIndex) = stateMachine.phase,
               currentIndex == photoIndex,
-              var manifest = currentManifest else { return .wrongPhoto }
+              case .idle = sessionLifecycleOperation,
+              let manifest = currentManifest else { return .wrongPhoto }
         let lifecycleGeneration = sessionLifecycleGeneration
 
         let count = retakeCounts[photoIndex, default: 0] + 1
-        let previous = manifest.shots.first(where: { $0.photoIndex == photoIndex })
-        upsertManifestShot(
-            &manifest,
-            photoIndex: photoIndex,
-            imageFileName: nil,
-            gifFrameFileNames: [],
-            retakeCount: count,
-            acceptedAt: nil,
-            previousImageFileName: previous?.imageFileName ?? previous?.previousImageFileName,
-            previousGifFrameFileNames: previous?.gifFrameFileNames.isEmpty == false
-                ? previous?.gifFrameFileNames
-                : previous?.previousGifFrameFileNames,
-            previousAcceptedAt: previous?.acceptedAt ?? previous?.previousAcceptedAt
-        )
+        let previousImagePath = manifest.shots.first(where: { $0.photoIndex == photoIndex })?.imageFileName
         do {
-            try await manifestStore.save(manifest)
+            let committedManifest = try await manifestStore.update(sessionID: manifest.id) { durable in
+                let previous = durable.shots.first(where: { $0.photoIndex == photoIndex })
+                upsertRuntimeShot(
+                    in: &durable.shots,
+                    photoIndex: photoIndex,
+                    imageFileName: nil,
+                    gifFrameFileNames: [],
+                    retakeCount: max(count, (previous?.retakeCount ?? 0) + 1),
+                    acceptedAt: nil,
+                    previousImageFileName: previous?.imageFileName ?? previous?.previousImageFileName,
+                    previousGifFrameFileNames: previous?.gifFrameFileNames.isEmpty == false
+                        ? previous?.gifFrameFileNames
+                        : previous?.previousGifFrameFileNames,
+                    previousAcceptedAt: previous?.acceptedAt ?? previous?.previousAcceptedAt
+                )
+                durable.nextPhotoIndex = photoIndex
+                durable.status = .capturing
+                durable.lastError = nil
+            }
             guard sessionLifecycleGeneration == lifecycleGeneration,
-                  currentManifest?.id == manifest.id else { return .stale }
-            currentManifest = manifest
-            retakeCounts[photoIndex] = count
+                  currentManifest?.id == committedManifest.id else { return .stale }
+            currentManifest = committedManifest
+            retakeCounts[photoIndex] = committedManifest.shots.first(where: { $0.photoIndex == photoIndex })?.retakeCount ?? count
             sessionAssetReferences.removeValue(forKey: photoIndex)
             currentFilteredReviewImages.removeValue(forKey: photoIndex)
             if let session = currentSession {
                 store.upsertShot(
                     session: session,
                     photoIndex: photoIndex,
-                    imagePath: previous?.imageFileName,
+                    imagePath: previousImagePath,
                     retakeCount: count
                 )
             }
@@ -2430,15 +2563,16 @@ final class BoothCoordinator {
     }
 
     private func cancelCurrentSession() async {
-        sessionLifecycleGeneration &+= 1
-        let cancellationGeneration = sessionLifecycleGeneration
-        cancelCountdown()
-        guard currentSession != nil, var manifest = currentManifest else {
+        guard case .idle = sessionLifecycleOperation else { return }
+        guard let session = currentSession, let manifest = currentManifest else {
             reviewDecisionPending = false
             currentReviewStateToken = nil
+            currentCaptureRecoveryStateToken = nil
             activeReviewRequestID = nil
             recentReviewRequests.removeAll(keepingCapacity: true)
             recentReviewRequestOrder.removeAll(keepingCapacity: true)
+            recentCaptureRecoveryRequests.removeAll(keepingCapacity: true)
+            recentCaptureRecoveryRequestOrder.removeAll(keepingCapacity: true)
             sessionAssetReferences = [:]
             stripAssetReference = nil
             assetSources = [:]
@@ -2452,24 +2586,44 @@ final class BoothCoordinator {
             resynciPad()
             return
         }
-        manifest.status = .cancelled
-        manifest.cancelledAt = Date()
+        sessionLifecycleOperation = .cancelling(sessionID: manifest.id)
+        let cancelledManifest: SessionManifest
         do {
-            try await manifestStore.save(manifest)
+            cancelledManifest = try await manifestStore.update(sessionID: manifest.id) { durable in
+                durable.status = .cancelled
+                durable.cancelledAt = Date()
+                durable.lastError = nil
+            }
         } catch {
+            sessionLifecycleOperation = .idle
             recoveryService.recordError("Cancelled session could not be persisted: \(error.localizedDescription)")
             errorMessage = "Session cancellation could not be persisted: \(error.localizedDescription)"
             return
         }
-        guard sessionLifecycleGeneration == cancellationGeneration else { return }
-        recordOperation(.sessionCancelled, sessionID: manifest.id)
-        jobQueue.cancelJobs(sessionID: manifest.id)
+
+        currentManifest = cancelledManifest
+        sessionLifecycleGeneration &+= 1
+        cancelCountdown()
+        reviewDecisionPending = false
         do {
-            try workspace.removeEntireSession(manifest: manifest)
+            let result = try await jobQueue.cancelAndQuiesceJobs(sessionID: manifest.id)
+            if result == .cleanupPending {
+                recoveryService.recordError("Cancelled session cleanup is pending because a job did not quiesce.")
+                errorMessage = "Session cancellation was saved; its files were retained while background work stops."
+            } else {
+                recordOperation(.sessionCancelled, sessionID: manifest.id)
+                do {
+                    try workspace.removeEntireSession(manifest: cancelledManifest)
+                } catch {
+                    recoveryService.recordError("Cancelled session files could not be removed: \(error.localizedDescription)")
+                }
+            }
         } catch {
-            recoveryService.recordError("Cancelled session files could not be removed: \(error.localizedDescription)")
+            recoveryService.recordError("Cancelled session jobs could not be quiesced: \(error.localizedDescription)")
+            errorMessage = "Session cancellation was saved; files were retained because background work could not be stopped."
         }
-        if let session = currentSession { store.deleteSession(session) }
+
+        store.deleteSession(session)
         currentManifest = nil
         currentManifestID = nil
         currentSession = nil
@@ -2487,10 +2641,14 @@ final class BoothCoordinator {
         capture.resetStills()
         reviewDecisionPending = false
         currentReviewStateToken = nil
+        currentCaptureRecoveryStateToken = nil
         activeReviewRequestID = nil
         recentReviewRequests.removeAll(keepingCapacity: true)
         recentReviewRequestOrder.removeAll(keepingCapacity: true)
+        recentCaptureRecoveryRequests.removeAll(keepingCapacity: true)
+        recentCaptureRecoveryRequestOrder.removeAll(keepingCapacity: true)
         stateMachine.reset()
+        sessionLifecycleOperation = .idle
         attemptPendingLANRecoveryIfIdle()
         resynciPad()
     }
@@ -2671,12 +2829,11 @@ final class BoothCoordinator {
                 if let failed = jobs.first(where: {
                     ($0.kind == .renderStrip || $0.kind == .registerDownload) && $0.status == .failed
                 }) {
-                    var failedManifest = manifest
-                    failedManifest.status = .failed
-                    failedManifest.lastError = failed.lastError ?? "Required job failed."
-                    failedManifest.updatedAt = Date()
                     do {
-                        try await manifestStore.save(failedManifest)
+                        _ = try await manifestStore.update(sessionID: manifest.id) { durable in
+                            durable.status = .failed
+                            durable.lastError = failed.lastError ?? "Required job failed."
+                        }
                     } catch {
                         recoveryService.recordError("Failed recovery manifest update: \(error.localizedDescription)")
                     }
@@ -2686,30 +2843,29 @@ final class BoothCoordinator {
                       jobs.first(where: { $0.kind == .registerDownload })?.status == .succeeded else {
                     continue
                 }
-                var completed = manifest
-                completed.status = .completed
-                completed.completedAt = Date()
-                completed.lastError = nil
                 do {
-                    try await manifestStore.save(completed)
+                    let completed = try await manifestStore.update(sessionID: manifest.id) { durable in
+                        durable.status = .completed
+                        durable.completedAt = Date()
+                        durable.lastError = nil
+                    }
+                    _ = store.restoreSessionRecord(from: completed)
+                    store.finishSession(
+                        sessionID: completed.id,
+                        stripPath: completed.stripFileName.map { "\(completed.relativeDirectoryPath)/\($0)" },
+                        gifPath: completed.gifFileName.map { "\(completed.relativeDirectoryPath)/\($0)" }
+                    )
+                    if jobs.filter({ $0.kind == .renderGIF }).allSatisfy({
+                        $0.status == .succeeded || $0.status == .cancelled
+                    }) {
+                        do {
+                            try workspace.removeWorkingFiles(manifest: completed)
+                        } catch {
+                            recoveryService.recordError("Recovered working files could not be removed: \(error.localizedDescription)")
+                        }
+                    }
                 } catch {
                     recoveryService.recordError("Failed recovered-session completion update: \(error.localizedDescription)")
-                    continue
-                }
-                _ = store.restoreSessionRecord(from: completed)
-                store.finishSession(
-                    sessionID: completed.id,
-                    stripPath: completed.stripFileName.map { "\(completed.relativeDirectoryPath)/\($0)" },
-                    gifPath: completed.gifFileName.map { "\(completed.relativeDirectoryPath)/\($0)" }
-                )
-                if jobs.filter({ $0.kind == .renderGIF }).allSatisfy({
-                    $0.status == .succeeded || $0.status == .cancelled
-                }) {
-                    do {
-                        try workspace.removeWorkingFiles(manifest: completed)
-                    } catch {
-                        recoveryService.recordError("Recovered working files could not be removed: \(error.localizedDescription)")
-                    }
                 }
             }
         }
@@ -2717,22 +2873,15 @@ final class BoothCoordinator {
 
     private func markCurrentSessionFailed(message: String) async {
         guard let current = currentManifest, current.status != .failed else { return }
-        let manifest: SessionManifest
         do {
-            manifest = try await manifestStore.load(sessionID: current.id)
+            let updated = try await manifestStore.update(sessionID: current.id) { durable in
+                durable.status = .failed
+                durable.lastError = message
+            }
+            currentManifest = updated
         } catch {
             recoveryService.recordError("Failed to reload session after queue failure: \(error.localizedDescription)")
-            manifest = current
-        }
-        var updated = manifest
-        updated.status = .failed
-        updated.lastError = message
-        do {
-            try await manifestStore.save(updated)
-            currentManifest = updated
-        } catch {
-            recoveryService.recordError("Failed to persist session failure: \(error.localizedDescription)")
-            currentManifest = updated
+            errorMessage = "Session failure could not be persisted: \(error.localizedDescription)"
         }
     }
 
@@ -2740,6 +2889,7 @@ final class BoothCoordinator {
         guard let original = currentManifest,
               currentSession != nil,
               stateMachine.phase == .processing,
+              case .idle = sessionLifecycleOperation,
               completionInFlightSessionID != original.id,
               finishedAwaitingCustomerAckSessionID != original.id else { return }
         let lifecycleGeneration = sessionLifecycleGeneration
@@ -2759,29 +2909,32 @@ final class BoothCoordinator {
             errorMessage = "Session finished, but the local download server is unavailable. QR/download links were not published."
             return
         }
-        let latest: SessionManifest
-        do {
-            latest = try await manifestStore.load(sessionID: original.id)
-        } catch {
-            recoveryService.recordError("Failed to reload session before completion: \(error.localizedDescription)")
-            latest = original
-        }
         guard sessionLifecycleGeneration == lifecycleGeneration,
               currentManifest?.id == original.id else { return }
-        var manifest = latest
-        guard manifest.status != .completed else { return }
-        manifest.status = .completed
-        manifest.completedAt = Date()
-        manifest.lastError = nil
+        sessionLifecycleOperation = .completing(sessionID: original.id)
+        let manifest: SessionManifest
         do {
-            try await manifestStore.save(manifest)
+            manifest = try await manifestStore.update(sessionID: original.id) { durable in
+                guard durable.status != .completed else { return }
+                durable.status = .completed
+                durable.completedAt = Date()
+                durable.lastError = nil
+            }
         } catch {
+            sessionLifecycleOperation = .idle
             recoveryService.recordError("Completed session could not be persisted: \(error.localizedDescription)")
             errorMessage = "Completed session could not be persisted: \(error.localizedDescription)"
             return
         }
         guard sessionLifecycleGeneration == lifecycleGeneration,
-              currentManifest?.id == original.id else { return }
+              currentManifest?.id == original.id else {
+            sessionLifecycleOperation = .idle
+            return
+        }
+        guard manifest.status == .completed else {
+            sessionLifecycleOperation = .idle
+            return
+        }
         currentManifest = manifest
         lastCompletedSessionID = manifest.id
         recordOperation(.sessionCompleted, sessionID: manifest.id, duration: Date().timeIntervalSince(manifest.startedAt))
@@ -2848,6 +3001,7 @@ final class BoothCoordinator {
         currentSession = nil
         lastSessionPresentation = currentSessionPresentation
         currentSessionPresentation = nil
+        sessionLifecycleOperation = .idle
         attemptPendingLANRecoveryIfIdle()
     }
 
@@ -3096,8 +3250,8 @@ final class BoothCoordinator {
             startSession(selection: selection)
         case .reviewDecision(let state, let requestID, let action):
             handleClientReviewDecision(state: state, requestID: requestID, action: action)
-        case .captureRecoveryAction(let context, let action):
-            if acceptsClientSessionMessage(context) { handleCaptureRecoveryAction(action) }
+        case .captureRecoveryAction(let state, let requestID, let action):
+            handleCaptureRecoveryAction(state: state, requestID: requestID, action: action)
         case .customerFinished(let context):
             handleCustomerFinished(context)
         default: break
@@ -3246,8 +3400,12 @@ final class BoothCoordinator {
                 photoIndex: index,
                 revision: context.sequence
             )
+        } else if case .captureRecovery = phase {
+            // Keep the original recovery occurrence across reconnects. A new
+            // sync sequence must not make an old action valid again.
         } else {
             currentReviewStateToken = nil
+            currentCaptureRecoveryStateToken = nil
         }
         multipeer.sendControl(.sessionSync(snapshot: SessionSyncSnapshot(
             config: stateMachine.config,
@@ -3269,7 +3427,8 @@ final class BoothCoordinator {
             keptShotAssets: sessionAssetReferences,
             acceptedPhotoIndices: stateMachine.acceptedPhotoIndices.sorted(),
             deferredPhotoIndices: stateMachine.deferredPhotoIndices.sorted(),
-            nextPhotoIndex: stateMachine.nextPhotoIndex
+            nextPhotoIndex: stateMachine.nextPhotoIndex,
+            captureRecoveryState: currentCaptureRecoveryStateToken
         )))
         multipeer.sendControl(.setMirrored(isMirrored: capture.camera.isMirrored))
     }

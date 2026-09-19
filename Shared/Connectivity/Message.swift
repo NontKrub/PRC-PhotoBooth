@@ -61,7 +61,28 @@ public struct ReviewStateToken: Codable, Sendable, Equatable, Hashable {
     }
 }
 
+public struct CaptureRecoveryStateToken: Codable, Sendable, Equatable, Hashable {
+    public let sessionID: String
+    public let photoIndex: Int
+    public let revision: UInt64
+
+    public init(sessionID: String, photoIndex: Int, revision: UInt64) {
+        self.sessionID = sessionID
+        self.photoIndex = photoIndex
+        self.revision = revision
+    }
+}
+
 public enum ReviewDecisionResult: String, Codable, Sendable, Equatable {
+    case accepted
+    case duplicate
+    case stale
+    case wrongPhoto
+    case sessionChanged
+    case persistenceFailed
+}
+
+public enum CaptureRecoveryActionResult: String, Codable, Sendable, Equatable {
     case accepted
     case duplicate
     case stale
@@ -130,7 +151,7 @@ public enum CaptureRecoveryAction: Codable, Sendable, Equatable {
 }
 
 public struct BoothTransportHello: Codable, Sendable, Equatable {
-    public static let currentProtocolVersion = 7
+    public static let currentProtocolVersion = 8
 
     public var protocolVersion: Int
     public var appVersion: String
@@ -295,11 +316,12 @@ public enum BoothAssetTransfer {
     private static let magic = Data([0x50, 0x52, 0x41, 0x31])
     private static let bindingMagic = Data([0x50, 0x52, 0x42, 0x31])
 
-    public static func chunks(
+    public static func chunk(
         data: Data,
         reference: BoothAssetReference,
+        index: Int,
         chunkSize: Int = 192 * 1024
-    ) throws -> [BoothAssetChunk] {
+    ) throws -> BoothAssetChunk {
         guard valid(reference: reference), data.count == reference.byteCount else {
             throw BoothAssetTransferError.invalidMetadata
         }
@@ -308,23 +330,38 @@ public enum BoothAssetTransfer {
         }
         let size = min(max(1, chunkSize), maximumChunkBytes)
         let count = max(1, (data.count + size - 1) / size)
+        guard count <= maximumChunkCount,
+              index >= 0,
+              index < count else {
+            throw BoothAssetTransferError.assetTooLarge(data.count)
+        }
+        let start = index * size
+        let end = min(data.count, start + size)
+        return BoothAssetChunk(
+            metadata: BoothAssetChunkMetadata(
+                assetID: reference.assetID,
+                sessionID: reference.sessionID,
+                revision: reference.revision,
+                kind: reference.kind,
+                index: index,
+                count: count,
+                totalBytes: reference.byteCount,
+                sha256: reference.sha256
+            ),
+            data: Data(data[start..<end])
+        )
+    }
+
+    public static func chunks(
+        data: Data,
+        reference: BoothAssetReference,
+        chunkSize: Int = 192 * 1024
+    ) throws -> [BoothAssetChunk] {
+        let size = min(max(1, chunkSize), maximumChunkBytes)
+        let count = max(1, (data.count + size - 1) / size)
         guard count <= maximumChunkCount else { throw BoothAssetTransferError.assetTooLarge(data.count) }
-        return (0..<count).map { index in
-            let start = index * size
-            let end = min(data.count, start + size)
-            return BoothAssetChunk(
-                metadata: BoothAssetChunkMetadata(
-                    assetID: reference.assetID,
-                    sessionID: reference.sessionID,
-                    revision: reference.revision,
-                    kind: reference.kind,
-                    index: index,
-                    count: count,
-                    totalBytes: reference.byteCount,
-                    sha256: reference.sha256
-                ),
-                data: Data(data[start..<end])
-            )
+        return try (0..<count).map {
+            try chunk(data: data, reference: reference, index: $0, chunkSize: size)
         }
     }
 
@@ -579,6 +616,7 @@ public struct SessionSyncSnapshot: Codable, Sendable, Equatable {
     public var acceptedPhotoIndices: [Int]
     public var deferredPhotoIndices: [Int]
     public var nextPhotoIndex: Int
+    public var captureRecoveryState: CaptureRecoveryStateToken?
 
     public init(
         config: EventConfig,
@@ -597,7 +635,8 @@ public struct SessionSyncSnapshot: Codable, Sendable, Equatable {
         keptShotAssets: [Int: BoothAssetReference] = [:],
         acceptedPhotoIndices: [Int] = [],
         deferredPhotoIndices: [Int] = [],
-        nextPhotoIndex: Int = 0
+        nextPhotoIndex: Int = 0,
+        captureRecoveryState: CaptureRecoveryStateToken? = nil
     ) {
         self.config = config
         self.sessionID = sessionID
@@ -616,12 +655,13 @@ public struct SessionSyncSnapshot: Codable, Sendable, Equatable {
         self.acceptedPhotoIndices = acceptedPhotoIndices
         self.deferredPhotoIndices = deferredPhotoIndices
         self.nextPhotoIndex = nextPhotoIndex
+        self.captureRecoveryState = captureRecoveryState
     }
 
     private enum CodingKeys: String, CodingKey {
         case config, sessionID, phase, presentation, reviewAsset, stripAsset
         case keptShotAssets, isMirrored, isBoothPaused, sequence, countdown
-        case acceptedPhotoIndices, deferredPhotoIndices, nextPhotoIndex
+        case acceptedPhotoIndices, deferredPhotoIndices, nextPhotoIndex, captureRecoveryState
     }
 
     public init(from decoder: Decoder) throws {
@@ -643,6 +683,7 @@ public struct SessionSyncSnapshot: Codable, Sendable, Equatable {
         acceptedPhotoIndices = try container.decodeIfPresent([Int].self, forKey: .acceptedPhotoIndices) ?? []
         deferredPhotoIndices = try container.decodeIfPresent([Int].self, forKey: .deferredPhotoIndices) ?? []
         nextPhotoIndex = try container.decodeIfPresent(Int.self, forKey: .nextPhotoIndex) ?? 0
+        captureRecoveryState = try container.decodeIfPresent(CaptureRecoveryStateToken.self, forKey: .captureRecoveryState)
     }
 }
 
@@ -676,7 +717,8 @@ public enum Message: Codable, Sendable, Equatable {
     case shotCaptured(context: SessionMessageContext, index: Int, thumbnailData: Data)
     case shotCapturedAsset(context: SessionMessageContext, index: Int, asset: BoothAssetReference)
     case captureRecovery(context: SessionMessageContext, photoIndex: Int, failure: CaptureFailureSummary)
-    case captureRecoveryAction(context: SessionMessageContext, action: CaptureRecoveryAction)
+    case captureRecoveryAction(state: CaptureRecoveryStateToken, requestID: UUID, action: CaptureRecoveryAction)
+    case captureRecoveryActionResult(requestID: UUID, result: CaptureRecoveryActionResult)
     case reviewDecision(state: ReviewStateToken, requestID: UUID, action: ReviewAction)
     case reviewDecisionResult(requestID: UUID, result: ReviewDecisionResult)
     case sessionFinished(context: SessionMessageContext, qrPayload: String, stripThumbData: Data?, gifThumbData: Data?)

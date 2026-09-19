@@ -80,6 +80,20 @@ struct OperationsStatusLogicTests {
         #expect(OperationsStatusLogic.printer(.systemDefault, lastTestResult: nil).summary == "Idle")
     }
 
+    @Test("unknown printer outcome requires verification")
+    func unknownPrinterOutcome() {
+        let result = PrinterTestResult(
+            date: .now,
+            printerName: "System Default",
+            isSuccess: false,
+            message: "Timed out",
+            outcome: .unknown
+        )
+        let status = OperationsStatusLogic.printer(.systemDefault, lastTestResult: result, isPrinting: true)
+        #expect(status.severity == .failure)
+        #expect(status.summary == "Verify printer")
+    }
+
     @Test("connection health separates control failures from channel degradation")
     func connectionHealth() {
         #expect(OperationsStatusLogic.connection(.connecting, authenticated: false, previewConnected: false).severity == .warning)

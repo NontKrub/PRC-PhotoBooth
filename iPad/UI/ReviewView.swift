@@ -5,6 +5,7 @@ struct ReviewView: View {
     @EnvironmentObject private var vm: iPadViewModel
 
     private var isThai: Bool { vm.selectedLanguage == .thai }
+    private var retryAction: ReviewAction? { vm.reviewActionToRetry }
 
     var body: some View {
         ZStack {
@@ -84,7 +85,9 @@ struct ReviewView: View {
                         HStack(spacing: 10) {
                             Image(systemName: "arrow.counterclockwise")
                                 .font(.system(size: 16, weight: .semibold))
-                            Text("Retake")
+                            Text(isThai
+                                 ? (retryAction == .retake ? "ลองถ่ายใหม่อีกครั้ง" : "ถ่ายใหม่")
+                                 : (retryAction == .retake ? "Retry Retake" : "Retake"))
                                 .font(.system(size: 17, weight: .semibold))
                         }
                         .foregroundStyle(.white.opacity(0.8))
@@ -93,14 +96,24 @@ struct ReviewView: View {
                         .overlay(RoundedRectangle(cornerRadius: 16).strokeBorder(.white.opacity(0.15), lineWidth: 1))
                     }
                     .buttonStyle(.plain)
-                    .disabled(!vm.isReviewMediaReady || vm.reviewDecisionPending)
+                    .disabled(
+                        !vm.isReviewMediaReady
+                            || vm.reviewDecisionPending
+                            || (vm.reviewDecisionAwaitingReconciliation && retryAction != .retake)
+                    )
 
                     // Keep — primary
                     Button(action: { vm.customerKeep(photoIndex: photoIndex) }) {
                         HStack(spacing: 10) {
                             Image(systemName: "checkmark")
                                 .font(.system(size: 16, weight: .bold))
-                        Text(LocalizedStringKey(photoIndex + 1 < vm.eventConfig.photoCount ? "Keep & next" : "Keep & finish"))
+                        Text(isThai
+                             ? (retryAction == .keep
+                                ? "ลองยืนยันอีกครั้ง"
+                                : photoIndex + 1 < vm.eventConfig.photoCount ? "เก็บและไปต่อ" : "เก็บและเสร็จสิ้น")
+                             : (retryAction == .keep
+                                ? "Retry Keep"
+                                : photoIndex + 1 < vm.eventConfig.photoCount ? "Keep & next" : "Keep & finish"))
                                 .font(.system(size: 17, weight: .bold))
                         }
                         .foregroundStyle(.black)
@@ -108,7 +121,11 @@ struct ReviewView: View {
                         .background(Color.white, in: RoundedRectangle(cornerRadius: 16))
                     }
                     .buttonStyle(.plain)
-                    .disabled(!vm.isReviewMediaReady || vm.reviewDecisionPending)
+                    .disabled(
+                        !vm.isReviewMediaReady
+                            || vm.reviewDecisionPending
+                            || (vm.reviewDecisionAwaitingReconciliation && retryAction != .keep)
+                    )
                 }
                 .padding(.bottom, 56)
 
@@ -124,9 +141,20 @@ struct ReviewView: View {
                     .accessibilityLabel("Saving your choice")
                     .padding(.bottom, 20)
                 } else if vm.reviewDecisionAwaitingReconciliation {
-                    Text("The booth did not confirm that choice. Tap the same choice to retry safely.")
+                    Text(isThai
+                         ? "บูธยังไม่ยืนยันตัวเลือกนี้ แตะตัวเลือกเดิมเพื่อลองใหม่อย่างปลอดภัย"
+                         : "The booth did not confirm that choice. Tap the same choice to retry safely.")
                         .font(.callout)
                         .foregroundStyle(.orange)
+                        .multilineTextAlignment(.center)
+                        .padding(.horizontal, 36)
+                        .padding(.bottom, 20)
+                }
+
+                if let error = vm.sessionRequestError, !vm.reviewDecisionAwaitingReconciliation {
+                    Text(error)
+                        .font(.callout)
+                        .foregroundStyle(.red)
                         .multilineTextAlignment(.center)
                         .padding(.horizontal, 36)
                         .padding(.bottom, 20)
