@@ -937,7 +937,12 @@ final class iPadViewModel: ObservableObject {
             clearSessionMedia()
         }
         cancelCountdown()
-        sessionMessageGate.synchronize(sessionID: snapshot.sessionID, sequence: snapshot.sequence)
+        // sessionSync is authoritative about phase, but the gate every other
+        // message is checked against must never move backwards.
+        let syncedSequence = snapshot.sessionID == sessionMessageGate.currentSessionID
+            ? max(snapshot.sequence, sessionMessageGate.latestAcceptedSequence)
+            : snapshot.sequence
+        sessionMessageGate.synchronize(sessionID: snapshot.sessionID, sequence: syncedSequence)
         eventConfig = snapshot.config
         stateMachine.config = snapshot.config
         selectedLanguage = snapshot.presentation?.language ?? snapshot.config.customerLanguage

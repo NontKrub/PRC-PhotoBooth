@@ -141,6 +141,33 @@ struct iPadSmokeTests {
         #expect(stateMachine.phase == .readyToStart)
     }
 
+    @Test("same-session sync never rewinds the sequence gate")
+    @MainActor
+    func sameSessionSyncDoesNotRewindMessageGate() {
+        let viewModel = iPadViewModel()
+        defer { viewModel.multipeer.disconnect() }
+        let config = EventConfig(photoCount: 1)
+        let current = SessionSyncSnapshot(
+            config: config,
+            sessionID: "sync-session",
+            phase: .readyToStart,
+            presentation: nil,
+            isMirrored: false,
+            sequence: 20
+        )
+        viewModel.multipeer.onControlMessage?(.sessionSync(snapshot: current))
+
+        var stale = current
+        stale.sequence = 4
+        viewModel.multipeer.onControlMessage?(.sessionSync(snapshot: stale))
+        viewModel.multipeer.onControlMessage?(.operatorOverride(
+            context: SessionMessageContext(sessionID: "sync-session", sequence: 5),
+            action: .forceStart
+        ))
+
+        #expect(viewModel.stateMachine.phase == .readyToStart)
+    }
+
     @Test("all customer phases construct with the environment object")
     @MainActor
     func constructsEveryPhase() {
