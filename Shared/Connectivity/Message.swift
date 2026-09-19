@@ -49,6 +49,42 @@ public struct SessionMessageContext: Codable, Sendable, Equatable, Hashable {
     }
 }
 
+public struct ReviewStateToken: Codable, Sendable, Equatable, Hashable {
+    public let sessionID: String
+    public let photoIndex: Int
+    public let revision: UInt64
+
+    public init(sessionID: String, photoIndex: Int, revision: UInt64) {
+        self.sessionID = sessionID
+        self.photoIndex = photoIndex
+        self.revision = revision
+    }
+}
+
+public enum ReviewDecisionResult: String, Codable, Sendable, Equatable {
+    case accepted
+    case duplicate
+    case stale
+    case wrongPhoto
+    case sessionChanged
+    case persistenceFailed
+}
+
+public enum ReviewDecisionGate {
+    public static func validate(
+        current: ReviewStateToken?,
+        phasePhotoIndex: Int?,
+        requested: ReviewStateToken
+    ) -> ReviewDecisionResult {
+        guard let current else { return .stale }
+        guard current.sessionID == requested.sessionID else { return .sessionChanged }
+        guard current.photoIndex == requested.photoIndex,
+              phasePhotoIndex == requested.photoIndex else { return .wrongPhoto }
+        guard current.revision == requested.revision else { return .stale }
+        return .accepted
+    }
+}
+
 public struct CountdownDescriptor: Codable, Sendable, Equatable {
     public var photoIndex: Int
     public var captureAt: Date
@@ -72,7 +108,7 @@ public struct SessionMessageGate: Sendable, Equatable {
 
     public mutating func synchronize(sessionID: String?, sequence: UInt64) {
         currentSessionID = sessionID
-        latestAcceptedSequence = sessionID == nil ? 0 : sequence
+        latestAcceptedSequence = sequence
     }
 
     public mutating func accept(_ context: SessionMessageContext) -> Bool {
@@ -94,7 +130,7 @@ public enum CaptureRecoveryAction: Codable, Sendable, Equatable {
 }
 
 public struct BoothTransportHello: Codable, Sendable, Equatable {
-    public static let currentProtocolVersion = 6
+    public static let currentProtocolVersion = 7
 
     public var protocolVersion: Int
     public var appVersion: String
@@ -410,12 +446,13 @@ public enum BoothAssetTransfer {
 
 public struct BoothAssetAssembler: Sendable {
     public static let assemblyLifetime: TimeInterval = 120
+    private let clock = ContinuousClock()
 
     private struct Assembly: Sendable {
         let metadata: BoothAssetChunkMetadata
         var chunks: [Int: Data]
         var receivedBytes: Int
-        var touchedAt: Date
+        var touchedAt: ContinuousClock.Instant
     }
 
     private var assemblies: [String: Assembly] = [:]
@@ -423,9 +460,9 @@ public struct BoothAssetAssembler: Sendable {
 
     public init() {}
 
-    private mutating func evictStale(now: Date) {
+    private mutating func evictStale(now: ContinuousClock.Instant) {
         let staleKeys = assemblies.compactMap { key, assembly in
-            now.timeIntervalSince(assembly.touchedAt) > Self.assemblyLifetime ? key : nil
+            now - assembly.touchedAt > .seconds(Self.assemblyLifetime) ? key : nil
         }
         for key in staleKeys {
             if let assembly = assemblies.removeValue(forKey: key) {
@@ -434,7 +471,14 @@ public struct BoothAssetAssembler: Sendable {
         }
     }
 
-    public mutating func append(_ chunk: BoothAssetChunk, now: Date = Date()) throws -> (BoothAssetReference, Data)? {
+    public mutating func append(_ chunk: BoothAssetChunk) throws -> (BoothAssetReference, Data)? {
+        try append(chunk, now: clock.now)
+    }
+
+    public mutating func append(
+        _ chunk: BoothAssetChunk,
+        now: ContinuousClock.Instant
+    ) throws -> (BoothAssetReference, Data)? {
         evictStale(now: now)
         guard BoothAssetTransfer.isValidForAssembly(chunk) else {
             throw BoothAssetTransferError.invalidMetadata
@@ -509,6 +553,11 @@ public struct BoothAssetAssembler: Sendable {
         assemblies.removeValue(forKey: key)
         bufferedBytes -= assembly.receivedBytes
         return (assembly.metadata.reference, result)
+    }
+
+    public mutating func reset() {
+        assemblies.removeAll()
+        bufferedBytes = 0
     }
 }
 
@@ -628,7 +677,8 @@ public enum Message: Codable, Sendable, Equatable {
     case shotCapturedAsset(context: SessionMessageContext, index: Int, asset: BoothAssetReference)
     case captureRecovery(context: SessionMessageContext, photoIndex: Int, failure: CaptureFailureSummary)
     case captureRecoveryAction(context: SessionMessageContext, action: CaptureRecoveryAction)
-    case reviewDecision(context: SessionMessageContext, action: ReviewAction)
+    case reviewDecision(state: ReviewStateToken, requestID: UUID, action: ReviewAction)
+    case reviewDecisionResult(requestID: UUID, result: ReviewDecisionResult)
     case sessionFinished(context: SessionMessageContext, qrPayload: String, stripThumbData: Data?, gifThumbData: Data?)
     case sessionFinishedAssets(context: SessionMessageContext, qrPayload: String, stripAsset: BoothAssetReference?, gifAsset: BoothAssetReference?)
     case customerFinished(context: SessionMessageContext)

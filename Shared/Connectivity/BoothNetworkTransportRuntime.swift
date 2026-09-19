@@ -99,17 +99,17 @@ final class BoothNetworkTransportRuntime: @unchecked Sendable {
     }
 
     func scheduleReconnect(after delay: TimeInterval, attempt: Int) {
-        queue.async { [weak self] in
-            guard let self, self.reconnectSource == nil else { return }
-            self.reconnectAttempt = attempt
-            let source = DispatchSource.makeTimerSource(queue: self.queue)
+        onQueue {
+            guard reconnectSource == nil else { return }
+            reconnectAttempt = attempt
+            let source = DispatchSource.makeTimerSource(queue: queue)
             source.schedule(deadline: .now() + delay)
             source.setEventHandler { [weak self] in
                 guard let self else { return }
                 self.reconnectSource = nil
                 self.onReconnectDue?(self.reconnectAttempt)
             }
-            self.reconnectSource = source
+            reconnectSource = source
             source.resume()
         }
     }

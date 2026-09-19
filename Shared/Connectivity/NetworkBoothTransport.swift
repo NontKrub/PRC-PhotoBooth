@@ -147,7 +147,11 @@ public final class NetworkBoothTransport: BoothTransport {
     private var peerAuthenticated = false
     private var didSendTransportHello = false
     private let secureChannel = BoothSecureChannel()
-    private let frameDecoder = BoothTransportFrameDecoder()
+    // Each NWConnection channel owns parser state; partial bytes must not
+    // cross-contaminate control, preview, or asset framing.
+    private let controlFrameDecoder = BoothTransportFrameDecoder()
+    private let previewFrameDecoder = BoothTransportFrameDecoder()
+    private let assetFrameDecoder = BoothTransportFrameDecoder()
     private var secureNegotiator = BoothSecureChannelNegotiator(role: .mac, localDeviceID: "")
     private var localSecureChannelHello: BoothSecureChannelHello?
     private var peerSecureChannelHello: BoothSecureChannelHello?
@@ -242,6 +246,23 @@ public final class NetworkBoothTransport: BoothTransport {
         label: "PRC-PhotoBooth.Transport",
         qos: .userInitiated
     )
+
+    private func frameDecoder(for channel: BoothTransportChannel) -> BoothTransportFrameDecoder {
+        switch channel {
+        case .control, .heartbeat: return controlFrameDecoder
+        case .preview: return previewFrameDecoder
+        case .asset: return assetFrameDecoder
+        }
+    }
+
+    private func setFrameDecoderHandshake(_ complete: Bool, channel: BoothTransportChannel) {
+        let decoder = frameDecoder(for: channel)
+        // MainActor callers must order this security transition before the
+        // next receive callback on the transport queue.
+        transportQueue.sync {
+            decoder.setHandshakeComplete(complete, channel: channel)
+        }
+    }
 
     private func replaceReceiveToken(for channel: BoothTransportChannel) -> BoothTransportReceiveToken {
         invalidateReceiveToken(for: channel)
@@ -2003,7 +2024,7 @@ public final class NetworkBoothTransport: BoothTransport {
         didSendTransportHello = false
         peerAuthenticated = false
         secureChannel.reset()
-        frameDecoder.setHandshakeComplete(false, channel: .control)
+        setFrameDecoderHandshake(false, channel: .control)
         secureNegotiationTimeoutSource?.cancel()
         secureNegotiationTimeoutSource = nil
         secureNegotiator.reset(connectionGeneration: controlConnectionGeneration)
@@ -2784,33 +2805,41 @@ public final class NetworkBoothTransport: BoothTransport {
         token: BoothTransportReceiveToken
     ) -> Bool {
         guard token.begin() else { return false }
-        frameDecoder.reset(channel)
-        Self.receive(
-            on: connection,
-            channel: channel,
-            decoder: frameDecoder,
-            token: token,
-            secureChannel: secureChannel,
-            activity: { [transportRuntime, secureChannel] in
-                guard secureChannel.isConfigured else { return }
-                transportRuntime.markControlActivityOnQueue()
-            },
-            deliver: { [weak self, weak connection] frames in
-                guard let self, let connection,
-                      token.isValid,
-                      self.isCurrent(connection, channel: channel) else { return }
-                self.handleDecodedFrames(frames)
-            },
-            deliverPreview: { [previewDeliveryPump, previewConnectionGeneration] data in
-                previewDeliveryPump.enqueueOnQueue(data, generation: previewConnectionGeneration)
-            },
-            close: { [weak self, weak connection] reason in
-                guard let self, let connection,
-                      token.isValid,
-                      self.isCurrent(connection, channel: channel) else { return }
-                self.connectionDidClose(connection, channel: channel, reason: reason)
-            }
-        )
+        let decoder = frameDecoder(for: channel)
+        let secureChannel = self.secureChannel
+        let transportRuntime = self.transportRuntime
+        let previewDeliveryPump = self.previewDeliveryPump
+        let previewConnectionGeneration = self.previewConnectionGeneration
+        transportQueue.async { [weak self, weak connection] in
+            guard let self, let connection, token.isValid else { return }
+            decoder.reset(channel)
+            Self.receive(
+                on: connection,
+                channel: channel,
+                decoder: decoder,
+                token: token,
+                secureChannel: secureChannel,
+                activity: { [transportRuntime, secureChannel] in
+                    guard secureChannel.isConfigured else { return }
+                    transportRuntime.markControlActivityOnQueue()
+                },
+                deliver: { [weak self, weak connection] frames in
+                    guard let self, let connection,
+                          token.isValid,
+                          self.isCurrent(connection, channel: channel) else { return }
+                    self.handleDecodedFrames(frames)
+                },
+                deliverPreview: { [previewDeliveryPump, previewConnectionGeneration] data in
+                    previewDeliveryPump.enqueueOnQueue(data, generation: previewConnectionGeneration)
+                },
+                close: { [weak self, weak connection] reason in
+                    guard let self, let connection,
+                          token.isValid,
+                          self.isCurrent(connection, channel: channel) else { return }
+                    self.connectionDidClose(connection, channel: channel, reason: reason)
+                }
+            )
+        }
         return true
     }
 
@@ -3919,7 +3948,7 @@ public final class NetworkBoothTransport: BoothTransport {
             secureChannelEstablished = false
             connectionStatus.publishSecureChannel(ready: false)
             secureChannel.reset()
-            frameDecoder.setHandshakeComplete(false, channel: .control)
+            setFrameDecoderHandshake(false, channel: .control)
             secureNegotiator.setExpectedPeerDeviceID(peerDeviceID)
             let action = try secureNegotiator.begin(generation: controlConnectionGeneration)
             guard case .sendHello(let hello) = action,
@@ -4069,7 +4098,7 @@ public final class NetworkBoothTransport: BoothTransport {
         secureNegotiationTimeoutSource = nil
         try? secureNegotiator.markEstablished(generation: controlConnectionGeneration)
         secureChannelEstablished = true
-        frameDecoder.setHandshakeComplete(true, channel: .control)
+        setFrameDecoderHandshake(true, channel: .control)
         connectionStatus.publishSecureChannel(ready: true)
         emitTransportEvent(.secureChannelEstablished, channel: .control)
         startHeartbeat()
@@ -4413,6 +4442,7 @@ public final class NetworkBoothTransport: BoothTransport {
         case .captureRecovery: return "captureRecovery"
         case .captureRecoveryAction: return "captureRecoveryAction"
         case .reviewDecision: return "reviewDecision"
+        case .reviewDecisionResult: return "reviewDecisionResult"
         case .sessionFinished: return "sessionFinished"
         case .sessionFinishedAssets: return "sessionFinishedAssets"
         case .customerFinished: return "customerFinished"
@@ -4596,6 +4626,7 @@ public final class NetworkBoothTransport: BoothTransport {
         let message: String
         switch outcome {
         case .noConnection: message = "No active control connection."
+        case .backpressure: message = "Control writer is busy; the request can be retried."
         case .rejectedOversize: message = "Control payload exceeded the transport limit."
         case .encodingFailed: message = "Control payload encoding failed."
         case .networkSendFailed: message = "Control payload could not be sent."
@@ -4655,6 +4686,8 @@ public final class NetworkBoothTransport: BoothTransport {
                 completion(.success(()))
             case .noConnection:
                 completion(.failure(.failed("No active control connection.")))
+            case .backpressure:
+                completion(.failure(.failed("Control writer is busy; retry the pairing request.")))
             case .rejectedOversize:
                 completion(.failure(.failed("Pairing message exceeded the transport limit.")))
             case .encodingFailed:
@@ -4935,7 +4968,7 @@ public final class NetworkBoothTransport: BoothTransport {
         peerAuthenticated = false
         previewPeerSupportsIdentity = false
         secureChannel.reset()
-        frameDecoder.setHandshakeComplete(false, channel: .control)
+        setFrameDecoderHandshake(false, channel: .control)
         resetAssetBinding()
         deferredAssetRequests.removeAll()
         secureNegotiationTimeoutSource?.cancel()

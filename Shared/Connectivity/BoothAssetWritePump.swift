@@ -160,9 +160,8 @@ final class BoothAssetWritePump: @unchecked Sendable {
         let estimatedBytes = encoded.count + 64
         guard pending.count + (inFlight == nil ? 0 : 1) < Self.maximumPendingChunks,
               pendingBytes + (inFlight?.estimatedBytes ?? 0) + estimatedBytes <= Self.maximumPendingBytes else {
-            let outcome: BoothControlSendOutcome = .networkSendFailed
+            let outcome: BoothControlSendOutcome = .backpressure
             finish(completion, with: outcome)
-            onFailure?(outcome, "Asset writer queue limit exceeded.", generation)
             return outcome
         }
         pending.append(Item(

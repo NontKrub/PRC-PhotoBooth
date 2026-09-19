@@ -369,6 +369,7 @@ extension BoothConnectionStatus: ObservableObject {}
 public enum BoothControlSendOutcome: Equatable, Sendable {
     case sent
     case noConnection
+    case backpressure
     case rejectedOversize
     case encodingFailed
     case networkSendFailed
@@ -785,9 +786,12 @@ struct BoothAssetRequestPump: Sendable {
     private(set) var inFlight: Set<BoothAssetReference> = []
     private(set) var unavailable: Set<BoothAssetReference> = []
     let maximumInFlight: Int
+    let maximumInFlightBytes: Int
+    private(set) var inFlightBytes = 0
 
-    init(maximumInFlight: Int = 8) {
+    init(maximumInFlight: Int = 8, maximumInFlightBytes: Int = 20 * 1024 * 1024) {
         self.maximumInFlight = max(1, maximumInFlight)
+        self.maximumInFlightBytes = max(1, maximumInFlightBytes)
     }
 
     mutating func nextBatch(
@@ -795,41 +799,52 @@ struct BoothAssetRequestPump: Sendable {
         cached: Set<BoothAssetReference>
     ) -> [BoothAssetReference] {
         let capacity = maximumInFlight - inFlight.count
-        guard capacity > 0 else { return [] }
+        guard capacity > 0, inFlightBytes < maximumInFlightBytes else { return [] }
 
         var selected: [BoothAssetReference] = []
         var seen = Set<BoothAssetReference>()
+        var selectedBytes = 0
         for reference in expected where selected.count < capacity {
             guard seen.insert(reference).inserted,
                   !cached.contains(reference),
                   !inFlight.contains(reference),
                   !unavailable.contains(reference) else { continue }
+            let nextBytes = selectedBytes + reference.byteCount
+            guard inFlightBytes + nextBytes <= maximumInFlightBytes else { continue }
             selected.append(reference)
+            selectedBytes = nextBytes
             inFlight.insert(reference)
         }
+        inFlightBytes += selectedBytes
         return selected
     }
 
     mutating func markCompleted(_ reference: BoothAssetReference) {
-        inFlight.remove(reference)
+        if inFlight.remove(reference) != nil {
+            inFlightBytes = max(0, inFlightBytes - reference.byteCount)
+        }
         unavailable.remove(reference)
     }
 
     mutating func markUnavailable(_ reference: BoothAssetReference) {
-        inFlight.remove(reference)
+        if inFlight.remove(reference) != nil {
+            inFlightBytes = max(0, inFlightBytes - reference.byteCount)
+        }
         unavailable.insert(reference)
     }
 
     mutating func markSendFailed(_ references: [BoothAssetReference]) {
-        inFlight.subtract(references)
+        for reference in references { markCompleted(reference) }
     }
 
     mutating func clearInFlight() {
         inFlight.removeAll()
+        inFlightBytes = 0
     }
 
     mutating func reset() {
         inFlight.removeAll()
+        inFlightBytes = 0
         unavailable.removeAll()
     }
 }

@@ -173,12 +173,17 @@ public final class SessionStateMachine {
     }
 
     @discardableResult
-    public func continueAfterCaptureFailure(photoIndex: Int) -> Int? {
+    public func nextPhotoAfterCaptureFailure(photoIndex: Int) -> Int? {
         guard case .captureRecovery(let current, _) = phase, current == photoIndex else { return nil }
+        return nextPendingPhoto(excluding: photoIndex)
+    }
+
+    @discardableResult
+    public func continueAfterCaptureFailure(photoIndex: Int) -> Int? {
+        guard let next = nextPhotoAfterCaptureFailure(photoIndex: photoIndex) else { return nil }
         // Never hand back the photograph that just failed: that is what the
         // guest asked to move past. If nothing else is pending, stay in
         // recovery so Retake and Use Previous remain the only exits.
-        guard let next = nextPendingPhoto(excluding: photoIndex) else { return nil }
         deferredPhotoIndices.insert(photoIndex)
         nextPhotoIndex = next
         countdownDeadline = nil

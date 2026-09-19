@@ -5,9 +5,45 @@ import CryptoKit
 
 @Suite("Message Codable")
 struct MessageTests {
+    @Test("review decisions reject stale sessions and wrong photos")
+    func reviewDecisionGate() {
+        let current = ReviewStateToken(sessionID: "session-a", photoIndex: 2, revision: 9)
+        #expect(
+            ReviewDecisionGate.validate(current: current, phasePhotoIndex: 2, requested: current)
+                == .accepted
+        )
+        #expect(
+            ReviewDecisionGate.validate(
+                current: current,
+                phasePhotoIndex: 1,
+                requested: ReviewStateToken(sessionID: "session-a", photoIndex: 1, revision: 9)
+            ) == .wrongPhoto
+        )
+        #expect(
+            ReviewDecisionGate.validate(
+                current: current,
+                phasePhotoIndex: 2,
+                requested: ReviewStateToken(sessionID: "session-a", photoIndex: 2, revision: 8)
+            ) == .stale
+        )
+        #expect(
+            ReviewDecisionGate.validate(
+                current: current,
+                phasePhotoIndex: 2,
+                requested: ReviewStateToken(sessionID: "session-b", photoIndex: 2, revision: 9)
+            ) == .sessionChanged
+        )
+        #expect(
+            ReviewDecisionGate.validate(current: nil, phasePhotoIndex: 2, requested: current)
+                == .stale
+        )
+    }
+
     @Test("round-trips all message kinds")
     func roundTrip() throws {
         let context = SessionMessageContext(sessionID: "session-test", sequence: 7)
+        let reviewState = ReviewStateToken(sessionID: context.sessionID, photoIndex: 0, revision: context.sequence)
+        let reviewRequestID = UUID(uuidString: "00000000-0000-0000-0000-000000000007")!
         let countdown = CountdownDescriptor(
             photoIndex: 1,
             captureAt: Date(timeIntervalSince1970: 1_700_000_005)
@@ -130,8 +166,9 @@ struct MessageTests {
                 )
             ),
             .captureRecoveryAction(context: context, action: .retryReceive(photoIndex: 1)),
-            .reviewDecision(context: context, action: .keep),
-            .reviewDecision(context: context, action: .retake),
+            .reviewDecision(state: reviewState, requestID: reviewRequestID, action: .keep),
+            .reviewDecision(state: reviewState, requestID: reviewRequestID, action: .retake),
+            .reviewDecisionResult(requestID: reviewRequestID, result: .accepted),
             .sessionFinished(context: context, qrPayload: "http://192.168.1.1:8585/s/abc", stripThumbData: nil, gifThumbData: nil),
             .sessionFinishedAssets(context: context, qrPayload: "http://192.168.1.1:8585/s/abc", stripAsset: nil, gifAsset: nil),
             .customerFinished(context: context),
@@ -273,9 +310,9 @@ struct MessageTests {
         #expect(legacyHello.deviceName == "legacy-id")
         #expect(legacyHello.networkPreference == nil)
     }
-    @Test("v1.4.2 connection protocol is version 6 and legacy protocol 2 remains decodable but incompatible")
+    @Test("v1.4.3 connection protocol is version 7 and legacy protocol 2 remains decodable but incompatible")
     func protocolVersionMismatchIsVisible() throws {
-        #expect(BoothTransportHello.currentProtocolVersion == 6)
+        #expect(BoothTransportHello.currentProtocolVersion == 7)
         let legacy = Data(#"{"protocolVersion":2,"appVersion":"1.4.1","role":"iPad","deviceID":"legacy-id","capabilities":["control"]}"#.utf8)
         let hello = try JSONDecoder().decode(BoothTransportHello.self, from: legacy)
         #expect(hello.protocolVersion == 2)

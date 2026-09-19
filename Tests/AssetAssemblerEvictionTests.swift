@@ -8,7 +8,8 @@ struct AssetAssemblerEvictionTests {
     @Test("stale partial assemblies are evicted and stop blocking new assets")
     func evictsStalePartials() throws {
         var assembler = BoothAssetAssembler()
-        let start = Date()
+        let clock = ContinuousClock()
+        let start = clock.now
         for index in 0..<BoothAssetTransfer.maximumConcurrentAssets {
             let chunk = makeChunk(assetID: "stale-\(index)", index: 0, count: 2)
             #expect(try assembler.append(chunk, now: start) == nil)
@@ -17,7 +18,7 @@ struct AssetAssemblerEvictionTests {
         #expect(throws: BoothAssetTransferError.tooManyConcurrentAssets) {
             try assembler.append(fresh, now: start)
         }
-        let later = start.addingTimeInterval(BoothAssetAssembler.assemblyLifetime + 1)
+        let later = start.advanced(by: .seconds(BoothAssetAssembler.assemblyLifetime + 1))
         #expect(try assembler.append(fresh, now: later) == nil)
     }
 

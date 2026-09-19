@@ -403,7 +403,6 @@ private final class TransportLivenessServer: @unchecked Sendable {
                     if self.scheduleReconnectOnClose && !self.reconnectWasScheduled {
                         self.reconnectWasScheduled = true
                         self.runtime.scheduleReconnect(after: 0.05, attempt: 1)
-                        self.runtime.scheduleReconnect(after: 0.05, attempt: 1)
                     }
                 default:
                     break
@@ -439,6 +438,8 @@ private func soakMessages(sessionID: String, photoCount: Int, index: Int) -> [Me
         isMirrored: false
     )
     let firstContext = SessionMessageContext(sessionID: sessionID, sequence: 1)
+    let firstReviewState = ReviewStateToken(sessionID: sessionID, photoIndex: 0, revision: 1)
+    let firstRequestID = UUID(uuidString: "00000000-0000-0000-0000-000000000001")!
     var messages: [Message] = [
         .sessionSync(snapshot: snapshot),
         .beginCountdown(
@@ -449,12 +450,14 @@ private func soakMessages(sessionID: String, photoCount: Int, index: Int) -> [Me
             )
         ),
         .reviewDecision(
-            context: firstContext,
+            state: firstReviewState,
+            requestID: firstRequestID,
             action: index.isMultiple(of: 7) ? .retake : .keep
         )
     ]
     if index.isMultiple(of: 7) {
         let retakeContext = SessionMessageContext(sessionID: sessionID, sequence: 2)
+        let retakeReviewState = ReviewStateToken(sessionID: sessionID, photoIndex: 0, revision: 2)
         messages.append(.beginCountdown(
             context: retakeContext,
             descriptor: CountdownDescriptor(
@@ -462,7 +465,11 @@ private func soakMessages(sessionID: String, photoCount: Int, index: Int) -> [Me
                 captureAt: Date(timeIntervalSince1970: Double(index) + 1)
             )
         ))
-        messages.append(.reviewDecision(context: retakeContext, action: .keep))
+        messages.append(.reviewDecision(
+            state: retakeReviewState,
+            requestID: UUID(uuidString: "00000000-0000-0000-0000-000000000002")!,
+            action: .keep
+        ))
     }
     return messages
 }
@@ -690,6 +697,9 @@ struct NetworkRouteTests {
         try await Task.sleep(for: .seconds(1))
         server.terminateConnection()
         for _ in 0..<20 where server.snapshot().transportClosedCount == 0 {
+            try await Task.sleep(for: .milliseconds(25))
+        }
+        for _ in 0..<40 where server.snapshot().reconnectDueCount == 0 {
             try await Task.sleep(for: .milliseconds(25))
         }
         let stalledSnapshot = server.snapshot()
@@ -1482,6 +1492,30 @@ struct TransportRecoveryPolicyTests {
         #expect(requested == expected)
     }
 
+    @Test("Asset request pump respects byte budget")
+    func assetRequestsRespectByteBudget() {
+        let expected = (0..<4).map { index in
+            BoothAssetReference(
+                assetID: "large-\(index)",
+                sessionID: "session",
+                revision: "1",
+                kind: .reviewImage,
+                byteCount: 8,
+                sha256: Data(repeating: UInt8(index), count: 32)
+            )
+        }
+        var pump = BoothAssetRequestPump(maximumInFlight: 8, maximumInFlightBytes: 16)
+
+        let first = pump.nextBatch(expected: expected, cached: [])
+        #expect(first == Array(expected.prefix(2)))
+        #expect(pump.inFlightBytes == 16)
+
+        pump.markCompleted(first[0])
+        let second = pump.nextBatch(expected: expected, cached: [first[0]])
+        #expect(second == [expected[2]])
+        #expect(pump.inFlightBytes == 16)
+    }
+
     @Test("Failed asset sends release references for bounded retry")
     func failedAssetSendsReleaseReferences() {
         let expected = (0..<2).map(reference)
@@ -1587,7 +1621,12 @@ struct TransportRecoveryPolicyTests {
                 )
             case 3:
                 return .reviewDecision(
-                    context: context,
+                    state: ReviewStateToken(
+                        sessionID: context.sessionID,
+                        photoIndex: index % 8,
+                        revision: context.sequence
+                    ),
+                    requestID: UUID(uuidString: String(format: "00000000-0000-0000-0000-%012llx", UInt64(index + 1)))!,
                     action: index.isMultiple(of: 2) ? .keep : .retake
                 )
             default:
