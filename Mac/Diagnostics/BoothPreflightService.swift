@@ -100,6 +100,8 @@ final class BoothPreflightService {
                     update(.printerTest, status: .passed, detail: "Test page submitted.")
                 case .cancelled:
                     update(.printerTest, status: .skipped, detail: "Printer test cancelled by operator.")
+                case .unknown:
+                    update(.printerTest, status: .warning, detail: "Printer completion could not be confirmed.")
                 }
             } catch {
                 update(.printerTest, status: .failed, detail: error.localizedDescription)
@@ -399,6 +401,8 @@ final class BoothPreflightService {
             status = .passed
         case .cancelled:
             status = .skipped
+        case .unknown:
+            status = .warning
         case nil:
             status = test.isSuccess ? .passed : .failed
         }

@@ -11,6 +11,7 @@ enum ConfiguredPrinterStatus: Sendable, Equatable {
 enum PrintSubmissionOutcome: Sendable, Equatable {
     case submitted
     case cancelled
+    case unknown
 }
 
 struct PrinterTestResult: Sendable, Equatable {
@@ -175,6 +176,19 @@ final class PrinterService {
                 )
                 return .cancelled
             }
+            if case PrinterServiceError.timeout = error {
+                printFailureCount += 1
+                lastPrintAt = date
+                lastPrintError = error.localizedDescription
+                lastTestResult = PrinterTestResult(
+                    date: date,
+                    printerName: backend.defaultPrinterName() ?? "System Default",
+                    isSuccess: false,
+                    message: error.localizedDescription,
+                    outcome: .unknown
+                )
+                throw JobExecutionError.permanent(error.localizedDescription)
+            }
             printFailureCount += 1
             lastPrintAt = date
             lastPrintError = error.localizedDescription
@@ -217,6 +231,9 @@ final class PrinterService {
             printFailureCount += 1
             lastPrintAt = Date()
             lastPrintError = error.localizedDescription
+            if case PrinterServiceError.timeout = error {
+                throw JobExecutionError.permanent(error.localizedDescription)
+            }
             if let error = error as? PrinterServiceError, error.isPermanent {
                 throw JobExecutionError.permanent(error.localizedDescription)
             }
@@ -236,6 +253,11 @@ final class PrinterService {
         currentPrintStartedAt = nil
     }
 
+}
+
+private enum PrintRunResult: Sendable {
+    case completed(Bool)
+    case timedOut
 }
 
 @MainActor
@@ -300,9 +322,9 @@ private final class AppKitPrinterBackend: PrinterBackend {
         }
         let operationID = ObjectIdentifier(operation)
         let timeout = request.showsPrintDialog ? PrinterService.printOperationTimeout : 120
-        let success = await withTaskGroup(of: Bool.self) { group in
+        let result = await withTaskGroup(of: PrintRunResult.self) { group in
             group.addTask {
-                await withCheckedContinuation { (continuation: CheckedContinuation<Bool, Never>) in
+                await withCheckedContinuation { (continuation: CheckedContinuation<PrintRunResult, Never>) in
                     Task { @MainActor in
                         let delegate = PrintOperationDelegate(
                             continuation: continuation,
@@ -326,18 +348,23 @@ private final class AppKitPrinterBackend: PrinterBackend {
                 // AppKit normally always calls back. When it does not, the
                 // print lane would block for the rest of the app's life.
                 try? await Task.sleep(for: .seconds(timeout))
-                guard !Task.isCancelled else { return false }
+                guard !Task.isCancelled else { return .timedOut }
                 await MainActor.run {
-                    self.activeDelegates[operationID]?.complete(false)
+                    self.activeDelegates[operationID]?.complete(.timedOut)
                 }
-                return false
+                return .timedOut
             }
-            let first = await group.next() ?? false
+            let first = await group.next() ?? .timedOut
             group.cancelAll()
             return first
         }
-        guard success else {
-            throw request.showsPrintDialog ? PrinterServiceError.cancelled : PrinterServiceError.rejected
+        switch result {
+        case .timedOut:
+            throw PrinterServiceError.timeout
+        case .completed(let success):
+            guard success else {
+                throw request.showsPrintDialog ? PrinterServiceError.cancelled : PrinterServiceError.rejected
+            }
         }
     }
 
@@ -351,19 +378,19 @@ private final class AppKitPrinterBackend: PrinterBackend {
 
 private final class PrintOperationDelegate: NSObject, @unchecked Sendable {
     private let lock = NSLock()
-    private var continuation: CheckedContinuation<Bool, Never>?
+    private var continuation: CheckedContinuation<PrintRunResult, Never>?
     private var completed = false
     private let onCompletion: @Sendable () -> Void
 
     init(
-        continuation: CheckedContinuation<Bool, Never>,
+        continuation: CheckedContinuation<PrintRunResult, Never>,
         onCompletion: @escaping @Sendable () -> Void
     ) {
         self.continuation = continuation
         self.onCompletion = onCompletion
     }
 
-    func complete(_ success: Bool) {
+    func complete(_ result: PrintRunResult) {
         lock.lock()
         guard !completed else {
             lock.unlock()
@@ -374,7 +401,7 @@ private final class PrintOperationDelegate: NSObject, @unchecked Sendable {
         self.continuation = nil
         lock.unlock()
 
-        continuation?.resume(returning: success)
+        continuation?.resume(returning: result)
         onCompletion()
     }
 
@@ -384,7 +411,7 @@ private final class PrintOperationDelegate: NSObject, @unchecked Sendable {
         success: Bool,
         contextInfo: UnsafeMutableRawPointer?
     ) {
-        complete(success)
+        complete(.completed(success))
     }
 }
 
@@ -551,12 +578,14 @@ enum PrinterServiceError: LocalizedError {
     case busy
     case cancelled
     case rejected
+    case timeout
     case missingSource(URL)
     case invalidImage(URL)
 
     var isPermanent: Bool {
         switch self {
         case .missingSource, .invalidImage: return true
+        case .timeout: return true
         case .unavailable, .busy, .cancelled, .rejected: return false
         }
     }
@@ -567,6 +596,7 @@ enum PrinterServiceError: LocalizedError {
         case .busy: return "A print is already in progress."
         case .cancelled: return "Print dialog cancelled."
         case .rejected: return "The print operation was rejected."
+        case .timeout: return "Print completion could not be confirmed; verify the printer before retrying."
         case .missingSource(let url): return "Photo strip is missing: \(url.path)"
         case .invalidImage(let url): return "Photo strip is unreadable: \(url.path)"
         }

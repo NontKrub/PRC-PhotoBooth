@@ -163,6 +163,27 @@ struct PrinterServiceTests {
         #expect(printer.printFailureCount == failuresBefore)
         #expect(printer.printSuccessCount == successesBefore)
     }
+
+    @Test("timeout is reported as unknown and stops automatic retry")
+    @MainActor
+    func timeoutIsUnknown() async throws {
+        let backend = TestPrinterBackend(names: ["Canon"], defaultName: "Canon")
+        let printer = PrinterService(backend: backend)
+        backend.failNext(with: PrinterServiceError.timeout)
+
+        do {
+            _ = try await printer.printTestPage()
+            Issue.record("Expected unknown print completion")
+        } catch let error as JobExecutionError {
+            if case .permanent = error {
+                // Expected: the printer must be verified before another job.
+            } else {
+                Issue.record("Expected permanent unknown-print result")
+            }
+        }
+        #expect(printer.lastTestResult?.outcome == .unknown)
+        #expect(printer.isPrinting == false)
+    }
 }
 
 @MainActor

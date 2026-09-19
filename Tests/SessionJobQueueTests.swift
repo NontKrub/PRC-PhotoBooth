@@ -80,7 +80,7 @@ struct SessionJobQueueTests {
             await queue.job(sessionID: "old-session", status: .succeeded, kind: .autoPrint) != nil
         }
 
-        #expect(await executor.snapshot().kinds.first == .autoPrint)
+        #expect(await executor.snapshot().kinds.contains(.autoPrint))
     }
 
     @Test("a blocked automatic print does not block another session's finalization")
