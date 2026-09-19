@@ -138,6 +138,23 @@ struct NetworkFramingTests {
         }
     }
 
+    @Test("plaintext bootstrap frames are rejected once the handshake completes")
+    func rejectsLateePlaintextBootstrap() throws {
+        let channel = try makeConfiguredSecureChannel()
+        let decoder = BoothTransportFrameDecoder()
+        let hello = Message.secureChannelHello(hello: makeHello())
+        let frame = try BoothFrameEncoder.encode(
+            channel: .control, payload: try hello.encoded()
+        )
+        // Before establishment the bootstrap frame is accepted in the clear.
+        #expect(try decoder.decode(frame, channel: .control, secureChannel: channel).count == 1)
+
+        decoder.setHandshakeComplete(true, channel: .control)
+        #expect(throws: (any Error).self) {
+            try decoder.decode(frame, channel: .control, secureChannel: channel)
+        }
+    }
+
     @Test("preview delivery keeps one pending frame while MainActor is blocked")
     func previewDeliveryCoalescesBeforeMainActor() {
         let queue = DispatchQueue(label: "PRC-PhotoBooth.Tests.PreviewDelivery")
@@ -195,4 +212,29 @@ struct NetworkFramingTests {
         #expect(delivered.wait(timeout: .now() + 2) == .success)
         #expect(received.snapshot == [Data("new".utf8)])
     }
+}
+
+private func makeConfiguredSecureChannel() throws -> BoothSecureChannel {
+    let secret = Data(repeating: 0xA5, count: 32)
+    let macHello = makeHello()
+    let iPadHello = BoothSecureChannelHello(
+        sessionID: "secure-session",
+        challenge: Data(repeating: 0x02, count: 32),
+        senderRole: .iPad,
+        senderDeviceID: "ipad",
+        receiverDeviceID: "mac"
+    )
+    let channel = BoothSecureChannel()
+    try channel.configure(secret: secret, localHello: macHello, peerHello: iPadHello)
+    return channel
+}
+
+private func makeHello() -> BoothSecureChannelHello {
+    BoothSecureChannelHello(
+        sessionID: "secure-session",
+        challenge: Data(repeating: 0x01, count: 32),
+        senderRole: .mac,
+        senderDeviceID: "mac",
+        receiverDeviceID: "ipad"
+    )
 }

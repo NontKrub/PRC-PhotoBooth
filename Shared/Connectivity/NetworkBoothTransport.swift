@@ -147,6 +147,7 @@ public final class NetworkBoothTransport: BoothTransport {
     private var peerAuthenticated = false
     private var didSendTransportHello = false
     private let secureChannel = BoothSecureChannel()
+    private let frameDecoder = BoothTransportFrameDecoder()
     private var secureNegotiator = BoothSecureChannelNegotiator(role: .mac, localDeviceID: "")
     private var localSecureChannelHello: BoothSecureChannelHello?
     private var peerSecureChannelHello: BoothSecureChannelHello?
@@ -2002,6 +2003,7 @@ public final class NetworkBoothTransport: BoothTransport {
         didSendTransportHello = false
         peerAuthenticated = false
         secureChannel.reset()
+        frameDecoder.setHandshakeComplete(false, channel: .control)
         secureNegotiationTimeoutSource?.cancel()
         secureNegotiationTimeoutSource = nil
         secureNegotiator.reset(connectionGeneration: controlConnectionGeneration)
@@ -2782,10 +2784,11 @@ public final class NetworkBoothTransport: BoothTransport {
         token: BoothTransportReceiveToken
     ) -> Bool {
         guard token.begin() else { return false }
+        frameDecoder.reset(channel)
         Self.receive(
             on: connection,
             channel: channel,
-            decoder: BoothTransportFrameDecoder(),
+            decoder: frameDecoder,
             token: token,
             secureChannel: secureChannel,
             activity: { [transportRuntime, secureChannel] in
@@ -3916,6 +3919,7 @@ public final class NetworkBoothTransport: BoothTransport {
             secureChannelEstablished = false
             connectionStatus.publishSecureChannel(ready: false)
             secureChannel.reset()
+            frameDecoder.setHandshakeComplete(false, channel: .control)
             secureNegotiator.setExpectedPeerDeviceID(peerDeviceID)
             let action = try secureNegotiator.begin(generation: controlConnectionGeneration)
             guard case .sendHello(let hello) = action,
@@ -4065,6 +4069,7 @@ public final class NetworkBoothTransport: BoothTransport {
         secureNegotiationTimeoutSource = nil
         try? secureNegotiator.markEstablished(generation: controlConnectionGeneration)
         secureChannelEstablished = true
+        frameDecoder.setHandshakeComplete(true, channel: .control)
         connectionStatus.publishSecureChannel(ready: true)
         emitTransportEvent(.secureChannelEstablished, channel: .control)
         startHeartbeat()
@@ -4930,6 +4935,7 @@ public final class NetworkBoothTransport: BoothTransport {
         peerAuthenticated = false
         previewPeerSupportsIdentity = false
         secureChannel.reset()
+        frameDecoder.setHandshakeComplete(false, channel: .control)
         resetAssetBinding()
         deferredAssetRequests.removeAll()
         secureNegotiationTimeoutSource?.cancel()

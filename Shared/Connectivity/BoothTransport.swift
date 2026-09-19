@@ -1323,6 +1323,13 @@ final class BoothTransportFrameDecoder: @unchecked Sendable {
     private var controlParser = BoothFrameParser()
     private var previewParser = BoothFrameParser()
     private var assetParser = BoothFrameParser()
+    private var handshakeComplete: [UInt8: Bool] = [:]
+
+    /// Called by the transport once the secure channel is established for a
+    /// connection generation, and again with `false` on reset.
+    func setHandshakeComplete(_ complete: Bool, channel: BoothTransportChannel) {
+        handshakeComplete[channel.rawValue] = complete
+    }
 
     func reset(_ channel: BoothTransportChannel) {
         switch channel {
@@ -1331,6 +1338,7 @@ final class BoothTransportFrameDecoder: @unchecked Sendable {
         case .asset: assetParser = BoothFrameParser()
         case .heartbeat: break
         }
+        setHandshakeComplete(false, channel: channel)
     }
 
     func decode(
@@ -1351,7 +1359,12 @@ final class BoothTransportFrameDecoder: @unchecked Sendable {
             switch frame.channel {
             case .control:
                 let payload: Data
+                // The bootstrap exemption exists so the handshake itself can
+                // travel before keys exist. Once the channel is established
+                // there is no legitimate plaintext control frame, and honouring
+                // one lets an off-path injector tear the channel down.
                 if let secureChannel, secureChannel.isConfigured,
+                   handshakeComplete[BoothTransportChannel.control.rawValue] != true,
                    let bootstrap = try? Message.decoded(from: frame.payload),
                    bootstrap.isSecureChannelBootstrap {
                     payload = frame.payload
