@@ -94,7 +94,10 @@ struct StartView: View {
                             .font(.callout)
                             .foregroundStyle(.orange)
                             .multilineTextAlignment(.center)
-                        Button(isThai ? "ลองใหม่" : "Retry") {
+                        Button(LocalizedText(
+                            english: "Retry",
+                            thai: "ลองใหม่"
+                        ).value(for: vm.selectedLanguage)) {
                             vm.customerTappedStart()
                         }
                         .buttonStyle(.bordered)
