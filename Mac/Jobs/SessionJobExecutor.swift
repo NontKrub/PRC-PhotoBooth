@@ -127,7 +127,10 @@ final class SessionJobExecutor: SessionJobExecuting {
 
         do {
             try Task.checkCancellation()
-            let updated = try await manifestStore.update(sessionID: manifest.id) {
+            let updated = try await manifestStore.update(
+                sessionID: manifest.id,
+                allowedStatuses: [.finalizing]
+            ) {
                 $0.stripFileName = "strip.png"
             }
             if store.fetchSession(id: manifest.id) == nil {
@@ -196,7 +199,10 @@ final class SessionJobExecutor: SessionJobExecuting {
         let directory = sessionDirectory(for: manifest)
         guard manifest.shots.contains(where: { !$0.gifFrameFileNames.isEmpty }) else {
             try Task.checkCancellation()
-            _ = try await manifestStore.update(sessionID: manifest.id) {
+            _ = try await manifestStore.update(
+                sessionID: manifest.id,
+                allowedStatuses: [.finalizing, .completed]
+            ) {
                 $0.gifFileName = nil
             }
             return
@@ -248,7 +254,10 @@ final class SessionJobExecutor: SessionJobExecuting {
             })
             guard didRender else { return }
             try Task.checkCancellation()
-            let updated = try await manifestStore.update(sessionID: manifest.id) {
+            let updated = try await manifestStore.update(
+                sessionID: manifest.id,
+                allowedStatuses: [.finalizing, .completed]
+            ) {
                 $0.gifFileName = "booth.gif"
             }
             if store.fetchSession(id: manifest.id) == nil {

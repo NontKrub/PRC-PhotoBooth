@@ -307,12 +307,14 @@ final class iPadViewModel: ObservableObject {
 
     private func currentReviewStateToken(photoIndex: Int) -> ReviewStateToken? {
         guard let sessionID = sessionMessageGate.currentSessionID,
+              let authorityEpoch = sessionMessageGate.authorityEpoch,
               case .review(let currentIndex) = stateMachine.phase,
               currentIndex == photoIndex else { return nil }
         return ReviewStateToken(
             sessionID: sessionID,
             photoIndex: photoIndex,
-            revision: sessionMessageGate.latestAcceptedSequence
+            revision: sessionMessageGate.latestAcceptedSequence,
+            authorityEpoch: authorityEpoch
         )
     }
 
@@ -451,7 +453,8 @@ final class iPadViewModel: ObservableObject {
             let recoveryState = CaptureRecoveryStateToken(
                 sessionID: context.sessionID,
                 photoIndex: index,
-                revision: context.sequence
+                revision: context.sequence,
+                authorityEpoch: context.authorityEpoch
             )
             let pending = pendingCaptureRecovery
             cancelCountdown()
@@ -495,21 +498,28 @@ final class iPadViewModel: ObservableObject {
         case .reviewDecisionResult(let requestID, let result):
             guard let pending = pendingReviewDecision,
                   pending.requestID == requestID else { break }
-            pendingReviewDecision = nil
             reviewDecisionTimeoutTask?.cancel()
             reviewDecisionTimeoutTask = nil
             reviewDecisionPending = false
-            reviewDecisionAwaitingReconciliation = false
             switch result {
             case .accepted, .duplicate:
+                pendingReviewDecision = nil
+                reviewDecisionAwaitingReconciliation = false
                 sessionRequestError = nil
             case .stale:
+                pendingReviewDecision = nil
+                reviewDecisionAwaitingReconciliation = false
                 setSessionRequestError("That choice is no longer current. Please wait for the booth to update.")
             case .wrongPhoto:
+                pendingReviewDecision = nil
+                reviewDecisionAwaitingReconciliation = false
                 setSessionRequestError("That photograph is no longer current.")
             case .sessionChanged:
+                pendingReviewDecision = nil
+                reviewDecisionAwaitingReconciliation = false
                 setSessionRequestError("The booth moved to another session. Please wait for the update.")
             case .persistenceFailed:
+                reviewDecisionAwaitingReconciliation = true
                 setSessionRequestError("The booth could not save that choice. Please try again.")
             }
 
@@ -551,12 +561,14 @@ final class iPadViewModel: ObservableObject {
                 break
             }
             if case .cancelSession = action {
+                guard let authorityEpoch = context?.authorityEpoch ?? sessionMessageGate.authorityEpoch else { break }
                 cancelCountdown()
                 clearSessionMedia()
                 stateMachine.reset()
                 sessionMessageGate.synchronize(
                     sessionID: nil,
-                    sequence: context?.sequence ?? sessionMessageGate.latestAcceptedSequence
+                    sequence: context?.sequence ?? sessionMessageGate.latestAcceptedSequence,
+                    authorityEpoch: authorityEpoch
                 )
             } else {
                 clearTransientRequestState()

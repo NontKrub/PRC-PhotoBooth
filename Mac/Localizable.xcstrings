@@ -2065,6 +2065,17 @@
         }
       }
     },
+    "Do not remove these files manually. Cleanup will retry after background work stops." : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "อย่าลบไฟล์เหล่านี้ด้วยตนเอง ระบบจะลองล้างข้อมูลอีกครั้งหลังงานเบื้องหลังหยุดทำงาน"
+          }
+        }
+      }
+    },
     "Disabled" : {
       "localizations" : {
         "th" : {
@@ -5999,6 +6010,17 @@
         }
       }
     },
+    "Session: %@" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "เซสชัน: %1$@"
+          }
+        }
+      }
+    },
     "Server user" : {
       "localizations" : {
         "th" : {
@@ -6026,6 +6048,17 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "ลิงก์ดาวน์โหลดเซสชัน"
+          }
+        }
+      }
+    },
+    "Session ID: %@" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "รหัสเซสชัน: %1$@"
           }
         }
       }
@@ -7182,6 +7215,17 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "กำลังรอเซิร์ฟเวอร์ภายในเครื่องและที่อยู่ LAN…"
+          }
+        }
+      }
+    },
+    "Waiting for macOS to finish the print operation. Automatic printing is paused; customer sessions remain available." : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "กำลังรอให้ macOS ดำเนินการพิมพ์ให้เสร็จ การพิมพ์อัตโนมัติหยุดชั่วคราว เซสชันของลูกค้ายังดำเนินต่อได้"
           }
         }
       }

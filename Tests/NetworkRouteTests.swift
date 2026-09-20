@@ -435,10 +435,11 @@ private func soakMessages(sessionID: String, photoCount: Int, index: Int) -> [Me
         sessionID: sessionID,
         phase: .review(photoIndex: max(0, photoCount - 1)),
         presentation: nil,
-        isMirrored: false
+        isMirrored: false,
+        authorityEpoch: testAuthorityEpoch
     )
-    let firstContext = SessionMessageContext(sessionID: sessionID, sequence: 1)
-    let firstReviewState = ReviewStateToken(sessionID: sessionID, photoIndex: 0, revision: 1)
+    let firstContext = SessionMessageContext(sessionID: sessionID, sequence: 1, authorityEpoch: testAuthorityEpoch)
+    let firstReviewState = ReviewStateToken(sessionID: sessionID, photoIndex: 0, revision: 1, authorityEpoch: testAuthorityEpoch)
     let firstRequestID = UUID(uuidString: "00000000-0000-0000-0000-000000000001")!
     var messages: [Message] = [
         .sessionSync(snapshot: snapshot),
@@ -456,8 +457,8 @@ private func soakMessages(sessionID: String, photoCount: Int, index: Int) -> [Me
         )
     ]
     if index.isMultiple(of: 7) {
-        let retakeContext = SessionMessageContext(sessionID: sessionID, sequence: 2)
-        let retakeReviewState = ReviewStateToken(sessionID: sessionID, photoIndex: 0, revision: 2)
+        let retakeContext = SessionMessageContext(sessionID: sessionID, sequence: 2, authorityEpoch: testAuthorityEpoch)
+        let retakeReviewState = ReviewStateToken(sessionID: sessionID, photoIndex: 0, revision: 2, authorityEpoch: testAuthorityEpoch)
         messages.append(.beginCountdown(
             context: retakeContext,
             descriptor: CountdownDescriptor(
@@ -779,17 +780,18 @@ struct NetworkRouteTests {
             #expect(pump.pendingMessageCount == 0)
             #expect(pump.pendingByteCount == 0)
 
-            sessionGate.synchronize(sessionID: sessionID, sequence: 0)
+            sessionGate.synchronize(sessionID: sessionID, sequence: 0, authorityEpoch: testAuthorityEpoch)
             let actionCount = index.isMultiple(of: 7) ? 2 : 1
             for sequence in 1...actionCount {
                 let accepted = sessionGate.accept(
-                    SessionMessageContext(sessionID: sessionID, sequence: UInt64(sequence))
+                    SessionMessageContext(sessionID: sessionID, sequence: UInt64(sequence), authorityEpoch: testAuthorityEpoch)
                 )
                 #expect(accepted)
             }
             let rejected = sessionGate.accept(SessionMessageContext(
                 sessionID: "stale-session",
-                sequence: UInt64.max
+                sequence: UInt64.max,
+                authorityEpoch: testAuthorityEpoch
             ))
             #expect(!rejected)
 
@@ -1599,12 +1601,14 @@ struct TransportRecoveryPolicyTests {
             sessionID: "control-stress",
             phase: .review(photoIndex: 0),
             presentation: nil,
-            isMirrored: false
+            isMirrored: false,
+            authorityEpoch: testAuthorityEpoch
         )
         let expected: [Message] = (0..<10_000).map { index in
             let context = SessionMessageContext(
                 sessionID: "control-stress",
-                sequence: UInt64(index + 1)
+                sequence: UInt64(index + 1),
+                authorityEpoch: testAuthorityEpoch
             )
             switch index % 5 {
             case 0:
@@ -1624,7 +1628,8 @@ struct TransportRecoveryPolicyTests {
                     state: ReviewStateToken(
                         sessionID: context.sessionID,
                         photoIndex: index % 8,
-                        revision: context.sequence
+                        revision: context.sequence,
+                        authorityEpoch: testAuthorityEpoch
                     ),
                     requestID: UUID(uuidString: String(format: "00000000-0000-0000-0000-%012llx", UInt64(index + 1)))!,
                     action: index.isMultiple(of: 2) ? .keep : .retake

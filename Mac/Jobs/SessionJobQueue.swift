@@ -206,10 +206,15 @@ final class SessionJobQueue {
             timeout: .seconds(10)
         )
         await reload()
-        let remaining = await store.snapshot().contains {
+        let remaining = snapshot.contains {
             $0.sessionID == sessionID && $0.status == .running
         }
-        return !quiesced || remaining || activeReservations.values.contains(sessionID)
+        let printLaneHeld = snapshot.contains {
+            $0.sessionID == sessionID
+                && $0.kind == .autoPrint
+                && !executor.isAutoPrintLaneAvailable
+        }
+        return !quiesced || remaining || printLaneHeld || activeReservations.values.contains(sessionID)
             ? .cleanupPending
             : .quiesced
     }
@@ -255,9 +260,7 @@ final class SessionJobQueue {
 
     private func enqueue(kinds: [SessionJobKind], sessionID: String) async throws {
         do {
-            for kind in kinds {
-                _ = try await store.enqueue(sessionID: sessionID, kind: kind)
-            }
+            _ = try await store.enqueueBatch(sessionID: sessionID, kinds: kinds)
             await reload()
         } catch {
             lastQueueError = error.localizedDescription
@@ -392,10 +395,7 @@ final class SessionJobQueue {
 
     private func finish(_ job: SessionJob) async {
         do {
-            let persisted = await store.snapshot().first { $0.id == job.id }
-            if persisted?.status != .cancelled {
-                try await store.update(job)
-            }
+            _ = try await store.finish(job)
             await reload()
         } catch {
             lastQueueError = error.localizedDescription

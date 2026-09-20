@@ -44,7 +44,7 @@ public struct SessionMessageContext: Codable, Sendable, Equatable, Hashable {
     public var sequence: UInt64
     public var authorityEpoch: UUID
 
-    public init(sessionID: String, sequence: UInt64, authorityEpoch: UUID = UUID()) {
+    public init(sessionID: String, sequence: UInt64, authorityEpoch: UUID) {
         self.sessionID = sessionID
         self.sequence = sequence
         self.authorityEpoch = authorityEpoch
@@ -55,11 +55,13 @@ public struct ReviewStateToken: Codable, Sendable, Equatable, Hashable {
     public let sessionID: String
     public let photoIndex: Int
     public let revision: UInt64
+    public let authorityEpoch: UUID
 
-    public init(sessionID: String, photoIndex: Int, revision: UInt64) {
+    public init(sessionID: String, photoIndex: Int, revision: UInt64, authorityEpoch: UUID) {
         self.sessionID = sessionID
         self.photoIndex = photoIndex
         self.revision = revision
+        self.authorityEpoch = authorityEpoch
     }
 }
 
@@ -67,11 +69,13 @@ public struct CaptureRecoveryStateToken: Codable, Sendable, Equatable, Hashable 
     public let sessionID: String
     public let photoIndex: Int
     public let revision: UInt64
+    public let authorityEpoch: UUID
 
-    public init(sessionID: String, photoIndex: Int, revision: UInt64) {
+    public init(sessionID: String, photoIndex: Int, revision: UInt64, authorityEpoch: UUID) {
         self.sessionID = sessionID
         self.photoIndex = photoIndex
         self.revision = revision
+        self.authorityEpoch = authorityEpoch
     }
 }
 
@@ -101,6 +105,7 @@ public enum ReviewDecisionGate {
     ) -> ReviewDecisionResult {
         guard let current else { return .stale }
         guard current.sessionID == requested.sessionID else { return .sessionChanged }
+        guard current.authorityEpoch == requested.authorityEpoch else { return .stale }
         guard current.photoIndex == requested.photoIndex,
               phasePhotoIndex == requested.photoIndex else { return .wrongPhoto }
         guard current.revision == requested.revision else { return .stale }
@@ -140,16 +145,15 @@ public struct SessionMessageGate: Sendable, Equatable {
     public mutating func synchronize(
         sessionID: String?,
         sequence: UInt64,
-        authorityEpoch: UUID? = nil
+        authorityEpoch: UUID
     ) {
-        if let authorityEpoch,
-           let current = self.authorityEpoch,
+        if let current = self.authorityEpoch,
            current != authorityEpoch {
             retiredAuthorityEpochs.insert(current)
         }
         currentSessionID = sessionID
         latestAcceptedSequence = sequence
-        if let authorityEpoch { self.authorityEpoch = authorityEpoch }
+        self.authorityEpoch = authorityEpoch
     }
 
     public mutating func accept(_ context: SessionMessageContext) -> Bool {
@@ -191,7 +195,7 @@ public enum CaptureRecoveryAction: Codable, Sendable, Equatable {
 }
 
 public struct BoothTransportHello: Codable, Sendable, Equatable {
-    public static let currentProtocolVersion = 9
+    public static let currentProtocolVersion = 10
 
     public var protocolVersion: Int
     public var appVersion: String
@@ -678,7 +682,7 @@ public struct SessionSyncSnapshot: Codable, Sendable, Equatable {
         deferredPhotoIndices: [Int] = [],
         nextPhotoIndex: Int = 0,
         captureRecoveryState: CaptureRecoveryStateToken? = nil,
-        authorityEpoch: UUID = UUID()
+        authorityEpoch: UUID
     ) {
         self.config = config
         self.sessionID = sessionID
@@ -727,7 +731,7 @@ public struct SessionSyncSnapshot: Codable, Sendable, Equatable {
         deferredPhotoIndices = try container.decodeIfPresent([Int].self, forKey: .deferredPhotoIndices) ?? []
         nextPhotoIndex = try container.decodeIfPresent(Int.self, forKey: .nextPhotoIndex) ?? 0
         captureRecoveryState = try container.decodeIfPresent(CaptureRecoveryStateToken.self, forKey: .captureRecoveryState)
-        authorityEpoch = try container.decodeIfPresent(UUID.self, forKey: .authorityEpoch) ?? UUID()
+        authorityEpoch = try container.decode(UUID.self, forKey: .authorityEpoch)
     }
 }
 

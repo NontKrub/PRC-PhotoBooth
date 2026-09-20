@@ -36,7 +36,7 @@ struct SessionManifestStoreTests {
         try await store.create(manifest)
         manifest = try await store.load(sessionID: manifest.id)
         manifest.lastError = "temporary"
-        try await store.save(manifest)
+        try await store.save(manifest, allowedStatuses: [.capturing])
 
         let files = try FileManager.default.contentsOfDirectory(
             at: root.appendingPathComponent("Sessions"),
@@ -127,7 +127,7 @@ struct SessionManifestStoreTests {
         var stale = try await store.load(sessionID: manifest.id)
         stale.updatedAt = Date(timeIntervalSince1970: 1)
         do {
-            try await store.save(stale)
+            try await store.save(stale, allowedStatuses: [.finalizing])
             Issue.record("Stale manifest write was accepted")
         } catch let error as SessionManifestError {
             guard case .staleWrite = error else {
@@ -136,7 +136,10 @@ struct SessionManifestStoreTests {
             }
         }
         do {
-            _ = try await store.update(sessionID: manifest.id) { $0.status = .capturing }
+            _ = try await store.update(
+                sessionID: manifest.id,
+                allowedStatuses: [.finalizing]
+            ) { $0.status = .capturing }
             Issue.record("Generic manifest update changed status")
         } catch let error as SessionManifestError {
             guard case .invalidTransition = error else {
@@ -149,6 +152,18 @@ struct SessionManifestStoreTests {
             $0.status = .completed
         }
         do {
+            _ = try await store.update(
+                sessionID: manifest.id,
+                allowedStatuses: [.capturing]
+            ) { $0.lastError = "late capture" }
+            Issue.record("Completed manifest accepted a capturing mutation")
+        } catch let error as SessionManifestError {
+            guard case .mutationNotAllowed = error else {
+                Issue.record("Unexpected completed-mutation error: \(error)")
+                return
+            }
+        }
+        do {
             _ = try await store.transition(sessionID: manifest.id, allowedFrom: [.completed]) {
                 $0.status = .capturing
             }
@@ -159,6 +174,33 @@ struct SessionManifestStoreTests {
                 return
             }
         }
+    }
+
+    @Test("cancelled manifest rejects late ordinary mutation")
+    func cancelledManifestRejectsLateMutation() async throws {
+        let root = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = SessionManifestStore(baseDirectory: root)
+        let manifest = makeManifest()
+        try await store.create(manifest)
+        _ = try await store.transition(sessionID: manifest.id, allowedFrom: [.capturing]) {
+            $0.status = .cancelled
+            $0.cancelledAt = Date()
+        }
+        let before = try await store.load(sessionID: manifest.id)
+        do {
+            _ = try await store.update(
+                sessionID: manifest.id,
+                allowedStatuses: [.capturing, .finalizing]
+            ) { $0.lastError = "late work" }
+            Issue.record("Cancelled manifest accepted late mutation")
+        } catch let error as SessionManifestError {
+            guard case .mutationNotAllowed = error else {
+                Issue.record("Unexpected cancelled-mutation error: \(error)")
+                return
+            }
+        }
+        #expect(try await store.load(sessionID: manifest.id) == before)
     }
 
     @Test("persists session-stable cloud delivery settings")
@@ -240,4 +282,39 @@ private func temporaryDirectory() throws -> URL {
     let url = FileManager.default.temporaryDirectory.appendingPathComponent("PRC-Manifest-\(UUID().uuidString)")
     try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
     return url
+}
+
+@Suite("SessionFlowOperationRegistry")
+struct SessionFlowOperationRegistryTests {
+    @Test("non-cooperative session work blocks cleanup until timeout")
+    @MainActor
+    func nonCooperativeWorkReturnsPending() async {
+        let registry = SessionFlowOperationRegistry()
+        let gate = SessionFlowTestGate()
+        registry.start(sessionID: "session", kind: .capture) {
+            await gate.wait()
+        }
+
+        #expect(!(await registry.cancelAndQuiesce(sessionID: "session", timeout: .milliseconds(20))))
+        await gate.open()
+        #expect(await registry.cancelAndQuiesce(sessionID: "session", timeout: .seconds(1)))
+    }
+}
+
+private actor SessionFlowTestGate {
+    private var opened = false
+    private var continuation: CheckedContinuation<Void, Never>?
+
+    func wait() async {
+        if opened { return }
+        await withCheckedContinuation { continuation in
+            self.continuation = continuation
+        }
+    }
+
+    func open() {
+        opened = true
+        continuation?.resume()
+        continuation = nil
+    }
 }

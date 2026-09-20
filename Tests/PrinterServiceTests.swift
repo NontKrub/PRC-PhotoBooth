@@ -183,7 +183,13 @@ struct PrinterServiceTests {
         }
         #expect(printer.lastTestResult?.outcome == .unknown)
         #expect(printer.isPrinting == true)
-        backend.completeLate()
+        guard case .unknownAwaitingAppKitCompletion(let operationID, _, _) = printer.lifecycleState else {
+            Issue.record("Expected an operation ID for the unknown print")
+            return
+        }
+        backend.completeLate(operationID: UUID())
+        #expect(printer.isPrinting == true)
+        backend.completeLate(operationID: operationID)
         #expect(printer.isPrinting == false)
     }
 }
@@ -201,7 +207,8 @@ private final class TestPrinterBackend: PrinterBackend {
     var defaultName: String?
     private(set) var requests: [Request] = []
     private var nextError: Error?
-    private var completionHandler: (@MainActor @Sendable () -> Void)?
+    private var completionHandler: (@MainActor @Sendable (UUID) -> Void)?
+    private var activeOperationID: UUID?
 
     init(names: [String], defaultName: String?) {
         self.names = names
@@ -210,11 +217,12 @@ private final class TestPrinterBackend: PrinterBackend {
 
     func availablePrinterNames() -> [String] { names }
     func defaultPrinterName() -> String? { defaultName }
-    func setOperationCompletionHandler(_ handler: (@MainActor @Sendable () -> Void)?) {
+    func setOperationCompletionHandler(_ handler: (@MainActor @Sendable (UUID) -> Void)?) {
         completionHandler = handler
     }
 
     func submit(_ request: PrinterPrintRequest) async throws {
+        activeOperationID = request.operationID
         if let nextError {
             self.nextError = nil
             throw nextError
@@ -231,8 +239,8 @@ private final class TestPrinterBackend: PrinterBackend {
         nextError = error
     }
 
-    func completeLate() {
-        completionHandler?()
+    func completeLate(operationID: UUID? = nil) {
+        completionHandler?(operationID ?? activeOperationID ?? UUID())
     }
 }
 

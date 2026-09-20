@@ -6,6 +6,8 @@ import Testing
 
 @testable import PRC_PhotoBooth_iPad
 
+private let iPadTestAuthorityEpoch = UUID(uuidString: "00000000-0000-0000-0000-000000000020")!
+
 @Suite("iPad smoke tests")
 struct iPadSmokeTests {
     @Test("connection log includes actionable state and redacts secrets")
@@ -122,11 +124,11 @@ struct iPadSmokeTests {
     @MainActor
     func authoritativeSyncRejectsStaleMessages() {
         var gate = SessionMessageGate(currentSessionID: "old", latestAcceptedSequence: 20)
-        gate.synchronize(sessionID: "current", sequence: 4)
+        gate.synchronize(sessionID: "current", sequence: 4, authorityEpoch: iPadTestAuthorityEpoch)
 
-        let staleSession = gate.accept(SessionMessageContext(sessionID: "old", sequence: 21))
-        let duplicate = gate.accept(SessionMessageContext(sessionID: "current", sequence: 4))
-        let current = gate.accept(SessionMessageContext(sessionID: "current", sequence: 5))
+        let staleSession = gate.accept(SessionMessageContext(sessionID: "old", sequence: 21, authorityEpoch: iPadTestAuthorityEpoch))
+        let duplicate = gate.accept(SessionMessageContext(sessionID: "current", sequence: 4, authorityEpoch: iPadTestAuthorityEpoch))
+        let current = gate.accept(SessionMessageContext(sessionID: "current", sequence: 5, authorityEpoch: iPadTestAuthorityEpoch))
         #expect(!staleSession)
         #expect(!duplicate)
         #expect(current)
@@ -158,7 +160,8 @@ struct iPadSmokeTests {
             keptShots: [0: Data([0x01])],
             acceptedPhotoIndices: [0],
             deferredPhotoIndices: [1],
-            nextPhotoIndex: 2
+            nextPhotoIndex: 2,
+            authorityEpoch: iPadTestAuthorityEpoch
         )
         viewModel.multipeer.onControlMessage?(.sessionSync(snapshot: current))
 
@@ -179,7 +182,7 @@ struct iPadSmokeTests {
         viewModel.multipeer.onControlMessage?(.sessionSync(snapshot: duplicate))
 
         viewModel.multipeer.onControlMessage?(.operatorOverride(
-            context: SessionMessageContext(sessionID: "sync-session", sequence: 5),
+            context: SessionMessageContext(sessionID: "sync-session", sequence: 5, authorityEpoch: iPadTestAuthorityEpoch),
             action: .forceStart
         ))
 
@@ -600,7 +603,8 @@ struct AssetRetryRecoveryTests {
                 phase: .review(photoIndex: 0),
                 presentation: nil,
                 reviewThumbnailData: data,
-                isMirrored: false
+                isMirrored: false,
+                authorityEpoch: iPadTestAuthorityEpoch
             ))
         )
 

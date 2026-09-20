@@ -93,6 +93,7 @@ nonisolated enum PrinterDocumentValidator {
 
 @MainActor
 struct PrinterPrintRequest {
+    let operationID: UUID
     let document: PrinterDocument
     let showsPrintDialog: Bool
 
@@ -105,12 +106,12 @@ protocol PrinterBackend: AnyObject {
     func availablePrinterNames() -> [String]
     func defaultPrinterName() -> String?
     func submit(_ request: PrinterPrintRequest) async throws
-    func setOperationCompletionHandler(_ handler: (@MainActor @Sendable () -> Void)?)
+    func setOperationCompletionHandler(_ handler: (@MainActor @Sendable (UUID) -> Void)?)
 }
 
 @MainActor
 extension PrinterBackend {
-    func setOperationCompletionHandler(_ handler: (@MainActor @Sendable () -> Void)?) {}
+    func setOperationCompletionHandler(_ handler: (@MainActor @Sendable (UUID) -> Void)?) {}
 }
 
 @MainActor
@@ -132,20 +133,14 @@ final class PrinterService {
 
     init(backend: any PrinterBackend = AppKitPrinterBackend()) {
         self.backend = backend
-        backend.setOperationCompletionHandler { [weak self] in
-            self?.operationDidComplete()
+        backend.setOperationCompletionHandler { [weak self] operationID in
+            self?.operationDidComplete(operationID: operationID)
         }
         refreshPrinters()
     }
 
     var isPrinting: Bool { lifecycleState != .idle }
     var isIdle: Bool { lifecycleState == .idle }
-
-    func resolveUnknownPrint(as outcome: PrintSubmissionOutcome) {
-        guard case .unknownAwaitingAppKitCompletion = lifecycleState,
-              outcome != .unknown else { return }
-        endPrint()
-    }
 
     func refreshPrinters() {
         availablePrinterNames = backend.availablePrinterNames()
@@ -170,11 +165,12 @@ final class PrinterService {
     func printTestPage() async throws -> PrintSubmissionOutcome {
         refreshPrinters()
         let date = Date()
+        let operationID = try beginPrint()
         let request = PrinterPrintRequest(
+            operationID: operationID,
             document: .testPage(date: date),
             showsPrintDialog: true
         )
-        try beginPrint()
         var releaseLane = true
         defer { if releaseLane { endPrint() } }
         do {
@@ -242,11 +238,12 @@ final class PrinterService {
             throw JobExecutionError.permanent(PrinterServiceError.invalidImage(url).localizedDescription)
         }
 
+        let operationID = try beginPrint()
         let request = PrinterPrintRequest(
+            operationID: operationID,
             document: .photoStrip(url),
             showsPrintDialog: showPrintDialog
         )
-        try beginPrint()
         var releaseLane = true
         defer { if releaseLane { endPrint() } }
         do {
@@ -262,6 +259,13 @@ final class PrinterService {
             if case PrinterServiceError.timeout = error {
                 releaseLane = false
                 markPrintUnknown()
+                lastTestResult = PrinterTestResult(
+                    date: lastPrintAt ?? Date(),
+                    printerName: backend.defaultPrinterName() ?? "System Default",
+                    isSuccess: false,
+                    message: error.localizedDescription,
+                    outcome: .unknown
+                )
                 throw JobExecutionError.sideEffectUnknown(error.localizedDescription)
             }
             if let error = error as? PrinterServiceError, error.isPermanent {
@@ -271,13 +275,14 @@ final class PrinterService {
         }
     }
 
-    private func beginPrint() throws {
+    private func beginPrint() throws -> UUID {
         guard case .idle = lifecycleState else { throw PrinterServiceError.busy }
         let operationID = UUID()
         let startedAt = Date()
         lifecycleState = .submitting(operationID: operationID, startedAt: startedAt)
         currentPrintStartedAt = startedAt
         printRequestCount += 1
+        return operationID
     }
 
     private func endPrint() {
@@ -294,8 +299,9 @@ final class PrinterService {
         )
     }
 
-    private func operationDidComplete() {
-        guard case .unknownAwaitingAppKitCompletion = lifecycleState else { return }
+    private func operationDidComplete(operationID: UUID) {
+        guard case .unknownAwaitingAppKitCompletion(let activeOperationID, _, _) = lifecycleState,
+              activeOperationID == operationID else { return }
         endPrint()
     }
 
@@ -309,7 +315,7 @@ private enum PrintRunResult: Sendable {
 @MainActor
 private final class AppKitPrinterBackend: PrinterBackend {
     private var activeDelegates: [ObjectIdentifier: PrintOperationDelegate] = [:]
-    private var operationCompletionHandler: (@MainActor @Sendable () -> Void)?
+    private var operationCompletionHandler: (@MainActor @Sendable (UUID) -> Void)?
 
     func availablePrinterNames() -> [String] {
         NSPrinter.printerNames
@@ -319,7 +325,7 @@ private final class AppKitPrinterBackend: PrinterBackend {
         NSPrintInfo.shared.printer.name
     }
 
-    func setOperationCompletionHandler(_ handler: (@MainActor @Sendable () -> Void)?) {
+    func setOperationCompletionHandler(_ handler: (@MainActor @Sendable (UUID) -> Void)?) {
         operationCompletionHandler = handler
     }
 
@@ -382,7 +388,7 @@ private final class AppKitPrinterBackend: PrinterBackend {
                             onCompletion: { [weak self] in
                                 Task { @MainActor [weak self] in
                                     self?.activeDelegates.removeValue(forKey: operationID)
-                                    self?.operationCompletionHandler?()
+                                    self?.operationCompletionHandler?(request.operationID)
                                 }
                             }
                         )

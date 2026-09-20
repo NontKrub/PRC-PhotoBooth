@@ -3,11 +3,13 @@ import Foundation
 import CryptoKit
 @testable import PRC_PhotoBooth_Mac
 
+let testAuthorityEpoch = UUID(uuidString: "00000000-0000-0000-0000-000000000010")!
+
 @Suite("Message Codable")
 struct MessageTests {
     @Test("review decisions reject stale sessions and wrong photos")
     func reviewDecisionGate() {
-        let current = ReviewStateToken(sessionID: "session-a", photoIndex: 2, revision: 9)
+        let current = ReviewStateToken(sessionID: "session-a", photoIndex: 2, revision: 9, authorityEpoch: testAuthorityEpoch)
         #expect(
             ReviewDecisionGate.validate(current: current, phasePhotoIndex: 2, requested: current)
                 == .accepted
@@ -16,21 +18,21 @@ struct MessageTests {
             ReviewDecisionGate.validate(
                 current: current,
                 phasePhotoIndex: 1,
-                requested: ReviewStateToken(sessionID: "session-a", photoIndex: 1, revision: 9)
+                requested: ReviewStateToken(sessionID: "session-a", photoIndex: 1, revision: 9, authorityEpoch: testAuthorityEpoch)
             ) == .wrongPhoto
         )
         #expect(
             ReviewDecisionGate.validate(
                 current: current,
                 phasePhotoIndex: 2,
-                requested: ReviewStateToken(sessionID: "session-a", photoIndex: 2, revision: 8)
+                requested: ReviewStateToken(sessionID: "session-a", photoIndex: 2, revision: 8, authorityEpoch: testAuthorityEpoch)
             ) == .stale
         )
         #expect(
             ReviewDecisionGate.validate(
                 current: current,
                 phasePhotoIndex: 2,
-                requested: ReviewStateToken(sessionID: "session-b", photoIndex: 2, revision: 9)
+                requested: ReviewStateToken(sessionID: "session-b", photoIndex: 2, revision: 9, authorityEpoch: testAuthorityEpoch)
             ) == .sessionChanged
         )
         #expect(
@@ -41,8 +43,8 @@ struct MessageTests {
 
     @Test("round-trips all message kinds")
     func roundTrip() throws {
-        let context = SessionMessageContext(sessionID: "session-test", sequence: 7)
-        let reviewState = ReviewStateToken(sessionID: context.sessionID, photoIndex: 0, revision: context.sequence)
+        let context = SessionMessageContext(sessionID: "session-test", sequence: 7, authorityEpoch: testAuthorityEpoch)
+        let reviewState = ReviewStateToken(sessionID: context.sessionID, photoIndex: 0, revision: context.sequence, authorityEpoch: testAuthorityEpoch)
         let reviewRequestID = UUID(uuidString: "00000000-0000-0000-0000-000000000007")!
         let countdown = CountdownDescriptor(
             photoIndex: 1,
@@ -114,7 +116,8 @@ struct MessageTests {
                 isMirrored: false,
                 isBoothPaused: true,
                 sequence: 6,
-                countdown: countdown
+                countdown: countdown,
+                authorityEpoch: testAuthorityEpoch
             )),
             .assetRequest(references: [BoothAssetReference(
                 assetID: "asset-request",
@@ -166,7 +169,7 @@ struct MessageTests {
                 )
             ),
             .captureRecoveryAction(
-                state: CaptureRecoveryStateToken(sessionID: context.sessionID, photoIndex: 1, revision: context.sequence),
+                state: CaptureRecoveryStateToken(sessionID: context.sessionID, photoIndex: 1, revision: context.sequence, authorityEpoch: testAuthorityEpoch),
                 requestID: reviewRequestID,
                 action: .retryReceive(photoIndex: 1)
             ),
@@ -201,22 +204,22 @@ struct MessageTests {
 
     @Test("session gate rejects stale, duplicate, reordered, and wrong-session packets")
     func sessionGateRejectsStalePackets() {
-        var gate = SessionMessageGate(currentSessionID: "B", latestAcceptedSequence: 10)
-        #expect(gate.accept(SessionMessageContext(sessionID: "A", sequence: 99)) == false)
-        #expect(gate.accept(SessionMessageContext(sessionID: "B", sequence: 10)) == false)
-        #expect(gate.accept(SessionMessageContext(sessionID: "B", sequence: 9)) == false)
-        let accepted = gate.accept(SessionMessageContext(sessionID: "B", sequence: 11))
+        var gate = SessionMessageGate(currentSessionID: "B", latestAcceptedSequence: 10, authorityEpoch: testAuthorityEpoch)
+        #expect(gate.accept(SessionMessageContext(sessionID: "A", sequence: 99, authorityEpoch: testAuthorityEpoch)) == false)
+        #expect(gate.accept(SessionMessageContext(sessionID: "B", sequence: 10, authorityEpoch: testAuthorityEpoch)) == false)
+        #expect(gate.accept(SessionMessageContext(sessionID: "B", sequence: 9, authorityEpoch: testAuthorityEpoch)) == false)
+        let accepted = gate.accept(SessionMessageContext(sessionID: "B", sequence: 11, authorityEpoch: testAuthorityEpoch))
         #expect(accepted)
-        #expect(gate.accept(SessionMessageContext(sessionID: "B", sequence: 11)) == false)
+        #expect(gate.accept(SessionMessageContext(sessionID: "B", sequence: 11, authorityEpoch: testAuthorityEpoch)) == false)
     }
 
     @Test("session synchronization replaces the gate baseline")
     func sessionSyncSupersedesQueuedPackets() {
-        var gate = SessionMessageGate(currentSessionID: "A", latestAcceptedSequence: 20)
-        gate.synchronize(sessionID: "B", sequence: 4)
-        #expect(gate.accept(SessionMessageContext(sessionID: "A", sequence: 21)) == false)
-        #expect(gate.accept(SessionMessageContext(sessionID: "B", sequence: 3)) == false)
-        let accepted = gate.accept(SessionMessageContext(sessionID: "B", sequence: 5))
+        var gate = SessionMessageGate(currentSessionID: "A", latestAcceptedSequence: 20, authorityEpoch: testAuthorityEpoch)
+        gate.synchronize(sessionID: "B", sequence: 4, authorityEpoch: testAuthorityEpoch)
+        #expect(gate.accept(SessionMessageContext(sessionID: "A", sequence: 21, authorityEpoch: testAuthorityEpoch)) == false)
+        #expect(gate.accept(SessionMessageContext(sessionID: "B", sequence: 3, authorityEpoch: testAuthorityEpoch)) == false)
+        let accepted = gate.accept(SessionMessageContext(sessionID: "B", sequence: 5, authorityEpoch: testAuthorityEpoch))
         #expect(accepted)
     }
 
@@ -252,9 +255,9 @@ struct MessageTests {
 
     @Test("session gate accepts a deterministic 500-message soak")
     func sessionGateSoak() {
-        var gate = SessionMessageGate(currentSessionID: "soak", latestAcceptedSequence: 0)
+        var gate = SessionMessageGate(currentSessionID: "soak", latestAcceptedSequence: 0, authorityEpoch: testAuthorityEpoch)
         for sequence in 1...500 {
-            let accepted = gate.accept(SessionMessageContext(sessionID: "soak", sequence: UInt64(sequence)))
+            let accepted = gate.accept(SessionMessageContext(sessionID: "soak", sequence: UInt64(sequence), authorityEpoch: testAuthorityEpoch))
             #expect(accepted)
         }
         #expect(gate.latestAcceptedSequence == 500)
@@ -269,11 +272,65 @@ struct MessageTests {
             presentation: nil,
             reviewThumbnailData: Data(repeating: 1, count: 100_000),
             isMirrored: false,
-            keptShots: [0: Data(repeating: 2, count: 100_000)]
+            keptShots: [0: Data(repeating: 2, count: 100_000)],
+            authorityEpoch: testAuthorityEpoch
         ))
         let json = String(decoding: encoded, as: UTF8.self)
         #expect(!json.contains("reviewThumbnailData"))
         #expect(!json.contains("keptShots"))
+    }
+
+    @Test("review and recovery tokens remain bound to their authority epoch")
+    func actionTokensCarryAuthorityEpoch() throws {
+        let review = ReviewStateToken(
+            sessionID: "session",
+            photoIndex: 1,
+            revision: 4,
+            authorityEpoch: testAuthorityEpoch
+        )
+        let recovery = CaptureRecoveryStateToken(
+            sessionID: "session",
+            photoIndex: 1,
+            revision: 4,
+            authorityEpoch: testAuthorityEpoch
+        )
+        #expect(try JSONDecoder().decode(ReviewStateToken.self, from: JSONEncoder().encode(review)) == review)
+        #expect(try JSONDecoder().decode(CaptureRecoveryStateToken.self, from: JSONEncoder().encode(recovery)) == recovery)
+        #expect(
+            ReviewDecisionGate.validate(
+                current: review,
+                phasePhotoIndex: 1,
+                requested: ReviewStateToken(
+                    sessionID: review.sessionID,
+                    photoIndex: review.photoIndex,
+                    revision: review.revision,
+                    authorityEpoch: UUID()
+                )
+            ) == .stale
+        )
+    }
+
+    @Test("session sync without an authority epoch fails closed")
+    func sessionSyncRequiresAuthorityEpoch() throws {
+        let snapshot = SessionSyncSnapshot(
+            config: EventConfig(photoCount: 1),
+            sessionID: "session",
+            phase: .idle,
+            presentation: nil,
+            isMirrored: false,
+            authorityEpoch: testAuthorityEpoch
+        )
+        var object = try #require(JSONSerialization.jsonObject(with: JSONEncoder().encode(snapshot)) as? [String: Any])
+        object.removeValue(forKey: "authorityEpoch")
+        let missing = try JSONSerialization.data(withJSONObject: object)
+        #expect(throws: DecodingError.self) {
+            _ = try JSONDecoder().decode(SessionSyncSnapshot.self, from: missing)
+        }
+        object["authorityEpoch"] = NSNull()
+        let null = try JSONSerialization.data(withJSONObject: object)
+        #expect(throws: DecodingError.self) {
+            _ = try JSONDecoder().decode(SessionSyncSnapshot.self, from: null)
+        }
     }
 
     @Test("asset sockets do not accept heartbeat frames")
@@ -345,12 +402,12 @@ struct MessageTests {
         #expect(legacyHello.deviceName == "legacy-id")
         #expect(legacyHello.networkPreference == nil)
     }
-    @Test("v1.4.3 connection protocol is version 9 and legacy protocol 2 remains decodable but incompatible")
+    @Test("v1.4.3 connection protocol is version 10 and legacy protocol 9 remains decodable but incompatible")
     func protocolVersionMismatchIsVisible() throws {
-        #expect(BoothTransportHello.currentProtocolVersion == 9)
-        let legacy = Data(#"{"protocolVersion":2,"appVersion":"1.4.1","role":"iPad","deviceID":"legacy-id","capabilities":["control"]}"#.utf8)
+        #expect(BoothTransportHello.currentProtocolVersion == 10)
+        let legacy = Data(#"{"protocolVersion":9,"appVersion":"1.4.2","role":"iPad","deviceID":"legacy-id","capabilities":["control"]}"#.utf8)
         let hello = try JSONDecoder().decode(BoothTransportHello.self, from: legacy)
-        #expect(hello.protocolVersion == 2)
+        #expect(hello.protocolVersion == 9)
         #expect(hello.protocolVersion != BoothTransportHello.currentProtocolVersion)
     }
 

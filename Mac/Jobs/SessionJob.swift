@@ -10,8 +10,8 @@ enum SessionJobKind: String, Codable, Sendable, CaseIterable {
 
     var isOptional: Bool {
         switch self {
-        case .renderGIF, .cloudUpload: return true
-        case .renderStrip, .registerDownload, .updateGallery, .autoPrint: return false
+        case .renderGIF, .cloudUpload, .autoPrint: return true
+        case .renderStrip, .registerDownload, .updateGallery: return false
         }
     }
 }

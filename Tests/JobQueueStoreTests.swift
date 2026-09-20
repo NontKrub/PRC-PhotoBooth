@@ -158,7 +158,7 @@ struct JobQueueStoreTests {
         #expect(jobs.first { $0.sessionID == "cancelled" }?.status == .cancelled)
     }
 
-    @Test("corrupt queue is preserved before a new empty queue is created")
+    @Test("corrupt queue is preserved and remains fail-closed")
     func preservesCorruptQueue() async throws {
         let file = try temporaryFile()
         defer { try? FileManager.default.removeItem(at: file.deletingLastPathComponent()) }
@@ -175,7 +175,19 @@ struct JobQueueStoreTests {
         }
         let files = try FileManager.default.contentsOfDirectory(at: file.deletingLastPathComponent(), includingPropertiesForKeys: nil)
         #expect(files.contains { $0.lastPathComponent.hasPrefix("jobs-corrupt-") })
-        #expect(try await store.load().isEmpty)
+        do {
+            _ = try await store.load()
+            Issue.record("Failed queue became loadable after the first error.")
+        } catch is JobQueueStoreError {
+            // Expected: the in-memory store remains failed closed.
+        }
+        let reloaded = JobQueueStore(fileURL: file)
+        do {
+            _ = try await reloaded.load()
+            Issue.record("Corrupt queue became loadable after store recreation.")
+        } catch is JobQueueStoreError {
+            // Expected: the corrupt source file is still present.
+        }
     }
 
     @Test("cancelled jobs do not run and optional cancellation is scoped")
@@ -214,6 +226,56 @@ struct JobQueueStoreTests {
             Issue.record("Reloaded cancellation barrier accepted an enqueue")
         } catch let error as JobQueueStoreError {
             #expect(error == .sessionCancelled("cancelled"))
+        }
+    }
+
+    @Test("batch enqueue rolls back all jobs on persistence failure")
+    func batchEnqueueRollsBackOnPersistenceFailure() async throws {
+        let file = try temporaryFile()
+        defer { try? FileManager.default.removeItem(at: file.deletingLastPathComponent()) }
+        let store = JobQueueStore(fileURL: file)
+        _ = try await store.load()
+        await store.failNextPersistenceForTesting()
+
+        do {
+            _ = try await store.enqueueBatch(
+                sessionID: "batch",
+                kinds: [.renderStrip, .registerDownload, .updateGallery]
+            )
+            Issue.record("Batch enqueue unexpectedly succeeded")
+        } catch let error as JobQueueStoreError {
+            guard case .persistenceFailed = error else {
+                Issue.record("Unexpected batch failure: \(error)")
+                return
+            }
+        }
+        #expect(await store.snapshot().isEmpty)
+    }
+
+    @Test("corrupt cancellation barrier fails closed on every mutation")
+    func corruptCancellationBarrierFailsClosed() async throws {
+        let file = try temporaryFile()
+        defer { try? FileManager.default.removeItem(at: file.deletingLastPathComponent()) }
+        let barrier = file.deletingPathExtension().appendingPathExtension("cancelled-sessions.json")
+        try Data("not-json".utf8).write(to: barrier)
+        let store = JobQueueStore(fileURL: file)
+
+        for operation in 0..<4 {
+            do {
+                switch operation {
+                case 0:
+                    _ = try await store.enqueue(sessionID: "blocked", kind: .renderStrip)
+                case 1:
+                    _ = try await store.claim(jobID: "missing")
+                case 2:
+                    try await store.retry(jobID: "missing")
+                default:
+                    _ = try await store.forceRequeueCloudUpload(sessionID: "blocked")
+                }
+                Issue.record("Corrupt cancellation barrier failed open")
+            } catch is JobQueueStoreError {
+                // Every operation must continue rejecting the failed load.
+            }
         }
     }
 

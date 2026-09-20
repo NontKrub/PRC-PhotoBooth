@@ -31,7 +31,7 @@ struct EventReadinessStressTests {
             )
 
             stateMachine.startSession(config: config, sessionID: sessionID)
-            messageGate.synchronize(sessionID: sessionID, sequence: 0)
+            messageGate.synchronize(sessionID: sessionID, sequence: 0, authorityEpoch: testAuthorityEpoch)
             if let previousContext {
                 let accepted = messageGate.accept(previousContext)
                 #expect(!accepted)
@@ -60,7 +60,8 @@ struct EventReadinessStressTests {
             for photoIndex in 0..<photoCount {
                 let captureContext = SessionMessageContext(
                     sessionID: sessionID,
-                    sequence: UInt64(photoIndex * 3 + 1)
+                    sequence: UInt64(photoIndex * 3 + 1),
+                    authorityEpoch: testAuthorityEpoch
                 )
                 let captureAccepted = messageGate.accept(captureContext)
                 #expect(captureAccepted)
@@ -77,7 +78,8 @@ struct EventReadinessStressTests {
                 if random.next() % 7 == 0 {
                     let retakeContext = SessionMessageContext(
                         sessionID: sessionID,
-                        sequence: UInt64(photoIndex * 3 + 2)
+                        sequence: UInt64(photoIndex * 3 + 2),
+                        authorityEpoch: testAuthorityEpoch
                     )
                     let retakeAccepted = messageGate.accept(retakeContext)
                     #expect(retakeAccepted)
@@ -93,7 +95,8 @@ struct EventReadinessStressTests {
 
                 let keepContext = SessionMessageContext(
                     sessionID: sessionID,
-                    sequence: UInt64(photoIndex * 3 + 3)
+                    sequence: UInt64(photoIndex * 3 + 3),
+                    authorityEpoch: testAuthorityEpoch
                 )
                 let keepAccepted = messageGate.accept(keepContext)
                 #expect(keepAccepted)
@@ -171,7 +174,8 @@ struct EventReadinessStressTests {
             stripAsset: stripReference,
             keptShotAssets: Dictionary(uniqueKeysWithValues: reviewReferences.enumerated().map { ($0.offset, $0.element) }),
             acceptedPhotoIndices: Array(0..<8),
-            nextPhotoIndex: 7
+            nextPhotoIndex: 7,
+            authorityEpoch: testAuthorityEpoch
         )
 
         let encoded = try Message.sessionSync(snapshot: snapshot).encoded()

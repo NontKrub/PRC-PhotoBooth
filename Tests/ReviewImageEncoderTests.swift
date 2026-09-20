@@ -9,7 +9,7 @@ import Testing
 struct ReviewImageEncoderTests {
     @Test("Portrait, landscape, and square reviews preserve useful dimensions")
     func reviewDimensions() throws {
-        let context = SessionMessageContext(sessionID: "session", sequence: 1)
+        let context = SessionMessageContext(sessionID: "session", sequence: 1, authorityEpoch: testAuthorityEpoch)
         for (width, height) in [(3000, 4000), (4000, 3000), (3000, 3000)] {
             let image = makeImage(width: width, height: height)
             let data = try ReviewImageEncoder.encode(image: image, context: context, index: 0)
@@ -25,7 +25,7 @@ struct ReviewImageEncoderTests {
     @Test("Review message stays below the transport frame limit")
     func reviewMessageFitsFrame() throws {
         let image = makeImage(width: 4000, height: 3000, noisy: true)
-        let context = SessionMessageContext(sessionID: "session", sequence: 2)
+        let context = SessionMessageContext(sessionID: "session", sequence: 2, authorityEpoch: testAuthorityEpoch)
         let data = try ReviewImageEncoder.encode(image: image, context: context, index: 1)
         let message = Message.shotCaptured(context: context, index: 1, thumbnailData: data)
 
@@ -35,7 +35,7 @@ struct ReviewImageEncoderTests {
 
     @Test("Reconnect snapshot keeps historical shots small")
     func reconnectSnapshotKeepsHistorySmall() throws {
-        let context = SessionMessageContext(sessionID: "session", sequence: 3)
+        let context = SessionMessageContext(sessionID: "session", sequence: 3, authorityEpoch: testAuthorityEpoch)
         let large = try ReviewImageEncoder.encode(
             image: makeImage(width: 4000, height: 3000),
             context: context,
@@ -50,6 +50,7 @@ struct ReviewImageEncoderTests {
             reviewThumbnailData: large,
             isMirrored: false,
             keptShots: [0: small, 1: small, 2: small],
+            authorityEpoch: testAuthorityEpoch,
         )
         let payload = try Message.sessionSync(snapshot: snapshot).encoded()
 
@@ -59,7 +60,7 @@ struct ReviewImageEncoderTests {
 
     @Test("Display decoding downsamples before bitmap creation")
     func displayDecodingIsBounded() throws {
-        let context = SessionMessageContext(sessionID: "session", sequence: 4)
+        let context = SessionMessageContext(sessionID: "session", sequence: 4, authorityEpoch: testAuthorityEpoch)
         let data = try ReviewImageEncoder.encode(
             image: makeImage(width: 1_200, height: 900),
             context: context,

@@ -34,9 +34,19 @@ actor SessionManifestStore {
         return try decode(from: url)
     }
 
-    func save(_ manifest: SessionManifest) throws {
+    func save(
+        _ manifest: SessionManifest,
+        allowedStatuses: Set<RuntimeSessionStatus>
+    ) throws {
         try validate(sessionID: manifest.id)
         let current = try load(sessionID: manifest.id)
+        guard current.status != .cancelled,
+              allowedStatuses.contains(current.status) else {
+            throw SessionManifestError.mutationNotAllowed(
+                sessionID: manifest.id,
+                status: current.status
+            )
+        }
         guard manifest.status == current.status else {
             throw SessionManifestError.invalidTransition(
                 sessionID: manifest.id,
@@ -52,12 +62,20 @@ actor SessionManifestStore {
 
     func update(
         sessionID: String,
+        allowedStatuses: Set<RuntimeSessionStatus>,
         _ mutation: @Sendable (inout SessionManifest) throws -> Void
     ) throws -> SessionManifest {
         try validate(sessionID: sessionID)
         let url = try fileURL(for: sessionID)
         var manifest = try load(sessionID: sessionID)
         let originalStatus = manifest.status
+        guard originalStatus != .cancelled,
+              allowedStatuses.contains(originalStatus) else {
+            throw SessionManifestError.mutationNotAllowed(
+                sessionID: sessionID,
+                status: originalStatus
+            )
+        }
         try mutation(&manifest)
         guard manifest.status == originalStatus else {
             throw SessionManifestError.invalidTransition(

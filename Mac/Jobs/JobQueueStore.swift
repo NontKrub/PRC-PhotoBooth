@@ -2,6 +2,7 @@ import Foundation
 
 enum JobQueueStoreError: LocalizedError, Equatable {
     case corrupt(URL, String, URL?)
+    case persistenceFailed(URL, String)
     case missingJob(String)
     case invalidJob(String)
     case sessionCancelled(String)
@@ -11,6 +12,8 @@ enum JobQueueStoreError: LocalizedError, Equatable {
         case .corrupt(let url, let message, let backup):
             let preserved = backup.map { " Preserved as \($0.lastPathComponent)." } ?? ""
             return "Corrupt job queue \(url.path): \(message).\(preserved)"
+        case .persistenceFailed(let url, let message):
+            return "Job queue persistence failed at \(url.path): \(message)"
         case .missingJob(let id): return "Job not found: \(id)"
         case .invalidJob(let id): return "Invalid job identifier: \(id)"
         case .sessionCancelled(let id): return "Session is durably cancelled: \(id)"
@@ -19,74 +22,98 @@ enum JobQueueStoreError: LocalizedError, Equatable {
 }
 
 actor JobQueueStore {
+    private enum LoadState {
+        case notLoaded
+        case loaded
+        case failed(JobQueueStoreError)
+    }
+
     private let fileURL: URL
     private var cancellationFileURL: URL { fileURL.deletingPathExtension().appendingPathExtension("cancelled-sessions.json") }
     private var jobs: [SessionJob] = []
     private var persistedJobs: [SessionJob] = []
     private var cancelledSessionIDs: Set<String> = []
-    private var hasLoaded = false
+    private var loadState: LoadState = .notLoaded
     private(set) var lastPersistenceError: String?
+#if DEBUG
+    private var failNextPersistence = false
+#endif
 
     init(fileURL: URL) {
         self.fileURL = fileURL
     }
 
-    func load() throws -> [SessionJob] {
-        if hasLoaded { return jobs }
-        hasLoaded = true
-        try FileManager.default.createDirectory(at: fileURL.deletingLastPathComponent(), withIntermediateDirectories: true)
-        try loadCancellationBarrier()
-        guard FileManager.default.fileExists(atPath: fileURL.path) else {
-            try persist()
-            return jobs
-        }
+#if DEBUG
+    func failNextPersistenceForTesting() {
+        failNextPersistence = true
+    }
+#endif
 
-        do {
-            let decoder = JSONDecoder()
-            decoder.dateDecodingStrategy = .iso8601
-            jobs = try decoder.decode([SessionJob].self, from: Data(contentsOf: fileURL))
-            persistedJobs = jobs
-            let now = Date()
-            var changed = false
-            for index in jobs.indices {
-                if jobs[index].status == .running {
-                    if jobs[index].kind == .autoPrint {
-                        jobs[index].status = .failed
-                        jobs[index].lastError = "Print submission outcome is unknown after app restart. Verify the printer before retrying."
-                        jobs[index].lastFailureDisposition = .sideEffectUnknown
-                        jobs[index].nextAttemptAt = nil
-                    } else {
-                        jobs[index].status = .pending
-                        jobs[index].lastAttemptAt = nil
-                        jobs[index].nextAttemptAt = now
-                    }
-                    jobs[index].updatedAt = now
-                    changed = true
-                }
-            }
-            changed = cancelDurablyCancelledJobs() || changed
-            changed = cancelDuplicateActiveJobs() || changed
-            if changed { try persist() }
+    func load() throws -> [SessionJob] {
+        switch loadState {
+        case .loaded:
             return jobs
-        } catch {
-            let decodingError = error.localizedDescription
-            let backup: URL?
-            do {
-                backup = try preserveCorruptFile()
-            } catch {
-                backup = nil
-            }
-            jobs = []
-            do {
+        case .failed(let error):
+            throw error
+        case .notLoaded:
+            break
+        }
+        do {
+            try FileManager.default.createDirectory(at: fileURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try loadCancellationBarrier()
+            guard FileManager.default.fileExists(atPath: fileURL.path) else {
                 try persist()
-            } catch {
-                throw JobQueueStoreError.corrupt(
-                    fileURL,
-                    "\(decodingError); recovered queue could not be persisted: \(error.localizedDescription)",
-                    backup
-                )
+                loadState = .loaded
+                return jobs
             }
-            throw JobQueueStoreError.corrupt(fileURL, decodingError, backup)
+
+            do {
+                let decoder = JSONDecoder()
+                decoder.dateDecodingStrategy = .iso8601
+                jobs = try decoder.decode([SessionJob].self, from: Data(contentsOf: fileURL))
+                persistedJobs = jobs
+                let now = Date()
+                var changed = false
+                for index in jobs.indices {
+                    if jobs[index].status == .running {
+                        if jobs[index].kind == .autoPrint {
+                            jobs[index].status = .failed
+                            jobs[index].lastError = "Print submission outcome is unknown after app restart. Verify the printer before retrying."
+                            jobs[index].lastFailureDisposition = .sideEffectUnknown
+                            jobs[index].nextAttemptAt = nil
+                        } else {
+                            jobs[index].status = .pending
+                            jobs[index].lastAttemptAt = nil
+                            jobs[index].nextAttemptAt = now
+                        }
+                        jobs[index].updatedAt = now
+                        changed = true
+                    }
+                }
+                changed = cancelDurablyCancelledJobs() || changed
+                changed = cancelDuplicateActiveJobs() || changed
+                if changed { try persist() }
+                loadState = .loaded
+                return jobs
+            } catch {
+                let decodingError = error.localizedDescription
+                let backup: URL?
+                do {
+                    backup = try preserveCorruptFile()
+                } catch {
+                    backup = nil
+                }
+                let failure = JobQueueStoreError.corrupt(fileURL, decodingError, backup)
+                loadState = .failed(failure)
+                throw failure
+            }
+        } catch let error as JobQueueStoreError {
+            loadState = .failed(error)
+            throw error
+        } catch {
+            let failure = JobQueueStoreError.persistenceFailed(fileURL, error.localizedDescription)
+            loadState = .failed(failure)
+            throw failure
         }
     }
 
@@ -95,30 +122,44 @@ actor JobQueueStore {
     }
 
     func enqueue(sessionID: String, kind: SessionJobKind) throws -> SessionJob {
+        try enqueueBatch(sessionID: sessionID, kinds: [kind]).first!
+    }
+
+    func enqueueBatch(sessionID: String, kinds: [SessionJobKind]) throws -> [SessionJob] {
         try ensureLoaded()
         guard !cancelledSessionIDs.contains(sessionID) else {
             throw JobQueueStoreError.sessionCancelled(sessionID)
         }
-        if let existing = jobs.first(where: { $0.sessionID == sessionID && $0.kind == kind && $0.status != .cancelled }) {
-            return existing
+        var result: [SessionJob] = []
+        var missingKinds = Set<SessionJobKind>()
+        for kind in kinds where missingKinds.insert(kind).inserted {
+            if let existing = jobs.first(where: {
+                $0.sessionID == sessionID
+                    && $0.kind == kind
+                    && $0.status != .cancelled
+            }) {
+                result.append(existing)
+                continue
+            }
+            let now = Date()
+            let job = SessionJob(
+                id: UUID().uuidString,
+                sessionID: sessionID,
+                kind: kind,
+                status: .pending,
+                createdAt: now,
+                updatedAt: now,
+                lastAttemptAt: nil,
+                nextAttemptAt: now,
+                attemptCount: 0,
+                lastError: nil,
+                lastFailureDisposition: nil
+            )
+            jobs.append(job)
+            result.append(job)
         }
-        let now = Date()
-        let job = SessionJob(
-            id: UUID().uuidString,
-            sessionID: sessionID,
-            kind: kind,
-            status: .pending,
-            createdAt: now,
-            updatedAt: now,
-            lastAttemptAt: nil,
-            nextAttemptAt: now,
-            attemptCount: 0,
-            lastError: nil,
-            lastFailureDisposition: nil
-        )
-        jobs.append(job)
         try persist()
-        return job
+        return result
     }
 
     func update(_ job: SessionJob) throws {
@@ -131,6 +172,20 @@ actor JobQueueStore {
         }
         jobs[index] = job
         try persist()
+    }
+
+    func finish(_ job: SessionJob) throws -> Bool {
+        try ensureLoaded()
+        guard let index = jobs.firstIndex(where: { $0.id == job.id }) else {
+            throw JobQueueStoreError.missingJob(job.id)
+        }
+        guard jobs[index].status == .running,
+              !cancelledSessionIDs.contains(job.sessionID) else {
+            return false
+        }
+        jobs[index] = job
+        try persist()
+        return true
     }
 
     func claim(jobID: String, now: Date = Date()) throws -> SessionJob? {
@@ -168,7 +223,7 @@ actor JobQueueStore {
             throw JobQueueStoreError.missingJob(jobID)
         }
         guard !cancelledSessionIDs.contains(jobs[index].sessionID) else { return }
-        guard jobs[index].status != .succeeded else { return }
+        guard jobs[index].status == .failed || jobs[index].status == .waitingRetry else { return }
         guard jobs[index].lastFailureDisposition != .sideEffectUnknown else { return }
         jobs[index].status = .pending
         jobs[index].attemptCount = 0
@@ -337,7 +392,14 @@ actor JobQueueStore {
     }
 
     private func ensureLoaded() throws {
-        if !hasLoaded { _ = try load() }
+        switch loadState {
+        case .notLoaded:
+            _ = try load()
+        case .loaded:
+            return
+        case .failed(let error):
+            throw error
+        }
     }
 
     private func loadCancellationBarrier() throws {
@@ -353,7 +415,16 @@ actor JobQueueStore {
     private func persistCancellationBarrier() throws {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-        try encoder.encode(cancelledSessionIDs.sorted()).write(to: cancellationFileURL, options: [.atomic])
+        do {
+            try encoder.encode(cancelledSessionIDs.sorted()).write(to: cancellationFileURL, options: [.atomic])
+        } catch {
+            let failure = JobQueueStoreError.persistenceFailed(
+                cancellationFileURL,
+                error.localizedDescription
+            )
+            loadState = .failed(failure)
+            throw failure
+        }
     }
 
     private func cancelDurablyCancelledJobs() -> Bool {
@@ -376,13 +447,25 @@ actor JobQueueStore {
         encoder.dateEncodingStrategy = .iso8601
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         do {
+#if DEBUG
+            if failNextPersistence {
+                failNextPersistence = false
+                throw NSError(
+                    domain: "PRCPhotoBooth.JobQueueStoreTests",
+                    code: 1,
+                    userInfo: [NSLocalizedDescriptionKey: "Injected queue persistence failure"]
+                )
+            }
+#endif
             try encoder.encode(jobs).write(to: fileURL, options: [.atomic])
             persistedJobs = jobs
             lastPersistenceError = nil
         } catch {
             jobs = persistedJobs
-            lastPersistenceError = error.localizedDescription
-            throw error
+            let failure = JobQueueStoreError.persistenceFailed(fileURL, error.localizedDescription)
+            lastPersistenceError = failure.localizedDescription
+            loadState = .failed(failure)
+            throw failure
         }
     }
 
@@ -398,7 +481,7 @@ actor JobQueueStore {
                 .appendingPathComponent("jobs-corrupt-\(formatter.string(from: Date()))-\(suffix).json")
             suffix += 1
         }
-        try FileManager.default.moveItem(at: fileURL, to: backup)
+        try FileManager.default.copyItem(at: fileURL, to: backup)
         return backup
     }
 

@@ -334,7 +334,7 @@ struct OperationsView: View {
                 VStack(alignment: .leading, spacing: 4) {
                     Text(readinessTitle).font(.title2.bold())
                     if let sessionStatus = coordinator.operationsSessionStatus {
-                        Text("Session: (sessionStatus)")
+                        Text(operatorFormat("Session: %@", locale: locale, sessionStatus))
                             .font(.caption)
                             .foregroundStyle(sessionStatus == "Cancelling" ? .orange : .secondary)
                     }
@@ -381,10 +381,18 @@ struct OperationsView: View {
                     Text("The session is cancelled. Its files remain protected until background work stops.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
+                    Text(operatorString(
+                        "Do not remove these files manually. Cleanup will retry after background work stops.",
+                        locale: locale
+                    ))
+                        .font(.caption)
+                        .foregroundStyle(.orange)
                     ForEach(coordinator.recoveryService.cleanupPendingSessionIDs.sorted(), id: \.self) { sessionID in
-                        Text(sessionID)
+                        Text(operatorFormat("Session ID: %@", locale: locale, sessionID))
                             .font(.caption2.monospaced())
                             .foregroundStyle(.tertiary)
+                            .textSelection(.enabled)
+                            .accessibilityLabel(operatorFormat("Session ID: %@", locale: locale, sessionID))
                     }
                 }
             }
@@ -603,9 +611,18 @@ struct OperationsView: View {
                         Text(startedAt, style: .timer)
                             .monospacedDigit()
                     }
-                    Text("Customer sessions remain available while printing.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+                    if case .unknownAwaitingAppKitCompletion = coordinator.printer.lifecycleState {
+                        Text(operatorString(
+                            "Waiting for macOS to finish the print operation. Automatic printing is paused; customer sessions remain available.",
+                            locale: locale
+                        ))
+                            .font(.caption)
+                            .foregroundStyle(.orange)
+                    } else {
+                        Text("Customer sessions remain available while printing.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
                 }
                 if let result = coordinator.printer.lastTestResult {
                     let cancelled = result.outcome == .cancelled

@@ -26,6 +26,7 @@ final class SessionRecoveryService {
 
     var onResume: ((SessionManifest, [Int: CGImage]) -> Void)?
     var onDiscard: ((SessionManifest) -> Void)?
+    var quiesceSessionOperations: (@MainActor (String) async -> Bool)?
 
     init(
         manifestStore: SessionManifestStore,
@@ -101,6 +102,10 @@ final class SessionRecoveryService {
                 }
                 if recoverableCaptureSession?.manifest.id == sessionID {
                     recoverableCaptureSession = nil
+                }
+                guard await quiesceSessionOperations?(sessionID) ?? true else {
+                    markCleanupPending(sessionID: sessionID)
+                    return
                 }
                 let quiescence = try await jobQueue.cancelAndQuiesceJobs(sessionID: sessionID)
                 guard quiescence == .quiesced else {
@@ -219,6 +224,76 @@ final class SessionRecoveryService {
         return try workspace.loadAcceptedImages(manifest: manifest)
     }
 
+}
+
+@MainActor
+final class SessionFlowOperationRegistry {
+    enum Kind: Sendable {
+        case capture
+        case reviewDecision
+        case captureRecovery
+    }
+
+    private struct Entry {
+        let sessionID: String
+        let task: Task<Void, Never>
+    }
+
+    private var entries: [UUID: Entry] = [:]
+    private var waiters: [UUID: (sessionID: String, continuation: CheckedContinuation<Bool, Never>)] = [:]
+
+    @discardableResult
+    func start(
+        sessionID: String,
+        kind: Kind,
+        operation: @escaping @MainActor () async -> Void
+    ) -> UUID {
+        let id = UUID()
+        let task = Task { @MainActor [weak self] in
+            await operation()
+            self?.finish(id)
+        }
+        entries[id] = Entry(sessionID: sessionID, task: task)
+        return id
+    }
+
+    func cancelAndQuiesce(sessionID: String, timeout: Duration) async -> Bool {
+        for entry in entries.values where entry.sessionID == sessionID {
+            entry.task.cancel()
+        }
+        guard entries.values.contains(where: { $0.sessionID == sessionID }) else { return true }
+        return await waitForQuiescence(sessionID: sessionID, timeout: timeout)
+    }
+
+    private func finish(_ id: UUID) {
+        entries.removeValue(forKey: id)
+        let ready = waiters.filter { _, waiter in
+            !entries.values.contains { $0.sessionID == waiter.sessionID }
+        }
+        for (waiterID, waiter) in ready {
+            waiters.removeValue(forKey: waiterID)
+            waiter.continuation.resume(returning: true)
+        }
+    }
+
+    private func waitForQuiescence(sessionID: String, timeout: Duration) async -> Bool {
+        guard entries.values.contains(where: { $0.sessionID == sessionID }) else { return true }
+        let waiterID = UUID()
+        let clock = ContinuousClock()
+        let deadline = clock.now.advanced(by: timeout)
+        return await withCheckedContinuation { continuation in
+            waiters[waiterID] = (sessionID, continuation)
+            Task { @MainActor [weak self] in
+                do { try await clock.sleep(until: deadline) } catch { return }
+                self?.timeout(waiterID)
+            }
+        }
+    }
+
+    private func timeout(_ id: UUID) {
+        guard let waiter = waiters.removeValue(forKey: id) else { return }
+        waiter.continuation.resume(returning: false)
+    }
 }
 
 private enum RecoveryError: LocalizedError {
