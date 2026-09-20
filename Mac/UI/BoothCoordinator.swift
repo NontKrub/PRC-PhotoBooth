@@ -168,6 +168,14 @@ final class BoothCoordinator {
     private var sessionMessageSequence: UInt64 = 0
     private let authorityEpoch = UUID()
     private var sessionLifecycleGeneration: UInt64 = 0
+    private struct ActiveSessionStart {
+        let requestID: UUID
+        let generation: UInt64
+        var sessionID: String?
+    }
+    private var activeSessionStart: ActiveSessionStart?
+    private var lastSessionStartRequestID: UUID?
+    private var lastSessionStartSessionID: String?
     private enum SessionLifecycleOperation: Equatable {
         case idle
         case cancelling(sessionID: String, token: UUID)
@@ -617,7 +625,9 @@ final class BoothCoordinator {
                 return
             }
             let snapshot = manifest?.cloudDelivery
-            if snapshot == nil && !UserDefaults.standard.bool(forKey: "cloudUploadEnabled") {
+            let cloudEnabled = manifest?.deliveryIntent?.cloudUploadEnabled
+                ?? (snapshot != nil || UserDefaults.standard.bool(forKey: "cloudUploadEnabled"))
+            if !cloudEnabled {
                 errorMessage = "Cloud upload is disabled."
                 return
             }
@@ -668,6 +678,13 @@ final class BoothCoordinator {
             remoteBasePath: UserDefaults.standard.string(forKey: "cloudRemotePath")
                 ?? CloudUploadConfiguration.defaultRemoteBasePath,
             sshHost: UserDefaults.standard.string(forKey: "cloudSSHHost") ?? ""
+        )
+    }
+
+    private func currentDeliveryIntentSnapshot() -> SessionDeliveryIntentSnapshot {
+        SessionDeliveryIntentSnapshot(
+            cloudUploadEnabled: UserDefaults.standard.bool(forKey: "cloudUploadEnabled"),
+            automaticPrintEnabled: UserDefaults.standard.bool(forKey: "selphyAutoPrintAfterSession")
         )
     }
 
@@ -1514,14 +1531,79 @@ final class BoothCoordinator {
 
     // MARK: - Session control
 
-    func startSession(selection requestedSelection: CustomerSessionSelection? = nil) {
-        guard !isBoothPaused else {
-            errorMessage = "The booth is paused by the operator."
+    private func sendSessionStartResult(
+        requestID: UUID?,
+        result: CustomerSessionStartResult
+    ) {
+        guard let requestID else { return }
+        multipeer.sendControl(.customerSessionStartResult(requestID: requestID, result: result))
+    }
+
+    private func releaseSessionStart(_ requestID: UUID) {
+        guard activeSessionStart?.requestID == requestID else { return }
+        activeSessionStart = nil
+    }
+
+    func startSession(
+        selection requestedSelection: CustomerSessionSelection? = nil,
+        requestID requestedRequestID: UUID? = nil
+    ) {
+        let startRequestID = requestedRequestID ?? UUID()
+        let respondsToRequest = requestedRequestID != nil
+        let customerLanguage = requestedSelection?.language ?? .english
+        func startMessage(english: String, thai: String) -> String {
+            LocalizedText(english: english, thai: thai).value(for: customerLanguage)
+        }
+        guard activeSessionStart == nil else {
+            if respondsToRequest { sendSessionStartResult(requestID: requestedRequestID, result: .inProgress) }
             return
         }
-        guard currentSession == nil,
-              finishedAwaitingCustomerAckSessionID == nil,
-              let event = activeEvent else { return }
+        guard !isBoothPaused else {
+            errorMessage = startMessage(
+                english: "The booth is paused by the operator.",
+                thai: "บูธถูกหยุดชั่วคราวโดยผู้ดูแล"
+            )
+            sendSessionStartResult(requestID: requestedRequestID, result: .rejected(reason: errorMessage!))
+            return
+        }
+        guard currentSession == nil, finishedAwaitingCustomerAckSessionID == nil else {
+            let reason = startMessage(
+                english: "A session is already in progress.",
+                thai: "มีเซสชันกำลังดำเนินการอยู่แล้ว"
+            )
+            errorMessage = reason
+            sendSessionStartResult(requestID: requestedRequestID, result: .rejected(reason: reason))
+            return
+        }
+        guard let event = activeEvent else {
+            let reason = startMessage(
+                english: "No active event is available.",
+                thai: "ไม่มีอีเวนต์ที่กำลังใช้งาน"
+            )
+            errorMessage = reason
+            sendSessionStartResult(requestID: requestedRequestID, result: .rejected(reason: reason))
+            return
+        }
+        sessionLifecycleGeneration &+= 1
+        let lifecycleGeneration = sessionLifecycleGeneration
+        activeSessionStart = ActiveSessionStart(
+            requestID: startRequestID,
+            generation: lifecycleGeneration,
+            sessionID: nil
+        )
+        func failBeforeTransaction(_ message: String, result: CustomerSessionStartResult = .rejected(reason: "")) {
+            self.releaseSessionStart(startRequestID)
+            self.errorMessage = message
+            switch result {
+            case .rejected:
+                self.sendSessionStartResult(
+                    requestID: requestedRequestID,
+                    result: .rejected(reason: message)
+                )
+            default:
+                self.sendSessionStartResult(requestID: requestedRequestID, result: result)
+            }
+        }
         reviewDecisionPending = false
         currentReviewStateToken = nil
         recentReviewRequests.removeAll(keepingCapacity: true)
@@ -1532,12 +1614,17 @@ final class BoothCoordinator {
         assetSources = [:]
         assetAssembler = BoothAssetAssembler()
         guard recoveryService.recoverableCaptureSession == nil else {
-            errorMessage = "Resume or discard the unfinished session in Operations."
+            failBeforeTransaction(startMessage(
+                english: "Resume or discard the unfinished session in Operations.",
+                thai: "ดำเนินการต่อหรือละทิ้งเซสชันที่ค้างอยู่ใน Operations"
+            ))
             return
         }
         guard let document = activeExperienceDocument else {
-            errorMessage = "Event experience is still loading."
-            if requestedSelection != nil { multipeer.sendControl(.sessionRequestRejected(reason: errorMessage!)) }
+            failBeforeTransaction(startMessage(
+                english: "Event experience is still loading.",
+                thai: "กำลังโหลดประสบการณ์ของอีเวนต์"
+            ))
             return
         }
         let snapshot = makeEventSnapshot(event)
@@ -1555,9 +1642,10 @@ final class BoothCoordinator {
                     : "/e/\(document.gallery.eventToken)/"
             )
         } catch {
-            if requestedSelection != nil {
+            if respondsToRequest {
                 let reason = (error as? CustomerSelectionError)?.message(for: selection.language) ?? error.localizedDescription
-                multipeer.sendControl(.sessionRequestRejected(reason: reason))
+                releaseSessionStart(startRequestID)
+                sendSessionStartResult(requestID: requestedRequestID, result: .rejected(reason: reason))
                 if let selectionError = error as? CustomerSelectionError,
                    selectionError == .staleCatalog {
                     sendExperienceCatalog()
@@ -1567,21 +1655,30 @@ final class BoothCoordinator {
             return
         }
         guard isCustomerDisplayReady else {
-            errorMessage = "Connect an iPad or activate the external viewer before starting a session."
+            failBeforeTransaction(startMessage(
+                english: "Connect an iPad or activate the external viewer before starting a session.",
+                thai: "เชื่อมต่อ iPad หรือเปิดหน้าจอภายนอกก่อนเริ่มเซสชัน"
+            ))
             return
         }
         if let health = startupComponents[.localServer], health.status == .unavailable {
-            errorMessage = health.detail
+            failBeforeTransaction(health.detail)
             return
         }
         guard startupComponents[.runtimeDirectory]?.status == .ready,
               startupComponents[.dataStore]?.status == .ready,
               jobQueue.lastQueueError == nil else {
-            errorMessage = "Required runtime persistence is unavailable. Resolve Preflight errors before starting."
+            failBeforeTransaction(startMessage(
+                english: "Required runtime persistence is unavailable. Resolve Preflight errors before starting.",
+                thai: "พื้นที่จัดเก็บที่จำเป็นไม่พร้อมใช้งาน แก้ไขข้อผิดพลาด Preflight ก่อนเริ่ม"
+            ))
             return
         }
         guard selectedCaptureSourceReady else {
-            errorMessage = "The selected camera is not ready."
+            failBeforeTransaction(startMessage(
+                english: "The selected camera is not ready.",
+                thai: "กล้องที่เลือกยังไม่พร้อมใช้งาน"
+            ))
             return
         }
         guard config.photoCount > 0,
@@ -1590,26 +1687,33 @@ final class BoothCoordinator {
               config.canvasWidth > 0,
               config.canvasHeight > 0,
               let outputRoot = picturesOutputDir() else {
-            errorMessage = "The active event layout is not valid."
+            failBeforeTransaction(startMessage(
+                english: "The active event layout is not valid.",
+                thai: "เลย์เอาต์อีเวนต์ที่ใช้งานไม่ถูกต้อง"
+            ))
             return
         }
         let session = store.startSession(for: event)
+        if var activeSessionStart {
+            activeSessionStart.sessionID = session.id
+            self.activeSessionStart = activeSessionStart
+        }
         session.photoCount = config.photoCount
         guard store.saveChanges() else {
             store.deleteSession(session)
             let detail = store.lastPersistenceError ?? "unknown error"
-            errorMessage = "Session persistence is unavailable: \(detail)"
+            failBeforeTransaction("Session persistence is unavailable: \(detail)", result: .persistenceFailed)
             return
         }
-        sessionLifecycleGeneration &+= 1
-        let lifecycleGeneration = sessionLifecycleGeneration
         let frameURL = selectedTemplateFrameURL(validated.template, eventID: event.id)
         let foregroundURL = selectedTemplateForegroundOverlayURL(validated.template, eventID: event.id)
 
         Task { @MainActor [weak self] in
             guard let self else { return }
-            guard self.sessionLifecycleGeneration == lifecycleGeneration else {
+            guard self.sessionLifecycleGeneration == lifecycleGeneration,
+                  self.activeSessionStart?.requestID == startRequestID else {
                 self.store.deleteSession(session)
+                self.releaseSessionStart(startRequestID)
                 return
             }
             var createdDirectory: URL?
@@ -1652,13 +1756,17 @@ final class BoothCoordinator {
                         )
                     },
                     cloudDelivery: currentCloudDeliverySnapshot(),
+                    deliveryIntent: currentDeliveryIntentSnapshot(),
                     lastError: nil,
                     updatedAt: Date()
                 )
                 try await manifestStore.create(manifest)
-                guard self.sessionLifecycleGeneration == lifecycleGeneration else {
+                guard self.sessionLifecycleGeneration == lifecycleGeneration,
+                      self.activeSessionStart?.requestID == startRequestID else {
+                    try? await manifestStore.delete(sessionID: manifest.id)
                     try? workspace.removeEntireSession(manifest: manifest)
                     store.deleteSession(session)
+                    self.releaseSessionStart(startRequestID)
                     return
                 }
                 currentSession = session
@@ -1674,7 +1782,8 @@ final class BoothCoordinator {
                     config: config,
                     document: document
                 )
-                guard self.sessionLifecycleGeneration == lifecycleGeneration else {
+                guard self.sessionLifecycleGeneration == lifecycleGeneration,
+                      self.activeSessionStart?.requestID == startRequestID else {
                     throw CancellationError()
                 }
                 try workspace.savePresentationSnapshot(
@@ -1710,6 +1819,13 @@ final class BoothCoordinator {
                     }
                     self.beginCountdown(photoIndex: 0)
                 }
+                self.lastSessionStartRequestID = startRequestID
+                self.lastSessionStartSessionID = sessionID
+                self.releaseSessionStart(startRequestID)
+                self.sendSessionStartResult(
+                    requestID: requestedRequestID,
+                    result: .accepted(sessionID: sessionID)
+                )
             } catch {
                 if let createdDirectory { try? FileManager.default.removeItem(at: createdDirectory) }
                 if let persisted = try? await manifestStore.load(sessionID: session.id),
@@ -1733,8 +1849,13 @@ final class BoothCoordinator {
                     currentReviewStateToken = nil
                     stateMachine.reset()
                 }
+                self.releaseSessionStart(startRequestID)
                 if !(error is CancellationError) {
                     errorMessage = "Session start failed: \(error.localizedDescription)"
+                    self.sendSessionStartResult(
+                        requestID: requestedRequestID,
+                        result: .persistenceFailed
+                    )
                 }
             }
         }
@@ -2020,13 +2141,14 @@ final class BoothCoordinator {
         }
         let images = currentFilteredReviewImages
         let compositor = Compositor(config: config, framePNG: framePNG)
+        let cloudUploadEnabled = manifest.deliveryIntent?.cloudUploadEnabled
+            ?? (manifest.cloudDelivery != nil || UserDefaults.standard.bool(forKey: "cloudUploadEnabled"))
         let qrPayload = config.qrCodeElements.isEmpty ? nil : try? SessionQRCodePayloadResolver.resolve(
             token: manifest.downloadToken,
             localBaseURL: "http://\(LocalWebServer.lanIPAddress() ?? "localhost"):8585",
             publicBaseURL: manifest.cloudDelivery?.publicBaseURL
                 ?? UserDefaults.standard.string(forKey: "publicBaseURL"),
-            cloudUploadEnabled: manifest.cloudDelivery != nil
-                || UserDefaults.standard.bool(forKey: "cloudUploadEnabled")
+            cloudUploadEnabled: cloudUploadEnabled
         )
         Task.detached(priority: .utility) { [compositor, images, qrPayload] in
             let img = try? compositor.render(images: images, qrPayload: qrPayload)
@@ -2618,12 +2740,22 @@ final class BoothCoordinator {
 
         reviewDecisionPending = true
         activeReviewRequestID = requestID
-        Task { @MainActor [weak self] in
-            guard let self else { return }
+        let lifecycleGeneration = sessionLifecycleGeneration
+        sessionFlowOperations.start(
+            sessionID: state.sessionID,
+            kind: .reviewDecision
+        ) { [weak self] in
+            guard let self,
+                  !Task.isCancelled,
+                  self.sessionLifecycleGeneration == lifecycleGeneration,
+                  self.currentManifest?.id == state.sessionID else { return }
             let result: ReviewDecisionResult = switch action {
             case .keep: await self.acceptShot(photoIndex: state.photoIndex)
             case .retake: await self.requestRetake(photoIndex: state.photoIndex, source: .guest)
             }
+            guard !Task.isCancelled,
+                  self.sessionLifecycleGeneration == lifecycleGeneration,
+                  self.currentManifest?.id == state.sessionID else { return }
             self.reviewDecisionPending = false
             self.activeReviewRequestID = nil
             self.rememberReviewRequest(requestID, state: state, action: action, result: result)
@@ -2691,6 +2823,10 @@ final class BoothCoordinator {
     private func cancelCurrentSession() async {
         guard sessionLifecycleOperation.allowsCancellation else { return }
         guard let session = currentSession, let manifest = currentManifest else {
+            if activeSessionStart != nil {
+                sessionLifecycleGeneration &+= 1
+                activeSessionStart = nil
+            }
             reviewDecisionPending = false
             currentReviewStateToken = nil
             currentCaptureRecoveryStateToken = nil
@@ -2933,14 +3069,20 @@ final class BoothCoordinator {
         currentManifest = manifest
         do {
             try await jobQueue.enqueueFinalizationJobs(for: manifest)
-            if manifest.cloudDelivery != nil || UserDefaults.standard.bool(forKey: "cloudUploadEnabled") {
+            let cloudEnabled = manifest.deliveryIntent?.cloudUploadEnabled
+                ?? (manifest.cloudDelivery != nil || UserDefaults.standard.bool(forKey: "cloudUploadEnabled"))
+            if cloudEnabled {
                 try await jobQueue.enqueueCloudUpload(for: manifest)
             }
-            if UserDefaults.standard.bool(forKey: "selphyAutoPrintAfterSession") {
+            let printEnabled = manifest.deliveryIntent?.automaticPrintEnabled
+                ?? UserDefaults.standard.bool(forKey: "selphyAutoPrintAfterSession")
+            if printEnabled {
                 try await jobQueue.enqueueAutoPrint(for: manifest)
             }
         } catch {
             errorMessage = "Could not queue session processing: \(error.localizedDescription)"
+            recoveryService.recordError("Session processing remains finalizing until queue persistence recovers: \(error.localizedDescription)")
+            return false
         }
         return true
     }
@@ -2953,8 +3095,7 @@ final class BoothCoordinator {
         let needsGIF = manifest.shots.contains { !$0.gifFrameFileNames.isEmpty }
         let requiredKinds: Set<SessionJobKind> = Set([
             .renderStrip,
-            .registerDownload,
-            .updateGallery
+            .registerDownload
         ] + (needsGIF ? [.renderGIF] : []))
         if requiredKinds.contains(where: { kind in !jobs.contains { $0.kind == kind } }) {
             Task { @MainActor [weak self] in
@@ -3011,8 +3152,7 @@ final class BoothCoordinator {
                 let needsGIF = manifest.shots.contains { !$0.gifFrameFileNames.isEmpty }
                 let requiredKinds: Set<SessionJobKind> = Set([
                     .renderStrip,
-                    .registerDownload,
-                    .updateGallery
+                    .registerDownload
                 ] + (needsGIF ? [.renderGIF] : []))
                 if requiredKinds.contains(where: { kind in !jobs.contains { $0.kind == kind } }) {
                     do {
@@ -3161,13 +3301,14 @@ final class BoothCoordinator {
         let publicBase = (manifest.cloudDelivery?.publicBaseURL
             ?? UserDefaults.standard.string(forKey: "publicBaseURL"))?
             .trimmingCharacters(in: CharacterSet(charactersIn: "/ "))
+        let cloudUploadEnabled = manifest.deliveryIntent?.cloudUploadEnabled
+            ?? (manifest.cloudDelivery != nil || UserDefaults.standard.bool(forKey: "cloudUploadEnabled"))
         let ip = LocalWebServer.lanIPAddress() ?? "localhost"
         let qr = Self.downloadURL(
             publicBaseURL: publicBase,
             localBaseURL: "http://\(ip):8585",
             token: token,
-            cloudUploadEnabled: manifest.cloudDelivery != nil
-                || UserDefaults.standard.bool(forKey: "cloudUploadEnabled")
+            cloudUploadEnabled: cloudUploadEnabled
         )
         let stripThumb = loadCGImage(from: directory.appendingPathComponent("strip.png"))
             .flatMap { jpegData(from: $0, quality: 0.4) }
@@ -3322,11 +3463,11 @@ final class BoothCoordinator {
                 }
                 do {
                     try await manifestStore.delete(sessionID: manifest.id)
+                    try await jobQueue.deleteJobsAndForgetCancellationBarrier(sessionID: manifest.id)
                 } catch {
                     recoveryService.recordError("Old session manifest could not be removed: \(error.localizedDescription)")
                     continue
                 }
-                jobQueue.deleteJobs(sessionID: manifest.id)
                 await server.unregisterToken(manifest.downloadToken)
                 if let session = store.fetchSession(id: manifest.id) { store.deleteSession(session) }
             } else if manifest.status == .cancelled,
@@ -3340,7 +3481,7 @@ final class BoothCoordinator {
                     }
                     try workspace.removeEntireSession(manifest: manifest)
                     try await manifestStore.delete(sessionID: manifest.id)
-                    jobQueue.deleteJobs(sessionID: manifest.id)
+                    try await jobQueue.deleteJobsAndForgetCancellationBarrier(sessionID: manifest.id)
                 } catch {
                     recoveryService.markCleanupPending(sessionID: manifest.id)
                     recoveryService.recordError("Cancelled session cleanup could not finish: \(error.localizedDescription)")
@@ -3458,11 +3599,43 @@ final class BoothCoordinator {
 
     private func handleMessage(_ msg: Message) {
         switch msg {
-        case .sessionStart(let context):
-            guard context == nil else { break }
-            if stateMachine.phase == .idle, activeEvent != nil {
-                startSession()
+        case .customerSessionStartRequest(let request):
+            if let active = activeSessionStart {
+                if active.requestID == request.requestID {
+                    sendSessionStartResult(requestID: request.requestID, result: .inProgress)
+                } else {
+                    sendSessionStartResult(
+                        requestID: request.requestID,
+                        result: .rejected(reason: LocalizedText(
+                            english: "A session is already starting.",
+                            thai: "มีการเริ่มเซสชันอยู่แล้ว"
+                        ).value(for: request.selection?.language ?? .english))
+                    )
+                }
+                break
             }
+            if request.requestID == lastSessionStartRequestID,
+               let sessionID = lastSessionStartSessionID {
+                sendSessionStartResult(
+                    requestID: request.requestID,
+                    result: .accepted(sessionID: sessionID)
+                )
+                resynciPad()
+                break
+            }
+            guard currentSession == nil, finishedAwaitingCustomerAckSessionID == nil else {
+                sendSessionStartResult(
+                    requestID: request.requestID,
+                    result: .rejected(reason: LocalizedText(
+                        english: "A session is already in progress.",
+                        thai: "มีเซสชันกำลังดำเนินการอยู่แล้ว"
+                    ).value(for: request.selection?.language ?? .english))
+                )
+                break
+            }
+            startSession(selection: request.selection, requestID: request.requestID)
+        case .sessionStart:
+            break
         case .assetRequest(let references):
             handleAssetRequest(references)
         case .customerSessionRequest(let selection):

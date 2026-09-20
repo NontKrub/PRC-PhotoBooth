@@ -309,6 +309,32 @@ struct SessionJobQueueTests {
         #expect((await queue.job(status: .failed, kind: .renderGIF))?.lastFailureDisposition == .permanent)
     }
 
+    @Test("permanent gallery failure does not block the customer deliverable")
+    @MainActor
+    func galleryFailureDoesNotBlockRequiredJobs() async throws {
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let executor = TestJobExecutor()
+        await executor.fail(.updateGallery, with: .permanent("gallery unavailable"))
+        let queue = SessionJobQueue(
+            store: JobQueueStore(fileURL: directory.appendingPathComponent("jobs.json")),
+            executor: executor
+        )
+
+        queue.start()
+        try await queue.enqueueFinalizationJobs(for: makeManifest())
+        try await waitUntil {
+            await queue.job(status: .succeeded, kind: .registerDownload) != nil
+        }
+        try await waitUntil {
+            await queue.job(status: .failed, kind: .updateGallery) != nil
+        }
+
+        #expect(await queue.job(status: .succeeded, kind: .renderStrip) != nil)
+        #expect(await queue.job(status: .succeeded, kind: .registerDownload) != nil)
+        #expect((await queue.job(status: .failed, kind: .updateGallery))?.lastFailureDisposition == .permanent)
+    }
+
     @Test("manual cloud requeue reports the store result")
     @MainActor
     func reportsCloudRequeueResult() async throws {

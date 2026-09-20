@@ -95,6 +95,7 @@ struct SessionManifestStoreTests {
         var object = try #require(JSONSerialization.jsonObject(with: encoder.encode(manifest)) as? [String: Any])
         object.removeValue(forKey: "captureAttempts")
         object.removeValue(forKey: "cloudDelivery")
+        object.removeValue(forKey: "deliveryIntent")
         if var shots = object["shots"] as? [[String: Any]], var shot = shots.first {
             shot.removeValue(forKey: "previousImageFileName")
             shot.removeValue(forKey: "previousGifFrameFileNames")
@@ -110,6 +111,7 @@ struct SessionManifestStoreTests {
         #expect(decoded.id == manifest.id)
         #expect(decoded.captureAttempts == nil)
         #expect(decoded.cloudDelivery == nil)
+        #expect(decoded.deliveryIntent == nil)
         #expect(decoded.shots[0].previousImageFileName == nil)
     }
 
@@ -214,9 +216,14 @@ struct SessionManifestStoreTests {
             remoteBasePath: "/srv/old-photos",
             sshHost: "old-host"
         )
+        manifest.deliveryIntent = SessionDeliveryIntentSnapshot(
+            cloudUploadEnabled: true,
+            automaticPrintEnabled: false
+        )
 
         try await store.create(manifest)
         #expect(try await store.load(sessionID: manifest.id).cloudDelivery == manifest.cloudDelivery)
+        #expect(try await store.load(sessionID: manifest.id).deliveryIntent == manifest.deliveryIntent)
     }
 
     @Test("session cloud snapshot takes precedence over changed Settings")
@@ -229,14 +236,19 @@ struct SessionManifestStoreTests {
             remoteBasePath: "/srv/old-photos",
             sshHost: "old-host"
         )
+        manifest.deliveryIntent = SessionDeliveryIntentSnapshot(
+            cloudUploadEnabled: false,
+            automaticPrintEnabled: false
+        )
         defaults.set(false, forKey: "cloudUploadEnabled")
         defaults.set("https://new.example", forKey: "publicBaseURL")
         defaults.set("/srv/new-photos", forKey: "cloudRemotePath")
         defaults.set("new-host", forKey: "cloudSSHHost")
 
-        let configuration = try #require(
-            SessionJobExecutor.cloudUploadConfiguration(for: manifest, defaults: defaults)
-        )
+        #expect(SessionJobExecutor.cloudUploadConfiguration(for: manifest, defaults: defaults) == nil)
+
+        manifest.deliveryIntent?.cloudUploadEnabled = true
+        let configuration = try #require(SessionJobExecutor.cloudUploadConfiguration(for: manifest, defaults: defaults))
         #expect(configuration.publicBaseURL == "https://old.example")
         #expect(configuration.remoteBasePath == "/srv/old-photos")
         #expect(configuration.sshHost == "old-host")

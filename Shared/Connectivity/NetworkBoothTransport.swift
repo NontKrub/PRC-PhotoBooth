@@ -4256,13 +4256,15 @@ public final class NetworkBoothTransport: BoothTransport {
         guard shouldReconnect, assetReconnectSource == nil else { return }
         assetReconnectToken &+= 1
         let token = assetReconnectToken
-        let source = DispatchSource.makeTimerSource(queue: .main)
+        let source = DispatchSource.makeTimerSource(queue: transportQueue)
         source.schedule(deadline: .now() + 0.5)
         source.setEventHandler { [weak self] in
-            guard let self else { return }
-            guard self.assetReconnectToken == token else { return }
-            self.assetReconnectSource = nil
-            self.startAssetChannelIfNeeded()
+            Task { @MainActor [weak self] in
+                guard let self,
+                      self.assetReconnectToken == token else { return }
+                self.assetReconnectSource = nil
+                self.startAssetChannelIfNeeded()
+            }
         }
         assetReconnectSource = source
         source.resume()
@@ -4461,6 +4463,8 @@ public final class NetworkBoothTransport: BoothTransport {
         case .eventExperienceAsset: return "eventExperienceAsset"
         case .setMirrored: return "setMirrored"
         case .sessionStart: return "sessionStart"
+        case .customerSessionStartRequest: return "customerSessionStartRequest"
+        case .customerSessionStartResult: return "customerSessionStartResult"
         case .customerSessionRequest: return "customerSessionRequest"
         case .sessionRequestRejected: return "sessionRequestRejected"
         case .sessionPrepared: return "sessionPrepared"

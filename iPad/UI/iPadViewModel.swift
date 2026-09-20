@@ -56,6 +56,7 @@ final class iPadViewModel: ObservableObject {
     private var previewFramesDisplayed = 0
 #endif
     private var sessionRequestTimeoutTask: Task<Void, Never>?
+    private var pendingSessionStartRequestID: UUID?
     private var reviewDecisionTimeoutTask: Task<Void, Never>?
     private var pendingReviewDecision: (state: ReviewStateToken, requestID: UUID, action: ReviewAction)?
     private var recoveryActionTimeoutTask: Task<Void, Never>?
@@ -352,6 +353,34 @@ final class iPadViewModel: ObservableObject {
         return true
     }
 
+    private func handleSessionStartResult(
+        requestID: UUID,
+        result: CustomerSessionStartResult
+    ) {
+        guard pendingSessionStartRequestID == requestID else { return }
+        switch result {
+        case .inProgress:
+            isSessionRequestPending = true
+            sessionRequestError = nil
+            armSessionRequestTimeout(generation: transientRequestGeneration)
+        case .accepted:
+            pendingSessionStartRequestID = nil
+            clearTransientRequestState()
+        case .rejected(let reason):
+            pendingSessionStartRequestID = nil
+            clearTransientRequestState()
+            setSessionRequestError(reason)
+            stateMachine.beginSelectingExperience()
+        case .persistenceFailed:
+            pendingSessionStartRequestID = nil
+            clearTransientRequestState()
+            setSessionRequestError(LocalizedText(
+                english: "The booth could not save the session. Please try again.",
+                thai: "บูธไม่สามารถบันทึกเซสชันได้ กรุณาลองอีกครั้ง"
+            ).value(for: selectedLanguage))
+        }
+    }
+
     private func handleMessage(_ msg: Message) {
         switch msg {
         case .sessionSync(let snapshot):
@@ -413,6 +442,9 @@ final class iPadViewModel: ObservableObject {
             requestMissingExpectedAssets()
             selectedLanguage = presentation.language
             installPresentationImages(presentation)
+
+        case .customerSessionStartResult(let requestID, let result):
+            handleSessionStartResult(requestID: requestID, result: result)
 
         case .beginCountdown(let context, let descriptor):
             guard accept(context, message: "beginCountdown") else { break }
@@ -580,6 +612,7 @@ final class iPadViewModel: ObservableObject {
     }
 
     private func clearSessionMedia() {
+        pendingSessionStartRequestID = nil
         clearTransientRequestState()
         previewDecodeTask?.cancel()
         previewDecodeTask = nil
@@ -1023,19 +1056,16 @@ final class iPadViewModel: ObservableObject {
     }
 
     private func applySessionSync(_ snapshot: SessionSyncSnapshot) {
-        guard !sessionMessageGate.isRetiredAuthorityEpoch(snapshot.authorityEpoch) else { return }
-        let authorityChanged = sessionMessageGate.authorityEpoch.map {
-            $0 != snapshot.authorityEpoch
-        } ?? false
-        let hasSyncBaseline = sessionMessageGate.currentSessionID != nil
-            || sessionMessageGate.latestAcceptedSequence > 0
-        if hasSyncBaseline,
-           !authorityChanged,
-           snapshot.sessionID == sessionMessageGate.currentSessionID,
-           snapshot.sequence <= sessionMessageGate.latestAcceptedSequence {
+        let previousSessionID = sessionMessageGate.currentSessionID
+        let acceptance = sessionMessageGate.acceptSnapshot(
+            sessionID: snapshot.sessionID,
+            sequence: snapshot.sequence,
+            authorityEpoch: snapshot.authorityEpoch
+        )
+        guard acceptance == .acceptedSameAuthority || acceptance == .acceptedNewAuthority else {
 #if DEBUG
             NSLog(
-                "[Session] Ignored non-newer sessionSync: session=%@ sequence=%llu latest=%llu",
+                "[Session] Ignored stale sessionSync: session=%@ sequence=%llu latest=%llu",
                 snapshot.sessionID ?? "none",
                 snapshot.sequence,
                 sessionMessageGate.latestAcceptedSequence
@@ -1043,18 +1073,13 @@ final class iPadViewModel: ObservableObject {
 #endif
             return
         }
+        let authorityChanged = acceptance == .acceptedNewAuthority
         let pendingRecovery = pendingCaptureRecovery
         clearTransientRequestState()
-        let previousSessionID = sessionMessageGate.currentSessionID
         if authorityChanged || previousSessionID != snapshot.sessionID || snapshot.sessionID == nil {
             clearSessionMedia()
         }
         cancelCountdown()
-        sessionMessageGate.synchronize(
-            sessionID: snapshot.sessionID,
-            sequence: snapshot.sequence,
-            authorityEpoch: snapshot.authorityEpoch
-        )
         currentCaptureRecoveryStateToken = snapshot.captureRecoveryState
         if pendingRecovery?.state == snapshot.captureRecoveryState {
             pendingCaptureRecovery = pendingRecovery
@@ -1314,16 +1339,7 @@ final class iPadViewModel: ObservableObject {
         }
 #endif
         guard let catalog = experienceCatalog else {
-            let generation = beginTransientRequest()
-            isSessionRequestPending = true
-            multipeer.sendControl(.sessionStart(context: nil)) { [weak self] outcome in
-                guard let self,
-                      self.transientRequestGeneration == generation,
-                      outcome != .sent else { return }
-                self.isSessionRequestPending = false
-                self.setSessionRequestError("The booth is not connected. Please try again.")
-            }
-            armSessionRequestTimeout(generation: generation)
+            sendSessionStartRequest(selection: nil)
             return
         }
         guard let templateID = selectedTemplateID,
@@ -1338,14 +1354,25 @@ final class iPadViewModel: ObservableObject {
             filterID: filterID,
             language: selectedLanguage
         )
+        sendSessionStartRequest(selection: selection)
+    }
+
+    private func sendSessionStartRequest(selection: CustomerSessionSelection?) {
+        let requestID = pendingSessionStartRequestID ?? UUID()
+        pendingSessionStartRequestID = requestID
         let generation = beginTransientRequest()
         isSessionRequestPending = true
-        multipeer.sendControl(.customerSessionRequest(selection: selection)) { [weak self] outcome in
+        multipeer.sendControl(.customerSessionStartRequest(
+            request: CustomerSessionStartRequest(requestID: requestID, selection: selection)
+        )) { [weak self] outcome in
             guard let self,
                   self.transientRequestGeneration == generation,
                   outcome != .sent else { return }
             self.isSessionRequestPending = false
-            self.setSessionRequestError("The booth is not connected. Please try again.")
+            self.setSessionRequestError(LocalizedText(
+                english: "The booth is not connected. Please try again.",
+                thai: "บูธยังไม่ได้เชื่อมต่อ กรุณาลองอีกครั้ง"
+            ).value(for: self.selectedLanguage))
         }
         armSessionRequestTimeout(generation: generation)
     }
@@ -1365,8 +1392,8 @@ final class iPadViewModel: ObservableObject {
             self.sessionRequestTimeoutTask = nil
             self.isSessionRequestPending = false
             self.setSessionRequestError(LocalizedText(
-                english: "The operator did not respond. Please try again.",
-                thai: "ผู้ควบคุมไม่ตอบสนอง กรุณาลองอีกครั้ง"
+                english: "Still checking the booth. Tap Retry to reconnect to this session.",
+                thai: "กำลังตรวจสอบบูธ แตะลองใหม่เพื่อเชื่อมต่อเซสชันนี้อีกครั้ง"
             ).value(for: self.selectedLanguage))
         }
     }

@@ -21,19 +21,21 @@ enum JobQueueStoreError: LocalizedError, Equatable {
     }
 }
 
-actor JobQueueStore {
-    private enum LoadState {
-        case notLoaded
-        case loaded
-        case failed(JobQueueStoreError)
-    }
+enum JobQueueLoadState: Sendable, Equatable {
+    case notLoaded
+    case loaded
+    case persistenceUnavailable
+    case corrupt
+}
 
+actor JobQueueStore {
     private let fileURL: URL
     private var cancellationFileURL: URL { fileURL.deletingPathExtension().appendingPathExtension("cancelled-sessions.json") }
     private var jobs: [SessionJob] = []
     private var persistedJobs: [SessionJob] = []
     private var cancelledSessionIDs: Set<String> = []
-    private var loadState: LoadState = .notLoaded
+    private var loadState: JobQueueLoadState = .notLoaded
+    private var loadError: JobQueueStoreError?
     private(set) var lastPersistenceError: String?
 #if DEBUG
     private var failNextPersistence = false
@@ -53,66 +55,62 @@ actor JobQueueStore {
         switch loadState {
         case .loaded:
             return jobs
-        case .failed(let error):
-            throw error
+        case .persistenceUnavailable, .corrupt:
+            throw loadError ?? JobQueueStoreError.persistenceFailed(fileURL, "Queue is unavailable")
         case .notLoaded:
             break
         }
+        return try recoverDurableState()
+    }
+
+    func durabilityState() -> JobQueueLoadState {
+        loadState
+    }
+
+    func recoverDurableState() throws -> [SessionJob] {
         do {
-            try FileManager.default.createDirectory(at: fileURL.deletingLastPathComponent(), withIntermediateDirectories: true)
-            try loadCancellationBarrier()
-            guard FileManager.default.fileExists(atPath: fileURL.path) else {
-                try persist()
-                loadState = .loaded
-                return jobs
+            try FileManager.default.createDirectory(
+                at: fileURL.deletingLastPathComponent(),
+                withIntermediateDirectories: true
+            )
+            let durableCancelled = try readCancellationBarrier()
+            let decodedJobs: [SessionJob]
+            if FileManager.default.fileExists(atPath: fileURL.path) {
+                do {
+                    let decoder = JSONDecoder()
+                    decoder.dateDecodingStrategy = .iso8601
+                    decodedJobs = try decoder.decode(
+                        [SessionJob].self,
+                        from: Data(contentsOf: fileURL)
+                    )
+                } catch {
+                    let backup = try? preserveCorruptFile()
+                    let failure = JobQueueStoreError.corrupt(
+                        fileURL,
+                        error.localizedDescription,
+                        backup
+                    )
+                    markUnavailable(failure, state: .corrupt)
+                    throw failure
+                }
+            } else {
+                decodedJobs = []
             }
 
-            do {
-                let decoder = JSONDecoder()
-                decoder.dateDecodingStrategy = .iso8601
-                jobs = try decoder.decode([SessionJob].self, from: Data(contentsOf: fileURL))
-                persistedJobs = jobs
-                let now = Date()
-                var changed = false
-                for index in jobs.indices {
-                    if jobs[index].status == .running {
-                        if jobs[index].kind == .autoPrint {
-                            jobs[index].status = .failed
-                            jobs[index].lastError = "Print submission outcome is unknown after app restart. Verify the printer before retrying."
-                            jobs[index].lastFailureDisposition = .sideEffectUnknown
-                            jobs[index].nextAttemptAt = nil
-                        } else {
-                            jobs[index].status = .pending
-                            jobs[index].lastAttemptAt = nil
-                            jobs[index].nextAttemptAt = now
-                        }
-                        jobs[index].updatedAt = now
-                        changed = true
-                    }
-                }
-                changed = cancelDurablyCancelledJobs() || changed
-                changed = cancelDuplicateActiveJobs() || changed
-                if changed { try persist() }
-                loadState = .loaded
-                return jobs
-            } catch {
-                let decodingError = error.localizedDescription
-                let backup: URL?
-                do {
-                    backup = try preserveCorruptFile()
-                } catch {
-                    backup = nil
-                }
-                let failure = JobQueueStoreError.corrupt(fileURL, decodingError, backup)
-                loadState = .failed(failure)
-                throw failure
-            }
+            let normalized = normalize(decodedJobs, cancelledSessionIDs: durableCancelled)
+            try persistDurableJobs(normalized.jobs)
+            jobs = normalized.jobs
+            persistedJobs = normalized.jobs
+            cancelledSessionIDs = durableCancelled
+            loadError = nil
+            lastPersistenceError = nil
+            loadState = .loaded
+            return jobs
         } catch let error as JobQueueStoreError {
-            loadState = .failed(error)
             throw error
         } catch {
             let failure = JobQueueStoreError.persistenceFailed(fileURL, error.localizedDescription)
-            loadState = .failed(failure)
+            markUnavailable(failure, state: .persistenceUnavailable)
             throw failure
         }
     }
@@ -391,24 +389,40 @@ actor JobQueueStore {
         if jobs.count != oldCount { try persist() }
     }
 
+    func forgetCancellationBarrierIfSafe(sessionID: String) throws {
+        try ensureLoaded()
+        guard cancelledSessionIDs.contains(sessionID) else { return }
+        guard jobs.allSatisfy({ $0.sessionID != sessionID }) else { return }
+        let previous = cancelledSessionIDs
+        cancelledSessionIDs.remove(sessionID)
+        do {
+            try persistCancellationBarrier()
+        } catch {
+            cancelledSessionIDs = previous
+            throw error
+        }
+    }
+
     private func ensureLoaded() throws {
         switch loadState {
         case .notLoaded:
             _ = try load()
         case .loaded:
             return
-        case .failed(let error):
-            throw error
+        case .persistenceUnavailable, .corrupt:
+            throw loadError ?? JobQueueStoreError.persistenceFailed(fileURL, "Queue is unavailable")
         }
     }
 
-    private func loadCancellationBarrier() throws {
-        guard FileManager.default.fileExists(atPath: cancellationFileURL.path) else { return }
+    private func readCancellationBarrier() throws -> Set<String> {
+        guard FileManager.default.fileExists(atPath: cancellationFileURL.path) else { return [] }
         do {
             let data = try Data(contentsOf: cancellationFileURL)
-            cancelledSessionIDs = Set(try JSONDecoder().decode([String].self, from: data))
+            return Set(try JSONDecoder().decode([String].self, from: data))
         } catch {
-            throw JobQueueStoreError.corrupt(cancellationFileURL, error.localizedDescription, nil)
+            let failure = JobQueueStoreError.corrupt(cancellationFileURL, error.localizedDescription, nil)
+            markUnavailable(failure, state: .corrupt)
+            throw failure
         }
     }
 
@@ -422,14 +436,32 @@ actor JobQueueStore {
                 cancellationFileURL,
                 error.localizedDescription
             )
-            loadState = .failed(failure)
+            markUnavailable(failure, state: .persistenceUnavailable)
             throw failure
         }
     }
 
-    private func cancelDurablyCancelledJobs() -> Bool {
+    private func normalize(
+        _ source: [SessionJob],
+        cancelledSessionIDs: Set<String>
+    ) -> (jobs: [SessionJob], changed: Bool) {
+        var jobs = source
         let now = Date()
         var changed = false
+        for index in jobs.indices where jobs[index].status == .running {
+            if jobs[index].kind == .autoPrint {
+                jobs[index].status = .failed
+                jobs[index].lastError = "Print submission outcome is unknown after app restart. Verify the printer before retrying."
+                jobs[index].lastFailureDisposition = .sideEffectUnknown
+                jobs[index].nextAttemptAt = nil
+            } else {
+                jobs[index].status = .pending
+                jobs[index].lastAttemptAt = nil
+                jobs[index].nextAttemptAt = now
+            }
+            jobs[index].updatedAt = now
+            changed = true
+        }
         for index in jobs.indices where cancelledSessionIDs.contains(jobs[index].sessionID)
             && jobs[index].status != .succeeded
             && jobs[index].status != .cancelled {
@@ -439,34 +471,44 @@ actor JobQueueStore {
             jobs[index].updatedAt = now
             changed = true
         }
-        return changed
+        let reconciled = reconcileDuplicateJobs(jobs)
+        return (reconciled.jobs, changed || reconciled.changed)
     }
 
     private func persist() throws {
-        let encoder = JSONEncoder()
-        encoder.dateEncodingStrategy = .iso8601
-        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         do {
-#if DEBUG
-            if failNextPersistence {
-                failNextPersistence = false
-                throw NSError(
-                    domain: "PRCPhotoBooth.JobQueueStoreTests",
-                    code: 1,
-                    userInfo: [NSLocalizedDescriptionKey: "Injected queue persistence failure"]
-                )
-            }
-#endif
-            try encoder.encode(jobs).write(to: fileURL, options: [.atomic])
+            try persistDurableJobs(jobs)
             persistedJobs = jobs
             lastPersistenceError = nil
         } catch {
             jobs = persistedJobs
             let failure = JobQueueStoreError.persistenceFailed(fileURL, error.localizedDescription)
-            lastPersistenceError = failure.localizedDescription
-            loadState = .failed(failure)
+            markUnavailable(failure, state: .persistenceUnavailable)
             throw failure
         }
+    }
+
+    private func persistDurableJobs(_ jobs: [SessionJob]) throws {
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+#if DEBUG
+        if failNextPersistence {
+            failNextPersistence = false
+            throw NSError(
+                domain: "PRCPhotoBooth.JobQueueStoreTests",
+                code: 1,
+                userInfo: [NSLocalizedDescriptionKey: "Injected queue persistence failure"]
+            )
+        }
+#endif
+        try encoder.encode(jobs).write(to: fileURL, options: [.atomic])
+    }
+
+    private func markUnavailable(_ error: JobQueueStoreError, state: JobQueueLoadState) {
+        loadError = error
+        loadState = state
+        lastPersistenceError = error.localizedDescription
     }
 
     private func preserveCorruptFile() throws -> URL {
@@ -485,22 +527,33 @@ actor JobQueueStore {
         return backup
     }
 
-    private func cancelDuplicateActiveJobs() -> Bool {
-        var seen = Set<String>()
+    private func reconcileDuplicateJobs(_ source: [SessionJob]) -> (jobs: [SessionJob], changed: Bool) {
+        var jobs = source
         var changed = false
-        for index in jobs.indices {
-            guard jobs[index].status != .cancelled else { continue }
-            let key = "\(jobs[index].sessionID)|\(jobs[index].kind.rawValue)"
-            if seen.contains(key) {
+        // A succeeded record wins; otherwise preserve an uncertain physical
+        // side effect; otherwise keep the oldest stable record. Every other
+        // record is cancelled so recovery cannot schedule duplicate work.
+        let groups = Dictionary(grouping: jobs.indices.filter { jobs[$0].status != .cancelled }) {
+            "\(jobs[$0].sessionID)|\(jobs[$0].kind.rawValue)"
+        }
+        for indices in groups.values where indices.count > 1 {
+            let winner = indices.min { left, right in
+                let leftJob = jobs[left]
+                let rightJob = jobs[right]
+                let leftRank = leftJob.status == .succeeded ? 0 : leftJob.lastFailureDisposition == .sideEffectUnknown ? 1 : 2
+                let rightRank = rightJob.status == .succeeded ? 0 : rightJob.lastFailureDisposition == .sideEffectUnknown ? 1 : 2
+                if leftRank != rightRank { return leftRank < rightRank }
+                if leftJob.createdAt != rightJob.createdAt { return leftJob.createdAt < rightJob.createdAt }
+                return leftJob.id < rightJob.id
+            }!
+            for index in indices where index != winner {
                 jobs[index].status = .cancelled
                 jobs[index].nextAttemptAt = nil
                 jobs[index].lastError = "Duplicate job record cancelled during queue recovery."
                 jobs[index].updatedAt = Date()
                 changed = true
-            } else {
-                seen.insert(key)
             }
         }
-        return changed
+        return (jobs, changed)
     }
 }

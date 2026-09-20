@@ -196,6 +196,53 @@ struct iPadSmokeTests {
         #expect(viewModel.isBoothPaused)
     }
 
+    @Test("cross-session and idle syncs cannot rewind an authority epoch")
+    @MainActor
+    func crossSessionSyncDoesNotRewindMessageGate() {
+        let viewModel = iPadViewModel()
+        defer { viewModel.multipeer.disconnect() }
+        let current = SessionSyncSnapshot(
+            config: EventConfig(photoCount: 2),
+            sessionID: "session-b",
+            phase: .readyToStart,
+            presentation: nil,
+            isMirrored: true,
+            isBoothPaused: true,
+            sequence: 100,
+            keptShots: [0: Data([0x01])],
+            acceptedPhotoIndices: [0],
+            deferredPhotoIndices: [1],
+            nextPhotoIndex: 1,
+            authorityEpoch: iPadTestAuthorityEpoch
+        )
+        viewModel.multipeer.onControlMessage?(.sessionSync(snapshot: current))
+
+        var staleOldSession = current
+        staleOldSession.sessionID = "session-a"
+        staleOldSession.sequence = 80
+        staleOldSession.phase = .idle
+        staleOldSession.keptShots = [:]
+        staleOldSession.acceptedPhotoIndices = []
+        staleOldSession.deferredPhotoIndices = []
+        staleOldSession.nextPhotoIndex = 0
+        viewModel.multipeer.onControlMessage?(.sessionSync(snapshot: staleOldSession))
+
+        var staleIdle = staleOldSession
+        staleIdle.sessionID = nil
+        staleIdle.sequence = 90
+        viewModel.multipeer.onControlMessage?(.sessionSync(snapshot: staleIdle))
+
+        #expect(viewModel.eventConfig == current.config)
+        #expect(viewModel.stateMachine.phase == current.phase)
+        #expect(viewModel.stateMachine.currentSessionID == current.sessionID)
+        #expect(viewModel.stateMachine.keptShots == current.keptShots)
+        #expect(viewModel.stateMachine.acceptedPhotoIndices == Set(current.acceptedPhotoIndices))
+        #expect(viewModel.stateMachine.deferredPhotoIndices == Set(current.deferredPhotoIndices))
+        #expect(viewModel.stateMachine.nextPhotoIndex == current.nextPhotoIndex)
+        #expect(viewModel.isMirrored)
+        #expect(viewModel.isBoothPaused)
+    }
+
     @Test("all customer phases construct with the environment object")
     @MainActor
     func constructsEveryPhase() {

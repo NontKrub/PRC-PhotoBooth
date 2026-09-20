@@ -288,6 +288,11 @@ final class SessionJobExecutor: SessionJobExecuting {
         for manifest: SessionManifest,
         defaults: UserDefaults
     ) -> CloudUploadConfiguration? {
+        if let intent = manifest.deliveryIntent {
+            guard intent.cloudUploadEnabled,
+                  let snapshot = manifest.cloudDelivery else { return nil }
+            return CloudUploadConfiguration(snapshot: snapshot)
+        }
         if let snapshot = manifest.cloudDelivery {
             return CloudUploadConfiguration(snapshot: snapshot)
         }
@@ -323,11 +328,13 @@ final class SessionJobExecutor: SessionJobExecuting {
 
     private func qrPayload(for manifest: SessionManifest) throws -> String? {
         guard !manifest.eventConfig.qrCodeElements.isEmpty else { return nil }
+        let cloudUploadEnabled = manifest.deliveryIntent?.cloudUploadEnabled
+            ?? (manifest.cloudDelivery != nil || defaults.bool(forKey: "cloudUploadEnabled"))
         return try SessionQRCodePayloadResolver.resolve(
             token: manifest.downloadToken,
             localBaseURL: "http://\(LocalWebServer.lanIPAddress() ?? "localhost"):\(server.port)",
             publicBaseURL: manifest.cloudDelivery?.publicBaseURL ?? defaults.string(forKey: "publicBaseURL"),
-            cloudUploadEnabled: manifest.cloudDelivery != nil || defaults.bool(forKey: "cloudUploadEnabled")
+            cloudUploadEnabled: cloudUploadEnabled
         )
     }
 

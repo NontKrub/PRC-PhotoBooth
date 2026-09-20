@@ -169,10 +169,15 @@ final class SessionRecoveryService {
             automaticallyRecoveringSessions.append(manifest.id)
             do {
                 try await jobQueue.enqueueFinalizationJobs(for: manifest)
-                if defaults.bool(forKey: "cloudUploadEnabled") {
+                let cloudEnabled = manifest.deliveryIntent?.cloudUploadEnabled
+                    ?? (manifest.cloudDelivery != nil
+                        || defaults.bool(forKey: "cloudUploadEnabled"))
+                if cloudEnabled {
                     try await jobQueue.enqueueCloudUpload(for: manifest)
                 }
-                if defaults.bool(forKey: "selphyAutoPrintAfterSession") {
+                let printEnabled = manifest.deliveryIntent?.automaticPrintEnabled
+                    ?? defaults.bool(forKey: "selphyAutoPrintAfterSession")
+                if printEnabled {
                     try await jobQueue.enqueueAutoPrint(for: manifest)
                 }
             } catch {
@@ -190,7 +195,7 @@ final class SessionRecoveryService {
                 }
                 try workspace.removeEntireSession(manifest: manifest)
                 try await manifestStore.delete(sessionID: manifest.id)
-                jobQueue.deleteJobs(sessionID: manifest.id)
+                try await jobQueue.deleteJobsAndForgetCancellationBarrier(sessionID: manifest.id)
             } catch {
                 cleanupPendingSessionIDs.insert(manifest.id)
                 recoveryErrors.append("Cancelled session cleanup failed for \(manifest.id): \(error.localizedDescription)")

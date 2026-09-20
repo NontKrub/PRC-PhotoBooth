@@ -166,6 +166,7 @@ struct OperationsView: View {
     @State private var showPrintResolutionConfirmation = false
     @State private var printResolutionJobID: String?
     @State private var printResolutionPrinted = false
+    @State private var queueErrorDetails: String?
     @State private var showDiscardConfirmation = false
     @State private var serverStatus = LocalWebServerStatus(state: .stopped, registeredTokenCount: 0)
     @State private var boothHealth = BoothHealthSnapshot.empty
@@ -304,6 +305,19 @@ struct OperationsView: View {
             Button("Cancel", role: .cancel) {}
         } message: {
             Text("Confirm the physical printer result before releasing this print lane.")
+        }
+        .alert(
+            operatorString("Queue Storage Error", locale: locale),
+            isPresented: Binding(
+                get: { queueErrorDetails != nil },
+                set: { if !$0 { queueErrorDetails = nil } }
+            )
+        ) {
+            Button(operatorString("OK", locale: locale), role: .cancel) {
+                queueErrorDetails = nil
+            }
+        } message: {
+            Text(queueErrorDetails ?? "")
         }
     }
 
@@ -550,8 +564,25 @@ struct OperationsView: View {
                         })
                 }
                 if let error = coordinator.jobQueue.lastQueueError {
-                    Label(error, systemImage: "exclamationmark.triangle")
-                        .font(.caption).foregroundStyle(.red)
+                    VStack(alignment: .leading, spacing: 8) {
+                        Label(error, systemImage: "exclamationmark.triangle")
+                            .font(.caption).foregroundStyle(.red)
+                        HStack {
+                            Button(operatorString("Retry Storage Recovery", locale: locale)) {
+                                Task {
+                                    _ = await coordinator.jobQueue.retryPersistenceRecovery()
+                                    await coordinator.runSafePreflight()
+                                }
+                            }
+                            .accessibilityHint(operatorString(
+                                "Re-read durable queue files and resume workers when storage is available.",
+                                locale: locale
+                            ))
+                            Button(operatorString("View Details", locale: locale)) {
+                                queueErrorDetails = error
+                            }
+                        }
+                    }
                 }
                 ForEach(coordinator.jobQueue.jobs) { job in
                     VStack(alignment: .leading, spacing: 5) {
@@ -586,6 +617,17 @@ struct OperationsView: View {
                         }
                         Text("\(operatorString("Attempts", locale: locale)): \(job.attemptCount)" + (job.lastError.map { " · \($0)" } ?? ""))
                             .font(.caption).foregroundStyle(.secondary)
+                        if job.kind == .updateGallery, job.status == .failed {
+                            Label(
+                                operatorString(
+                                    "Gallery update needs attention. Customer strip and download are available.",
+                                    locale: locale
+                                ),
+                                systemImage: "photo.badge.exclamationmark"
+                            )
+                                .font(.caption)
+                                .foregroundStyle(.orange)
+                        }
                         if let next = job.nextAttemptAt {
                             (Text("Next attempt ") + Text(next, style: .relative))
                                 .font(.caption2).foregroundStyle(.tertiary)

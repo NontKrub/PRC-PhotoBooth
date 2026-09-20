@@ -81,16 +81,27 @@ struct StartView: View {
                 }
 
                 if vm.isSessionRequestPending {
-                    ProgressView("Waiting for operator…")
+                    ProgressView(LocalizedText(
+                        english: "Starting your session…",
+                        thai: "กำลังเริ่มเซสชัน…"
+                    ).value(for: vm.selectedLanguage))
                         .tint(.white)
                         .foregroundStyle(.white)
                         .padding(.top, 18)
                 } else if let error = vm.sessionRequestError {
-                    Text(error)
-                        .font(.callout)
-                        .foregroundStyle(.orange)
-                        .multilineTextAlignment(.center)
-                        .padding(.top, 18)
+                    VStack(spacing: 10) {
+                        Text(error)
+                            .font(.callout)
+                            .foregroundStyle(.orange)
+                            .multilineTextAlignment(.center)
+                        Button(isThai ? "ลองใหม่" : "Retry") {
+                            vm.customerTappedStart()
+                        }
+                        .buttonStyle(.bordered)
+                        .tint(.white)
+                        .accessibilityIdentifier("Session Start Retry")
+                    }
+                    .padding(.top, 18)
                 }
 
                 Spacer()

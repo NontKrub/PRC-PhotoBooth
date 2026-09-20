@@ -96,6 +96,26 @@ final class SessionJobQueue {
         }
     }
 
+    @discardableResult
+    func retryPersistenceRecovery() async -> Bool {
+        let wasRunning = isRunning
+        if wasRunning { stop() }
+        do {
+            jobs = try await store.recoverDurableState()
+            persistentQueueError = nil
+            lastQueueError = nil
+            onJobsChanged?()
+            if wasRunning { start() }
+            return true
+        } catch {
+            persistentQueueError = error.localizedDescription
+            lastQueueError = persistentQueueError
+            jobs = []
+            onJobsChanged?()
+            return false
+        }
+    }
+
     func enqueueFinalizationJobs(for manifest: SessionManifest) async throws {
         var kinds: [SessionJobKind] = [.renderStrip, .registerDownload, .updateGallery]
         if manifest.shots.contains(where: { !$0.gifFrameFileNames.isEmpty }) {
@@ -206,10 +226,13 @@ final class SessionJobQueue {
             timeout: .seconds(10)
         )
         await reload()
-        let remaining = snapshot.contains {
+        guard let durable = try? await store.load() else {
+            return .cleanupPending
+        }
+        let remaining = durable.contains {
             $0.sessionID == sessionID && $0.status == .running
         }
-        let printLaneHeld = snapshot.contains {
+        let printLaneHeld = durable.contains {
             $0.sessionID == sessionID
                 && $0.kind == .autoPrint
                 && !executor.isAutoPrintLaneAvailable
@@ -246,16 +269,10 @@ final class SessionJobQueue {
         }
     }
 
-    func deleteJobs(sessionID: String) {
-        Task { [weak self] in
-            guard let self else { return }
-            do {
-                try await store.deleteJobs(sessionID: sessionID)
-                await reload()
-            } catch {
-                lastQueueError = error.localizedDescription
-            }
-        }
+    func deleteJobsAndForgetCancellationBarrier(sessionID: String) async throws {
+        try await store.deleteJobs(sessionID: sessionID)
+        try await store.forgetCancellationBarrierIfSafe(sessionID: sessionID)
+        await reload()
     }
 
     private func enqueue(kinds: [SessionJobKind], sessionID: String) async throws {
@@ -505,13 +522,9 @@ final class SessionJobQueue {
         } catch {
             persistentQueueError = error.localizedDescription
             lastQueueError = persistentQueueError
-            await reloadFromSnapshot()
+            jobs = []
+            onJobsChanged?()
         }
-    }
-
-    private func reloadFromSnapshot() async {
-        jobs = await store.snapshot()
-        onJobsChanged?()
     }
 
     private func reserve(_ job: SessionJob) {

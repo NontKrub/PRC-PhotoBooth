@@ -141,6 +141,14 @@ struct MessageTests {
             .boothPaused(isPaused: true),
             .setMirrored(isMirrored: true),
             .sessionStart(context: nil),
+            .customerSessionStartRequest(request: CustomerSessionStartRequest(
+                requestID: reviewRequestID,
+                selection: nil
+            )),
+            .customerSessionStartResult(
+                requestID: reviewRequestID,
+                result: .accepted(sessionID: "session-test")
+            ),
             .beginCountdown(context: context, descriptor: countdown),
             .shotCaptured(context: context, index: 0, thumbnailData: Data([0x01, 0x02])),
             .shotCapturedAsset(
@@ -216,11 +224,22 @@ struct MessageTests {
     @Test("session synchronization replaces the gate baseline")
     func sessionSyncSupersedesQueuedPackets() {
         var gate = SessionMessageGate(currentSessionID: "A", latestAcceptedSequence: 20, authorityEpoch: testAuthorityEpoch)
-        gate.synchronize(sessionID: "B", sequence: 4, authorityEpoch: testAuthorityEpoch)
+        #expect(gate.acceptSnapshot(sessionID: "B", sequence: 21, authorityEpoch: testAuthorityEpoch) == .acceptedSameAuthority)
         #expect(gate.accept(SessionMessageContext(sessionID: "A", sequence: 21, authorityEpoch: testAuthorityEpoch)) == false)
-        #expect(gate.accept(SessionMessageContext(sessionID: "B", sequence: 3, authorityEpoch: testAuthorityEpoch)) == false)
-        let accepted = gate.accept(SessionMessageContext(sessionID: "B", sequence: 5, authorityEpoch: testAuthorityEpoch))
-        #expect(accepted)
+        #expect(gate.acceptSnapshot(sessionID: "B", sequence: 20, authorityEpoch: testAuthorityEpoch) == .stale)
+        #expect(gate.acceptSnapshot(sessionID: nil, sequence: 19, authorityEpoch: testAuthorityEpoch) == .stale)
+        #expect(gate.acceptSnapshot(sessionID: "C", sequence: 22, authorityEpoch: testAuthorityEpoch) == .acceptedSameAuthority)
+    }
+
+    @Test("session synchronization accepts a new authority and retires the old one")
+    func sessionSyncAuthorityEpochs() {
+        let oldEpoch = testAuthorityEpoch
+        let newEpoch = UUID(uuidString: "00000000-0000-0000-0000-000000000011")!
+        var gate = SessionMessageGate(currentSessionID: "B", latestAcceptedSequence: 100, authorityEpoch: oldEpoch)
+        #expect(gate.acceptSnapshot(sessionID: "C", sequence: 1, authorityEpoch: newEpoch) == .acceptedNewAuthority)
+        #expect(gate.acceptSnapshot(sessionID: "old", sequence: 500, authorityEpoch: oldEpoch) == .retiredAuthority)
+        #expect(gate.currentSessionID == "C")
+        #expect(gate.latestAcceptedSequence == 1)
     }
 
     @Test("old authority epochs cannot rewind a newer baseline")
@@ -402,12 +421,12 @@ struct MessageTests {
         #expect(legacyHello.deviceName == "legacy-id")
         #expect(legacyHello.networkPreference == nil)
     }
-    @Test("v1.4.3 connection protocol is version 10 and legacy protocol 9 remains decodable but incompatible")
+    @Test("v1.4.3 connection protocol is version 11 and legacy protocol 10 remains decodable but incompatible")
     func protocolVersionMismatchIsVisible() throws {
-        #expect(BoothTransportHello.currentProtocolVersion == 10)
-        let legacy = Data(#"{"protocolVersion":9,"appVersion":"1.4.2","role":"iPad","deviceID":"legacy-id","capabilities":["control"]}"#.utf8)
+        #expect(BoothTransportHello.currentProtocolVersion == 11)
+        let legacy = Data(#"{"protocolVersion":10,"appVersion":"1.4.3","role":"iPad","deviceID":"legacy-id","capabilities":["control"]}"#.utf8)
         let hello = try JSONDecoder().decode(BoothTransportHello.self, from: legacy)
-        #expect(hello.protocolVersion == 9)
+        #expect(hello.protocolVersion == 10)
         #expect(hello.protocolVersion != BoothTransportHello.currentProtocolVersion)
     }
 

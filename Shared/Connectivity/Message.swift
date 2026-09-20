@@ -123,6 +123,13 @@ public struct CountdownDescriptor: Codable, Sendable, Equatable {
     }
 }
 
+public enum SessionSyncAcceptance: Sendable, Equatable {
+    case acceptedSameAuthority
+    case acceptedNewAuthority
+    case stale
+    case retiredAuthority
+}
+
 // The iPad uses one gate for every Mac-issued, session-sensitive message.
 // A reconnect snapshot moves the baseline forward before queued packets can apply.
 public struct SessionMessageGate: Sendable, Equatable {
@@ -169,17 +176,46 @@ public struct SessionMessageGate: Sendable, Equatable {
     }
 
     public mutating func acceptSessionChange(_ context: SessionMessageContext) -> Bool {
-        let epochChanged = authorityEpoch.map { $0 != context.authorityEpoch } ?? true
-        guard !retiredAuthorityEpochs.contains(context.authorityEpoch),
-              epochChanged || context.sequence > latestAcceptedSequence else {
-            return false
-        }
-        synchronize(
+        switch acceptSnapshot(
             sessionID: context.sessionID,
             sequence: context.sequence,
             authorityEpoch: context.authorityEpoch
-        )
-        return true
+        ) {
+        case .acceptedSameAuthority, .acceptedNewAuthority:
+            return true
+        case .stale, .retiredAuthority:
+            return false
+        }
+    }
+
+    public mutating func acceptSnapshot(
+        sessionID: String?,
+        sequence: UInt64,
+        authorityEpoch: UUID
+    ) -> SessionSyncAcceptance {
+        if retiredAuthorityEpochs.contains(authorityEpoch) {
+            return .retiredAuthority
+        }
+        guard let currentAuthorityEpoch = self.authorityEpoch else {
+            self.authorityEpoch = authorityEpoch
+            currentSessionID = sessionID
+            latestAcceptedSequence = sequence
+            return .acceptedNewAuthority
+        }
+        guard currentAuthorityEpoch == authorityEpoch else {
+            synchronize(
+                sessionID: sessionID,
+                sequence: sequence,
+                authorityEpoch: authorityEpoch
+            )
+            return .acceptedNewAuthority
+        }
+        guard sequence > latestAcceptedSequence else {
+            return .stale
+        }
+        currentSessionID = sessionID
+        latestAcceptedSequence = sequence
+        return .acceptedSameAuthority
     }
 
     public func isRetiredAuthorityEpoch(_ epoch: UUID) -> Bool {
@@ -195,7 +231,7 @@ public enum CaptureRecoveryAction: Codable, Sendable, Equatable {
 }
 
 public struct BoothTransportHello: Codable, Sendable, Equatable {
-    public static let currentProtocolVersion = 10
+    public static let currentProtocolVersion = 11
 
     public var protocolVersion: Int
     public var appVersion: String
@@ -758,6 +794,8 @@ public enum Message: Codable, Sendable, Equatable {
     case eventExperienceAsset(packet: ExperienceAssetPacket)
     case setMirrored(isMirrored: Bool)
     case sessionStart(context: SessionMessageContext?)
+    case customerSessionStartRequest(request: CustomerSessionStartRequest)
+    case customerSessionStartResult(requestID: UUID, result: CustomerSessionStartResult)
     case customerSessionRequest(selection: CustomerSessionSelection)
     case sessionRequestRejected(reason: String)
     case sessionPrepared(config: EventConfig, presentation: SessionPresentation, context: SessionMessageContext)

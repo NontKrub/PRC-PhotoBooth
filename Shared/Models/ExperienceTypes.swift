@@ -263,6 +263,23 @@ public struct CustomerSessionSelection: Codable, Sendable, Equatable {
     }
 }
 
+public struct CustomerSessionStartRequest: Codable, Sendable, Equatable {
+    public let requestID: UUID
+    public let selection: CustomerSessionSelection?
+
+    public init(requestID: UUID, selection: CustomerSessionSelection?) {
+        self.requestID = requestID
+        self.selection = selection
+    }
+}
+
+public enum CustomerSessionStartResult: Codable, Sendable, Equatable {
+    case inProgress
+    case accepted(sessionID: String)
+    case rejected(reason: String)
+    case persistenceFailed
+}
+
 public enum ExperienceAssetKind: String, Codable, Sendable {
     case templatePreview
 }

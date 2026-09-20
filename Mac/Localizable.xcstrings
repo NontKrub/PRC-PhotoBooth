@@ -4709,6 +4709,28 @@
         }
       }
     },
+    "Queue Storage Error" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ข้อผิดพลาดของที่เก็บคิว"
+          }
+        }
+      }
+    },
+    "Gallery update needs attention. Customer strip and download are available." : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "การอัปเดตแกลเลอรีต้องตรวจสอบ แถบรูปและการดาวน์โหลดของลูกค้ายังพร้อมใช้งาน"
+          }
+        }
+      }
+    },
     "Photo %@" : {
       "localizations" : {
         "th" : {
@@ -5308,6 +5330,17 @@
         }
       }
     },
+    "Re-read durable queue files and resume workers when storage is available." : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "อ่านไฟล์คิวถาวรใหม่และทำงานต่อเมื่อที่เก็บข้อมูลพร้อมใช้งาน"
+          }
+        }
+      }
+    },
     "Reconnect iPad" : {
       "extractionState" : "manual",
       "localizations" : {
@@ -5628,6 +5661,17 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "ตั้งเวลาลองใหม่ "
+          }
+        }
+      }
+    },
+    "Retry Storage Recovery" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ลองกู้คืนที่เก็บข้อมูลอีกครั้ง"
           }
         }
       }
@@ -7279,6 +7323,17 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "คำเตือน"
+          }
+        }
+      }
+    },
+    "View Details" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ดูรายละเอียด"
           }
         }
       }

@@ -279,6 +279,74 @@ struct JobQueueStoreTests {
         }
     }
 
+    @Test("valid queue stays unavailable when recovery normalization cannot persist")
+    func recoveryPersistenceFailureCanBeRetried() async throws {
+        let file = try temporaryFile()
+        defer { try? FileManager.default.removeItem(at: file.deletingLastPathComponent()) }
+        let seed = JobQueueStore(fileURL: file)
+        var running = try await seed.enqueue(sessionID: "session", kind: .cloudUpload)
+        running.status = .running
+        try await seed.update(running)
+
+        let reloaded = JobQueueStore(fileURL: file)
+        await reloaded.failNextPersistenceForTesting()
+        do {
+            _ = try await reloaded.load()
+            Issue.record("Recovery unexpectedly succeeded after the injected write failure")
+        } catch let error as JobQueueStoreError {
+            guard case .persistenceFailed = error else {
+                Issue.record("Unexpected recovery error: \(error)")
+                return
+            }
+        }
+        #expect(await reloaded.durabilityState() == .persistenceUnavailable)
+
+        let recovered = try await reloaded.recoverDurableState()
+        #expect(recovered.first?.status == .pending)
+        #expect(await reloaded.durabilityState() == .loaded)
+    }
+
+    @Test("recovery deterministically reconciles duplicate jobs")
+    func reconcilesDuplicateJobs() async throws {
+        let file = try temporaryFile()
+        defer { try? FileManager.default.removeItem(at: file.deletingLastPathComponent()) }
+        let now = Date(timeIntervalSince1970: 1_700_000_000)
+        let jobs = [
+            storedJob(id: "pending", status: .pending, createdAt: now),
+            storedJob(
+                id: "unknown",
+                status: .failed,
+                createdAt: now.addingTimeInterval(10),
+                lastError: "unknown",
+                disposition: .sideEffectUnknown
+            ),
+            storedJob(id: "succeeded", status: .succeeded, createdAt: now.addingTimeInterval(20))
+        ]
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        try encoder.encode(jobs).write(to: file)
+
+        let recovered = try await JobQueueStore(fileURL: file).load()
+        #expect(recovered.first { $0.id == "succeeded" }?.status == .succeeded)
+        #expect(recovered.first { $0.id == "unknown" }?.status == .cancelled)
+        #expect(recovered.first { $0.id == "pending" }?.status == .cancelled)
+    }
+
+    @Test("safe cancellation-barrier compaction allows future sessions")
+    func compactsCancellationBarrierAfterJobDeletion() async throws {
+        let file = try temporaryFile()
+        defer { try? FileManager.default.removeItem(at: file.deletingLastPathComponent()) }
+        let store = JobQueueStore(fileURL: file)
+        try await store.cancelJobs(sessionID: "cancelled")
+        try await store.deleteJobs(sessionID: "cancelled")
+        try await store.forgetCancellationBarrierIfSafe(sessionID: "cancelled")
+
+        let reloaded = JobQueueStore(fileURL: file)
+        _ = try await reloaded.load()
+        _ = try await reloaded.enqueue(sessionID: "cancelled", kind: .renderStrip)
+        #expect(await reloaded.snapshot().count == 1)
+    }
+
     @Test("unknown print resolution does not spend a retry")
     func resolvesUnknownPrintWithoutRetryCost() async throws {
         let file = try temporaryFile()
@@ -328,4 +396,26 @@ private func temporaryFile() throws -> URL {
     let directory = FileManager.default.temporaryDirectory.appendingPathComponent("PRC-Jobs-\(UUID().uuidString)")
     try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
     return directory.appendingPathComponent("jobs.json")
+}
+
+private func storedJob(
+    id: String,
+    status: SessionJobStatus,
+    createdAt: Date,
+    lastError: String? = nil,
+    disposition: SessionJobFailureDisposition? = nil
+) -> SessionJob {
+    SessionJob(
+        id: id,
+        sessionID: "session",
+        kind: .autoPrint,
+        status: status,
+        createdAt: createdAt,
+        updatedAt: createdAt,
+        lastAttemptAt: nil,
+        nextAttemptAt: nil,
+        attemptCount: 0,
+        lastError: lastError,
+        lastFailureDisposition: disposition
+    )
 }

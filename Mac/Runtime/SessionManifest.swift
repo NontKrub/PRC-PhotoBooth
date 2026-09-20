@@ -46,6 +46,11 @@ struct SessionCloudDeliverySnapshot: Codable, Sendable, Equatable {
     var sshHost: String
 }
 
+struct SessionDeliveryIntentSnapshot: Codable, Sendable, Equatable {
+    var cloudUploadEnabled: Bool
+    var automaticPrintEnabled: Bool
+}
+
 struct SessionManifest: Codable, Sendable, Identifiable, Equatable {
     static let currentSchemaVersion = 1
 
@@ -76,6 +81,8 @@ struct SessionManifest: Codable, Sendable, Identifiable, Equatable {
     var shots: [RuntimeShotRecord]
     // Optional keeps older manifests recoverable with current Settings as a fallback.
     var cloudDelivery: SessionCloudDeliverySnapshot?
+    // Optional keeps manifests written before v1.4.3 recoverable.
+    var deliveryIntent: SessionDeliveryIntentSnapshot? = nil
     // Optional keeps v1.1/v1.2 manifests readable without a migration.
     var captureAttempts: [CaptureAttemptRecord]?
 
