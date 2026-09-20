@@ -3092,11 +3092,10 @@ final class BoothCoordinator {
               currentSession != nil,
               stateMachine.phase == .processing else { return }
         let jobs = jobQueue.jobs.filter { $0.sessionID == manifest.id }
-        let needsGIF = manifest.shots.contains { !$0.gifFrameFileNames.isEmpty }
         let requiredKinds: Set<SessionJobKind> = Set([
             .renderStrip,
             .registerDownload
-        ] + (needsGIF ? [.renderGIF] : []))
+        ])
         if requiredKinds.contains(where: { kind in !jobs.contains { $0.kind == kind } }) {
             Task { @MainActor [weak self] in
                 guard let self else { return }
@@ -3149,11 +3148,10 @@ final class BoothCoordinator {
             for result in results {
                 guard case .loaded(let manifest) = result, manifest.status == .finalizing else { continue }
                 let jobs = jobQueue.jobs.filter { $0.sessionID == manifest.id }
-                let needsGIF = manifest.shots.contains { !$0.gifFrameFileNames.isEmpty }
                 let requiredKinds: Set<SessionJobKind> = Set([
                     .renderStrip,
                     .registerDownload
-                ] + (needsGIF ? [.renderGIF] : []))
+                ])
                 if requiredKinds.contains(where: { kind in !jobs.contains { $0.kind == kind } }) {
                     do {
                         try await jobQueue.enqueueFinalizationJobs(for: manifest)
