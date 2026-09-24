@@ -116,6 +116,7 @@ func operatorPreflightTitle(_ id: PreflightCheckID, locale: Locale) -> String {
     case .unfinishedSession: key = "Unfinished session"
     case .queueHealth: key = "Queue health"
     case .cloudUpload: key = "Cloud upload"
+    case .guestDeliverySecurity: key = "Guest delivery security"
     case .printerConfiguration: key = "Printer configuration"
     case .printerTest: key = "Printer test"
     }

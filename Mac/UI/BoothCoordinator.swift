@@ -30,6 +30,29 @@ func shouldScheduleAutomaticCloudRetry(previous: Bool?, isSatisfied: Bool) -> Bo
     isSatisfied && previous != true
 }
 
+enum JobRecoveryError: LocalizedError, Sendable, Equatable {
+    case jobNotFound(String)
+    case sessionCancelled(String)
+    case manualPrintResolutionRequired(String)
+    case manifestNotFound(String)
+    case manifestCancelled(String)
+
+    var errorDescription: String? {
+        switch self {
+        case .jobNotFound(let id):
+            return "Job \(id) was not found."
+        case .sessionCancelled(let id):
+            return "Session \(id) has been cancelled and cannot be retried."
+        case .manualPrintResolutionRequired:
+            return "Print outcome is unknown. Please verify the printer before retrying."
+        case .manifestNotFound(let id):
+            return "Manifest for session \(id) was not found."
+        case .manifestCancelled(let id):
+            return "Session \(id) is cancelled and cannot be retried."
+        }
+    }
+}
+
 @MainActor
 @Observable
 final class BoothCoordinator {
@@ -40,14 +63,16 @@ final class BoothCoordinator {
         publicBaseURL: String?,
         localBaseURL: String,
         token: String,
-        cloudUploadEnabled: Bool
+        cloudUploadEnabled: Bool,
+        allowTrustedLocalHTTP: Bool = false
     ) -> String {
         (try? SessionQRCodePayloadResolver.resolve(
             token: token,
             localBaseURL: localBaseURL,
             publicBaseURL: publicBaseURL,
-            cloudUploadEnabled: cloudUploadEnabled
-        )) ?? "\(localBaseURL.trimmingCharacters(in: .whitespacesAndNewlines))/s/\(token)/"
+            cloudUploadEnabled: cloudUploadEnabled,
+            allowTrustedLocalHTTP: allowTrustedLocalHTTP
+        )) ?? ""
     }
 
     let multipeer: BoothTransport
@@ -445,6 +470,49 @@ final class BoothCoordinator {
         }
     }
 
+#if DEBUG
+    init(
+        testingManifestStore: SessionManifestStore,
+        testingJobQueue: SessionJobQueue,
+        runtimeDirectory: URL,
+        testingRecoveryService: SessionRecoveryService? = nil,
+        testingWorkspace: SessionWorkspace? = nil
+    ) {
+        let networkPreference = Self.loadNetworkPreference()
+        let status = BoothConnectionStatus(requestedNetwork: networkPreference)
+        multipeer = NetworkBoothTransport(role: .mac, networkPreference: networkPreference, connectionStatus: status)
+        connectionStatus = status
+        capture = CaptureService()
+        stateMachine = SessionStateMachine()
+        server = LocalWebServer(port: 8585)
+        operatorAuth = RemoteOperatorAuth()
+        store = DataStore.shared
+        cloudSSHSetup = CloudSSHSetupService()
+        experienceStore = EventExperienceStore(baseDirectory: runtimeDirectory)
+        filterPipeline = PhotoFilterPipeline()
+        galleryStore = EventGalleryStore(baseDirectory: runtimeDirectory)
+        self.manifestStore = testingManifestStore
+        let ws = testingWorkspace ?? SessionWorkspace()
+        self.workspace = ws
+        operationsEvents = OperationsEventStore(fileURL: runtimeDirectory.appendingPathComponent("operations-events.json"))
+        printer = PrinterService()
+        cloudUpload = CloudUploadService()
+        self.jobQueue = testingJobQueue
+        self.recoveryService = testingRecoveryService ?? SessionRecoveryService(
+            manifestStore: testingManifestStore,
+            workspace: ws,
+            jobQueue: testingJobQueue
+        )
+        preflight = BoothPreflightService()
+        startupComponents = [:]
+        jobQueue.onJobsChanged = { [weak self] in
+            self?.reconcileCurrentSessionJobs()
+            self?.reconcileRecoveredSessions()
+            self?.cleanupCompletedWorkingFiles()
+        }
+    }
+#endif
+
     var operatorPairingURL: String? {
         guard operatorAuth.isEnabled,
               isLocalServerReady,
@@ -480,32 +548,13 @@ final class BoothCoordinator {
         case .resume:
             resumeBooth(); return true
         case .retryFailedJobs:
-            jobQueue.retryAllFailed()
-            // Restore .failed manifests to .finalizing so completion can proceed (Finding 11).
-            Task { @MainActor [weak self] in
-                guard let self else { return }
-                for result in await manifestStore.loadAll() {
-                    guard case .loaded(let manifest) = result, manifest.status == .failed else { continue }
-                    let jobs = jobQueue.jobs.filter { $0.sessionID == manifest.id }
-                    // Only restore if there are retryable jobs that were just re-queued.
-                    guard jobs.contains(where: { $0.status == .pending || $0.status == .running }) else { continue }
-                    do {
-                        let restored = try await manifestStore.transition(
-                            sessionID: manifest.id,
-                            allowedFrom: [.failed]
-                        ) { durable in
-                            durable.status = .finalizing
-                            durable.lastError = nil
-                        }
-                        if currentManifestID == manifest.id {
-                            currentManifest = restored
-                        }
-                    } catch {
-                        recoveryService.recordError("Could not restore manifest \(manifest.id) for retry: \(error.localizedDescription)")
-                    }
-                }
+            do {
+                _ = try await retryAllFailedJobs()
+                return true
+            } catch {
+                recoveryService.recordError("Remote operator retry failed: \(error.localizedDescription)")
+                return false
             }
-            return true
         case .safeChecks:
             await runSafePreflight(); return true
         case .reconnectCamera:
@@ -696,6 +745,133 @@ final class BoothCoordinator {
                 errorMessage = "Printer outcome could not be recorded: \(error.localizedDescription)"
             }
         }
+    }
+
+    func retryJob(jobID: String) async throws {
+        guard let job = jobQueue.jobs.first(where: { $0.id == jobID }) else {
+            throw JobRecoveryError.jobNotFound(jobID)
+        }
+        if job.lastFailureDisposition == .sideEffectUnknown {
+            throw JobRecoveryError.manualPrintResolutionRequired(jobID)
+        }
+
+        let manifest: SessionManifest
+        do {
+            manifest = try await manifestStore.load(sessionID: job.sessionID)
+        } catch {
+            throw JobRecoveryError.manifestNotFound(job.sessionID)
+        }
+
+        if manifest.status == .cancelled {
+            _ = try? await jobQueue.cancelAndQuiesceJobs(sessionID: job.sessionID)
+            throw JobRecoveryError.manifestCancelled(job.sessionID)
+        }
+
+        var restoredManifest: SessionManifest?
+        let isRequired = !job.kind.isOptional
+        if isRequired, manifest.status == .failed {
+            let restored = try await manifestStore.transition(
+                sessionID: job.sessionID,
+                allowedFrom: [.failed]
+            ) { durable in
+                durable.status = .finalizing
+                durable.lastError = nil
+            }
+            restoredManifest = restored
+            if currentManifestID == job.sessionID {
+                currentManifest = restored
+            }
+        }
+
+        do {
+            try await jobQueue.retry(jobID: jobID)
+        } catch {
+            if restoredManifest != nil {
+                do {
+                    let rolledBack = try await manifestStore.transition(
+                        sessionID: job.sessionID,
+                        allowedFrom: [.finalizing]
+                    ) { durable in
+                        durable.status = .failed
+                        durable.lastError = "Queue retry failed: \(error.localizedDescription)"
+                    }
+                    if currentManifestID == job.sessionID {
+                        currentManifest = rolledBack
+                    }
+                } catch {
+                    recoveryService.recordError("Manifest rollback failed for \(job.sessionID): \(error.localizedDescription)")
+                }
+            }
+            throw error
+        }
+    }
+
+    @discardableResult
+    func retryAllFailedJobs() async throws -> [SessionJob] {
+        let eligibleCandidates = jobQueue.jobs.filter {
+            ($0.status == .failed || $0.status == .cancelled)
+                && $0.lastFailureDisposition == .retryable
+                && $0.lastFailureDisposition != .sideEffectUnknown
+        }
+        guard !eligibleCandidates.isEmpty else { return [] }
+
+        let requiredEligibleSessions = Set(
+            eligibleCandidates
+                .filter { !$0.kind.isOptional }
+                .map(\.sessionID)
+        )
+
+        let candidateSessionIDs = Set(eligibleCandidates.map(\.sessionID))
+        var restoredSessionIDs: [String] = []
+        for sessionID in candidateSessionIDs {
+            do {
+                let manifest = try await manifestStore.load(sessionID: sessionID)
+                if manifest.status == .cancelled {
+                    _ = try? await jobQueue.cancelAndQuiesceJobs(sessionID: sessionID)
+                    continue
+                }
+                if requiredEligibleSessions.contains(sessionID) && manifest.status == .failed {
+                    let restored = try await manifestStore.transition(
+                        sessionID: sessionID,
+                        allowedFrom: [.failed]
+                    ) { durable in
+                        durable.status = .finalizing
+                        durable.lastError = nil
+                    }
+                    restoredSessionIDs.append(sessionID)
+                    if currentManifestID == sessionID {
+                        currentManifest = restored
+                    }
+                }
+            } catch {
+                recoveryService.recordError("Could not inspect/restore manifest \(sessionID): \(error.localizedDescription)")
+            }
+        }
+
+        let retried: [SessionJob]
+        do {
+            retried = try await jobQueue.retryAllFailed()
+        } catch {
+            for sessionID in restoredSessionIDs {
+                do {
+                    let rolledBack = try await manifestStore.transition(
+                        sessionID: sessionID,
+                        allowedFrom: [.finalizing]
+                    ) { durable in
+                        durable.status = .failed
+                        durable.lastError = "Queue batch retry failed: \(error.localizedDescription)"
+                    }
+                    if currentManifestID == sessionID {
+                        currentManifest = rolledBack
+                    }
+                } catch {
+                    recoveryService.recordError("Batch rollback failed for \(sessionID): \(error.localizedDescription)")
+                }
+            }
+            throw error
+        }
+
+        return retried
     }
 
     private func currentCloudDeliverySnapshot() -> SessionCloudDeliverySnapshot? {
@@ -1494,6 +1670,8 @@ final class BoothCoordinator {
             queueFailedCount: jobs.filter { $0.status == .failed }.count,
             oldestCriticalJobAge: criticalJobs.map { max(0, Date().timeIntervalSince($0.createdAt)) }.max(),
             cloudUploadEnabled: cloudUploadEnabled,
+            allowTrustedLocalHTTP: UserDefaults.standard.bool(forKey: "allowTrustedLocalHTTP"),
+            publicBaseURL: UserDefaults.standard.string(forKey: "publicBaseURL"),
             cloudSetupComplete: cloudSetupComplete,
             cloudConnectivityPassed: cloudConnectivityPassed,
             automaticPrintingEnabled: UserDefaults.standard.bool(forKey: "selphyAutoPrintAfterSession"),
@@ -2192,12 +2370,14 @@ final class BoothCoordinator {
         let compositor = Compositor(config: config, framePNG: framePNG)
         let cloudUploadEnabled = manifest.deliveryIntent?.cloudUploadEnabled
             ?? (manifest.cloudDelivery != nil || UserDefaults.standard.bool(forKey: "cloudUploadEnabled"))
+        let allowTrustedLocalHTTP = UserDefaults.standard.bool(forKey: "allowTrustedLocalHTTP")
         let qrPayload = config.qrCodeElements.isEmpty ? nil : try? SessionQRCodePayloadResolver.resolve(
             token: manifest.downloadToken,
             localBaseURL: "http://\(LocalWebServer.lanIPAddress() ?? "localhost"):8585",
             publicBaseURL: manifest.cloudDelivery?.publicBaseURL
                 ?? UserDefaults.standard.string(forKey: "publicBaseURL"),
-            cloudUploadEnabled: cloudUploadEnabled
+            cloudUploadEnabled: cloudUploadEnabled,
+            allowTrustedLocalHTTP: allowTrustedLocalHTTP
         )
         let expectedSessionID = manifest.id
         let expectedGeneration = sessionLifecycleGeneration
@@ -3415,11 +3595,13 @@ final class BoothCoordinator {
         let cloudUploadEnabled = manifest.deliveryIntent?.cloudUploadEnabled
             ?? (manifest.cloudDelivery != nil || UserDefaults.standard.bool(forKey: "cloudUploadEnabled"))
         let ip = LocalWebServer.lanIPAddress() ?? "localhost"
+        let allowTrustedLocalHTTP = UserDefaults.standard.bool(forKey: "allowTrustedLocalHTTP")
         let qr = Self.downloadURL(
             publicBaseURL: publicBase,
             localBaseURL: "http://\(ip):8585",
             token: token,
-            cloudUploadEnabled: cloudUploadEnabled
+            cloudUploadEnabled: cloudUploadEnabled,
+            allowTrustedLocalHTTP: allowTrustedLocalHTTP
         )
         let stripThumb = loadCGImage(from: directory.appendingPathComponent("strip.png"))
             .flatMap { jpegData(from: $0, quality: 0.4) }

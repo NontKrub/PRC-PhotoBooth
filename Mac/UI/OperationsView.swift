@@ -103,12 +103,20 @@ enum OperationsStatusLogic {
         return OperationsSectionStatus(summary: "Idle", severity: .normal)
     }
 
-    static func server(_ status: LocalWebServerStatus) -> OperationsSectionStatus {
+    static func server(_ status: LocalWebServerStatus, deliveryPolicy: GuestDeliveryPolicy = .unavailable) -> OperationsSectionStatus {
         switch status.state {
         case .stopped: return OperationsSectionStatus(summary: "Stopped", severity: .warning)
         case .starting: return OperationsSectionStatus(summary: "Starting…", severity: .normal)
-        case .ready: return OperationsSectionStatus(summary: "Ready", severity: .normal)
         case .failed: return OperationsSectionStatus(summary: "Failed", severity: .failure)
+        case .ready:
+            switch deliveryPolicy {
+            case .publicHTTPS:
+                return OperationsSectionStatus(summary: "HTTPS", severity: .normal)
+            case .trustedLocalHTTP:
+                return OperationsSectionStatus(summary: "Trusted LAN · HTTP", severity: .warning)
+            case .unavailable:
+                return OperationsSectionStatus(summary: "Guest links disabled", severity: .warning)
+            }
         }
     }
 
@@ -171,6 +179,9 @@ struct OperationsView: View {
     @State private var serverStatus = LocalWebServerStatus(state: .stopped, registeredTokenCount: 0)
     @State private var boothHealth = BoothHealthSnapshot.empty
     @State private var manifests: [String: SessionManifest] = [:]
+    @State private var retryingJobIDs: Set<String> = []
+    @State private var isRetryingAll = false
+    @State private var retryErrorMessage: String?
     @AppStorage("operations.readinessExpanded") private var readinessExpanded = true
     @AppStorage("operations.preflightExpanded") private var preflightExpanded = false
     @AppStorage("operations.recoveryExpanded") private var recoveryExpanded = true
@@ -557,11 +568,38 @@ struct OperationsView: View {
                     queueCount("Failed", counts.failed)
                     queueCount("Completed", counts.completed)
                     Spacer()
-                    Button("Retry All Failed") { coordinator.jobQueue.retryAllFailed() }
-                        .disabled(!coordinator.jobQueue.jobs.contains {
-                            ($0.status == .failed || $0.status == .cancelled)
-                                && $0.lastFailureDisposition == .retryable
-                        })
+                    Button {
+                        guard !isRetryingAll, retryingJobIDs.isEmpty else { return }
+                        isRetryingAll = true
+                        retryErrorMessage = nil
+                        Task {
+                            defer { isRetryingAll = false }
+                            do {
+                                _ = try await coordinator.retryAllFailedJobs()
+                                await refreshManifests()
+                            } catch {
+                                retryErrorMessage = error.localizedDescription
+                            }
+                        }
+                    } label: {
+                        if isRetryingAll {
+                            HStack(spacing: 4) {
+                                ProgressView()
+                                    .controlSize(.small)
+                                Text("Retrying…")
+                            }
+                        } else {
+                            Text("Retry All Failed")
+                        }
+                    }
+                    .disabled(isRetryingAll || !retryingJobIDs.isEmpty || !coordinator.jobQueue.jobs.contains {
+                        ($0.status == .failed || $0.status == .cancelled)
+                            && $0.lastFailureDisposition == .retryable
+                    })
+                }
+                if let retryErrorMessage {
+                    Label(retryErrorMessage, systemImage: "exclamationmark.triangle")
+                        .font(.caption).foregroundStyle(.red)
                 }
                 if let error = coordinator.jobQueue.lastQueueError {
                     VStack(alignment: .leading, spacing: 8) {
@@ -607,7 +645,31 @@ struct OperationsView: View {
                                         showPrintResolutionConfirmation = true
                                     }
                                 } else {
-                                    Button("Retry") { coordinator.jobQueue.retry(jobID: job.id) }
+                                    Button {
+                                        guard !retryingJobIDs.contains(job.id), !isRetryingAll else { return }
+                                        retryingJobIDs.insert(job.id)
+                                        retryErrorMessage = nil
+                                        Task {
+                                            defer { retryingJobIDs.remove(job.id) }
+                                            do {
+                                                try await coordinator.retryJob(jobID: job.id)
+                                                await refreshManifests()
+                                            } catch {
+                                                retryErrorMessage = error.localizedDescription
+                                            }
+                                        }
+                                    } label: {
+                                        if retryingJobIDs.contains(job.id) {
+                                            HStack(spacing: 4) {
+                                                ProgressView()
+                                                    .controlSize(.small)
+                                                Text("Retrying…")
+                                            }
+                                        } else {
+                                            Text("Retry")
+                                        }
+                                    }
+                                    .disabled(isRetryingAll || retryingJobIDs.contains(job.id))
                                 }
                             }
                             if job.kind.isOptional && job.status != .succeeded && job.status != .cancelled {
@@ -712,9 +774,25 @@ struct OperationsView: View {
                 Text(serverStatusText)
                 Text("Registered tokens: \(serverStatus.registeredTokenCount)")
                     .font(.caption).foregroundStyle(.secondary)
-                if !coordinator.serverURL.isEmpty {
-                    Text("LAN URL: \(coordinator.serverURL)")
-                        .font(.caption.monospaced()).textSelection(.enabled)
+                let policy = SessionQRCodePayloadResolver.evaluatePolicy(
+                    publicBaseURL: UserDefaults.standard.string(forKey: "publicBaseURL"),
+                    cloudUploadEnabled: UserDefaults.standard.bool(forKey: "cloudUploadEnabled"),
+                    allowTrustedLocalHTTP: UserDefaults.standard.bool(forKey: "allowTrustedLocalHTTP")
+                )
+                switch policy {
+                case .publicHTTPS:
+                    Text("Guest Delivery: Public HTTPS (\(UserDefaults.standard.string(forKey: "publicBaseURL") ?? ""))")
+                        .font(.caption).foregroundStyle(.green)
+                case .trustedLocalHTTP:
+                    Text("Guest Delivery: Trusted Private LAN (HTTP)")
+                        .font(.caption).foregroundStyle(.orange)
+                    if !coordinator.serverURL.isEmpty {
+                        Text("LAN URL: \(coordinator.serverURL)")
+                            .font(.caption.monospaced()).textSelection(.enabled)
+                    }
+                case .unavailable:
+                    Text("Guest Delivery: Disabled (enable Cloud or allow Trusted LAN HTTP in Settings)")
+                        .font(.caption).foregroundStyle(.secondary)
                 }
             }
         }
@@ -950,7 +1028,12 @@ struct OperationsView: View {
     }
 
     private var serverSectionStatus: OperationsSectionStatus {
-        OperationsStatusLogic.server(serverStatus)
+        let policy = SessionQRCodePayloadResolver.evaluatePolicy(
+            publicBaseURL: UserDefaults.standard.string(forKey: "publicBaseURL"),
+            cloudUploadEnabled: UserDefaults.standard.bool(forKey: "cloudUploadEnabled"),
+            allowTrustedLocalHTTP: UserDefaults.standard.bool(forKey: "allowTrustedLocalHTTP")
+        )
+        return OperationsStatusLogic.server(serverStatus, deliveryPolicy: policy)
     }
 
     private var healthSectionStatus: OperationsSectionStatus {

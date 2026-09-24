@@ -26,7 +26,6 @@ public final class NetworkBoothTransport: BoothTransport {
     private static let previewIdentityCapability = "preview-identity"
     private static let heartbeatInterval: TimeInterval = 2
     private static let heartbeatTimeout: TimeInterval = 8
-    private static let unauthenticatedIdleTimeout: TimeInterval = 15.0
     private static let transportQueueLabel = "PRC-PhotoBooth.Transport"
 
     private struct PendingPairingCommit: Equatable, Sendable {
@@ -95,7 +94,18 @@ public final class NetworkBoothTransport: BoothTransport {
     private var activeInterface: BoothNetworkInterfacePolicy?
     private var fallbackActive = false
     private var fallbackReason: String?
-    private var unauthenticatedIdleTimer: DispatchSourceTimer?
+    private var preAuthWatchdog: BoothPreAuthWatchdog?
+    private var preAuthAdmissionLimiter = BoothPreAuthAdmissionLimiter()
+    private var preAuthWatchdogTimer: DispatchSourceTimer?
+
+    private func endpointKey(for endpoint: NWEndpoint) -> String {
+        switch endpoint {
+        case .hostPort(let host, _):
+            return "\(host)"
+        default:
+            return endpoint.debugDescription
+        }
+    }
 
     public var requestedNetworkPreference: BoothNetworkPreference {
         get { requestedPreference }
@@ -560,6 +570,12 @@ public final class NetworkBoothTransport: BoothTransport {
             resetPairingState(clearTarget: true, clearPendingCommit: true, clearFailure: true)
             let session = try BoothPairingSession.make(macIdentity: localIdentity)
             currentPairingSession = session
+            if role == .mac {
+                preAuthWatchdog?.onPairingSessionStarted(absoluteExpiry: session.info.expiresAt)
+                if let connection = controlConnection {
+                    schedulePreAuthWatchdogTick(generation: controlConnectionGeneration, connection: connection)
+                }
+            }
             schedulePairingExpiry(for: session)
             if let expiresAt = currentPairingSession?.info.expiresAt {
                 setPairingStage(.discovering, state: .pairing(expiresAt: expiresAt))
@@ -2404,6 +2420,15 @@ public final class NetworkBoothTransport: BoothTransport {
     }
 
     private func accept(_ connection: NWConnection, channel: BoothTransportChannel) {
+        if role == .mac, channel == .control {
+            let key = endpointKey(for: connection.endpoint)
+            let check = preAuthAdmissionLimiter.shouldAdmit(endpointKey: key)
+            if !check.admitted {
+                let reason = check.reason ?? "Pre-authentication throttled."
+                rejectIncomingConnection(connection, reason: reason)
+                return
+            }
+        }
         if role == .mac, channel == .control, controlConnection != nil {
             let reason: String
             if peerAuthenticated {
@@ -3055,6 +3080,23 @@ public final class NetworkBoothTransport: BoothTransport {
         publishStatus()
 
         if role == .mac {
+            let isPairing: Bool
+            var pairingExpiry: Date? = nil
+            if case .unpaired = BoothPeerSelectionPolicy.admission(
+                peerID: hello.deviceID,
+                preferredPeerID: trustedStore.preferredPeerID,
+                trustedPeerIDs: trustedStore.trustedPeerIDs
+            ) {
+                isPairing = true
+                pairingExpiry = currentPairingSession?.info.expiresAt ?? Date().addingTimeInterval(120)
+            } else {
+                isPairing = false
+            }
+            preAuthWatchdog?.onValidHello(isPairing: isPairing, pairingExpiry: pairingExpiry)
+            if let connection = controlConnection {
+                schedulePreAuthWatchdogTick(generation: controlConnectionGeneration, connection: connection)
+            }
+
             if let pendingPairingCommit {
                 guard pendingPairingCommit.peer.id == hello.deviceID else {
                     rejectControlConnection("This Mac is waiting for a different iPad to finish pairing.")
@@ -3347,6 +3389,7 @@ public final class NetworkBoothTransport: BoothTransport {
             rejectControlConnection(error.localizedDescription)
             return
         }
+        notifyPreAuthWatchdogProgress()
 
         let now = Date()
         let decision = BoothPairingIntentPolicy.decide(
@@ -3507,6 +3550,7 @@ public final class NetworkBoothTransport: BoothTransport {
             sendPairingFailure("Pairing request is missing secure proof material.")
             return
         }
+        notifyPreAuthWatchdogProgress()
 
         incomingPairingRequest = IncomingBoothPairingRequest(
             iPadIdentity: request.iPadIdentity
@@ -3762,6 +3806,12 @@ public final class NetworkBoothTransport: BoothTransport {
 
     private func beginAuthentication(with peerID: String) {
         guard !didInitiateAuthentication else { return }
+        if role == .mac {
+            preAuthWatchdog?.onAuthenticationStarted()
+            if let connection = controlConnection {
+                schedulePreAuthWatchdogTick(generation: controlConnectionGeneration, connection: connection)
+            }
+        }
         guard secretForAuthentication(peerID: peerID) != nil else {
             rejectControlConnection("Authentication failed: pairing secret is unavailable.")
             return
@@ -3926,7 +3976,12 @@ public final class NetworkBoothTransport: BoothTransport {
             }
         }
         peerAuthenticated = true
+        preAuthWatchdog?.onAuthenticated()
         cancelUnauthenticatedIdleTimer()
+        if role == .mac, let connection = controlConnection {
+            let key = endpointKey(for: connection.endpoint)
+            preAuthAdmissionLimiter.recordSuccess(endpointKey: key)
+        }
         pendingPairingRequest = nil
         pendingPairingIntent = nil
         pendingPairingSessionID = nil
@@ -4346,6 +4401,11 @@ public final class NetworkBoothTransport: BoothTransport {
 
     private func rejectControlConnection(_ reason: String) {
         let connection = controlConnection
+        if role == .mac, let connection {
+            let key = endpointKey(for: connection.endpoint)
+            preAuthAdmissionLimiter.recordFailure(endpointKey: key)
+        }
+        cancelUnauthenticatedIdleTimer()
         if currentConnectionOwnsPairingState {
             failPairing(reason, closeConnection: false)
         } else if !hasEphemeralPairingState {
@@ -4999,8 +5059,23 @@ public final class NetworkBoothTransport: BoothTransport {
         guard role == .mac else { return }
         let generation = controlConnectionGeneration
         guard let connection = controlConnection else { return }
+        let watchdog = BoothPreAuthWatchdog(generation: generation)
+        preAuthWatchdog = watchdog
+        schedulePreAuthWatchdogTick(generation: generation, connection: connection)
+    }
+
+    private func schedulePreAuthWatchdogTick(generation: Int, connection: NWConnection) {
+        preAuthWatchdogTimer?.cancel()
+        preAuthWatchdogTimer = nil
+        guard role == .mac,
+              let watchdog = preAuthWatchdog,
+              watchdog.generation == generation,
+              !peerAuthenticated,
+              let nextDeadline = watchdog.nextDeadline() else { return }
+
+        let delay = max(0.1, nextDeadline.timeIntervalSinceNow)
         let timer = DispatchSource.makeTimerSource(queue: transportQueue)
-        timer.schedule(deadline: .now() + Self.unauthenticatedIdleTimeout)
+        timer.schedule(deadline: .now() + delay)
         timer.setEventHandler { [weak self, weak connection] in
             guard let self, let connection else { return }
             Task { @MainActor [weak self, weak connection] in
@@ -5008,17 +5083,31 @@ public final class NetworkBoothTransport: BoothTransport {
                       self.controlConnectionGeneration == generation,
                       self.isCurrent(connection, channel: .control),
                       !self.peerAuthenticated else { return }
-                NSLog("[Transport] Unauthenticated control connection idle for %.0fs — disconnecting.", Self.unauthenticatedIdleTimeout)
-                self.rejectControlConnection("Authentication deadline expired.")
+                guard let watchdog = self.preAuthWatchdog, watchdog.generation == generation else { return }
+                if let reason = watchdog.checkTimeout() {
+                    NSLog("[Transport] Pre-auth timeout (generation %d): %@", generation, reason)
+                    self.rejectControlConnection(reason)
+                } else {
+                    self.schedulePreAuthWatchdogTick(generation: generation, connection: connection)
+                }
             }
         }
         timer.resume()
-        unauthenticatedIdleTimer = timer
+        preAuthWatchdogTimer = timer
+    }
+
+    private func notifyPreAuthWatchdogProgress() {
+        guard role == .mac, let watchdog = preAuthWatchdog, !peerAuthenticated else { return }
+        watchdog.onInteractiveProgress()
+        if let connection = controlConnection {
+            schedulePreAuthWatchdogTick(generation: controlConnectionGeneration, connection: connection)
+        }
     }
 
     private func cancelUnauthenticatedIdleTimer() {
-        unauthenticatedIdleTimer?.cancel()
-        unauthenticatedIdleTimer = nil
+        preAuthWatchdogTimer?.cancel()
+        preAuthWatchdogTimer = nil
+        preAuthWatchdog = nil
     }
 
     private func resetPreviewIdentity() {

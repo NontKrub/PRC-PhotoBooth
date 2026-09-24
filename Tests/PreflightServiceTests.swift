@@ -257,6 +257,38 @@ func storedCancelledPrinterTestSkips() async {
     #expect(service.result(for: .printerTest)?.status == .skipped)
 }
 
+@Test("guest delivery security checks report passed for HTTPS, warning for trusted LAN, and fail if required QR is disabled")
+@MainActor
+func guestDeliverySecurityCheck() async {
+    let service = BoothPreflightService()
+
+    // 1. HTTPS public base -> passed
+    var ctx = context(publicBaseURL: "https://photos.example.com")
+    ctx.cloudUploadEnabled = true
+    await service.runSafeChecks(using: ctx)
+    #expect(service.result(for: .guestDeliverySecurity)?.status == .passed)
+
+    // 2. Trusted private LAN HTTP -> warning
+    var ctxLAN = context(allowTrustedLocalHTTP: true)
+    ctxLAN.cloudUploadEnabled = false
+    await service.runSafeChecks(using: ctxLAN)
+    #expect(service.result(for: .guestDeliverySecurity)?.status == .warning)
+
+    // 3. Disabled with QR elements in template -> failed
+    let qrElement = SharedQRCodeElement(normalizedRect: CGRect(x: 0, y: 0, width: 0.2, height: 0.2))
+    let eventWithQR = EventConfig(photoCount: 1, slots: [SharedPhotoSlot(photoIndex: 0)], qrCodeElements: [qrElement])
+    var ctxQR = context(event: eventWithQR, allowTrustedLocalHTTP: false)
+    ctxQR.cloudUploadEnabled = false
+    await service.runSafeChecks(using: ctxQR)
+    #expect(service.result(for: .guestDeliverySecurity)?.status == .failed)
+
+    // 4. Disabled without QR elements in template -> warning (not failed)
+    let eventNoQR = EventConfig(photoCount: 1, slots: [SharedPhotoSlot(photoIndex: 0)], qrCodeElements: [])
+    var ctxNoQR = context(event: eventNoQR, allowTrustedLocalHTTP: false)
+    ctxNoQR.cloudUploadEnabled = false
+    await service.runSafeChecks(using: ctxNoQR)
+    #expect(service.result(for: .guestDeliverySecurity)?.status == .warning)
+}
 }
 
 private enum TestPreflightError: LocalizedError {
@@ -287,7 +319,9 @@ private func context(
     previewPermissionGranted: Bool = true,
     previewConnected: Bool = true,
     previewRequired: Bool = false,
-    startupComponents: [StartupComponent: StartupComponentHealth] = [:]
+    startupComponents: [StartupComponent: StartupComponentHealth] = [:],
+    allowTrustedLocalHTTP: Bool = false,
+    publicBaseURL: String? = nil
 ) -> BoothPreflightContext {
     let output = FileManager.default.temporaryDirectory.appendingPathComponent("PRC-Preflight-\(UUID().uuidString)")
     return BoothPreflightContext(
@@ -320,6 +354,8 @@ private func context(
         requiredJobFailed: requiredJobFailed,
         optionalJobPendingOrFailed: optionalJobPendingOrFailed,
         cloudUploadEnabled: false,
+        allowTrustedLocalHTTP: allowTrustedLocalHTTP,
+        publicBaseURL: publicBaseURL,
         cloudSetupComplete: false,
         cloudConnectivityPassed: false,
         automaticPrintingEnabled: automaticPrintingEnabled,

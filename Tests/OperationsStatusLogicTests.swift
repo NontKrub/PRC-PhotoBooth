@@ -105,4 +105,21 @@ struct OperationsStatusLogicTests {
         #expect(OperationsStatusLogic.connection(.connected(peerName: "iPad"), authenticated: true, previewConnected: true, fallbackActive: true).summary == "Wi-Fi fallback active")
         #expect(OperationsStatusLogic.connection(.connected(peerName: "iPad"), authenticated: true, previewConnected: true, reconnectInProgress: true).summary == "Reconnecting…")
     }
+
+    @Test("server status reflects guest delivery policy")
+    func serverGuestDeliveryPolicy() {
+        let readyServer = LocalWebServerStatus(state: .ready(port: 8585), registeredTokenCount: 5)
+
+        let httpsStatus = OperationsStatusLogic.server(readyServer, deliveryPolicy: .publicHTTPS)
+        #expect(httpsStatus.summary == "HTTPS")
+        #expect(httpsStatus.severity == .normal)
+
+        let lanStatus = OperationsStatusLogic.server(readyServer, deliveryPolicy: .trustedLocalHTTP)
+        #expect(lanStatus.summary == "Trusted LAN · HTTP")
+        #expect(lanStatus.severity == .warning)
+
+        let disabledStatus = OperationsStatusLogic.server(readyServer, deliveryPolicy: .unavailable)
+        #expect(disabledStatus.summary == "Guest links disabled")
+        #expect(disabledStatus.severity == .warning)
+    }
 }

@@ -131,15 +131,19 @@ final class SessionJobQueue {
         try await enqueue(kinds: [.cloudUpload], sessionID: manifest.id)
     }
 
-    func retry(jobID: String) {
-        Task { [weak self] in
-            guard let self else { return }
-            do {
-                try await store.retry(jobID: jobID)
-                await reload()
-            } catch {
-                lastQueueError = error.localizedDescription
-            }
+    func waitUntilReady() async {
+        if let task = startupTask {
+            _ = await task.value
+        }
+    }
+
+    func retry(jobID: String) async throws {
+        do {
+            try await store.retry(jobID: jobID)
+            await reload()
+        } catch {
+            lastQueueError = error.localizedDescription
+            throw error
         }
     }
 
@@ -241,18 +245,15 @@ final class SessionJobQueue {
             : .quiesced
     }
 
-    func retryAllFailed() {
-        Task { [weak self] in
-            guard let self else { return }
-            let failed = jobs.filter { $0.status == .failed }
-            do {
-                for job in failed where job.lastFailureDisposition == .retryable {
-                    try await store.retry(jobID: job.id)
-                }
-                await reload()
-            } catch {
-                lastQueueError = error.localizedDescription
-            }
+    @discardableResult
+    func retryAllFailed() async throws -> [SessionJob] {
+        do {
+            let retried = try await store.retryEligibleFailed()
+            await reload()
+            return retried
+        } catch {
+            lastQueueError = error.localizedDescription
+            throw error
         }
     }
 

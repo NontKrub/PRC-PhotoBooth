@@ -4,16 +4,30 @@ import Testing
 
 @Suite("Download URL")
 struct DownloadURLTests {
-    @Test("cloud disabled uses the local server")
+    @Test("cloud disabled uses the local server when trusted local HTTP is allowed")
     func usesReachableURLWhenCloudUploadIsPending() {
         let url = BoothCoordinator.downloadURL(
             publicBaseURL: "https://photos.example",
             localBaseURL: "http://192.168.0.109:8585",
             token: "token",
-            cloudUploadEnabled: false
+            cloudUploadEnabled: false,
+            allowTrustedLocalHTTP: true
         )
 
         #expect(url == "http://192.168.0.109:8585/s/token/")
+    }
+
+    @Test("cloud disabled without trusted local HTTP returns empty string")
+    func returnsEmptyWhenLocalHTTPNotAllowed() {
+        let url = BoothCoordinator.downloadURL(
+            publicBaseURL: "https://photos.example",
+            localBaseURL: "http://192.168.0.109:8585",
+            token: "token",
+            cloudUploadEnabled: false,
+            allowTrustedLocalHTTP: false
+        )
+
+        #expect(url.isEmpty)
     }
 
     @Test("cloud enabled uses the public URL before upload")

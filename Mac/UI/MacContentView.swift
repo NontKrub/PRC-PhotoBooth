@@ -125,6 +125,7 @@ struct SettingsView: View {
     @AppStorage("cloudSSHHost")          private var sshHost        = ""
     @AppStorage("cloudRemotePath")       private var remotePath     = CloudUploadConfiguration.defaultRemoteBasePath
     @AppStorage("publicBaseURL")         private var publicBaseURL  = ""
+    @AppStorage("allowTrustedLocalHTTP") private var allowTrustedLocalHTTP = false
     @AppStorage("operatorLanguage")      private var operatorLanguage = OperatorLanguage.system.rawValue
     @AppStorage(BoothCoordinator.eventFolderPathKey) private var eventFolderPath = ""
     @State private var selectedScreenIndex = 0
@@ -786,9 +787,15 @@ struct SettingsView: View {
                             .textFieldStyle(.roundedBorder)
                             .frame(width: 280)
                     }
-                    Text("Used in QR codes after cloud upload succeeds. Leave blank to use the LAN server.")
+                    Text("Used in QR codes after cloud upload succeeds. Public URLs must use HTTPS.")
                         .font(.caption).foregroundStyle(.secondary)
                 }
+
+                Divider()
+
+                Toggle("Allow guest downloads over trusted private LAN (HTTP)", isOn: $allowTrustedLocalHTTP)
+                Text("Use only on an isolated or operator-controlled network. Guest photos and download links are not encrypted in transit.")
+                    .font(.caption).foregroundStyle(.secondary)
             }
             .padding(4)
         } label: {

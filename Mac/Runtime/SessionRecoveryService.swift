@@ -126,6 +126,7 @@ final class SessionRecoveryService {
         automaticallyRecoveringSessions = []
         cleanupPendingSessionIDs = []
         recoveryErrors = recordedErrors
+        await jobQueue.waitUntilReady()
 
         let results = await manifestStore.loadAll()
         var manifests: [SessionManifest] = []
@@ -137,6 +138,64 @@ final class SessionRecoveryService {
                 recoveryErrors.append("\(fileURL.lastPathComponent): \(message)")
             }
         }
+
+        let requiredKinds: Set<SessionJobKind> = [.renderStrip, .registerDownload]
+        var reconciledManifests: [SessionManifest] = []
+        for var manifest in manifests {
+            let sessionJobs = jobQueue.jobs.filter { $0.sessionID == manifest.id }
+            let requiredJobs = sessionJobs.filter { requiredKinds.contains($0.kind) }
+
+            if manifest.status == .failed {
+                // Case A: manifest is .failed, but required job is pending, running, or waitingRetry.
+                // Correction: restore manifest to .finalizing.
+                let hasActiveRequiredJob = requiredJobs.contains {
+                    $0.status == .pending || $0.status == .running || $0.status == .waitingRetry
+                }
+                if hasActiveRequiredJob {
+                    do {
+                        manifest = try await manifestStore.transition(
+                            sessionID: manifest.id,
+                            allowedFrom: [.failed]
+                        ) { durable in
+                            durable.status = .finalizing
+                            durable.lastError = nil
+                        }
+                    } catch {
+                        recoveryErrors.append("Case A reconciliation failed for \(manifest.id): \(error.localizedDescription)")
+                    }
+                }
+            } else if manifest.status == .finalizing {
+                // Case B: manifest is .finalizing, but every required unfinished job is terminal .failed / .cancelled,
+                // and no required job is pending, running, or waitingRetry.
+                // Correction: manifest becomes .failed, preserving failure reason.
+                if !requiredJobs.isEmpty {
+                    let hasRunnableRequiredJob = requiredJobs.contains {
+                        $0.status == .pending || $0.status == .running || $0.status == .waitingRetry
+                    }
+                    let unfinishedRequired = requiredJobs.filter { $0.status != .succeeded }
+                    let allUnfinishedTerminal = !unfinishedRequired.isEmpty && unfinishedRequired.allSatisfy {
+                        $0.status == .failed || $0.status == .cancelled
+                    }
+                    if !hasRunnableRequiredJob && allUnfinishedTerminal {
+                        let failureReason = unfinishedRequired.compactMap(\.lastError).first
+                            ?? "Required finalization jobs failed."
+                        do {
+                            manifest = try await manifestStore.transition(
+                                sessionID: manifest.id,
+                                allowedFrom: [.finalizing]
+                            ) { durable in
+                                durable.status = .failed
+                                durable.lastError = failureReason
+                            }
+                        } catch {
+                            recoveryErrors.append("Case B reconciliation failed for \(manifest.id): \(error.localizedDescription)")
+                        }
+                    }
+                }
+            }
+            reconciledManifests.append(manifest)
+        }
+        manifests = reconciledManifests
 
         let capturing = manifests
             .filter { $0.status == .capturing }

@@ -220,7 +220,9 @@ actor JobQueueStore {
         guard let index = jobs.firstIndex(where: { $0.id == jobID }) else {
             throw JobQueueStoreError.missingJob(jobID)
         }
-        guard !cancelledSessionIDs.contains(jobs[index].sessionID) else { return }
+        guard !cancelledSessionIDs.contains(jobs[index].sessionID) else {
+            throw JobQueueStoreError.sessionCancelled(jobs[index].sessionID)
+        }
         guard jobs[index].status == .failed || jobs[index].status == .waitingRetry else { return }
         guard jobs[index].lastFailureDisposition != .sideEffectUnknown else { return }
         jobs[index].status = .pending
@@ -231,6 +233,30 @@ actor JobQueueStore {
         jobs[index].lastFailureDisposition = nil
         jobs[index].updatedAt = Date()
         try persist()
+    }
+
+    func retryEligibleFailed() throws -> [SessionJob] {
+        try ensureLoaded()
+        let now = Date()
+        var retried: [SessionJob] = []
+        for index in jobs.indices {
+            let job = jobs[index]
+            guard !cancelledSessionIDs.contains(job.sessionID) else { continue }
+            guard job.status == .failed || job.status == .waitingRetry else { continue }
+            guard job.lastFailureDisposition != .sideEffectUnknown else { continue }
+            jobs[index].status = .pending
+            jobs[index].attemptCount = 0
+            jobs[index].lastAttemptAt = nil
+            jobs[index].nextAttemptAt = now
+            jobs[index].lastError = nil
+            jobs[index].lastFailureDisposition = nil
+            jobs[index].updatedAt = now
+            retried.append(jobs[index])
+        }
+        if !retried.isEmpty {
+            try persist()
+        }
+        return retried
     }
 
     func resolveUnknownPrint(

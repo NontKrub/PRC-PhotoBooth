@@ -68,6 +68,7 @@ enum PreflightCheckID: String, Sendable, CaseIterable, Identifiable {
     case unfinishedSession
     case queueHealth
     case cloudUpload
+    case guestDeliverySecurity
     case printerConfiguration
     case printerTest
 
@@ -138,6 +139,8 @@ struct BoothPreflightContext: Sendable {
     var queueFailedCount: Int
     var oldestCriticalJobAge: TimeInterval?
     var cloudUploadEnabled: Bool
+    var allowTrustedLocalHTTP: Bool
+    var publicBaseURL: String?
     var cloudSetupComplete: Bool
     var cloudConnectivityPassed: Bool
     var automaticPrintingEnabled: Bool
@@ -193,6 +196,8 @@ struct BoothPreflightContext: Sendable {
         queueFailedCount: Int = 0,
         oldestCriticalJobAge: TimeInterval? = nil,
         cloudUploadEnabled: Bool = false,
+        allowTrustedLocalHTTP: Bool = false,
+        publicBaseURL: String? = nil,
         cloudSetupComplete: Bool = false,
         cloudConnectivityPassed: Bool = false,
         automaticPrintingEnabled: Bool = false,
@@ -247,6 +252,8 @@ struct BoothPreflightContext: Sendable {
         self.queueFailedCount = queueFailedCount
         self.oldestCriticalJobAge = oldestCriticalJobAge
         self.cloudUploadEnabled = cloudUploadEnabled
+        self.allowTrustedLocalHTTP = allowTrustedLocalHTTP
+        self.publicBaseURL = publicBaseURL
         self.cloudSetupComplete = cloudSetupComplete
         self.cloudConnectivityPassed = cloudConnectivityPassed
         self.automaticPrintingEnabled = automaticPrintingEnabled

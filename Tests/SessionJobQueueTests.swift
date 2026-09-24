@@ -278,7 +278,7 @@ struct SessionJobQueueTests {
             return
         }
         #expect(job.lastFailureDisposition == .retryable)
-        queue.retry(jobID: job.id)
+        try await queue.retry(jobID: job.id)
         try await waitUntil {
             await queue.job(status: .succeeded, kind: .renderStrip) != nil
         }

@@ -102,14 +102,99 @@ struct NetworkFramingTests {
         #expect(throws: BoothFrameError.unsupportedVersion(9)) { try versionParser.append(unknownChannel) }
     }
 
-    @Test("rejects oversized payloads")
+    @Test("rejects oversized payloads based on channel limit")
     func oversizedPayload() throws {
         var parser = BoothFrameParser()
-        let length = UInt32(BoothFrameParser.maximumPayloadLength + 1).bigEndian
+        let length = UInt32(BoothFrameParser.maximumControlPayloadLength + 1).bigEndian
         var header = Data([0x50, 0x52, 1, BoothTransportChannel.control.rawValue])
         withUnsafeBytes(of: length) { header.append(contentsOf: $0) }
-        #expect(throws: BoothFrameError.oversizedPayload(BoothFrameParser.maximumPayloadLength + 1)) {
+        #expect(throws: BoothFrameError.oversizedPayload(BoothFrameParser.maximumControlPayloadLength + 1)) {
             try parser.append(header)
+        }
+    }
+
+    @Test("channel-aware limits match between parser and encoder")
+    func matchingCeilingsBetweenParserAndEncoder() {
+        for channel in [BoothTransportChannel.control, .preview, .asset, .heartbeat] {
+            let maxLen = BoothFrameParser.maximumPayloadLength(for: channel)
+            switch channel {
+            case .control:
+                #expect(maxLen == 256 * 1024)
+            case .preview, .asset:
+                #expect(maxLen == 2 * 1024 * 1024)
+            case .heartbeat:
+                #expect(maxLen == 256)
+            }
+        }
+    }
+
+    @Test("control channel exact max accepted and max + 1 rejected on header only")
+    func controlChannelBoundaries() throws {
+        // Exact max control payload (256 KiB)
+        let exactMax = BoothFrameParser.maximumControlPayloadLength
+        let validPayload = Data(repeating: 0x42, count: exactMax)
+        let encoded = try BoothFrameEncoder.encode(channel: .control, payload: validPayload)
+        var parser = BoothFrameParser()
+        let frames = try parser.append(encoded)
+        #expect(frames.count == 1)
+        #expect(frames[0].channel == .control)
+        #expect(frames[0].payload.count == exactMax)
+
+        // Control max + 1 rejected by encoder
+        let overMaxPayload = Data(repeating: 0x42, count: exactMax + 1)
+        #expect(throws: BoothFrameError.oversizedPayload(exactMax + 1)) {
+            try BoothFrameEncoder.encode(channel: .control, payload: overMaxPayload)
+        }
+
+        // Control max + 1 rejected by parser on raw header ONLY (8 bytes, no body buffered)
+        var headerOnly = Data([0x50, 0x52, 1, BoothTransportChannel.control.rawValue])
+        var length = UInt32(exactMax + 1).bigEndian
+        withUnsafeBytes(of: &length) { headerOnly.append(contentsOf: $0) }
+        #expect(headerOnly.count == 8)
+
+        var headerParser = BoothFrameParser()
+        #expect(throws: BoothFrameError.oversizedPayload(exactMax + 1)) {
+            try headerParser.append(headerOnly)
+        }
+        #expect(headerParser.bufferedByteCount == 8) // Only the 8-byte header is buffered; no body was allocated
+    }
+
+    @Test("preview channel accepts payloads larger than control max but within preview limit")
+    func previewChannelBoundaries() throws {
+        let controlMax = BoothFrameParser.maximumControlPayloadLength
+        let previewMax = BoothFrameParser.maximumPayloadLength(for: .preview)
+        let largerThanControl = controlMax + 1024
+        #expect(largerThanControl < previewMax)
+
+        let payload = Data(repeating: 0x55, count: largerThanControl)
+        let encoded = try BoothFrameEncoder.encode(channel: .preview, payload: payload)
+        var parser = BoothFrameParser()
+        let frames = try parser.append(encoded)
+        #expect(frames.count == 1)
+        #expect(frames[0].channel == .preview)
+        #expect(frames[0].payload.count == largerThanControl)
+
+        // Preview max + 1 rejected
+        var overHeader = Data([0x50, 0x52, 1, BoothTransportChannel.preview.rawValue])
+        var overLength = UInt32(previewMax + 1).bigEndian
+        withUnsafeBytes(of: &overLength) { overHeader.append(contentsOf: $0) }
+
+        var overParser = BoothFrameParser()
+        #expect(throws: BoothFrameError.oversizedPayload(previewMax + 1)) {
+            try overParser.append(overHeader)
+        }
+    }
+
+    @Test("asset channel enforces asset payload limit")
+    func assetChannelBoundaries() throws {
+        let assetMax = BoothFrameParser.maximumPayloadLength(for: .asset)
+        var overHeader = Data([0x50, 0x52, 1, BoothTransportChannel.asset.rawValue])
+        var overLength = UInt32(assetMax + 1).bigEndian
+        withUnsafeBytes(of: &overLength) { overHeader.append(contentsOf: $0) }
+
+        var parser = BoothFrameParser()
+        #expect(throws: BoothFrameError.oversizedPayload(assetMax + 1)) {
+            try parser.append(overHeader)
         }
     }
 

@@ -67,8 +67,8 @@ final class AVFoundationCameraSource: NSObject, CameraSource {
 
     var captureSession: AVCaptureSession?
     private var photoOutput: AVCapturePhotoOutput?
-    private var stillContinuation: CheckedContinuation<CGImage, Error>?
-    private var isCapturing = false
+    let lifecycleCoordinator = StillCaptureLifecycleCoordinator(timeoutDuration: 10.0)
+    var isCapturing: Bool { lifecycleCoordinator.isCapturing }
     private var requestedPreviewFramesPerSecond = 30
 
     // rollingBuffer is NSLock-guarded internally — safe to share across threads
@@ -85,11 +85,37 @@ final class AVFoundationCameraSource: NSObject, CameraSource {
     override init() {
         super.init()
         refreshDeviceList()
-        for name in [AVCaptureDevice.wasConnectedNotification, AVCaptureDevice.wasDisconnectedNotification] {
-            NotificationCenter.default.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
-                Task { @MainActor [weak self] in self?.refreshDeviceList() }
+        NotificationCenter.default.addObserver(
+            forName: AVCaptureDevice.wasConnectedNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor [weak self] in self?.refreshDeviceList() }
+        }
+        NotificationCenter.default.addObserver(
+            forName: AVCaptureDevice.wasDisconnectedNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] notification in
+            let disconnectedID = (notification.object as? AVCaptureDevice)?.uniqueID
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                if let disconnectedID, disconnectedID == self.activeDevice?.uniqueID {
+                    self.handleActiveDeviceDisconnected()
+                }
+                self.refreshDeviceList()
             }
         }
+    }
+
+    func handleActiveDeviceDisconnected() {
+        lifecycleCoordinator.abortAll(error: CameraError.deviceDisconnected)
+        stop()
+        onError?(CameraError.deviceDisconnected)
+    }
+
+    func finishStillCapture(requestID: Int64, result: Result<CGImage, any Error>) {
+        lifecycleCoordinator.finish(requestID: requestID, result: result)
     }
 
     private func restart() {
@@ -230,25 +256,42 @@ final class AVFoundationCameraSource: NSObject, CameraSource {
         captureSession?.stopRunning()
         isRunning = false
         activeDevice = nil
-        stillContinuation?.resume(throwing: CameraError.notRunning)
-        stillContinuation = nil
+        lifecycleCoordinator.abortAll(error: CameraError.notRunning)
     }
 
     func captureStill() async throws -> CGImage {
         guard let photoOutput, let captureSession, captureSession.isRunning else {
             throw CameraError.notRunning
         }
-        guard !isCapturing else { throw CameraError.captureInProgress }
-        isCapturing = true
-        defer { isCapturing = false }
-        let raw = try await withCheckedThrowingContinuation { continuation in
-            self.stillContinuation = continuation
-            let settings = AVCapturePhotoSettings()
-            if photoOutput.supportedFlashModes.contains(flashMode) {
-                settings.flashMode = flashMode
-            }
-            photoOutput.capturePhoto(with: settings, delegate: self)
+        guard !lifecycleCoordinator.isCapturing else { throw CameraError.captureInProgress }
+
+        let settings = AVCapturePhotoSettings()
+        if photoOutput.supportedFlashModes.contains(flashMode) {
+            settings.flashMode = flashMode
         }
+        let requestID = settings.uniqueID
+
+        let raw: CGImage = try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                do {
+                    try lifecycleCoordinator.beginCapture(
+                        requestID: requestID,
+                        continuation: continuation,
+                        onTimeout: { [weak self] reqID in
+                            self?.finishStillCapture(requestID: reqID, result: .failure(CameraError.timeout))
+                        }
+                    )
+                    photoOutput.capturePhoto(with: settings, delegate: self)
+                } catch {
+                    continuation.resume(throwing: error)
+                }
+            }
+        } onCancel: {
+            Task { @MainActor [weak self] in
+                self?.lifecycleCoordinator.cancelCurrent(requestID: requestID, error: CameraError.cancelled)
+            }
+        }
+
         guard isMirrored || exposureEV != 0 else { return raw }
         var ci = CIImage(cgImage: raw)
         if isMirrored {
@@ -291,22 +334,21 @@ extension AVFoundationCameraSource: AVCaptureVideoDataOutputSampleBufferDelegate
 
 extension AVFoundationCameraSource: AVCapturePhotoCaptureDelegate {
     nonisolated func photoOutput(_ output: AVCapturePhotoOutput, didFinishProcessingPhoto photo: AVCapturePhoto, error: Error?) {
+        let requestID = photo.resolvedSettings.uniqueID
         if let error {
             Task { @MainActor [weak self] in
-                self?.stillContinuation?.resume(throwing: error)
-                self?.stillContinuation = nil
+                self?.finishStillCapture(requestID: requestID, result: .failure(error))
             }
             return
         }
         let rawData = photo.fileDataRepresentation()
         Task { @MainActor [weak self] in
             guard let self else { return }
-            defer { stillContinuation = nil }
             guard let data = rawData,
                   let src = CGImageSourceCreateWithData(data as CFData, nil),
                   let raw = CGImageSourceCreateImageAtIndex(src, 0, nil)
             else {
-                stillContinuation?.resume(throwing: CameraError.captureDataMissing)
+                self.finishStillCapture(requestID: requestID, result: .failure(CameraError.captureDataMissing))
                 return
             }
             // CGImageSourceCreateImageAtIndex strips EXIF orientation, so apply it manually.
@@ -315,19 +357,32 @@ extension AVFoundationCameraSource: AVCapturePhotoCaptureDelegate {
             let img: CGImage
             if exifRaw != 1, let orientation = CGImagePropertyOrientation(rawValue: exifRaw) {
                 let ci = CIImage(cgImage: raw).oriented(orientation)
-                img = ciContext.value.createCGImage(ci, from: ci.extent) ?? raw
+                img = self.ciContext.value.createCGImage(ci, from: ci.extent) ?? raw
             } else {
                 img = raw
             }
-            stillContinuation?.resume(returning: img)
+            self.finishStillCapture(requestID: requestID, result: .success(img))
+        }
+    }
+
+    nonisolated func photoOutput(
+        _ output: AVCapturePhotoOutput,
+        didFinishCaptureFor resolvedSettings: AVCaptureResolvedPhotoSettings,
+        error: Error?
+    ) {
+        if let error {
+            let requestID = resolvedSettings.uniqueID
+            Task { @MainActor [weak self] in
+                self?.finishStillCapture(requestID: requestID, result: .failure(error))
+            }
         }
     }
 }
 
 // MARK: - Errors
 
-enum CameraError: LocalizedError {
-    case noDevice, configFailed, notRunning, captureDataMissing, captureInProgress
+enum CameraError: LocalizedError, Equatable {
+    case noDevice, configFailed, notRunning, captureDataMissing, captureInProgress, timeout, deviceDisconnected, cancelled
     var errorDescription: String? {
         switch self {
         case .noDevice:           return "No camera device found"
@@ -335,6 +390,9 @@ enum CameraError: LocalizedError {
         case .notRunning:         return "Camera is not running"
         case .captureDataMissing: return "Failed to get image data from capture"
         case .captureInProgress:  return "A capture is already in progress"
+        case .timeout:            return "Camera capture timed out"
+        case .deviceDisconnected: return "Camera device was disconnected during capture"
+        case .cancelled:          return "Camera capture was cancelled"
         }
     }
 }

@@ -67,6 +67,7 @@ final class BoothPreflightService {
         let queueSummary = "Backlog pending=\(context.queuePendingCount), running=\(context.queueRunningCount), retrying=\(context.queueRetryingCount), failed=\(context.queueFailedCount); oldest critical job=\(ageText(context.oldestCriticalJobAge))."
         checked.append(result(.queueHealth, "Queue health", "\(queueDetail) \(queueSummary)", queueStatus, .required, now))
         checked.append(cloudResult(context, now: now))
+        checked.append(guestDeliverySecurityResult(context, now: now))
         checked.append(printerConfigurationResult(context, now: now))
         checked.append(printerTestResult(context, now: now))
 
@@ -384,6 +385,51 @@ final class BoothPreflightService {
         guard context.cloudUploadEnabled else { return result(.cloudUpload, "Cloud upload", "Disabled in Settings.", .skipped, .recommended, now) }
         guard context.cloudSetupComplete else { return result(.cloudUpload, "Cloud upload", "Cloud SSH setup is incomplete.", .failed, .required, now) }
         return result(.cloudUpload, "Cloud upload", context.cloudConnectivityPassed ? "SSH connectivity is ready." : "SSH connectivity failed.", context.cloudConnectivityPassed ? .passed : .failed, .required, now)
+    }
+
+    private func guestDeliverySecurityResult(_ context: BoothPreflightContext, now: Date) -> PreflightCheckResult {
+        let policy = SessionQRCodePayloadResolver.evaluatePolicy(
+            publicBaseURL: context.publicBaseURL,
+            cloudUploadEnabled: context.cloudUploadEnabled,
+            allowTrustedLocalHTTP: context.allowTrustedLocalHTTP
+        )
+        switch policy {
+        case .publicHTTPS:
+            let publicBase = context.publicBaseURL.map(SessionQRCodePayloadResolver.trimBaseURL) ?? ""
+            return result(
+                .guestDeliverySecurity,
+                "Guest delivery security",
+                "Guest downloads use public HTTPS (\(publicBase)).",
+                .passed,
+                .recommended,
+                now
+            )
+        case .trustedLocalHTTP:
+            return result(
+                .guestDeliverySecurity,
+                "Guest delivery security",
+                "Guest downloads use plaintext HTTP over private LAN. Ensure the network is isolated.",
+                .warning,
+                .recommended,
+                now
+            )
+        case .unavailable:
+            let hasQRElements = context.event?.qrCodeElements.isEmpty == false
+            let detail: String
+            if context.cloudUploadEnabled {
+                detail = "Cloud upload is enabled but public base URL is missing or not HTTPS."
+            } else {
+                detail = "Guest delivery is disabled: configure a public HTTPS base URL or allow trusted local LAN HTTP in Settings."
+            }
+            return result(
+                .guestDeliverySecurity,
+                "Guest delivery security",
+                detail,
+                hasQRElements ? .failed : .warning,
+                hasQRElements ? .required : .recommended,
+                now
+            )
+        }
     }
 
     private func printerConfigurationResult(_ context: BoothPreflightContext, now: Date) -> PreflightCheckResult {

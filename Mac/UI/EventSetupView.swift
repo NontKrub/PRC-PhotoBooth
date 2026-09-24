@@ -157,6 +157,7 @@ struct EventDetailView: View {
     @Environment(BoothCoordinator.self) private var coordinator
     @Environment(\.modelContext) private var modelContext
     @AppStorage("publicBaseURL") private var publicBaseURL: String = ""
+    @AppStorage("allowTrustedLocalHTTP") private var allowTrustedLocalHTTP: Bool = false
     @State private var experienceDocument: EventExperienceDocument?
     @State private var experienceError: String?
 
@@ -187,10 +188,14 @@ struct EventDetailView: View {
                 }
             }
 
-            Section("Remote Access") {
-                TextField("Public URL (optional)", text: $publicBaseURL)
+            Section("Guest Downloads") {
+                TextField("Public HTTPS URL (optional)", text: $publicBaseURL)
                     .font(.caption.monospaced())
-                Text("QR codes use this URL after cloud upload succeeds; otherwise they use the LAN server.\nExample: https://photos.yourdomain.com")
+                Text("QR codes use this URL when cloud upload is enabled. Public URLs must use HTTPS.\nExample: https://photos.yourdomain.com")
+                    .font(.caption).foregroundStyle(.secondary)
+
+                Toggle("Allow guest downloads over trusted private LAN (HTTP)", isOn: $allowTrustedLocalHTTP)
+                Text("Use only on an isolated or operator-controlled network. Guest photos and download links are not encrypted in transit.")
                     .font(.caption).foregroundStyle(.secondary)
             }
 

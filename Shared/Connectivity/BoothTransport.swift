@@ -1308,6 +1308,17 @@ public struct BoothFrameParser: Sendable {
     public static let targetControlPayloadLength = 128 * 1024
     public static let maximumControlPayloadLength = 256 * 1024
 
+    public static func maximumPayloadLength(for channel: BoothTransportChannel) -> Int {
+        switch channel {
+        case .control:
+            return maximumControlPayloadLength
+        case .preview, .asset:
+            return maximumPayloadLength
+        case .heartbeat:
+            return 256
+        }
+    }
+
     private static let headerLength = 8
     private var buffer = Data()
 
@@ -1340,7 +1351,8 @@ public struct BoothFrameParser: Sendable {
                 | (lengthByte2 << 8)
                 | lengthByte3
             let length = Int(rawLength)
-            guard length <= Self.maximumPayloadLength else {
+            let maxPayloadLength = Self.maximumPayloadLength(for: channel)
+            guard length <= maxPayloadLength else {
                 throw BoothFrameError.oversizedPayload(length)
             }
             guard buffer.count >= Self.headerLength + length else { break }
@@ -1358,10 +1370,8 @@ public struct BoothFrameParser: Sendable {
 
 public enum BoothFrameEncoder {
     public static func encode(channel: BoothTransportChannel, payload: Data) throws -> Data {
-        guard payload.count <= BoothFrameParser.maximumPayloadLength else {
-            throw BoothFrameError.oversizedPayload(payload.count)
-        }
-        guard channel != .control || payload.count <= BoothFrameParser.maximumControlPayloadLength else {
+        let maxPayloadLength = BoothFrameParser.maximumPayloadLength(for: channel)
+        guard payload.count <= maxPayloadLength else {
             throw BoothFrameError.oversizedPayload(payload.count)
         }
         var frame = Data([0x50, 0x52, BoothFrameParser.protocolVersion, channel.rawValue])
