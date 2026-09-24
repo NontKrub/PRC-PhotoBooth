@@ -26,6 +26,7 @@ public final class NetworkBoothTransport: BoothTransport {
     private static let previewIdentityCapability = "preview-identity"
     private static let heartbeatInterval: TimeInterval = 2
     private static let heartbeatTimeout: TimeInterval = 8
+    private static let unauthenticatedIdleTimeout: TimeInterval = 15.0
     private static let transportQueueLabel = "PRC-PhotoBooth.Transport"
 
     private struct PendingPairingCommit: Equatable, Sendable {
@@ -94,6 +95,7 @@ public final class NetworkBoothTransport: BoothTransport {
     private var activeInterface: BoothNetworkInterfacePolicy?
     private var fallbackActive = false
     private var fallbackReason: String?
+    private var unauthenticatedIdleTimer: DispatchSourceTimer?
 
     public var requestedNetworkPreference: BoothNetworkPreference {
         get { requestedPreference }
@@ -2000,6 +2002,7 @@ public final class NetworkBoothTransport: BoothTransport {
     }
 
     private func cancelTransportObjects() {
+        cancelUnauthenticatedIdleTimer()
         invalidateReceiveToken(for: .control)
         invalidateReceiveToken(for: .preview)
         invalidateReceiveToken(for: .asset)
@@ -2742,6 +2745,7 @@ public final class NetworkBoothTransport: BoothTransport {
                         self.publishStatus()
                         guard self.receive(on: connection, channel: channel, token: receiveToken) else { return }
                         self.sendTransportHello()
+                        self.startUnauthenticatedIdleTimer()
                     } else if channel == .preview {
                         self.emitTransportEvent(.previewReconnected, channel: channel)
                         guard self.receive(on: connection, channel: channel, token: receiveToken) else { return }
@@ -3922,6 +3926,7 @@ public final class NetworkBoothTransport: BoothTransport {
             }
         }
         peerAuthenticated = true
+        cancelUnauthenticatedIdleTimer()
         pendingPairingRequest = nil
         pendingPairingIntent = nil
         pendingPairingSessionID = nil
@@ -4989,6 +4994,33 @@ public final class NetworkBoothTransport: BoothTransport {
             || shouldDeferPathHintForAuthenticatedControl
     }
 
+    private func startUnauthenticatedIdleTimer() {
+        cancelUnauthenticatedIdleTimer()
+        guard role == .mac else { return }
+        let generation = controlConnectionGeneration
+        guard let connection = controlConnection else { return }
+        let timer = DispatchSource.makeTimerSource(queue: transportQueue)
+        timer.schedule(deadline: .now() + Self.unauthenticatedIdleTimeout)
+        timer.setEventHandler { [weak self, weak connection] in
+            guard let self, let connection else { return }
+            Task { @MainActor [weak self, weak connection] in
+                guard let self, let connection,
+                      self.controlConnectionGeneration == generation,
+                      self.isCurrent(connection, channel: .control),
+                      !self.peerAuthenticated else { return }
+                NSLog("[Transport] Unauthenticated control connection idle for %.0fs — disconnecting.", Self.unauthenticatedIdleTimeout)
+                self.rejectControlConnection("Authentication deadline expired.")
+            }
+        }
+        timer.resume()
+        unauthenticatedIdleTimer = timer
+    }
+
+    private func cancelUnauthenticatedIdleTimer() {
+        unauthenticatedIdleTimer?.cancel()
+        unauthenticatedIdleTimer = nil
+    }
+
     private func resetPreviewIdentity() {
         previewPeerID = nil
         didSendPreviewHello = false
@@ -4996,6 +5028,7 @@ public final class NetworkBoothTransport: BoothTransport {
     }
 
     private func resetControlAuthentication() {
+        cancelUnauthenticatedIdleTimer()
         didReceiveHello = false
         didSendTransportHello = false
         peerAuthenticated = false

@@ -127,11 +127,16 @@ struct GalleryModerationView: View {
 
     private func set(_ entry: GallerySessionEntry, eventID: String, status: GalleryApprovalStatus) {
         Task {
-            try? await coordinator.galleryStore.setApproval(
-                eventID: eventID,
-                sessionID: entry.sessionID,
-                status: status
-            )
+            do {
+                try await coordinator.galleryStore.setApproval(
+                    eventID: eventID,
+                    sessionID: entry.sessionID,
+                    status: status
+                )
+            } catch {
+                coordinator.errorMessage = error.localizedDescription
+                return
+            }
             await coordinator.refreshServerRoutes()
             load()
         }
@@ -143,12 +148,21 @@ struct GalleryModerationView: View {
             let entries = index.sessions.filter { entry in
                 onlyPending ? entry.approvalStatus == .pending : selectedSessionIDs.contains(entry.id)
             }
+            var failureCount = 0
             for entry in entries {
-                try? await coordinator.galleryStore.setApproval(
-                    eventID: index.eventID,
-                    sessionID: entry.sessionID,
-                    status: status
-                )
+                do {
+                    try await coordinator.galleryStore.setApproval(
+                        eventID: index.eventID,
+                        sessionID: entry.sessionID,
+                        status: status
+                    )
+                } catch {
+                    failureCount += 1
+                }
+            }
+            if failureCount > 0 {
+                coordinator.errorMessage = "Failed to update \(failureCount) session(s)."
+                return
             }
             selectedSessionIDs.removeAll()
             await coordinator.refreshServerRoutes()

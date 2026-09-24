@@ -701,10 +701,17 @@ final class iPadViewModel: ObservableObject {
 
     private func resetAssetProcessing() {
         cancelAssetResponseDeadlines()
+        assetRequestPump.clearInFlight()
         assetProcessingGeneration &+= 1
         let generation = assetProcessingGeneration
         let pipeline = assetReceivePipeline
         Task { await pipeline.reset(to: generation) }
+
+        // Re-request assets that are expected but not yet received
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            self.requestMissingExpectedAssets()
+        }
     }
 
     private func requestMissingAssets(for snapshot: SessionSyncSnapshot) {

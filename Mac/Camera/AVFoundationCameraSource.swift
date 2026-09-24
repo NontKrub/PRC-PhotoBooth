@@ -68,6 +68,7 @@ final class AVFoundationCameraSource: NSObject, CameraSource {
     var captureSession: AVCaptureSession?
     private var photoOutput: AVCapturePhotoOutput?
     private var stillContinuation: CheckedContinuation<CGImage, Error>?
+    private var isCapturing = false
     private var requestedPreviewFramesPerSecond = 30
 
     // rollingBuffer is NSLock-guarded internally — safe to share across threads
@@ -229,12 +230,17 @@ final class AVFoundationCameraSource: NSObject, CameraSource {
         captureSession?.stopRunning()
         isRunning = false
         activeDevice = nil
+        stillContinuation?.resume(throwing: CameraError.notRunning)
+        stillContinuation = nil
     }
 
     func captureStill() async throws -> CGImage {
         guard let photoOutput, let captureSession, captureSession.isRunning else {
             throw CameraError.notRunning
         }
+        guard !isCapturing else { throw CameraError.captureInProgress }
+        isCapturing = true
+        defer { isCapturing = false }
         let raw = try await withCheckedThrowingContinuation { continuation in
             self.stillContinuation = continuation
             let settings = AVCapturePhotoSettings()
@@ -321,13 +327,14 @@ extension AVFoundationCameraSource: AVCapturePhotoCaptureDelegate {
 // MARK: - Errors
 
 enum CameraError: LocalizedError {
-    case noDevice, configFailed, notRunning, captureDataMissing
+    case noDevice, configFailed, notRunning, captureDataMissing, captureInProgress
     var errorDescription: String? {
         switch self {
         case .noDevice:           return "No camera device found"
         case .configFailed:       return "Camera configuration failed"
         case .notRunning:         return "Camera is not running"
         case .captureDataMissing: return "Failed to get image data from capture"
+        case .captureInProgress:  return "A capture is already in progress"
         }
     }
 }

@@ -114,7 +114,7 @@ actor EventGalleryStore {
             includingPropertiesForKeys: nil,
             options: [.skipsHiddenFiles]
         ) else { return [] }
-        return files.filter { $0.pathExtension == "json" }.sorted { $0.path < $1.path }.map { url in
+        return files.filter { $0.pathExtension == "json" && !$0.lastPathComponent.contains("-corrupt-") }.sorted { $0.path < $1.path }.map { url in
             let eventID = url.deletingPathExtension().lastPathComponent
             do {
                 guard let index = try load(eventID: eventID) else { return .failed(url, "Gallery index is missing.") }
@@ -137,11 +137,11 @@ actor EventGalleryStore {
         formatter.locale = Locale(identifier: "en_US_POSIX")
         formatter.dateFormat = "yyyyMMdd-HHmmss"
         var backup = url.deletingLastPathComponent()
-            .appendingPathComponent("\(url.deletingPathExtension().lastPathComponent)-corrupt-\(formatter.string(from: Date())).json")
+            .appendingPathComponent("\(url.deletingPathExtension().lastPathComponent)-corrupt-\(formatter.string(from: Date())).json.corrupt")
         var suffix = 2
         while fileManager.fileExists(atPath: backup.path) {
             backup = backup.deletingLastPathComponent()
-                .appendingPathComponent("\(url.deletingPathExtension().lastPathComponent)-corrupt-\(formatter.string(from: Date()))-\(suffix).json")
+                .appendingPathComponent("\(url.deletingPathExtension().lastPathComponent)-corrupt-\(formatter.string(from: Date()))-\(suffix).json.corrupt")
             suffix += 1
         }
         try fileManager.copyItem(at: url, to: backup)

@@ -390,6 +390,29 @@ struct JobQueueStoreTests {
         #expect(!jobs.contains { $0.id == succeeded.id })
         #expect(jobs.contains { $0.id == failed.id })
     }
+
+    @Test("pruning skips succeeded jobs when session has active non-terminal work")
+    func testPruneSkipsSessionsWithActiveWork() async throws {
+        let file = try temporaryFile()
+        defer { try? FileManager.default.removeItem(at: file.deletingLastPathComponent()) }
+        let store = JobQueueStore(fileURL: file)
+
+        var strip = try await store.enqueue(sessionID: "session-active", kind: .renderStrip)
+        strip.status = .succeeded
+        strip.updatedAt = Date(timeIntervalSince1970: 1)
+        try await store.update(strip)
+
+        var cloud = try await store.enqueue(sessionID: "session-active", kind: .cloudUpload)
+        cloud.status = .failed
+        cloud.updatedAt = Date(timeIntervalSince1970: 1)
+        try await store.update(cloud)
+
+        try await store.purgeOldSucceededJobs(olderThan: Date(timeIntervalSince1970: 2))
+        let remaining = await store.snapshot()
+        // renderStrip must NOT be pruned because cloudUpload is still failed / retryable
+        #expect(remaining.contains { $0.id == strip.id })
+        #expect(remaining.contains { $0.id == cloud.id })
+    }
 }
 
 private func temporaryFile() throws -> URL {

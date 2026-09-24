@@ -1,4 +1,6 @@
 .DS_Store
 *.profraw
 DerivedData/
+.derivedData/
 xcuserdata/
+*.sync-conflict-*

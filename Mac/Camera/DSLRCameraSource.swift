@@ -213,6 +213,7 @@ final class DSLRCameraSource: NSObject, CameraSource {
     private var expectingCapture = false
     private var captureRequestedAt: Date?     // used to filter out old SD card files during cataloging
     private var catalogedMediaFileNamesAtCapture: Set<String> = []
+    private var lastCaptureBaseline: Set<String> = []
     private var pendingDownloadAttemptID: UUID?
     private var pendingDownloadFile: ICCameraFile?
     private var pendingDownloadURL: URL?
@@ -354,6 +355,7 @@ final class DSLRCameraSource: NSObject, CameraSource {
             catalogedMediaFileNamesAtCapture = Set(
                 (cam.mediaFiles ?? []).compactMap { ($0 as? ICCameraFile)?.name }
             )
+            lastCaptureBaseline = catalogedMediaFileNamesAtCapture
             if ptpHealthy {
                 Task { @MainActor [weak self] in
                     while self?.isRequestingLiveViewFrame == true {
@@ -371,6 +373,11 @@ final class DSLRCameraSource: NSObject, CameraSource {
                 try? await Task.sleep(for: .seconds(30))
                 guard !Task.isCancelled, let self, self.activeCaptureAttemptID == attempt.id else { return }
                 if let cam = self.connectedCamera, self.tryDownloadFreshestMediaFile(from: cam, attemptID: attempt.id) {
+                    Task { @MainActor [weak self] in
+                        try? await Task.sleep(for: .seconds(15))
+                        guard !Task.isCancelled, let self, self.activeCaptureAttemptID == attempt.id, self.isCapturing else { return }
+                        self.failCapture(DSLRError.captureFailed("Capture download timed out."), attemptID: attempt.id)
+                    }
                     return
                 }
                 let msg = self.busyRejection
@@ -395,7 +402,7 @@ final class DSLRCameraSource: NSObject, CameraSource {
             fallbackTakePictureIssued = false
             busyRejection = false
             captureRequestedAt = Date()
-            catalogedMediaFileNamesAtCapture = []
+            catalogedMediaFileNamesAtCapture = lastCaptureBaseline
             captureTimeoutTask = Task { @MainActor [weak self] in
                 try? await Task.sleep(for: .seconds(7))
                 guard !Task.isCancelled, let self, self.activeCaptureAttemptID == attempt.id else { return }

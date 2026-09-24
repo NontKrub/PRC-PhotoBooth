@@ -98,14 +98,13 @@ final class SessionJobQueue {
 
     @discardableResult
     func retryPersistenceRecovery() async -> Bool {
-        let wasRunning = isRunning
-        if wasRunning { stop() }
+        if isRunning { stop() }
         do {
             jobs = try await store.recoverDurableState()
             persistentQueueError = nil
             lastQueueError = nil
             onJobsChanged?()
-            if wasRunning { start() }
+            start()
             return true
         } catch {
             persistentQueueError = error.localizedDescription

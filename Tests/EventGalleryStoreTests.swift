@@ -42,6 +42,32 @@ struct EventGalleryStoreTests {
         #expect(try await store.load(eventID: manifest.eventID)?.sessions.isEmpty == true)
     }
 
+    @Test("corrupt backup files are excluded from loadAll")
+    func testCorruptBackupExcludedFromLoadAll() async throws {
+        let root = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = EventGalleryStore(baseDirectory: root)
+
+        // Create a valid index
+        let manifest = makeManifest(root: root)
+        try await store.upsertSession(manifest: manifest, configuration: EventGalleryConfiguration(mode: .automatic))
+
+        // Create corrupt backup files
+        let corruptBackup1 = root.appendingPathComponent("event-1-corrupt-20260924-120000.json")
+        let corruptBackup2 = root.appendingPathComponent("event-1-corrupt-20260924-120000.json.corrupt")
+        try Data("corrupt json".utf8).write(to: corruptBackup1)
+        try Data("corrupt json".utf8).write(to: corruptBackup2)
+
+        let loaded = await store.loadAll()
+        // Should only have the 1 valid loaded index, not 2 or 3 entries
+        #expect(loaded.count == 1)
+        if case .loaded(let index) = loaded.first {
+            #expect(index.eventID == manifest.eventID)
+        } else {
+            Issue.record("Expected loaded index")
+        }
+    }
+
     private func makeManifest(root: URL) -> SessionManifest {
         let directory = root.appendingPathComponent("session")
         try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)

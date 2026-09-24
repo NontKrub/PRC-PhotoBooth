@@ -128,8 +128,12 @@ struct ProcessCloudCommandRunner: CloudCommandRunning {
             terminate(process, processGroupConfigured: processGroupConfigured)
         }
 
-        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + timeout) {
+        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + timeout) { [stdoutPipe, stderrPipe] in
             state.requestTermination(CloudCommandError.timedOut(timeout))
+            DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 10) {
+                stdoutPipe.fileHandleForReading.closeFile()
+                stderrPipe.fileHandleForReading.closeFile()
+            }
         }
     }
 

@@ -420,6 +420,40 @@ struct SessionJobQueueTests {
         #expect(snapshot.cancelled)
         #expect(snapshot.completed)
     }
+
+    @Test("retryPersistenceRecovery starts workers even after startup failure set isRunning to false")
+    @MainActor
+    func testRecoveryStartsWorkersAfterStartupFailure() async throws {
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let jobsURL = directory.appendingPathComponent("jobs.json")
+        // Write corrupt JSON to force startup failure
+        try Data("corrupt".utf8).write(to: jobsURL)
+
+        let executor = TestJobExecutor()
+        let store = JobQueueStore(fileURL: jobsURL)
+        let queue = SessionJobQueue(store: store, executor: executor)
+
+        queue.start()
+        // Wait until startup failure occurs
+        try await waitUntil { await queue.lastQueueError != nil }
+        #expect(queue.isRunning == false)
+
+        // Now fix the store by removing corrupt file
+        try FileManager.default.removeItem(at: jobsURL)
+        let manifest = makeManifest()
+
+        // Call retryPersistenceRecovery
+        let recovered = await queue.retryPersistenceRecovery()
+        #expect(recovered == true)
+        #expect(queue.lastQueueError == nil)
+        #expect(queue.isRunning == true)
+
+        // Verify workers can actually process jobs now
+        try await queue.enqueueFinalizationJobs(for: manifest)
+        try await waitUntil { await executor.snapshot().kinds.count == 3 }
+        #expect(await executor.snapshot().kinds == [.renderStrip, .registerDownload, .updateGallery])
+    }
 }
 
 @MainActor

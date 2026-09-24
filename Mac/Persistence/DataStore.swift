@@ -9,6 +9,7 @@ final class DataStore {
     var context: ModelContext { container.mainContext }
     private(set) var lastPersistenceError: String?
     private(set) var persistentStorageAvailable = true
+    private(set) var databaseWasRecreated = false
 
     private init() {
         let schema = Schema([BoothEvent.self, BoothSlot.self, BoothSession.self, CapturedShot.self])
@@ -36,6 +37,9 @@ final class DataStore {
             }
             do {
                 container = try ModelContainer(for: schema, configurations: config)
+                databaseWasRecreated = true
+                lastPersistenceError = "Database was successfully recreated after corruption evacuation."
+                NSLog("[Persistence] Warning: Database was successfully recreated after corruption evacuation.")
             } catch {
                 let persistenceError = error.localizedDescription
                 persistentStorageAvailable = false

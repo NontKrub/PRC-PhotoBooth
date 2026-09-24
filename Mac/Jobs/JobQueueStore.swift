@@ -378,7 +378,15 @@ actor JobQueueStore {
     func purgeOldSucceededJobs(olderThan date: Date) throws {
         try ensureLoaded()
         let oldCount = jobs.count
-        jobs.removeAll { $0.status == .succeeded && $0.updatedAt < date }
+        let sessionsWithActiveWork = Set(
+            jobs.filter { $0.status != .succeeded && $0.status != .cancelled }
+                .map(\.sessionID)
+        )
+        jobs.removeAll {
+            $0.status == .succeeded
+            && $0.updatedAt < date
+            && !sessionsWithActiveWork.contains($0.sessionID)
+        }
         if jobs.count != oldCount { try persist() }
     }
 

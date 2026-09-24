@@ -75,10 +75,3 @@ public enum CustomerDisplayWorkflow {
         return reviewMediaReady
     }
 }
-
-private extension BoothPhase {
-    var isFinished: Bool {
-        if case .finished = self { return true }
-        return false
-    }
-}

@@ -55,4 +55,12 @@ struct CustomerDisplayWorkflowTests {
             reviewMediaReady: true
         ))
     }
+
+    @Test("BoothPhase isFinished property accurately matches finished phase")
+    func boothPhaseIsFinished() {
+        #expect(!BoothPhase.idle.isFinished)
+        #expect(!BoothPhase.readyToStart.isFinished)
+        #expect(!BoothPhase.processing.isFinished)
+        #expect(BoothPhase.finished(qrPayload: "qr").isFinished)
+    }
 }

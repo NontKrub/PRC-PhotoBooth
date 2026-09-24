@@ -308,8 +308,10 @@ final class BoothCoordinator {
         }
         initialStartupComponents[.dataStore] = store.lastPersistenceError.map {
             StartupComponentHealth(
-                status: .unavailable,
-                detail: "Persistent event data is unavailable: \($0)"
+                status: store.databaseWasRecreated ? .degraded : .unavailable,
+                detail: store.databaseWasRecreated
+                    ? "Database was recreated after corruption. Previous event data moved to backup (Finding 19)."
+                    : "Persistent event data is unavailable: \($0)"
             )
         } ?? StartupComponentHealth(
             status: .ready,
@@ -478,7 +480,32 @@ final class BoothCoordinator {
         case .resume:
             resumeBooth(); return true
         case .retryFailedJobs:
-            jobQueue.retryAllFailed(); return true
+            jobQueue.retryAllFailed()
+            // Restore .failed manifests to .finalizing so completion can proceed (Finding 11).
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                for result in await manifestStore.loadAll() {
+                    guard case .loaded(let manifest) = result, manifest.status == .failed else { continue }
+                    let jobs = jobQueue.jobs.filter { $0.sessionID == manifest.id }
+                    // Only restore if there are retryable jobs that were just re-queued.
+                    guard jobs.contains(where: { $0.status == .pending || $0.status == .running }) else { continue }
+                    do {
+                        let restored = try await manifestStore.transition(
+                            sessionID: manifest.id,
+                            allowedFrom: [.failed]
+                        ) { durable in
+                            durable.status = .finalizing
+                            durable.lastError = nil
+                        }
+                        if currentManifestID == manifest.id {
+                            currentManifest = restored
+                        }
+                    } catch {
+                        recoveryService.recordError("Could not restore manifest \(manifest.id) for retry: \(error.localizedDescription)")
+                    }
+                }
+            }
+            return true
         case .safeChecks:
             await runSafePreflight(); return true
         case .reconnectCamera:
@@ -1288,6 +1315,10 @@ final class BoothCoordinator {
     func testCameraCapture() {
         Task { @MainActor [weak self] in
             guard let self else { return }
+            guard stateMachine.phase == .idle || stateMachine.phase == .readyToStart else {
+                errorMessage = "Camera test is unavailable during an active session."
+                return
+            }
             do {
                 _ = try await capture.captureDiagnosticStill()
                 errorMessage = nil
@@ -1311,6 +1342,9 @@ final class BoothCoordinator {
             runPrinterTest: runPrinterTest,
             cameraTest: { [weak self] in
                 guard let self else { return }
+                guard self.stateMachine.phase == .idle || self.stateMachine.phase == .readyToStart else {
+                    throw CameraError.captureInProgress
+                }
                 _ = try await self.capture.captureDiagnosticStill()
             },
             printerTest: { [weak self] in
@@ -1642,9 +1676,10 @@ final class BoothCoordinator {
                     : "/e/\(document.gallery.eventToken)/"
             )
         } catch {
+            // Always release the start latch so subsequent starts are not blocked (Finding 17).
+            releaseSessionStart(startRequestID)
             if respondsToRequest {
                 let reason = (error as? CustomerSelectionError)?.message(for: selection.language) ?? error.localizedDescription
-                releaseSessionStart(startRequestID)
                 sendSessionStartResult(requestID: requestedRequestID, result: .rejected(reason: reason))
                 if let selectionError = error as? CustomerSelectionError,
                    selectionError == .staleCatalog {
@@ -1814,10 +1849,17 @@ final class BoothCoordinator {
                     guard outcome == .sent,
                           self.currentSession?.id == sessionID,
                           self.stateMachine.currentSessionID == sessionID else {
-                        self.errorMessage = "The iPad did not receive session setup. Reconnect before retrying."
+                        // Only show error if an iPad was expected (Finding 6).
+                        if self.isAuthenticatedIPadConnected {
+                            self.errorMessage = "The iPad did not receive session setup. Reconnect before retrying."
+                        }
                         return
                     }
                     self.beginCountdown(photoIndex: 0)
+                }
+                // External-display-only: no iPad to acknowledge, begin countdown directly (Finding 6).
+                if !isAuthenticatedIPadConnected, isExternalViewerActive {
+                    beginCountdown(photoIndex: 0)
                 }
                 self.lastSessionStartRequestID = startRequestID
                 self.lastSessionStartSessionID = sessionID
@@ -1993,13 +2035,20 @@ final class BoothCoordinator {
             )
             recordOperation(.captureFailed, sessionID: currentManifest?.id, photoIndex: photoIndex, duration: Date().timeIntervalSince(attempt.startedAt), reason: summary.reason.rawValue)
             guard sessionLifecycleGeneration == lifecycleGeneration,
-                  currentManifest?.id == sessionID,
-                  await persistCaptureFailure(photoIndex: photoIndex, error: error) else {
+                  currentManifest?.id == sessionID else {
                 currentCaptureAttempt = nil
                 return
             }
+            let persistSucceeded = await persistCaptureFailure(photoIndex: photoIndex, error: error)
+            // Enter recovery regardless — the operator needs a way out (Finding 20).
             currentCaptureAttempt = nil
             stateMachine.enterCaptureRecovery(photoIndex: photoIndex, failure: summary)
+            if !persistSucceeded {
+                recoveryService.recordError(
+                    "Capture failure for photo \(photoIndex) could not be persisted. "
+                    + "Recovery UI is shown but the failure is not durable."
+                )
+            }
             currentReviewStateToken = nil
             reviewDecisionPending = false
             if let context = nextSessionMessageContext() {
@@ -2150,9 +2199,18 @@ final class BoothCoordinator {
                 ?? UserDefaults.standard.string(forKey: "publicBaseURL"),
             cloudUploadEnabled: cloudUploadEnabled
         )
+        let expectedSessionID = manifest.id
+        let expectedGeneration = sessionLifecycleGeneration
         Task.detached(priority: .utility) { [compositor, images, qrPayload] in
             let img = try? compositor.render(images: images, qrPayload: qrPayload)
-            await MainActor.run { [weak self] in self?.currentStripPreview = img }
+            await MainActor.run { [weak self] in
+                guard let self,
+                      self.currentManifest?.id == expectedSessionID,
+                      self.sessionLifecycleGeneration == expectedGeneration else {
+                    return  // session changed — discard stale render (Finding 21)
+                }
+                self.currentStripPreview = img
+            }
         }
     }
 
@@ -2590,11 +2648,50 @@ final class BoothCoordinator {
                   CustomerDisplayWorkflow.canApply(.keep(photoIndex: idx), in: stateMachine.phase) else { return }
             handleReviewDecision(photoIndex: idx, action: .keep)
         case .cancelSession:
-            guard currentSession != nil else { return }
-            Task { @MainActor [weak self] in
-                await self?.cancelCurrentSession()
+            if currentSession != nil {
+                Task { @MainActor [weak self] in
+                    await self?.cancelCurrentSession()
+                }
+            } else if finishedAwaitingCustomerAckSessionID != nil
+                      || stateMachine.phase.isFinished {
+                // Post-completion reset — session already cleared (Finding 7).
+                resetToIdleAfterCompletion()
             }
         }
+    }
+
+    /// Resets the booth to idle from a post-completion state where `currentSession` has
+    /// already been cleared but `finishedAwaitingCustomerAckSessionID` or `.finished` phase
+    /// are still active (Finding 7).
+    private func resetToIdleAfterCompletion() {
+        customerFinishedInFlightSessionID = nil
+        finishedAwaitingCustomerAckSessionID = nil
+        completionInFlightSessionID = nil
+        sessionLifecycleGeneration &+= 1
+        currentManifest = nil
+        currentManifestID = nil
+        currentSession = nil
+        currentSessionPresentation = nil
+        currentStripPreview = nil
+        currentFilteredReviewImages = [:]
+        sessionAssetReferences = [:]
+        stripAssetReference = nil
+        assetSources = [:]
+        pendingPromptAssets = [:]
+        assetAssembler = BoothAssetAssembler()
+        capture.resetStills()
+        retakeCounts = [:]
+        gifFrames = [:]
+        currentCaptureAttempt = nil
+        currentCountdown = nil
+        reviewDecisionPending = false
+        currentReviewStateToken = nil
+        activeReviewRequestID = nil
+        recentReviewRequests.removeAll(keepingCapacity: true)
+        recentReviewRequestOrder.removeAll(keepingCapacity: true)
+        stateMachine.reset()
+        resynciPad()
+        attemptPendingLANRecoveryIfIdle()
     }
 
     private enum RetakeSource {
@@ -2685,6 +2782,8 @@ final class BoothCoordinator {
         action: ReviewAction,
         result: ReviewDecisionResult
     ) {
+        // Don't cache transient failures — allow retries to re-attempt the save (Finding 9).
+        guard result != .persistenceFailed else { return }
         recentReviewRequests[requestID] = ReviewRequestRecord(state: state, action: action, result: result)
         recentReviewRequestOrder.removeAll { $0 == requestID }
         recentReviewRequestOrder.append(requestID)
@@ -3080,8 +3179,22 @@ final class BoothCoordinator {
                 try await jobQueue.enqueueAutoPrint(for: manifest)
             }
         } catch {
+            // Roll back manifest to .capturing so the guest can retry (Finding 10).
+            do {
+                let rolledBack = try await manifestStore.transition(
+                    sessionID: sessionID,
+                    allowedFrom: [.finalizing]
+                ) { durable in
+                    durable.status = .capturing
+                    durable.lastError = "Job queue failure: \(error.localizedDescription)"
+                }
+                currentManifest = rolledBack
+            } catch {
+                recoveryService.recordError(
+                    "Could not roll back session \(sessionID) from finalizing: \(error.localizedDescription)"
+                )
+            }
             errorMessage = "Could not queue session processing: \(error.localizedDescription)"
-            recoveryService.recordError("Session processing remains finalizing until queue persistence recovers: \(error.localizedDescription)")
             return false
         }
         return true
@@ -3490,6 +3603,10 @@ final class BoothCoordinator {
 
         // Keep the pre-1.1 cleanup path for sessions that predate runtime manifests.
         for session in store.fetchSessions(finishedBefore: cutoff) {
+            // Skip sessions managed by the manifest system (Finding 14).
+            if let _ = try? await manifestStore.load(sessionID: session.id) {
+                continue
+            }
             if let stripPath = session.stripPath {
                 let strip = picturesOutputDir()?.appendingPathComponent(stripPath)
                 if let strip {

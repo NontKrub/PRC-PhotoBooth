@@ -164,7 +164,9 @@ final class SessionJobExecutor: SessionJobExecuting {
                 sessionDirectory: directory,
                 language: manifest.eventConfig.customerLanguage,
                 eventGalleryPath: manifest.eventConfig.eventGalleryPath,
-                gifState: manifest.shots.contains(where: { !$0.gifFrameFileNames.isEmpty }) ? .preparing : .none
+                gifState: manifest.shots.contains(where: { !$0.gifFrameFileNames.isEmpty })
+                    ? (manifest.gifFileName != nil ? .ready : .preparing)
+                    : .none
             )
         )
     }
@@ -267,6 +269,23 @@ final class SessionJobExecutor: SessionJobExecuting {
                 sessionID: manifest.id,
                 stripPath: nil,
                 gifPath: "\(manifest.relativeDirectoryPath)/booth.gif"
+            )
+            do {
+                if let document = try? await experienceStore.load(eventID: updated.eventID),
+                   document.gallery.mode != .disabled {
+                    try await galleryStore.upsertSession(manifest: updated, configuration: document.gallery)
+                }
+            } catch {
+                NSLog("[Jobs] Gallery GIF refresh failed: %@", error.localizedDescription)
+            }
+            await server.registerToken(
+                updated.downloadToken,
+                registration: SessionRouteRegistration(
+                    sessionDirectory: directory,
+                    language: updated.eventConfig.customerLanguage,
+                    eventGalleryPath: updated.eventConfig.eventGalleryPath,
+                    gifState: .ready
+                )
             )
         } catch is CancellationError {
             throw CancellationError()
