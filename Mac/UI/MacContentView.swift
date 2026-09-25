@@ -11,6 +11,9 @@ struct MacContentView: View {
     @State private var isAdminUnlocked = false
     @State private var showCloudSSHSetup = false
     @AppStorage("operatorLanguage") private var operatorLanguage = OperatorLanguage.system.rawValue
+    @AppStorage("cloudUploadEnabled") private var cloudUploadEnabled = false
+    @AppStorage("publicBaseURL") private var publicBaseURL = ""
+    @AppStorage("allowTrustedLocalHTTP") private var allowTrustedLocalHTTP = false
 
     var body: some View {
         TabView(selection: $selectedTab) {
@@ -46,6 +49,15 @@ struct MacContentView: View {
         }
         .onChange(of: scenePhase) { _, newPhase in
             if newPhase == .active { coordinator.printer.refreshPrinters() }
+        }
+        .onChange(of: cloudUploadEnabled) { _, _ in
+            coordinator.guestDeliveryConfigurationDidChange()
+        }
+        .onChange(of: publicBaseURL) { _, _ in
+            coordinator.guestDeliveryConfigurationDidChange()
+        }
+        .onChange(of: allowTrustedLocalHTTP) { _, _ in
+            coordinator.guestDeliveryConfigurationDidChange()
         }
         .sheet(isPresented: $showPINSetup) {
             PINGateView(mode: .setup) {
@@ -136,6 +148,7 @@ struct SettingsView: View {
     @State private var editedDeviceName = ""
     @State private var peerToForget: TrustedBoothPeer?
     @State private var showForgetAllPeers = false
+    @State private var settingsActionError: String?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -169,7 +182,12 @@ struct SettingsView: View {
         ) {
             if let peer = peerToForget {
                 Button("Forget " + peer.displayName, role: .destructive) {
-                    (coordinator.multipeer as? NetworkBoothTransport)?.forgetPeer(peer.id)
+                    guard let transport = coordinator.multipeer as? NetworkBoothTransport,
+                          transport.forgetPeer(peer.id) else {
+                        settingsActionError = "The iPad remains trusted because its Keychain secret could not be removed."
+                        peerToForget = nil
+                        return
+                    }
                     peerToForget = nil
                 }
             }
@@ -179,11 +197,23 @@ struct SettingsView: View {
         }
         .confirmationDialog("Forget all paired iPads?", isPresented: $showForgetAllPeers) {
             Button("Forget All", role: .destructive) {
-                (coordinator.multipeer as? NetworkBoothTransport)?.forgetAllPeers()
+                guard let transport = coordinator.multipeer as? NetworkBoothTransport,
+                      transport.forgetAllPeers() else {
+                    settingsActionError = "Some iPad secrets could not be removed from Keychain. Those peers remain trusted."
+                    return
+                }
             }
             Button("Cancel", role: .cancel) {}
         } message: {
             Text("All trusted iPads and their pairing secrets will be removed from this Mac.")
+        }
+        .alert("Keychain Action Not Completed", isPresented: Binding(
+            get: { settingsActionError != nil },
+            set: { if !$0 { settingsActionError = nil } }
+        )) {
+            Button("OK") { settingsActionError = nil }
+        } message: {
+            Text(settingsActionError ?? "")
         }
         .task {
             coordinator.printer.refreshPrinters()
@@ -787,15 +817,19 @@ struct SettingsView: View {
                             .textFieldStyle(.roundedBorder)
                             .frame(width: 280)
                     }
-                    Text("Used in QR codes after cloud upload succeeds. Public URLs must use HTTPS.")
+                    Text("Public guest URLs must use HTTPS. Session pages use this URL after cloud upload succeeds.")
                         .font(.caption).foregroundStyle(.secondary)
                 }
 
                 Divider()
 
-                Toggle("Allow guest downloads over trusted private LAN (HTTP)", isOn: $allowTrustedLocalHTTP)
-                Text("Use only on an isolated or operator-controlled network. Guest photos and download links are not encrypted in transit.")
-                    .font(.caption).foregroundStyle(.secondary)
+                Toggle("Trusted private LAN HTTP", isOn: $allowTrustedLocalHTTP)
+                Label(
+                    "Guest photos and download links are unencrypted on the local network. Use only on an isolated, operator-controlled network.",
+                    systemImage: "exclamationmark.triangle.fill"
+                )
+                .font(.caption)
+                .foregroundStyle(.orange)
             }
             .padding(4)
         } label: {
@@ -822,8 +856,11 @@ struct SettingsView: View {
         }
         .confirmationDialog("Reset Admin PIN?", isPresented: $showResetPINConfirmation) {
             Button("Reset PIN", role: .destructive) {
-                clearPIN()
-                onResetPIN()
+                if clearPIN() {
+                    onResetPIN()
+                } else {
+                    settingsActionError = "The PIN was not reset because Keychain could not remove every stored credential copy."
+                }
             }
             Button("Cancel", role: .cancel) {}
         } message: {

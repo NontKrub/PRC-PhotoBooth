@@ -6,6 +6,7 @@ enum JobQueueStoreError: LocalizedError, Equatable {
     case missingJob(String)
     case invalidJob(String)
     case sessionCancelled(String)
+    case manualRetryRejected(String, ManualJobRetryEligibility)
 
     var errorDescription: String? {
         switch self {
@@ -17,8 +18,70 @@ enum JobQueueStoreError: LocalizedError, Equatable {
         case .missingJob(let id): return "Job not found: \(id)"
         case .invalidJob(let id): return "Invalid job identifier: \(id)"
         case .sessionCancelled(let id): return "Session is durably cancelled: \(id)"
+        case .manualRetryRejected(let id, let reason):
+            return "Job \(id) is not eligible for manual retry (\(reason.description))."
         }
     }
+}
+
+enum ManualJobRetryEligibility: Sendable, Equatable {
+    case eligible
+    case notFailed
+    case missingDisposition
+    case permanent
+    case sideEffectUnknown
+    case cancelled
+    case sessionCancelled
+
+    static func evaluate(
+        _ job: SessionJob,
+        sessionIsCancelled: Bool = false,
+        manifestIsCancelled: Bool = false
+    ) -> Self {
+        guard !sessionIsCancelled, !manifestIsCancelled else { return .sessionCancelled }
+        switch job.status {
+        case .failed:
+            switch job.lastFailureDisposition {
+            case .retryable: return .eligible
+            case .permanent: return .permanent
+            case .sideEffectUnknown: return .sideEffectUnknown
+            case nil: return .missingDisposition
+            }
+        case .cancelled:
+            return .cancelled
+        case .pending, .running, .waitingRetry, .succeeded:
+            return .notFailed
+        }
+    }
+}
+
+extension ManualJobRetryEligibility {
+    var description: String {
+        switch self {
+        case .eligible: return "eligible"
+        case .notFailed: return "not failed"
+        case .missingDisposition: return "failure disposition is missing"
+        case .permanent: return "permanent failure"
+        case .sideEffectUnknown: return "side effect requires resolution"
+        case .cancelled: return "job is cancelled"
+        case .sessionCancelled: return "session is cancelled"
+        }
+    }
+}
+
+enum ManualRetrySkippedReason: Sendable, Equatable {
+    case missing
+    case ineligible(ManualJobRetryEligibility)
+}
+
+struct ManualRetrySkippedJob: Sendable, Equatable {
+    var jobID: String
+    var reason: ManualRetrySkippedReason
+}
+
+struct ManualRetryBatchResult: Sendable, Equatable {
+    var retried: [SessionJob]
+    var skipped: [ManualRetrySkippedJob]
 }
 
 enum JobQueueLoadState: Sendable, Equatable {
@@ -216,47 +279,81 @@ actor JobQueueStore {
     }
 
     func retry(jobID: String) throws {
-        try ensureLoaded()
-        guard let index = jobs.firstIndex(where: { $0.id == jobID }) else {
+        let result = try retryJobs(jobIDs: [jobID])
+        guard result.retried.isEmpty else { return }
+        guard let skipped = result.skipped.first else { return }
+        switch skipped.reason {
+        case .missing:
             throw JobQueueStoreError.missingJob(jobID)
+        case .ineligible(.sessionCancelled):
+            if let job = jobs.first(where: { $0.id == jobID }) {
+                throw JobQueueStoreError.sessionCancelled(job.sessionID)
+            }
+            throw JobQueueStoreError.missingJob(jobID)
+        case .ineligible(let eligibility):
+            throw JobQueueStoreError.manualRetryRejected(jobID, eligibility)
         }
-        guard !cancelledSessionIDs.contains(jobs[index].sessionID) else {
-            throw JobQueueStoreError.sessionCancelled(jobs[index].sessionID)
-        }
-        guard jobs[index].status == .failed || jobs[index].status == .waitingRetry else { return }
-        guard jobs[index].lastFailureDisposition != .sideEffectUnknown else { return }
-        jobs[index].status = .pending
-        jobs[index].attemptCount = 0
-        jobs[index].lastAttemptAt = nil
-        jobs[index].nextAttemptAt = Date()
-        jobs[index].lastError = nil
-        jobs[index].lastFailureDisposition = nil
-        jobs[index].updatedAt = Date()
-        try persist()
     }
 
-    func retryEligibleFailed() throws -> [SessionJob] {
+    func manualRetryEligibility(jobID: String) throws -> ManualJobRetryEligibility {
+        try ensureLoaded()
+        guard let job = jobs.first(where: { $0.id == jobID }) else {
+            throw JobQueueStoreError.missingJob(jobID)
+        }
+        return ManualJobRetryEligibility.evaluate(
+            job,
+            sessionIsCancelled: cancelledSessionIDs.contains(job.sessionID)
+        )
+    }
+
+    func eligibleManualRetryJobs(jobIDs: Set<String>) throws -> [SessionJob] {
+        try ensureLoaded()
+        return jobs
+            .filter { jobIDs.contains($0.id) }
+            .filter {
+                ManualJobRetryEligibility.evaluate(
+                    $0,
+                    sessionIsCancelled: cancelledSessionIDs.contains($0.sessionID)
+                ) == .eligible
+            }
+            .sorted { $0.id < $1.id }
+    }
+
+    func retryJobs(jobIDs: Set<String>) throws -> ManualRetryBatchResult {
         try ensureLoaded()
         let now = Date()
+        var prospectiveJobs = jobs
         var retried: [SessionJob] = []
-        for index in jobs.indices {
-            let job = jobs[index]
-            guard !cancelledSessionIDs.contains(job.sessionID) else { continue }
-            guard job.status == .failed || job.status == .waitingRetry else { continue }
-            guard job.lastFailureDisposition != .sideEffectUnknown else { continue }
-            jobs[index].status = .pending
-            jobs[index].attemptCount = 0
-            jobs[index].lastAttemptAt = nil
-            jobs[index].nextAttemptAt = now
-            jobs[index].lastError = nil
-            jobs[index].lastFailureDisposition = nil
-            jobs[index].updatedAt = now
-            retried.append(jobs[index])
+        var skipped: [ManualRetrySkippedJob] = []
+
+        for jobID in jobIDs.sorted() {
+            guard let index = prospectiveJobs.firstIndex(where: { $0.id == jobID }) else {
+                skipped.append(ManualRetrySkippedJob(jobID: jobID, reason: .missing))
+                continue
+            }
+            let job = prospectiveJobs[index]
+            let eligibility = ManualJobRetryEligibility.evaluate(
+                job,
+                sessionIsCancelled: cancelledSessionIDs.contains(job.sessionID)
+            )
+            guard eligibility == .eligible else {
+                skipped.append(ManualRetrySkippedJob(jobID: jobID, reason: .ineligible(eligibility)))
+                continue
+            }
+            prospectiveJobs[index].status = .pending
+            prospectiveJobs[index].attemptCount = 0
+            prospectiveJobs[index].lastAttemptAt = nil
+            prospectiveJobs[index].nextAttemptAt = now
+            prospectiveJobs[index].lastError = nil
+            prospectiveJobs[index].lastFailureDisposition = nil
+            prospectiveJobs[index].updatedAt = now
+            retried.append(prospectiveJobs[index])
         }
+
         if !retried.isEmpty {
-            try persist()
+            try persist(prospectiveJobs)
         }
-        return retried
+        return ManualRetryBatchResult(retried: retried, skipped: skipped)
     }
 
     func resolveUnknownPrint(
@@ -323,11 +420,13 @@ actor JobQueueStore {
         }
     }
 
-    func requeueFailedCloudUploads() throws -> Int {
+    func requeueFailedCloudUploads(sessionIDs: Set<String>) throws -> Int {
         try ensureLoaded()
         let now = Date()
         var count = 0
-        for index in jobs.indices where jobs[index].kind == .cloudUpload
+        for index in jobs.indices where sessionIDs.contains(jobs[index].sessionID)
+            && !cancelledSessionIDs.contains(jobs[index].sessionID)
+            && jobs[index].kind == .cloudUpload
             && jobs[index].status == .failed
             && jobs[index].lastFailureDisposition == .retryable {
             jobs[index].status = .pending
@@ -510,9 +609,14 @@ actor JobQueueStore {
     }
 
     private func persist() throws {
+        try persist(jobs)
+    }
+
+    private func persist(_ prospectiveJobs: [SessionJob]) throws {
         do {
-            try persistDurableJobs(jobs)
-            persistedJobs = jobs
+            try persistDurableJobs(prospectiveJobs)
+            jobs = prospectiveJobs
+            persistedJobs = prospectiveJobs
             lastPersistenceError = nil
         } catch {
             jobs = persistedJobs

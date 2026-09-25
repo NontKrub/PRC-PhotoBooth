@@ -2,6 +2,50 @@ import Foundation
 import CoreGraphics
 import Observation
 
+enum SessionJobReconciliationDecision: Sendable, Equatable {
+    case none
+    case restoreFinalizing
+    case enqueueMissingRequiredJobs
+    case fail(String)
+    case complete
+
+    static func evaluate(
+        manifestStatus: RuntimeSessionStatus,
+        jobs: [SessionJob]
+    ) -> Self {
+        let requiredKinds: [SessionJobKind] = [.renderStrip, .registerDownload]
+        let requiredJobs = requiredKinds.compactMap { kind -> SessionJob? in
+            let matching = jobs.filter { $0.kind == kind }
+            let nonCancelled = matching.filter { $0.status != .cancelled }
+            return (nonCancelled.isEmpty ? matching : nonCancelled).max {
+                $0.createdAt == $1.createdAt ? $0.id < $1.id : $0.createdAt < $1.createdAt
+            }
+        }
+
+        switch manifestStatus {
+        case .failed:
+            return requiredJobs.contains(where: { SessionJobDependencyPolicy.hasRunnableWork($0, in: jobs) })
+                ? .restoreFinalizing
+                : .none
+        case .finalizing:
+            if requiredJobs.count == requiredKinds.count,
+               requiredJobs.allSatisfy({ $0.status == .succeeded }) {
+                return .complete
+            }
+            let unfinished = requiredJobs.filter { $0.status != .succeeded }
+            let hasTerminalFailure = unfinished.contains { $0.status == .failed || $0.status == .cancelled }
+            if hasTerminalFailure,
+               !requiredJobs.contains(where: { SessionJobDependencyPolicy.hasRunnableWork($0, in: jobs) }) {
+                return .fail(unfinished.compactMap(\.lastError).first ?? "Required finalization jobs failed.")
+            }
+            return requiredJobs.count < requiredKinds.count ? .enqueueMissingRequiredJobs : .none
+        case .capturing, .completed, .cancelled:
+            return .none
+        }
+    }
+
+}
+
 struct RecoverableSession: Identifiable, Sendable {
     var manifest: SessionManifest
     var issue: String?
@@ -17,6 +61,8 @@ final class SessionRecoveryService {
     private let jobQueue: SessionJobQueue
     private let defaults: UserDefaults
     private var activeResumeID: String?
+    private var scanInProgress = false
+    private var locallyClaimedRecoverySessionIDs: Set<String> = []
 
     private(set) var recoverableCaptureSession: RecoverableSession?
     private(set) var automaticallyRecoveringSessions: [String] = []
@@ -27,6 +73,13 @@ final class SessionRecoveryService {
     var onResume: ((SessionManifest, [Int: CGImage]) -> Void)?
     var onDiscard: ((SessionManifest) -> Void)?
     var quiesceSessionOperations: (@MainActor (String) async -> Bool)?
+    var isSessionRecoveryInFlight: (@MainActor (String) -> Bool)?
+    var claimSessionRecovery: (@MainActor (String) -> Bool)?
+    var releaseSessionRecovery: (@MainActor (String) -> Void)?
+    var onRecoveryScanFinished: (@MainActor () -> Void)?
+#if DEBUG
+    var beforeManifestReconciliationForTesting: (@MainActor (String) async -> Void)?
+#endif
 
     init(
         manifestStore: SessionManifestStore,
@@ -91,6 +144,12 @@ final class SessionRecoveryService {
     func discardCaptureSession(sessionID: String) {
         Task { [weak self] in
             guard let self else { return }
+            guard claimRecoverySession(sessionID) else {
+                recoveryErrors.append("Session recovery is already running: \(sessionID)")
+                return
+            }
+            defer { releaseRecoverySession(sessionID) }
+
             do {
                 let manifest = try await manifestStore.transition(
                     sessionID: sessionID,
@@ -122,6 +181,10 @@ final class SessionRecoveryService {
     }
 
     private func scan() async {
+        guard !scanInProgress else { return }
+        scanInProgress = true
+        defer { scanInProgress = false }
+
         recoverableCaptureSession = nil
         automaticallyRecoveringSessions = []
         cleanupPendingSessionIDs = []
@@ -139,66 +202,71 @@ final class SessionRecoveryService {
             }
         }
 
-        let requiredKinds: Set<SessionJobKind> = [.renderStrip, .registerDownload]
+        var claimedSessionIDs = Set<String>()
+        for manifest in manifests where claimRecoverySession(manifest.id) {
+            claimedSessionIDs.insert(manifest.id)
+        }
+        defer {
+            for sessionID in claimedSessionIDs {
+                releaseRecoverySession(sessionID)
+            }
+            if !claimedSessionIDs.isEmpty {
+                onRecoveryScanFinished?()
+            }
+        }
+
         var reconciledManifests: [SessionManifest] = []
         for var manifest in manifests {
+            guard claimedSessionIDs.contains(manifest.id) else {
+                reconciledManifests.append(manifest)
+                continue
+            }
             let sessionJobs = jobQueue.jobs.filter { $0.sessionID == manifest.id }
-            let requiredJobs = sessionJobs.filter { requiredKinds.contains($0.kind) }
-
-            if manifest.status == .failed {
-                // Case A: manifest is .failed, but required job is pending, running, or waitingRetry.
-                // Correction: restore manifest to .finalizing.
-                let hasActiveRequiredJob = requiredJobs.contains {
-                    $0.status == .pending || $0.status == .running || $0.status == .waitingRetry
+            let decision = SessionJobReconciliationDecision.evaluate(
+                manifestStatus: manifest.status,
+                jobs: sessionJobs
+            )
+#if DEBUG
+            if decision == .restoreFinalizing {
+                await beforeManifestReconciliationForTesting?(manifest.id)
+            } else if case .fail = decision {
+                await beforeManifestReconciliationForTesting?(manifest.id)
+            }
+#endif
+            switch decision {
+            case .restoreFinalizing:
+                do {
+                    manifest = try await manifestStore.transition(
+                        sessionID: manifest.id,
+                        allowedFrom: [.failed]
+                    ) { durable in
+                        durable.status = .finalizing
+                        durable.lastError = nil
+                    }
+                } catch {
+                    recoveryErrors.append("Case A reconciliation failed for \(manifest.id): \(error.localizedDescription)")
                 }
-                if hasActiveRequiredJob {
-                    do {
-                        manifest = try await manifestStore.transition(
-                            sessionID: manifest.id,
-                            allowedFrom: [.failed]
-                        ) { durable in
-                            durable.status = .finalizing
-                            durable.lastError = nil
-                        }
-                    } catch {
-                        recoveryErrors.append("Case A reconciliation failed for \(manifest.id): \(error.localizedDescription)")
+            case .fail(let reason):
+                do {
+                    manifest = try await manifestStore.transition(
+                        sessionID: manifest.id,
+                        allowedFrom: [.finalizing]
+                    ) { durable in
+                        durable.status = .failed
+                        durable.lastError = reason
                     }
+                } catch {
+                    recoveryErrors.append("Case B reconciliation failed for \(manifest.id): \(error.localizedDescription)")
                 }
-            } else if manifest.status == .finalizing {
-                // Case B: manifest is .finalizing, but every required unfinished job is terminal .failed / .cancelled,
-                // and no required job is pending, running, or waitingRetry.
-                // Correction: manifest becomes .failed, preserving failure reason.
-                if !requiredJobs.isEmpty {
-                    let hasRunnableRequiredJob = requiredJobs.contains {
-                        $0.status == .pending || $0.status == .running || $0.status == .waitingRetry
-                    }
-                    let unfinishedRequired = requiredJobs.filter { $0.status != .succeeded }
-                    let allUnfinishedTerminal = !unfinishedRequired.isEmpty && unfinishedRequired.allSatisfy {
-                        $0.status == .failed || $0.status == .cancelled
-                    }
-                    if !hasRunnableRequiredJob && allUnfinishedTerminal {
-                        let failureReason = unfinishedRequired.compactMap(\.lastError).first
-                            ?? "Required finalization jobs failed."
-                        do {
-                            manifest = try await manifestStore.transition(
-                                sessionID: manifest.id,
-                                allowedFrom: [.finalizing]
-                            ) { durable in
-                                durable.status = .failed
-                                durable.lastError = failureReason
-                            }
-                        } catch {
-                            recoveryErrors.append("Case B reconciliation failed for \(manifest.id): \(error.localizedDescription)")
-                        }
-                    }
-                }
+            case .none, .enqueueMissingRequiredJobs, .complete:
+                break
             }
             reconciledManifests.append(manifest)
         }
         manifests = reconciledManifests
 
         let capturing = manifests
-            .filter { $0.status == .capturing }
+            .filter { claimedSessionIDs.contains($0.id) && $0.status == .capturing }
             .sorted { $0.startedAt > $1.startedAt }
         if let newest = capturing.first {
             for older in capturing.dropFirst() {
@@ -219,7 +287,7 @@ final class SessionRecoveryService {
             recoverableCaptureSession = RecoverableSession(manifest: newest, issue: issue)
         }
 
-        for manifest in manifests where manifest.status == .finalizing {
+        for manifest in manifests where claimedSessionIDs.contains(manifest.id) && manifest.status == .finalizing {
             do {
                 try workspace.removeAbandonedGIFTemporaries(manifest: manifest)
             } catch {
@@ -244,7 +312,7 @@ final class SessionRecoveryService {
             }
         }
 
-        for manifest in manifests where manifest.status == .cancelled {
+        for manifest in manifests where claimedSessionIDs.contains(manifest.id) && manifest.status == .cancelled {
             do {
                 let result = try await jobQueue.cancelAndQuiesceJobs(sessionID: manifest.id)
                 guard result == .quiesced else {
@@ -265,6 +333,22 @@ final class SessionRecoveryService {
             if let error = manifest.lastError {
                 recoveryErrors.append("\(manifest.eventName): \(error)")
             }
+        }
+    }
+
+    private func claimRecoverySession(_ sessionID: String) -> Bool {
+        guard isSessionRecoveryInFlight?(sessionID) != true else { return false }
+        if let claimSessionRecovery {
+            return claimSessionRecovery(sessionID)
+        }
+        return locallyClaimedRecoverySessionIDs.insert(sessionID).inserted
+    }
+
+    private func releaseRecoverySession(_ sessionID: String) {
+        if let releaseSessionRecovery {
+            releaseSessionRecovery(sessionID)
+        } else {
+            locallyClaimedRecoverySessionIDs.remove(sessionID)
         }
     }
 

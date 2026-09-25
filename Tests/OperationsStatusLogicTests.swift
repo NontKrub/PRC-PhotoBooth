@@ -111,15 +111,15 @@ struct OperationsStatusLogicTests {
         let readyServer = LocalWebServerStatus(state: .ready(port: 8585), registeredTokenCount: 5)
 
         let httpsStatus = OperationsStatusLogic.server(readyServer, deliveryPolicy: .publicHTTPS)
-        #expect(httpsStatus.summary == "HTTPS")
+        #expect(httpsStatus.summary == "Guest Delivery · HTTPS")
         #expect(httpsStatus.severity == .normal)
 
         let lanStatus = OperationsStatusLogic.server(readyServer, deliveryPolicy: .trustedLocalHTTP)
-        #expect(lanStatus.summary == "Trusted LAN · HTTP")
+        #expect(lanStatus.summary == "Guest Delivery · Trusted LAN HTTP")
         #expect(lanStatus.severity == .warning)
 
         let disabledStatus = OperationsStatusLogic.server(readyServer, deliveryPolicy: .unavailable)
-        #expect(disabledStatus.summary == "Guest links disabled")
+        #expect(disabledStatus.summary == "Guest Delivery · Disabled")
         #expect(disabledStatus.severity == .warning)
     }
 }

@@ -23,6 +23,7 @@ public enum BoothPreAuthPhase: Equatable, Sendable {
 public final class BoothPreAuthWatchdog: @unchecked Sendable {
     public let generation: Int
     public private(set) var phase: BoothPreAuthPhase
+    private var pairingAbsoluteExpiry: Date?
 
     public var helloTimeout: TimeInterval = 5.0
     public var interactiveInactivityTimeout: TimeInterval = 45.0
@@ -37,17 +38,23 @@ public final class BoothPreAuthWatchdog: @unchecked Sendable {
     public func onValidHello(now: Date = Date(), isPairing: Bool, pairingExpiry: Date? = nil) {
         guard case .awaitingHello = phase else { return }
         if isPairing, let pairingExpiry {
+            pairingAbsoluteExpiry = pairingExpiry
             let inactivity = now.addingTimeInterval(interactiveInactivityTimeout)
             phase = .interactivePairing(inactivityDeadline: inactivity, absoluteExpiry: pairingExpiry)
         } else {
+            pairingAbsoluteExpiry = nil
             phase = .authenticating(deadline: now.addingTimeInterval(authenticatingTimeout))
         }
     }
 
-    public func onPairingSessionStarted(absoluteExpiry: Date, now: Date = Date()) {
-        guard !phase.isTerminal else { return }
+    @discardableResult
+    public func onPairingSessionStarted(absoluteExpiry: Date, now: Date = Date()) -> Bool {
+        guard checkTimeout(now: now) == nil, !phase.isTerminal else { return false }
+        let connectionExpiry = min(pairingAbsoluteExpiry ?? absoluteExpiry, absoluteExpiry)
+        pairingAbsoluteExpiry = connectionExpiry
         let inactivity = now.addingTimeInterval(interactiveInactivityTimeout)
-        phase = .interactivePairing(inactivityDeadline: inactivity, absoluteExpiry: absoluteExpiry)
+        phase = .interactivePairing(inactivityDeadline: inactivity, absoluteExpiry: connectionExpiry)
+        return true
     }
 
     public func onInteractiveProgress(now: Date = Date()) {
@@ -71,10 +78,22 @@ public final class BoothPreAuthWatchdog: @unchecked Sendable {
     }
 
     public func onAuthenticated() {
+        pairingAbsoluteExpiry = nil
         phase = .authenticated
     }
 
     public func checkTimeout(now: Date = Date()) -> String? {
+        switch phase {
+        case .interactivePairing, .authenticating, .secureChannelNegotiating:
+            if let pairingAbsoluteExpiry, now >= pairingAbsoluteExpiry {
+                let reason = "Pairing session absolute deadline expired."
+                phase = .expired(reason: reason)
+                return reason
+            }
+        case .awaitingHello, .authenticated, .expired:
+            break
+        }
+
         switch phase {
         case .awaitingHello(let deadline):
             if now >= deadline {
@@ -120,12 +139,67 @@ public final class BoothPreAuthWatchdog: @unchecked Sendable {
         case .interactivePairing(let inactivityDeadline, let absoluteExpiry):
             return min(inactivityDeadline, absoluteExpiry)
         case .authenticating(let deadline):
-            return deadline
+            return min(deadline, pairingAbsoluteExpiry ?? deadline)
         case .secureChannelNegotiating(let deadline):
-            return deadline
+            return min(deadline, pairingAbsoluteExpiry ?? deadline)
         case .authenticated, .expired:
             return nil
         }
+    }
+}
+
+public enum BoothPreAuthProgressPolicy {
+    @discardableResult
+    public static func advance(
+        _ watchdog: BoothPreAuthWatchdog,
+        after decision: BoothPairingIntentPolicy.Decision,
+        now: Date = Date()
+    ) -> Bool {
+        if case .reject = decision { return false }
+        guard case .interactivePairing(let inactivityDeadline, let absoluteExpiry) = watchdog.phase,
+              now < inactivityDeadline,
+              now < absoluteExpiry else {
+            _ = watchdog.checkTimeout(now: now)
+            return false
+        }
+        watchdog.onInteractiveProgress(now: now)
+        guard case .interactivePairing = watchdog.phase else { return false }
+        return true
+    }
+
+    @discardableResult
+    public static func advance(
+        _ watchdog: BoothPreAuthWatchdog,
+        after result: BoothPairingAttemptResult,
+        now: Date = Date()
+    ) -> Bool {
+        guard result == .accepted,
+              case .interactivePairing(let inactivityDeadline, let absoluteExpiry) = watchdog.phase,
+              now < inactivityDeadline,
+              now < absoluteExpiry else {
+            _ = watchdog.checkTimeout(now: now)
+            return false
+        }
+        watchdog.onInteractiveProgress(now: now)
+        guard case .interactivePairing = watchdog.phase else { return false }
+        return true
+    }
+
+    public static func shouldRunTimerTick(
+        expectedGeneration: Int,
+        currentGeneration: Int,
+        connectionIsCurrent: Bool
+    ) -> Bool {
+        expectedGeneration == currentGeneration && connectionIsCurrent
+    }
+
+    public static func canProcessPairingTraffic(
+        _ watchdog: BoothPreAuthWatchdog,
+        now: Date = Date()
+    ) -> Bool {
+        guard watchdog.checkTimeout(now: now) == nil,
+              case .interactivePairing = watchdog.phase else { return false }
+        return true
     }
 }
 

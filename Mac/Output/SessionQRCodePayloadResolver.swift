@@ -4,6 +4,39 @@ public enum GuestDeliveryPolicy: String, Sendable, Equatable {
     case publicHTTPS
     case trustedLocalHTTP
     case unavailable
+
+    public func permitsLocalGuestHTTP(allowTrustedLocalHTTP: Bool) -> Bool {
+        allowTrustedLocalHTTP && self != .unavailable
+    }
+}
+
+public struct ValidatedPublicGuestBaseURL: Sendable, Equatable {
+    public let url: URL
+    public let canonicalString: String
+
+    public init?(string: String) {
+        let value = string.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !value.isEmpty,
+              value.rangeOfCharacter(from: .whitespacesAndNewlines) == nil,
+              !value.contains("\\"),
+              var components = URLComponents(string: value),
+              components.scheme?.lowercased() == "https",
+              let host = components.host,
+              !host.isEmpty,
+              components.user == nil,
+              components.password == nil,
+              components.query == nil,
+              components.fragment == nil,
+              components.port.map({ (1...65_535).contains($0) }) ?? true else {
+            return nil
+        }
+        components.scheme = "https"
+        guard let parsedURL = components.url else { return nil }
+        let canonicalString = SessionQRCodePayloadResolver.trimBaseURL(parsedURL.absoluteString)
+        guard let url = URL(string: canonicalString) else { return nil }
+        self.url = url
+        self.canonicalString = canonicalString
+    }
 }
 
 public enum SessionQRCodePayloadError: LocalizedError, Equatable {
@@ -33,21 +66,11 @@ public struct SessionQRCodePayloadResolver {
         allowTrustedLocalHTTP: Bool,
         isRelease: Bool = isReleaseBuild
     ) -> GuestDeliveryPolicy {
-        let publicBase = publicBaseURL.map(trimBaseURL) ?? ""
-        if cloudUploadEnabled && !publicBase.isEmpty {
-            if isRelease {
-                if publicBase.lowercased().hasPrefix("https://") {
-                    return .publicHTTPS
-                } else {
-                    return .unavailable
-                }
-            } else {
-                if publicBase.lowercased().hasPrefix("https://") || publicBase.lowercased().hasPrefix("http://") {
-                    return .publicHTTPS
-                } else {
-                    return .unavailable
-                }
-            }
+        let hasConfiguredPublicBase = publicBaseURL.map {
+            !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        } ?? false
+        if cloudUploadEnabled && hasConfiguredPublicBase {
+            return ValidatedPublicGuestBaseURL(string: publicBaseURL ?? "") == nil ? .unavailable : .publicHTTPS
         }
         if allowTrustedLocalHTTP {
             return .trustedLocalHTTP
@@ -67,19 +90,15 @@ public struct SessionQRCodePayloadResolver {
         guard !token.isEmpty else { throw SessionQRCodePayloadError.emptyToken }
 
         let localBase = trimBaseURL(localBaseURL)
-        let publicBase = publicBaseURL.map(trimBaseURL) ?? ""
+        let hasConfiguredPublicBase = publicBaseURL.map {
+            !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        } ?? false
 
-        if cloudUploadEnabled && !publicBase.isEmpty {
-            if isRelease {
-                guard publicBase.lowercased().hasPrefix("https://") else {
-                    throw SessionQRCodePayloadError.insecurePublicBaseURL
-                }
-            } else {
-                guard publicBase.lowercased().hasPrefix("https://") || publicBase.lowercased().hasPrefix("http://") else {
-                    throw SessionQRCodePayloadError.insecurePublicBaseURL
-                }
+        if cloudUploadEnabled && hasConfiguredPublicBase {
+            guard let validated = publicBaseURL.flatMap(ValidatedPublicGuestBaseURL.init(string:)) else {
+                throw SessionQRCodePayloadError.insecurePublicBaseURL
             }
-            return "\(publicBase)/s/\(token)/"
+            return "\(validated.canonicalString)/s/\(token)/"
         }
 
         guard allowTrustedLocalHTTP else {

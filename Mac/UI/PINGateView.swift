@@ -16,10 +16,17 @@ struct PINGateView: View {
     @State private var shake = false
     @State private var errorMsg: String? = nil
     @State private var deviceOwnerAuthenticationAvailable = false
+    @State private var credentialActivity: CredentialActivity?
+    @State private var credentialOperation: Task<Void, Never>?
     @FocusState private var focused: Bool
     @Environment(\.locale) private var locale
 
     private enum Phase { case enter, confirm }
+    enum CredentialActivity: Equatable {
+        case verifying, saving
+
+        var preventsDismissal: Bool { self == .saving }
+    }
 
     var body: some View {
         VStack(spacing: 28) {
@@ -50,6 +57,17 @@ struct PINGateView: View {
                 Text(err).font(.caption).foregroundStyle(.red)
             }
 
+            if let credentialActivity {
+                HStack(spacing: 8) {
+                    ProgressView().controlSize(.small)
+                    Text(activityTitle(for: credentialActivity))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                .frame(maxWidth: .infinity)
+                .accessibilityElement(children: .combine)
+            }
+
             // Number pad
             numPad
 
@@ -60,22 +78,29 @@ struct PINGateView: View {
                 }
                 .buttonStyle(.bordered)
                 .controlSize(.large)
+                .disabled(credentialActivity != nil)
             }
 
             if let cancel = onCancel {
-                Button("Cancel", role: .cancel, action: cancel)
-                    .foregroundStyle(.secondary)
+                Button("Cancel", role: .cancel) {
+                    cancelCredentialOperation()
+                    cancel()
+                }
+                .foregroundStyle(.secondary)
+                .disabled(credentialActivity?.preventsDismissal == true)
             }
         }
         .padding(32)
         .frame(width: 320)
+        .interactiveDismissDisabled(credentialActivity?.preventsDismissal == true)
         .focusable()
         .focusEffectDisabled()
         .focused($focused)
         .onKeyPress(phases: .down) { press in
+            guard credentialActivity == nil else { return .handled }
             let ch = press.characters
-            if let digit = ch.first, digit.isNumber {
-                tap(String(digit))
+            if ch.utf8.count == 1, let digit = ch.utf8.first, (48...57).contains(digit) {
+                tap(String(UnicodeScalar(digit)))
                 return .handled
             }
             if press.key == .delete || ch == "\u{7F}" || ch == "\u{8}" {
@@ -87,6 +112,11 @@ struct PINGateView: View {
         .onAppear {
             focused = true
             refreshDeviceOwnerAuthenticationAvailability()
+        }
+        .onDisappear {
+            if credentialActivity?.preventsDismissal != true {
+                cancelCredentialOperation()
+            }
         }
     }
 
@@ -133,11 +163,13 @@ struct PINGateView: View {
                 }
             }
         }
+        .disabled(credentialActivity != nil)
     }
 
     // MARK: - Logic
 
     private func tap(_ key: String) {
+        guard credentialActivity == nil else { return }
         errorMsg = nil
         if key == "⌫" {
             if phase == .confirm { if !confirmDigits.isEmpty { confirmDigits.removeLast() } }
@@ -162,25 +194,60 @@ struct PINGateView: View {
         case .verify:
             if pinLockoutRemaining() > 0 {
                 triggerError(operatorString("Too many attempts. Try again shortly.", locale: locale))
-            } else if verifyPIN(digits.joined()) {
-                onSuccess()
             } else {
-                triggerError(operatorString("Incorrect PIN. Try again.", locale: locale))
+                startCredentialOperation(.verifying, pin: digits.joined())
             }
         }
     }
 
     private func commitConfirm() {
         if confirmDigits.joined() == digits.joined() {
-            guard setPIN(digits.joined()) else {
-                triggerError(operatorString("Admin PIN could not be saved. Try again.", locale: locale))
-                return
-            }
-            onSuccess()
+            startCredentialOperation(.saving, pin: digits.joined())
         } else {
             triggerError(operatorString("PINs don't match. Start over.", locale: locale))
             digits = []; confirmDigits = []; phase = .enter
         }
+    }
+
+    private func activityTitle(for activity: CredentialActivity) -> String {
+        let key = switch activity {
+        case .verifying: "Verifying…"
+        case .saving: "Saving PIN…"
+        }
+        return operatorString(key, locale: locale)
+    }
+
+    @MainActor
+    private func startCredentialOperation(_ activity: CredentialActivity, pin: String) {
+        credentialOperation?.cancel()
+        credentialActivity = activity
+        credentialOperation = Task { @MainActor in
+            let succeeded: Bool
+            switch activity {
+            case .verifying:
+                succeeded = await verifyPIN(pin)
+            case .saving:
+                succeeded = await setPIN(pin)
+            }
+            guard !Task.isCancelled else { return }
+            credentialOperation = nil
+            credentialActivity = nil
+            if succeeded {
+                onSuccess()
+            } else {
+                let message = activity == .verifying
+                    ? operatorString("Incorrect PIN. Try again.", locale: locale)
+                    : operatorString("Admin PIN could not be saved. Try again.", locale: locale)
+                triggerError(message)
+            }
+        }
+    }
+
+    @MainActor
+    private func cancelCredentialOperation() {
+        credentialOperation?.cancel()
+        credentialOperation = nil
+        credentialActivity = nil
     }
 
     private func triggerError(_ msg: String) {

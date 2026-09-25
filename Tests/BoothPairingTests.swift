@@ -592,7 +592,13 @@ struct BoothPairingTests {
         let service = "com.nont.prcphoto.tests.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suite)!
         defer { defaults.removePersistentDomain(forName: suite) }
-        let store = BoothTrustedPeerStore(defaults: defaults, namespace: namespace, keychainService: service)
+        let keychain = InMemoryGenericPasswordKeychain()
+        let store = BoothTrustedPeerStore(
+            defaults: defaults,
+            namespace: namespace,
+            keychainService: service,
+            keychain: keychain
+        )
         let peer = TrustedBoothPeer(id: "ipad-1", displayName: "PRC-iPad-01", role: .iPad)
         let secret = Data(repeating: 0x42, count: 32)
 
@@ -605,12 +611,95 @@ struct BoothPairingTests {
         #expect(store.preferredPeerID == peer.id)
         #expect(store.autoReconnect)
         #expect(store.secret(for: peer.id) == secret)
+        #expect(keychain.item(service: service, account: peer.id, useDataProtectionKeychain: true) == secret)
+        #expect(keychain.item(service: service, account: peer.id, useDataProtectionKeychain: false) == nil)
 
         store.forget(peerID: peer.id)
         #expect(store.trustedPeers.isEmpty)
         #expect(store.preferredPeerID == nil)
         #expect(store.secret(for: peer.id) == nil)
         #expect(!store.autoReconnect)
+    }
+
+    @Test("trusted peer reads migrate legacy Keychain secret to Data Protection")
+    func trustedPeerSecretMigratesToDataProtection() throws {
+        let suite = "BoothPairingTests.migration.\(UUID().uuidString)"
+        let namespace = "test.migration.\(UUID().uuidString)"
+        let service = "com.nont.prcphoto.tests.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let keychain = InMemoryGenericPasswordKeychain()
+        let store = BoothTrustedPeerStore(
+            defaults: defaults,
+            namespace: namespace,
+            keychainService: service,
+            keychain: keychain
+        )
+        let peer = TrustedBoothPeer(id: "ipad-migration", displayName: "PRC-iPad-Migration", role: .iPad)
+        let secret = Data(repeating: 0x57, count: 32)
+        store.trustedPeers = [peer]
+        keychain.put(secret, service: service, account: peer.id, useDataProtectionKeychain: false)
+
+        #expect(store.secret(for: peer.id) == secret)
+        #expect(keychain.item(service: service, account: peer.id, useDataProtectionKeychain: true) == secret)
+        #expect(keychain.item(service: service, account: peer.id, useDataProtectionKeychain: false) == nil)
+    }
+
+    @Test("forget removes Data Protection and legacy trusted peer secrets")
+    func forgetRemovesBothTrustedPeerKeychainCopies() {
+        let suite = "BoothPairingTests.forget-copies.\(UUID().uuidString)"
+        let namespace = "test.forget-copies.\(UUID().uuidString)"
+        let service = "com.nont.prcphoto.tests.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let keychain = InMemoryGenericPasswordKeychain()
+        let store = BoothTrustedPeerStore(
+            defaults: defaults,
+            namespace: namespace,
+            keychainService: service,
+            keychain: keychain
+        )
+        let peer = TrustedBoothPeer(id: "ipad-forget", displayName: "PRC-iPad-Forget", role: .iPad)
+        store.trustedPeers = [peer]
+        keychain.put(Data(repeating: 0x31, count: 32), service: service, account: peer.id, useDataProtectionKeychain: false)
+        keychain.put(Data(repeating: 0x32, count: 32), service: service, account: peer.id, useDataProtectionKeychain: true)
+
+        store.forget(peerID: peer.id)
+
+        #expect(keychain.item(service: service, account: peer.id, useDataProtectionKeychain: false) == nil)
+        #expect(keychain.item(service: service, account: peer.id, useDataProtectionKeychain: true) == nil)
+    }
+
+    @Test("failed trusted-peer Keychain deletion keeps the peer visibly trusted")
+    func failedForgetKeepsPeerMetadataForRetry() throws {
+        let suite = "BoothPairingTests.forget-failure.\(UUID().uuidString)"
+        let namespace = "test.forget-failure.\(UUID().uuidString)"
+        let service = "com.nont.prcphoto.tests.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let keychain = InMemoryGenericPasswordKeychain()
+        let store = BoothTrustedPeerStore(
+            defaults: defaults,
+            namespace: namespace,
+            keychainService: service,
+            keychain: keychain
+        )
+        let peer = TrustedBoothPeer(id: "ipad-forget-failure", displayName: "PRC-iPad-Failure", role: .iPad)
+        let secret = Data(repeating: 0x48, count: 32)
+        try store.trust(peer, secret: secret)
+        keychain.failDataProtectionDeletes = true
+        keychain.failLegacyDeletes = true
+
+        let deletionStatus = store.forget(peerID: peer.id)
+
+        #expect(deletionStatus == errSecIO)
+        #expect(store.trustedPeerIDs.contains(peer.id))
+        #expect(store.secret(for: peer.id) == secret)
+        keychain.failDataProtectionDeletes = false
+        keychain.failLegacyDeletes = false
+        #expect(store.forget(peerID: peer.id) == errSecSuccess)
+        #expect(store.trustedPeerIDs.isEmpty)
+        #expect(store.secret(for: peer.id) == nil)
     }
 
     @Test("HMAC proof succeeds with the paired secret and rejects wrong secret, stale challenge, or device")

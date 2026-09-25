@@ -111,11 +111,11 @@ enum OperationsStatusLogic {
         case .ready:
             switch deliveryPolicy {
             case .publicHTTPS:
-                return OperationsSectionStatus(summary: "HTTPS", severity: .normal)
+                return OperationsSectionStatus(summary: "Guest Delivery · HTTPS", severity: .normal)
             case .trustedLocalHTTP:
-                return OperationsSectionStatus(summary: "Trusted LAN · HTTP", severity: .warning)
+                return OperationsSectionStatus(summary: "Guest Delivery · Trusted LAN HTTP", severity: .warning)
             case .unavailable:
-                return OperationsSectionStatus(summary: "Guest links disabled", severity: .warning)
+                return OperationsSectionStatus(summary: "Guest Delivery · Disabled", severity: .warning)
             }
         }
     }
@@ -192,6 +192,9 @@ struct OperationsView: View {
     @AppStorage("operations.serverExpanded") private var serverExpanded = false
     @AppStorage("operations.healthExpanded") private var healthExpanded = false
     @AppStorage("operations.remoteExpanded") private var remoteExpanded = false
+    @AppStorage("cloudUploadEnabled") private var cloudUploadEnabled = false
+    @AppStorage("publicBaseURL") private var publicBaseURL = ""
+    @AppStorage("allowTrustedLocalHTTP") private var allowTrustedLocalHTTP = false
 
     var body: some View {
         ScrollView {
@@ -557,6 +560,13 @@ struct OperationsView: View {
         }
     }
 
+    private func isManualRetryEligible(_ job: SessionJob) -> Bool {
+        ManualJobRetryEligibility.evaluate(
+            job,
+            manifestIsCancelled: manifests[job.sessionID]?.status == .cancelled
+        ) == .eligible
+    }
+
     private var queueSection: some View {
         GroupBox("Persistent Queue") {
             VStack(alignment: .leading, spacing: 10) {
@@ -593,8 +603,7 @@ struct OperationsView: View {
                         }
                     }
                     .disabled(isRetryingAll || !retryingJobIDs.isEmpty || !coordinator.jobQueue.jobs.contains {
-                        ($0.status == .failed || $0.status == .cancelled)
-                            && $0.lastFailureDisposition == .retryable
+                        isManualRetryEligible($0)
                     })
                 }
                 if let retryErrorMessage {
@@ -644,7 +653,7 @@ struct OperationsView: View {
                                         printResolutionPrinted = false
                                         showPrintResolutionConfirmation = true
                                     }
-                                } else {
+                                } else if isManualRetryEligible(job) {
                                     Button {
                                         guard !retryingJobIDs.contains(job.id), !isRetryingAll else { return }
                                         retryingJobIDs.insert(job.id)
@@ -775,24 +784,53 @@ struct OperationsView: View {
                 Text("Registered tokens: \(serverStatus.registeredTokenCount)")
                     .font(.caption).foregroundStyle(.secondary)
                 let policy = SessionQRCodePayloadResolver.evaluatePolicy(
-                    publicBaseURL: UserDefaults.standard.string(forKey: "publicBaseURL"),
-                    cloudUploadEnabled: UserDefaults.standard.bool(forKey: "cloudUploadEnabled"),
-                    allowTrustedLocalHTTP: UserDefaults.standard.bool(forKey: "allowTrustedLocalHTTP")
+                    publicBaseURL: publicBaseURL,
+                    cloudUploadEnabled: cloudUploadEnabled,
+                    allowTrustedLocalHTTP: allowTrustedLocalHTTP
                 )
                 switch policy {
                 case .publicHTTPS:
-                    Text("Guest Delivery: Public HTTPS (\(UserDefaults.standard.string(forKey: "publicBaseURL") ?? ""))")
-                        .font(.caption).foregroundStyle(.green)
+                    Label("Guest Delivery · HTTPS", systemImage: "lock.shield")
+                        .font(.caption)
+                        .foregroundStyle(.green)
+                    if let validated = ValidatedPublicGuestBaseURL(string: publicBaseURL) {
+                        Text(validated.canonicalString)
+                            .font(.caption.monospaced())
+                            .textSelection(.enabled)
+                    }
+                    if allowTrustedLocalHTTP {
+                        Label(
+                            "Trusted LAN HTTP is also enabled; local guest routes are unencrypted.",
+                            systemImage: "exclamationmark.triangle.fill"
+                        )
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                    }
                 case .trustedLocalHTTP:
-                    Text("Guest Delivery: Trusted Private LAN (HTTP)")
-                        .font(.caption).foregroundStyle(.orange)
+                    Label("Guest Delivery · Trusted LAN HTTP", systemImage: "exclamationmark.triangle.fill")
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                    Text("Guest photos and download links are unencrypted on the local network. Use only on an isolated, operator-controlled network.")
+                        .font(.caption)
+                        .foregroundStyle(.orange)
                     if !coordinator.serverURL.isEmpty {
                         Text("LAN URL: \(coordinator.serverURL)")
                             .font(.caption.monospaced()).textSelection(.enabled)
                     }
                 case .unavailable:
-                    Text("Guest Delivery: Disabled (enable Cloud or allow Trusted LAN HTTP in Settings)")
-                        .font(.caption).foregroundStyle(.secondary)
+                    Label("Guest Delivery · Disabled", systemImage: "minus.circle")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    if cloudUploadEnabled,
+                       !publicBaseURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                        Text("The public guest URL is invalid. Cloud delivery requires HTTPS.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    } else {
+                        Text("Enable public HTTPS or trusted LAN HTTP in Global booth guest-delivery settings.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
                 }
             }
         }
@@ -1029,9 +1067,9 @@ struct OperationsView: View {
 
     private var serverSectionStatus: OperationsSectionStatus {
         let policy = SessionQRCodePayloadResolver.evaluatePolicy(
-            publicBaseURL: UserDefaults.standard.string(forKey: "publicBaseURL"),
-            cloudUploadEnabled: UserDefaults.standard.bool(forKey: "cloudUploadEnabled"),
-            allowTrustedLocalHTTP: UserDefaults.standard.bool(forKey: "allowTrustedLocalHTTP")
+            publicBaseURL: publicBaseURL,
+            cloudUploadEnabled: cloudUploadEnabled,
+            allowTrustedLocalHTTP: allowTrustedLocalHTTP
         )
         return OperationsStatusLogic.server(serverStatus, deliveryPolicy: policy)
     }

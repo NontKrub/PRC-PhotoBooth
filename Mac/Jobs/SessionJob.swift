@@ -86,6 +86,45 @@ struct SessionJobRetryPolicy {
     }
 }
 
+enum SessionJobDependencyPolicy {
+    static func prerequisitesSatisfied(for job: SessionJob, in jobs: [SessionJob]) -> Bool {
+        func latest(_ kind: SessionJobKind) -> SessionJob? {
+            jobs
+                .filter { $0.sessionID == job.sessionID && $0.kind == kind && $0.status != .cancelled }
+                .max { $0.createdAt == $1.createdAt ? $0.id < $1.id : $0.createdAt < $1.createdAt }
+        }
+
+        func succeeded(_ kind: SessionJobKind) -> Bool {
+            latest(kind)?.status == .succeeded
+        }
+
+        switch job.kind {
+        case .renderStrip:
+            return true
+        case .registerDownload, .updateGallery, .autoPrint:
+            return succeeded(.renderStrip)
+        case .renderGIF:
+            guard let download = latest(.registerDownload) else { return true }
+            return download.status == .succeeded || download.status == .failed || download.status == .cancelled
+        case .cloudUpload:
+            guard succeeded(.renderStrip) else { return false }
+            guard let gif = latest(.renderGIF) else { return true }
+            return gif.status == .succeeded || gif.status == .failed || gif.status == .cancelled
+        }
+    }
+
+    static func hasRunnableWork(_ job: SessionJob, in jobs: [SessionJob]) -> Bool {
+        switch job.status {
+        case .running:
+            return true
+        case .pending, .waitingRetry:
+            return prerequisitesSatisfied(for: job, in: jobs)
+        case .succeeded, .failed, .cancelled:
+            return false
+        }
+    }
+}
+
 enum SessionDeliveryState: String, Codable, Sendable, Equatable {
     case localPending = "Local Pending"
     case localReady = "Local Ready"

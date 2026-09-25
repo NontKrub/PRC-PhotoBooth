@@ -37,7 +37,8 @@ struct GalleryRouterTests {
                     eventGalleryPath: "/e/event-token/"
                 )
             ],
-            galleryRoutes: ["event-token": route]
+            galleryRoutes: ["event-token": route],
+            guestRouteExposure: .trustedLocalHTTP
         )
         let page = router.response(for: "/e/event-token/")
         #expect(page.statusCode == 200)

@@ -8,6 +8,11 @@ enum LocalWebServerState: Sendable, Equatable {
     case failed(message: String)
 }
 
+enum LocalGuestRouteExposure: Sendable, Equatable {
+    case disabled
+    case trustedLocalHTTP
+}
+
 struct LocalWebServerStatus: Sendable, Equatable {
     var state: LocalWebServerState
     var registeredTokenCount: Int
@@ -37,9 +42,15 @@ actor LocalWebServer {
     let port: UInt16
     private var sessionRoutes: [String: SessionRouteRegistration] = [:]
     private var galleryRoutes: [String: EventGalleryRouteRegistration] = [:]
+    private var guestRouteExposure: LocalGuestRouteExposure = .disabled
+    private var guestRouteGeneration: UInt64 = 0
+    private var activeGuestConnections: [UUID: NWConnection] = [:]
     private var operatorHandlers: OperatorWebHandlers?
     private var activePort: UInt16?
     private var activeConnectionCount = 0
+#if DEBUG
+    private var beforeFileResponseForTesting: (@Sendable () async -> Void)?
+#endif
     private let ioQueue = DispatchQueue(label: "PRC-PhotoBooth.LocalWebServer", qos: .utility, attributes: .concurrent)
 
     private var state: LocalWebServerState = .stopped
@@ -59,7 +70,7 @@ actor LocalWebServer {
     }
 
     func registerToken(_ token: String, registration: SessionRouteRegistration) {
-        guard !token.isEmpty else { return }
+        guard guestRouteExposure == .trustedLocalHTTP, !token.isEmpty else { return }
         sessionRoutes[token] = registration
     }
 
@@ -68,6 +79,10 @@ actor LocalWebServer {
     }
 
     func replaceTokenMap(_ mappings: [String: URL]) {
+        guard guestRouteExposure == .trustedLocalHTTP else {
+            sessionRoutes.removeAll()
+            return
+        }
         sessionRoutes = mappings.reduce(into: [:]) { result, mapping in
             guard !mapping.key.isEmpty else { return }
             result[mapping.key] = SessionRouteRegistration(
@@ -80,6 +95,10 @@ actor LocalWebServer {
     }
 
     func replaceSessionRoutes(_ mappings: [String: SessionRouteRegistration]) {
+        guard guestRouteExposure == .trustedLocalHTTP else {
+            sessionRoutes.removeAll()
+            return
+        }
         sessionRoutes = mappings.reduce(into: [:]) { result, mapping in
             guard !mapping.key.isEmpty else { return }
             result[mapping.key] = mapping.value
@@ -87,15 +106,39 @@ actor LocalWebServer {
     }
 
     func replaceGalleryRoutes(_ mappings: [String: EventGalleryRouteRegistration]) {
+        guard guestRouteExposure == .trustedLocalHTTP else {
+            galleryRoutes.removeAll()
+            return
+        }
         galleryRoutes = mappings.reduce(into: [:]) { result, mapping in
             guard !mapping.key.isEmpty else { return }
             result[mapping.key] = mapping.value
         }
     }
 
+    func setGuestRouteExposure(_ exposure: LocalGuestRouteExposure) {
+        if guestRouteExposure != exposure {
+            guestRouteGeneration &+= 1
+        }
+        guestRouteExposure = exposure
+        guard exposure == .disabled else { return }
+        sessionRoutes.removeAll()
+        galleryRoutes.removeAll()
+        for connection in activeGuestConnections.values {
+            connection.cancel()
+        }
+        activeGuestConnections.removeAll()
+    }
+
     func configureOperatorHandlers(_ handlers: OperatorWebHandlers) {
         operatorHandlers = handlers
     }
+
+#if DEBUG
+    func setBeforeFileResponseForTesting(_ handler: (@Sendable () async -> Void)?) {
+        beforeFileResponseForTesting = handler
+    }
+#endif
 
     func statusSnapshot() -> LocalWebServerStatus {
         LocalWebServerStatus(state: state, registeredTokenCount: sessionRoutes.count)
@@ -197,10 +240,33 @@ actor LocalWebServer {
             _ = await send(connection, data: secured(errorResponse(for: HTTPServerRequestError.malformed)).httpData, timeoutNanoseconds: Self.fileChunkTimeoutNanoseconds)
             return
         }
+        let isGuestRequest = LocalDownloadRouter.isGuestMediaPath(request.path)
+        let guestGeneration = guestRouteGeneration
+        let guestConnectionID = isGuestRequest ? UUID() : nil
+        if let guestConnectionID {
+            activeGuestConnections[guestConnectionID] = connection
+        }
+        defer {
+            if let guestConnectionID {
+                activeGuestConnections.removeValue(forKey: guestConnectionID)
+            }
+        }
         switch await route(for: request) {
         case .response(let response):
+            guard !isGuestRequest || guestGeneration == guestRouteGeneration else {
+                connection.cancel()
+                return
+            }
             _ = await send(connection, data: secured(response).httpData, timeoutNanoseconds: Self.fileChunkTimeoutNanoseconds)
         case .file(let response):
+#if DEBUG
+            await beforeFileResponseForTesting?()
+#endif
+            guard !isGuestRequest
+                    || (guestGeneration == guestRouteGeneration && guestRouteExposure == .trustedLocalHTTP) else {
+                connection.cancel()
+                return
+            }
             await send(connection, file: response)
         }
     }
@@ -288,7 +354,11 @@ actor LocalWebServer {
             return .response(await operatorResponse(for: request))
         }
         guard request.method == "GET" else { return .response(methodNotAllowed()) }
-        return LocalDownloadRouter(sessionRoutes: sessionRoutes, galleryRoutes: galleryRoutes).route(for: request.path)
+        return LocalDownloadRouter(
+            sessionRoutes: sessionRoutes,
+            galleryRoutes: galleryRoutes,
+            guestRouteExposure: guestRouteExposure
+        ).route(for: request.path)
     }
 
     private func operatorResponse(for request: HTTPServerRequest) async -> LocalDownloadResponse {

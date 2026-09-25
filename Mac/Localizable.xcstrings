@@ -5863,6 +5863,17 @@
         }
       }
     },
+    "Saving PIN…" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "กำลังบันทึก PIN…"
+          }
+        }
+      }
+    },
     "Scan once to connect an operator device. The link is a credential and expires shortly." : {
       "extractionState" : "manual",
       "localizations" : {
@@ -7204,6 +7215,17 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "ยืนยันการเชื่อมต่อ"
+          }
+        }
+      }
+    },
+    "Verifying…" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "กำลังตรวจสอบ…"
           }
         }
       }

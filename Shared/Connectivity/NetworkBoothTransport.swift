@@ -569,9 +569,14 @@ public final class NetworkBoothTransport: BoothTransport {
             }
             resetPairingState(clearTarget: true, clearPendingCommit: true, clearFailure: true)
             let session = try BoothPairingSession.make(macIdentity: localIdentity)
+            if role == .mac, let watchdog = preAuthWatchdog,
+               !watchdog.onPairingSessionStarted(absoluteExpiry: session.info.expiresAt) {
+                let reason = watchdog.checkTimeout() ?? "The pre-auth pairing deadline expired."
+                rejectControlConnection(reason)
+                return false
+            }
             currentPairingSession = session
             if role == .mac {
-                preAuthWatchdog?.onPairingSessionStarted(absoluteExpiry: session.info.expiresAt)
                 if let connection = controlConnection {
                     schedulePreAuthWatchdogTick(generation: controlConnectionGeneration, connection: connection)
                 }
@@ -975,24 +980,40 @@ public final class NetworkBoothTransport: BoothTransport {
         }
     }
 
-    public func forgetPeer(_ peerID: String) {
+    @discardableResult
+    public func forgetPeer(_ peerID: String) -> Bool {
+        let deletionStatus = trustedStore.forget(peerID: peerID)
+        guard deletionStatus == errSecSuccess else {
+            lastNetworkError = "The iPad remains trusted because its Keychain secret could not be removed."
+            publishStatus()
+            return false
+        }
         let wasCurrent = peerDeviceID == peerID
-        trustedStore.forget(peerID: peerID)
         if targetPeerID == peerID {
             resetPairingState(clearTarget: true, clearPendingCommit: true, clearFailure: true)
         }
         if wasCurrent { controlConnection?.cancel() }
         setPairingStage(.idle, state: .idle)
         if role == .iPad { restartDiscoveryForPeerSelection() }
+        lastNetworkError = nil
+        return true
     }
 
-    public func forgetAllPeers() {
-        trustedStore.forgetAll()
+    @discardableResult
+    public func forgetAllPeers() -> Bool {
+        let deletionStatus = trustedStore.forgetAll()
         resetPairingState(clearTarget: true, clearPendingCommit: true, clearFailure: true)
         peerAuthenticated = false
         controlConnection?.cancel()
         setPairingStage(.idle, state: .idle)
         if role == .iPad { restartDiscoveryForPeerSelection() }
+        guard deletionStatus == errSecSuccess else {
+            lastNetworkError = "Some iPad secrets could not be removed from Keychain; those peers remain trusted."
+            publishStatus()
+            return false
+        }
+        lastNetworkError = nil
+        return true
     }
 
     public func start() {
@@ -2993,6 +3014,11 @@ public final class NetworkBoothTransport: BoothTransport {
 
     private func handleControl(_ message: Message) {
         logPairingMessage(message, sent: false)
+        if role == .mac, !peerAuthenticated,
+           let reason = preAuthWatchdog?.checkTimeout() {
+            rejectControlConnection(reason)
+            return
+        }
         switch message {
         case .helloDetails(let hello):
             handleHello(hello)
@@ -3383,14 +3409,19 @@ public final class NetworkBoothTransport: BoothTransport {
             rejectControlConnection(BoothPairingError.invalidPairingIntent.localizedDescription)
             return
         }
+        guard let watchdog = preAuthWatchdog,
+              BoothPreAuthProgressPolicy.canProcessPairingTraffic(watchdog) else {
+            rejectControlConnection(
+                preAuthWatchdog?.checkTimeout() ?? "Pairing connection is no longer active."
+            )
+            return
+        }
         do {
             try intent.validate(peerHello: hello, localMacDeviceID: localIdentity.id)
         } catch {
             rejectControlConnection(error.localizedDescription)
             return
         }
-        notifyPreAuthWatchdogProgress()
-
         let now = Date()
         let decision = BoothPairingIntentPolicy.decide(
             iPadID: intent.iPadIdentity.id,
@@ -3412,6 +3443,10 @@ public final class NetworkBoothTransport: BoothTransport {
                 sendPairingFailure("Pairing session is unavailable.")
                 return
             }
+            guard notifyPreAuthWatchdogProgress(after: decision, at: now) else {
+                rejectControlConnection(preAuthWatchdog?.checkTimeout(now: now) ?? "Pairing connection is no longer active.")
+                return
+            }
             let request = incomingPairingRequest ?? IncomingBoothPairingRequest(
                 iPadIdentity: intent.iPadIdentity,
                 receivedAt: now
@@ -3423,6 +3458,10 @@ public final class NetworkBoothTransport: BoothTransport {
             guard startPairingSession(keepingControlConnection: true),
                   let session = currentPairingSession else {
                 sendPairingFailure("Pairing mode could not be started.")
+                return
+            }
+            guard notifyPreAuthWatchdogProgress(after: decision, at: now) else {
+                rejectControlConnection(preAuthWatchdog?.checkTimeout(now: now) ?? "Pairing connection is no longer active.")
                 return
             }
             let request = IncomingBoothPairingRequest(
@@ -3537,6 +3576,13 @@ public final class NetworkBoothTransport: BoothTransport {
             rejectControlConnection("Pairing request does not match this connection.")
             return
         }
+        guard let watchdog = preAuthWatchdog,
+              BoothPreAuthProgressPolicy.canProcessPairingTraffic(watchdog) else {
+            rejectControlConnection(
+                preAuthWatchdog?.checkTimeout() ?? "Pairing connection is no longer active."
+            )
+            return
+        }
         guard var session = currentPairingSession else {
             sendPairingFailure("Pairing mode is not active.")
             return
@@ -3550,8 +3596,6 @@ public final class NetworkBoothTransport: BoothTransport {
             sendPairingFailure("Pairing request is missing secure proof material.")
             return
         }
-        notifyPreAuthWatchdogProgress()
-
         incomingPairingRequest = IncomingBoothPairingRequest(
             iPadIdentity: request.iPadIdentity
         )
@@ -3569,6 +3613,11 @@ public final class NetworkBoothTransport: BoothTransport {
             transcript: transcript
         )
         currentPairingSession = session
+        let watchdogProgressed = notifyPreAuthWatchdogProgress(after: validation)
+        if validation == .accepted, !watchdogProgressed {
+            rejectControlConnection(preAuthWatchdog?.checkTimeout() ?? "Pairing connection is no longer active.")
+            return
+        }
 
         switch validation {
         case .accepted:
@@ -3578,6 +3627,10 @@ public final class NetworkBoothTransport: BoothTransport {
                     method: request.method,
                     transcript: transcript
                 )
+                if let reason = preAuthWatchdog?.checkTimeout() {
+                    rejectControlConnection(reason)
+                    return
+                }
                 let peer = TrustedBoothPeer(
                     id: request.iPadIdentity.id,
                     displayName: request.iPadIdentity.displayName,
@@ -3807,7 +3860,15 @@ public final class NetworkBoothTransport: BoothTransport {
     private func beginAuthentication(with peerID: String) {
         guard !didInitiateAuthentication else { return }
         if role == .mac {
+            if let reason = preAuthWatchdog?.checkTimeout() {
+                rejectControlConnection(reason)
+                return
+            }
             preAuthWatchdog?.onAuthenticationStarted()
+            if let reason = preAuthWatchdog?.checkTimeout() {
+                rejectControlConnection(reason)
+                return
+            }
             if let connection = controlConnection {
                 schedulePreAuthWatchdogTick(generation: controlConnectionGeneration, connection: connection)
             }
@@ -3955,6 +4016,10 @@ public final class NetworkBoothTransport: BoothTransport {
     }
 
     private func completeAuthentication(with hello: BoothTransportHello) {
+        if role == .mac, let reason = preAuthWatchdog?.checkTimeout() {
+            rejectControlConnection(reason)
+            return
+        }
         if let commit = pendingPairingCommit {
             guard commit.peer.id == hello.deviceID else {
                 failPairing("Authentication peer does not match the pairing request.")
@@ -3962,6 +4027,10 @@ public final class NetworkBoothTransport: BoothTransport {
             }
             setPairingStage(.trustSaving, state: .authenticating(peerID: hello.deviceID))
             do {
+                guard Date() < commit.expiresAt else {
+                    expirePendingPairingCommit(sessionID: commit.sessionID)
+                    return
+                }
                 try trustedStore.trust(commit.peer, secret: commit.secret)
                 trustedStore.preferredPeerID = commit.peer.id
                 trustedStore.autoReconnect = true
@@ -5080,8 +5149,11 @@ public final class NetworkBoothTransport: BoothTransport {
             guard let self, let connection else { return }
             Task { @MainActor [weak self, weak connection] in
                 guard let self, let connection,
-                      self.controlConnectionGeneration == generation,
-                      self.isCurrent(connection, channel: .control),
+                      BoothPreAuthProgressPolicy.shouldRunTimerTick(
+                        expectedGeneration: generation,
+                        currentGeneration: self.controlConnectionGeneration,
+                        connectionIsCurrent: self.isCurrent(connection, channel: .control)
+                      ),
                       !self.peerAuthenticated else { return }
                 guard let watchdog = self.preAuthWatchdog, watchdog.generation == generation else { return }
                 if let reason = watchdog.checkTimeout() {
@@ -5096,12 +5168,33 @@ public final class NetworkBoothTransport: BoothTransport {
         preAuthWatchdogTimer = timer
     }
 
-    private func notifyPreAuthWatchdogProgress() {
-        guard role == .mac, let watchdog = preAuthWatchdog, !peerAuthenticated else { return }
-        watchdog.onInteractiveProgress()
-        if let connection = controlConnection {
-            schedulePreAuthWatchdogTick(generation: controlConnectionGeneration, connection: connection)
-        }
+    @discardableResult
+    private func notifyPreAuthWatchdogProgress(
+        after decision: BoothPairingIntentPolicy.Decision,
+        at now: Date
+    ) -> Bool {
+        guard role == .mac,
+              let watchdog = preAuthWatchdog,
+              !peerAuthenticated,
+              watchdog.generation == controlConnectionGeneration,
+              let connection = controlConnection,
+              isCurrent(connection, channel: .control),
+              BoothPreAuthProgressPolicy.advance(watchdog, after: decision, now: now) else { return false }
+        schedulePreAuthWatchdogTick(generation: watchdog.generation, connection: connection)
+        return true
+    }
+
+    @discardableResult
+    private func notifyPreAuthWatchdogProgress(after result: BoothPairingAttemptResult) -> Bool {
+        guard role == .mac,
+              let watchdog = preAuthWatchdog,
+              !peerAuthenticated,
+              watchdog.generation == controlConnectionGeneration,
+              let connection = controlConnection,
+              isCurrent(connection, channel: .control),
+              BoothPreAuthProgressPolicy.advance(watchdog, after: result) else { return false }
+        schedulePreAuthWatchdogTick(generation: watchdog.generation, connection: connection)
+        return true
     }
 
     private func cancelUnauthenticatedIdleTimer() {

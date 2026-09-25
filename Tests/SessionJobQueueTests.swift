@@ -255,7 +255,7 @@ struct SessionJobQueueTests {
         }
     }
 
-    @Test("retryable errors wait for retry and manual retry resets the job")
+    @Test("retryable waiting jobs retain their automatic retry schedule")
     @MainActor
     func retriesRetryableErrors() async throws {
         let directory = try temporaryDirectory()
@@ -278,10 +278,10 @@ struct SessionJobQueueTests {
             return
         }
         #expect(job.lastFailureDisposition == .retryable)
-        try await queue.retry(jobID: job.id)
-        try await waitUntil {
-            await queue.job(status: .succeeded, kind: .renderStrip) != nil
+        await #expect(throws: JobQueueStoreError.manualRetryRejected(job.id, .notFailed)) {
+            try await queue.retry(jobID: job.id)
         }
+        #expect(await queue.job(status: .waitingRetry, kind: .renderStrip)?.id == job.id)
     }
 
     @Test("permanent optional failure does not block required completion")
@@ -347,12 +347,7 @@ struct SessionJobQueueTests {
         let queue = SessionJobQueue(store: store, executor: TestJobExecutor())
         queue.start()
 
-        let result = RequeueResultBox()
-        queue.forceRequeueCloudUpload(sessionID: "session") { value in
-            Task { await result.set(value) }
-        }
-        try await waitUntil { await result.value != nil }
-        #expect(await result.value == .queued)
+        #expect(try await queue.forceRequeueCloudUpload(sessionID: "session") == .queued)
     }
 
     @Test("cancelling a running cloud job cancels execution and leaves the job cancelled")
@@ -644,13 +639,6 @@ private actor AsyncGate {
     }
 }
 
-private actor RequeueResultBox {
-    private(set) var value: CloudUploadRequeueResult?
-
-    func set(_ value: CloudUploadRequeueResult) {
-        self.value = value
-    }
-}
 
 private extension SessionJobQueue {
     func job(status: SessionJobStatus, kind: SessionJobKind) async -> SessionJob? {

@@ -3,7 +3,7 @@ import Foundation
 import CoreGraphics
 @testable import PRC_PhotoBooth_Mac
 
-@Suite("JobRecoveryTests")
+@Suite("JobRecoveryTests", .serialized)
 struct JobRecoveryTests {
 
     @Test("Required render job fails and marks manifest as failed")
@@ -46,6 +46,7 @@ struct JobRecoveryTests {
         let updated = try await manifestStore.load(sessionID: sessionID)
         #expect(updated.status == .failed)
         #expect(updated.lastError?.contains("Strip render failed") == true)
+        #expect(coordinator.recoveryService.isSessionRecoveryInFlight?(sessionID) == false)
     }
 
     @Test("Individual Retry restores manifest to finalizing before execution and reaches completed")
@@ -295,6 +296,574 @@ struct JobRecoveryTests {
         #expect(!retried.contains { $0.id == job.id })
     }
 
+    @Test("Retry All requeues only the exact failed retryable candidates")
+    @MainActor
+    func retryAllUsesExactEligibleIDs() async throws {
+        let root = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let manifestStore = SessionManifestStore(baseDirectory: root.appendingPathComponent("Runtime"))
+        let store = JobQueueStore(fileURL: root.appendingPathComponent("jobs.json"))
+        let sessionID = "session-exact-retry"
+        try await manifestStore.create(makeManifest(id: sessionID, status: .failed, root: root))
+
+        var retryable = try await store.enqueue(sessionID: sessionID, kind: .renderStrip)
+        retryable.status = .failed
+        retryable.lastFailureDisposition = .retryable
+        try await store.update(retryable)
+
+        var permanent = try await store.enqueue(sessionID: sessionID, kind: .registerDownload)
+        permanent.status = .failed
+        permanent.lastFailureDisposition = .permanent
+        try await store.update(permanent)
+
+        var waiting = try await store.enqueue(sessionID: sessionID, kind: .cloudUpload)
+        waiting.status = .waitingRetry
+        waiting.nextAttemptAt = Date().addingTimeInterval(3_600)
+        waiting.lastFailureDisposition = .retryable
+        try await store.update(waiting)
+
+        var unknown = try await store.enqueue(sessionID: sessionID, kind: .autoPrint)
+        unknown.status = .failed
+        unknown.lastFailureDisposition = .sideEffectUnknown
+        try await store.update(unknown)
+
+        var cancelled = try await store.enqueue(sessionID: sessionID, kind: .renderGIF)
+        cancelled.status = .cancelled
+        cancelled.lastFailureDisposition = .retryable
+        try await store.update(cancelled)
+
+        let queue = SessionJobQueue(store: store, executor: MockJobExecutor())
+        let coordinator = BoothCoordinator(
+            testingManifestStore: manifestStore,
+            testingJobQueue: queue,
+            runtimeDirectory: root
+        )
+        queue.refresh()
+        try await waitUntil { queue.jobs.count == 5 }
+
+        let retried = try await coordinator.retryAllFailedJobs()
+        #expect(retried.map(\.id) == [retryable.id])
+
+        let durableJobs = try await store.load()
+        #expect(durableJobs.first { $0.id == retryable.id }?.status == .pending)
+        #expect(durableJobs.first { $0.id == permanent.id }?.status == .failed)
+        #expect(durableJobs.first { $0.id == waiting.id }?.status == .waitingRetry)
+        #expect(durableJobs.first { $0.id == unknown.id }?.status == .failed)
+        #expect(durableJobs.first { $0.id == cancelled.id }?.status == .cancelled)
+    }
+
+    @Test("Retry All excludes jobs whose manifest cannot be loaded")
+    @MainActor
+    func retryAllSkipsUnrestorableManifest() async throws {
+        let root = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let manifestStore = SessionManifestStore(baseDirectory: root.appendingPathComponent("Runtime"))
+        let store = JobQueueStore(fileURL: root.appendingPathComponent("jobs.json"))
+        var job = try await store.enqueue(sessionID: "missing-manifest", kind: .renderStrip)
+        job.status = .failed
+        job.lastFailureDisposition = .retryable
+        try await store.update(job)
+
+        let queue = SessionJobQueue(store: store, executor: MockJobExecutor())
+        let coordinator = BoothCoordinator(
+            testingManifestStore: manifestStore,
+            testingJobQueue: queue,
+            runtimeDirectory: root
+        )
+        queue.refresh()
+        try await waitUntil { queue.jobs.contains { $0.id == job.id } }
+
+        let retried = try await coordinator.retryAllFailedJobs()
+        #expect(retried.isEmpty)
+        #expect(try await store.load().first { $0.id == job.id }?.status == .failed)
+    }
+
+    @Test("Permanent individual retry does not restore a failed manifest")
+    @MainActor
+    func permanentIndividualRetryDoesNotRestoreManifest() async throws {
+        let root = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let manifestStore = SessionManifestStore(baseDirectory: root.appendingPathComponent("Runtime"))
+        let store = JobQueueStore(fileURL: root.appendingPathComponent("jobs.json"))
+        let sessionID = "session-permanent-retry"
+        try await manifestStore.create(makeManifest(id: sessionID, status: .failed, root: root))
+        var job = try await store.enqueue(sessionID: sessionID, kind: .renderStrip)
+        job.status = .failed
+        job.lastFailureDisposition = .permanent
+        try await store.update(job)
+
+        let queue = SessionJobQueue(store: store, executor: MockJobExecutor())
+        let coordinator = BoothCoordinator(
+            testingManifestStore: manifestStore,
+            testingJobQueue: queue,
+            runtimeDirectory: root
+        )
+        queue.refresh()
+        try await waitUntil { queue.jobs.contains { $0.id == job.id } }
+
+        do {
+            try await coordinator.retryJob(jobID: job.id)
+            Issue.record("Permanent job was accepted for generic retry")
+        } catch { }
+
+        #expect(try await manifestStore.load(sessionID: sessionID).status == .failed)
+        #expect(try await store.load().first { $0.id == job.id }?.status == .failed)
+    }
+
+    @Test("Cancelled individual retry does not restore a failed manifest")
+    @MainActor
+    func cancelledIndividualRetryDoesNotRestoreManifest() async throws {
+        let root = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let manifestStore = SessionManifestStore(baseDirectory: root.appendingPathComponent("Runtime"))
+        let store = JobQueueStore(fileURL: root.appendingPathComponent("jobs.json"))
+        let sessionID = "session-cancelled-job-retry"
+        try await manifestStore.create(makeManifest(id: sessionID, status: .failed, root: root))
+        var job = try await store.enqueue(sessionID: sessionID, kind: .renderStrip)
+        job.status = .cancelled
+        job.lastFailureDisposition = .retryable
+        try await store.update(job)
+
+        let queue = SessionJobQueue(store: store, executor: MockJobExecutor())
+        let coordinator = BoothCoordinator(
+            testingManifestStore: manifestStore,
+            testingJobQueue: queue,
+            runtimeDirectory: root
+        )
+        queue.refresh()
+        try await waitUntil { queue.jobs.contains { $0.id == job.id } }
+
+        do {
+            try await coordinator.retryJob(jobID: job.id)
+            Issue.record("Cancelled job was accepted for generic retry")
+        } catch { }
+
+        #expect(try await manifestStore.load(sessionID: sessionID).status == .failed)
+        #expect(try await store.load().first { $0.id == job.id }?.status == .cancelled)
+    }
+
+    @Test("Runtime reconciliation restores failed manifest when required job is runnable")
+    @MainActor
+    func runtimeReconciliationRestoresFailedManifestForRunnableJob() async throws {
+        let root = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let manifestStore = SessionManifestStore(baseDirectory: root.appendingPathComponent("Runtime"))
+        let store = JobQueueStore(fileURL: root.appendingPathComponent("jobs.json"))
+        let sessionID = "session-runtime-case-a"
+        try await manifestStore.create(makeManifest(id: sessionID, status: .failed, root: root))
+        let job = try await store.enqueue(sessionID: sessionID, kind: .renderStrip)
+
+        let queue = SessionJobQueue(store: store, executor: MockJobExecutor())
+        let coordinator = BoothCoordinator(
+            testingManifestStore: manifestStore,
+            testingJobQueue: queue,
+            runtimeDirectory: root
+        )
+        queue.refresh()
+        try await waitUntil { queue.jobs.contains { $0.id == job.id } }
+        try await waitUntil(timeout: .seconds(1)) {
+            (try? await manifestStore.load(sessionID: sessionID).status) == .finalizing
+        }
+        try await waitUntil(timeout: .seconds(1)) {
+            queue.jobs.contains { $0.sessionID == sessionID && $0.kind == .registerDownload }
+        }
+
+        #expect(try await manifestStore.load(sessionID: sessionID).status == .finalizing)
+        #expect(coordinator.recoveryService.isSessionRecoveryInFlight?(sessionID) == false)
+    }
+
+    @Test("Retry reconciliation cannot roll back a manifest between restore and queue retry")
+    @MainActor
+    func retryReconciliationIsGatedBetweenStores() async throws {
+        let root = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let manifestStore = SessionManifestStore(baseDirectory: root.appendingPathComponent("Runtime"))
+        let store = JobQueueStore(fileURL: root.appendingPathComponent("jobs.json"))
+        let sessionID = "session-retry-reconciliation-gate"
+        try await manifestStore.create(makeManifest(id: sessionID, status: .failed, root: root))
+        var job = try await store.enqueue(sessionID: sessionID, kind: .renderStrip)
+        job.status = .failed
+        job.lastFailureDisposition = .retryable
+        try await store.update(job)
+
+        let queue = SessionJobQueue(store: store, executor: MockJobExecutor())
+        let coordinator = BoothCoordinator(
+            testingManifestStore: manifestStore,
+            testingJobQueue: queue,
+            runtimeDirectory: root
+        )
+        queue.refresh()
+        try await waitUntil { queue.jobs.contains { $0.id == job.id } }
+        coordinator.beforeManualRetryQueueMutationForTesting = {
+            await coordinator.reconcileJobsNowForTesting()
+        }
+
+        try await coordinator.retryJob(jobID: job.id)
+
+        #expect(await store.snapshot().first { $0.id == job.id }?.status == .pending)
+        #expect(try await manifestStore.load(sessionID: sessionID).status == .finalizing)
+    }
+
+    @Test("Queue persistence failure rolls back retry and failed manifest")
+    @MainActor
+    func individualRetryRollsBackAfterQueuePersistenceFailure() async throws {
+        let root = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let manifestStore = SessionManifestStore(baseDirectory: root.appendingPathComponent("Runtime"))
+        let jobsURL = root.appendingPathComponent("jobs.json")
+        let store = JobQueueStore(fileURL: jobsURL)
+        let sessionID = "session-retry-persistence-rollback"
+        try await manifestStore.create(makeManifest(id: sessionID, status: .failed, root: root))
+        var job = try await store.enqueue(sessionID: sessionID, kind: .renderStrip)
+        job.status = .failed
+        job.lastFailureDisposition = .retryable
+        try await store.update(job)
+
+        let queue = SessionJobQueue(store: store, executor: MockJobExecutor())
+        let coordinator = BoothCoordinator(
+            testingManifestStore: manifestStore,
+            testingJobQueue: queue,
+            runtimeDirectory: root
+        )
+        queue.refresh()
+        try await waitUntil { queue.jobs.contains { $0.id == job.id } }
+        await store.failNextPersistenceForTesting()
+
+        do {
+            try await coordinator.retryJob(jobID: job.id)
+            Issue.record("Retry unexpectedly succeeded after queue persistence failure")
+        } catch { }
+
+        #expect(await store.snapshot().first { $0.id == job.id }?.status == .failed)
+        #expect(queue.jobs.first { $0.id == job.id }?.status == .failed)
+        #expect(try await manifestStore.load(sessionID: sessionID).status == .failed)
+        let durable = try await JobQueueStore(fileURL: jobsURL).load()
+        #expect(durable.first { $0.id == job.id }?.status == .failed)
+    }
+
+    @Test("Duplicate individual retry is rejected while recovery is in flight")
+    @MainActor
+    func duplicateIndividualRetryIsRejected() async throws {
+        let root = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let manifestStore = SessionManifestStore(baseDirectory: root.appendingPathComponent("Runtime"))
+        let store = JobQueueStore(fileURL: root.appendingPathComponent("jobs.json"))
+        let sessionID = "session-duplicate-individual-retry"
+        try await manifestStore.create(makeManifest(id: sessionID, status: .failed, root: root))
+        var job = try await store.enqueue(sessionID: sessionID, kind: .renderStrip)
+        job.status = .failed
+        job.lastFailureDisposition = .retryable
+        try await store.update(job)
+
+        let queue = SessionJobQueue(store: store, executor: MockJobExecutor())
+        let coordinator = BoothCoordinator(
+            testingManifestStore: manifestStore,
+            testingJobQueue: queue,
+            runtimeDirectory: root
+        )
+        queue.refresh()
+        try await waitUntil { queue.jobs.contains { $0.id == job.id } }
+        var duplicateWasRejected = false
+        coordinator.beforeManualRetryQueueMutationForTesting = {
+            do {
+                try await coordinator.retryJob(jobID: job.id)
+            } catch {
+                duplicateWasRejected = true
+            }
+        }
+
+        try await coordinator.retryJob(jobID: job.id)
+
+        #expect(duplicateWasRejected)
+        #expect(await store.snapshot().filter { $0.id == job.id && $0.status == .pending }.count == 1)
+    }
+
+    @Test("Explicit cloud retry cannot overtake the cancellation queue barrier")
+    @MainActor
+    func explicitCloudRetryCannotOvertakeCancellationBarrier() async throws {
+        let root = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let sessionID = "session-cloud-cancel-explicit"
+        var manifest = makeManifest(id: sessionID, status: .finalizing, root: root)
+        manifest.cloudDelivery = SessionCloudDeliverySnapshot(
+            publicBaseURL: "https://photos.example.com",
+            remoteBasePath: "/photos",
+            sshHost: "photos.example.com"
+        )
+        manifest.deliveryIntent = SessionDeliveryIntentSnapshot(
+            cloudUploadEnabled: true,
+            automaticPrintEnabled: false
+        )
+        let manifestStore = SessionManifestStore(baseDirectory: root.appendingPathComponent("Runtime"))
+        try await manifestStore.create(manifest)
+
+        let store = JobQueueStore(fileURL: root.appendingPathComponent("jobs.json"))
+        var job = try await store.enqueue(sessionID: sessionID, kind: .cloudUpload)
+        job.status = .failed
+        job.lastFailureDisposition = .retryable
+        try await store.update(job)
+        let queue = SessionJobQueue(store: store, executor: MockJobExecutor())
+        queue.refresh()
+        try await waitUntil { queue.jobs.contains { $0.id == job.id } }
+
+        let coordinator = BoothCoordinator(
+            testingManifestStore: manifestStore,
+            testingJobQueue: queue,
+            runtimeDirectory: root
+        )
+        var cancellationPaused = false
+        var resumeCancellation: CheckedContinuation<Void, Never>?
+        coordinator.beforeCancellationQueueBarrierForTesting = { _ in
+            cancellationPaused = true
+            await withCheckedContinuation { resumeCancellation = $0 }
+        }
+        let cancellationTask = Task { await coordinator.cancelSessionForTesting(manifest: manifest) }
+        try await waitUntil { cancellationPaused }
+
+        coordinator.retryCloudUpload(sessionID: sessionID)
+        try await waitUntil {
+            let status = await store.snapshot().first { $0.id == job.id }?.status
+            return coordinator.errorMessage != nil || status == .pending
+        }
+        #expect(await store.snapshot().first { $0.id == job.id }?.status == .failed)
+
+        resumeCancellation?.resume()
+        resumeCancellation = nil
+        await cancellationTask.value
+        #expect(await store.snapshot().first { $0.id == job.id }?.status == .cancelled)
+    }
+
+    @Test("Automatic cloud retry cannot overtake the cancellation queue barrier")
+    @MainActor
+    func automaticCloudRetryCannotOvertakeCancellationBarrier() async throws {
+        let root = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let sessionID = "session-cloud-cancel-automatic"
+        var manifest = makeManifest(id: sessionID, status: .finalizing, root: root)
+        manifest.cloudDelivery = SessionCloudDeliverySnapshot(
+            publicBaseURL: "https://photos.example.com",
+            remoteBasePath: "/photos",
+            sshHost: "photos.example.com"
+        )
+        manifest.deliveryIntent = SessionDeliveryIntentSnapshot(
+            cloudUploadEnabled: true,
+            automaticPrintEnabled: false
+        )
+        let manifestStore = SessionManifestStore(baseDirectory: root.appendingPathComponent("Runtime"))
+        try await manifestStore.create(manifest)
+
+        let store = JobQueueStore(fileURL: root.appendingPathComponent("jobs.json"))
+        var job = try await store.enqueue(sessionID: sessionID, kind: .cloudUpload)
+        job.status = .failed
+        job.lastFailureDisposition = .retryable
+        try await store.update(job)
+        let queue = SessionJobQueue(store: store, executor: MockJobExecutor())
+        queue.refresh()
+        try await waitUntil { queue.jobs.contains { $0.id == job.id } }
+
+        let coordinator = BoothCoordinator(
+            testingManifestStore: manifestStore,
+            testingJobQueue: queue,
+            runtimeDirectory: root
+        )
+        var cancellationPaused = false
+        var resumeCancellation: CheckedContinuation<Void, Never>?
+        coordinator.beforeCancellationQueueBarrierForTesting = { _ in
+            cancellationPaused = true
+            await withCheckedContinuation { resumeCancellation = $0 }
+        }
+        let cancellationTask = Task { await coordinator.cancelSessionForTesting(manifest: manifest) }
+        try await waitUntil { cancellationPaused }
+
+        await coordinator.retryFailedCloudUploadsNowForTesting()
+        #expect(await store.snapshot().first { $0.id == job.id }?.status == .failed)
+
+        resumeCancellation?.resume()
+        resumeCancellation = nil
+        await cancellationTask.value
+        #expect(await store.snapshot().first { $0.id == job.id }?.status == .cancelled)
+    }
+
+    @Test("Capture discard cannot race an in-flight cloud retry")
+    @MainActor
+    func captureDiscardCannotRaceInFlightCloudRetry() async throws {
+        let root = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let sessionID = "session-discard-cloud-retry-race"
+        var manifest = makeManifest(id: sessionID, status: .capturing, root: root)
+        manifest.cloudDelivery = SessionCloudDeliverySnapshot(
+            publicBaseURL: "https://photos.example.com",
+            remoteBasePath: "/photos",
+            sshHost: "photos.example.com"
+        )
+        manifest.deliveryIntent = SessionDeliveryIntentSnapshot(
+            cloudUploadEnabled: true,
+            automaticPrintEnabled: false
+        )
+        let manifestStore = SessionManifestStore(baseDirectory: root.appendingPathComponent("Runtime"))
+        try await manifestStore.create(manifest)
+
+        let store = JobQueueStore(fileURL: root.appendingPathComponent("jobs.json"))
+        var job = try await store.enqueue(sessionID: sessionID, kind: .cloudUpload)
+        job.status = .failed
+        job.lastFailureDisposition = .retryable
+        try await store.update(job)
+        let queue = SessionJobQueue(store: store, executor: MockJobExecutor())
+        queue.refresh()
+        try await waitUntil { queue.jobs.contains { $0.id == job.id } }
+
+        let recovery = SessionRecoveryService(
+            manifestStore: manifestStore,
+            workspace: SessionWorkspace(),
+            jobQueue: queue
+        )
+        let coordinator = BoothCoordinator(
+            testingManifestStore: manifestStore,
+            testingJobQueue: queue,
+            runtimeDirectory: root,
+            testingRecoveryService: recovery
+        )
+        var retryPaused = false
+        var resumeRetry: CheckedContinuation<Void, Never>?
+        coordinator.beforeCloudRetryQueueMutationForTesting = { _ in
+            retryPaused = true
+            await withCheckedContinuation { resumeRetry = $0 }
+        }
+        coordinator.retryCloudUpload(sessionID: sessionID)
+        try await waitUntil { retryPaused }
+
+        var discardPaused = false
+        var resumeDiscard: CheckedContinuation<Bool, Never>?
+        recovery.quiesceSessionOperations = { _ in
+            discardPaused = true
+            return await withCheckedContinuation { resumeDiscard = $0 }
+        }
+        recovery.discardCaptureSession(sessionID: sessionID)
+        try await waitUntil {
+            discardPaused || recovery.recoveryErrors.contains { $0.contains(sessionID) }
+        }
+
+        let reachedCancellationWindow = discardPaused
+        #expect(!reachedCancellationWindow)
+        #expect(try await manifestStore.load(sessionID: sessionID).status == .capturing)
+        #expect(await store.snapshot().first { $0.id == job.id }?.status == .failed)
+
+        resumeRetry?.resume()
+        resumeRetry = nil
+        try await waitUntil { await store.snapshot().first { $0.id == job.id }?.status == .pending }
+
+        if reachedCancellationWindow {
+            resumeDiscard?.resume(returning: true)
+            resumeDiscard = nil
+            try await waitUntil {
+                let currentManifest = try? await manifestStore.load(sessionID: sessionID)
+                let currentJob = await store.snapshot().first { $0.id == job.id }
+                return currentManifest?.status == .cancelled && currentJob?.status == .cancelled
+            }
+        }
+    }
+
+    @Test("Session cancellation cannot overtake an in-flight manual retry")
+    @MainActor
+    func sessionCancellationCannotOvertakeManualRetry() async throws {
+        let root = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let sessionID = "session-retry-cancel-race"
+        let manifestStore = SessionManifestStore(baseDirectory: root.appendingPathComponent("Runtime"))
+        try await manifestStore.create(makeManifest(id: sessionID, status: .failed, root: root))
+        let jobsURL = root.appendingPathComponent("jobs.json")
+        let store = JobQueueStore(fileURL: jobsURL)
+        var job = try await store.enqueue(sessionID: sessionID, kind: .renderStrip)
+        job.status = .failed
+        job.lastFailureDisposition = .retryable
+        try await store.update(job)
+
+        let queue = SessionJobQueue(store: store, executor: MockJobExecutor())
+        let coordinator = BoothCoordinator(
+            testingManifestStore: manifestStore,
+            testingJobQueue: queue,
+            runtimeDirectory: root
+        )
+        queue.refresh()
+        try await waitUntil { queue.jobs.contains { $0.id == job.id } }
+
+        var retryPaused = false
+        var resumeRetry: CheckedContinuation<Void, Never>?
+        coordinator.beforeManualRetryQueueMutationForTesting = {
+            retryPaused = true
+            await withCheckedContinuation { resumeRetry = $0 }
+        }
+        let retryTask = Task { try await coordinator.retryJob(jobID: job.id) }
+        try await waitUntil(timeout: .seconds(2)) { retryPaused }
+
+        let retryingManifest = try await manifestStore.load(sessionID: sessionID)
+        await coordinator.cancelSessionForTesting(manifest: retryingManifest)
+        #expect(try await manifestStore.load(sessionID: sessionID).status == .finalizing)
+
+        resumeRetry?.resume()
+        do {
+            try await retryTask.value
+        } catch {
+            Issue.record("Manual retry failed after cancellation was deferred: \(error.localizedDescription)")
+        }
+
+        #expect(try await manifestStore.load(sessionID: sessionID).status == .finalizing)
+        #expect(await store.snapshot().first { $0.id == job.id }?.status == .pending)
+        let durable = try await JobQueueStore(fileURL: jobsURL).load()
+        #expect(durable.first { $0.id == job.id }?.status == .pending)
+    }
+
+    @Test("Duplicate Retry All does not enqueue the same job twice")
+    @MainActor
+    func duplicateRetryAllDoesNotRequeueTwice() async throws {
+        let root = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let manifestStore = SessionManifestStore(baseDirectory: root.appendingPathComponent("Runtime"))
+        let store = JobQueueStore(fileURL: root.appendingPathComponent("jobs.json"))
+        let sessionID = "session-duplicate-batch-retry"
+        try await manifestStore.create(makeManifest(id: sessionID, status: .failed, root: root))
+        var job = try await store.enqueue(sessionID: sessionID, kind: .renderStrip)
+        job.status = .failed
+        job.lastFailureDisposition = .retryable
+        try await store.update(job)
+
+        let queue = SessionJobQueue(store: store, executor: MockJobExecutor())
+        let coordinator = BoothCoordinator(
+            testingManifestStore: manifestStore,
+            testingJobQueue: queue,
+            runtimeDirectory: root
+        )
+        queue.refresh()
+        try await waitUntil { queue.jobs.contains { $0.id == job.id } }
+        var duplicateResult: [SessionJob]?
+        coordinator.beforeManualRetryQueueMutationForTesting = {
+            do {
+                duplicateResult = try await coordinator.retryAllFailedJobs()
+            } catch {
+                duplicateResult = nil
+            }
+        }
+
+        let retried = try await coordinator.retryAllFailedJobs()
+
+        #expect(retried.map(\.id) == [job.id])
+        #expect(duplicateResult?.isEmpty == true)
+        #expect(await store.snapshot().filter { $0.id == job.id && $0.status == .pending }.count == 1)
+    }
+
     @Test("Cancelled session cannot be resurrected")
     @MainActor
     func cancelledSessionCannotBeResurrected() async throws {
@@ -403,6 +972,58 @@ struct JobRecoveryTests {
         let corrected = try await manifestStore.load(sessionID: sessionID)
         #expect(corrected.status == .failed)
         #expect(corrected.lastError?.contains("Fatal render error") == true)
+    }
+
+    @Test("Startup reconciliation reserves a session before persisting its failure")
+    @MainActor
+    func startupReconciliationClaimsSessionBeforeTransition() async throws {
+        let root = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let sessionID = "session-reconcile-retry-race"
+        let manifestStore = SessionManifestStore(baseDirectory: root.appendingPathComponent("Runtime"))
+        try await manifestStore.create(makeManifest(id: sessionID, status: .finalizing, root: root))
+
+        let store = JobQueueStore(fileURL: root.appendingPathComponent("jobs.json"))
+        var render = try await store.enqueue(sessionID: sessionID, kind: .renderStrip)
+        render.status = .failed
+        render.lastFailureDisposition = .retryable
+        render.lastError = "Previous render attempt failed."
+        try await store.update(render)
+        var registration = try await store.enqueue(sessionID: sessionID, kind: .registerDownload)
+        registration.status = .cancelled
+        try await store.update(registration)
+
+        let queue = SessionJobQueue(store: store, executor: MockJobExecutor())
+        queue.start()
+        await queue.waitUntilReady()
+
+        let recovery = SessionRecoveryService(
+            manifestStore: manifestStore,
+            workspace: SessionWorkspace(),
+            jobQueue: queue
+        )
+        var claimedSessionIDs = Set<String>()
+        recovery.isSessionRecoveryInFlight = { claimedSessionIDs.contains($0) }
+        recovery.claimSessionRecovery = { claimedSessionIDs.insert($0).inserted }
+        recovery.releaseSessionRecovery = { claimedSessionIDs.remove($0) }
+        var reconciliationPaused = false
+        var resumeReconciliation: CheckedContinuation<Void, Never>?
+        recovery.beforeManifestReconciliationForTesting = { _ in
+            reconciliationPaused = true
+            await withCheckedContinuation { resumeReconciliation = $0 }
+        }
+
+        let scanTask = Task { await recovery.scanNow() }
+        try await waitUntil(timeout: .seconds(2)) { reconciliationPaused }
+        let retryWasRejected = !(recovery.claimSessionRecovery?(sessionID) ?? true)
+        resumeReconciliation?.resume()
+        await scanTask.value
+
+        #expect(retryWasRejected)
+        #expect(await store.snapshot().first { $0.id == render.id }?.status == .failed)
+        #expect(!claimedSessionIDs.contains(sessionID))
+        #expect(try await manifestStore.load(sessionID: sessionID).status == .failed)
     }
 }
 

@@ -80,6 +80,66 @@ struct BoothPreAuthPolicyTests {
         #expect(expired?.contains("absolute deadline expired") == true)
     }
 
+    @Test("pairing absolute expiry remains enforced during authentication")
+    func pairingExpiryRemainsEnforcedDuringAuthentication() {
+        let start = Date(timeIntervalSince1970: 90_000)
+        let pairingExpiry = start.addingTimeInterval(120)
+        let watchdog = BoothPreAuthWatchdog(generation: 1, startTime: start)
+        watchdog.onPairingSessionStarted(absoluteExpiry: pairingExpiry, now: start)
+
+        // A valid admission proof can start authentication immediately before
+        // pairing expiry. Authentication must not replace the pairing deadline.
+        watchdog.onAuthenticationStarted(now: pairingExpiry.addingTimeInterval(-1))
+
+        #expect(watchdog.checkTimeout(now: pairingExpiry) == "Pairing session absolute deadline expired.")
+        #expect(watchdog.phase == .expired(reason: "Pairing session absolute deadline expired."))
+    }
+
+    @Test("pairing traffic requires an active interactive watchdog phase")
+    func pairingTrafficRequiresActiveWatchdog() {
+        let start = Date(timeIntervalSince1970: 70_000)
+        let expiry = start.addingTimeInterval(120)
+        let watchdog = BoothPreAuthWatchdog(generation: 1, startTime: start)
+        watchdog.onPairingSessionStarted(absoluteExpiry: expiry, now: start)
+
+        #expect(BoothPreAuthProgressPolicy.canProcessPairingTraffic(watchdog, now: start))
+
+        watchdog.onAuthenticationStarted(now: expiry.addingTimeInterval(1))
+        #expect(!BoothPreAuthProgressPolicy.canProcessPairingTraffic(
+            watchdog,
+            now: expiry.addingTimeInterval(1)
+        ))
+        #expect(watchdog.phase == .expired(reason: "Pairing session absolute deadline expired."))
+    }
+
+    @Test("restarting pairing sessions cannot extend the connection absolute deadline")
+    func restartedPairingSessionPreservesConnectionDeadline() {
+        let start = Date(timeIntervalSince1970: 80_000)
+        let originalExpiry = start.addingTimeInterval(120)
+        let watchdog = BoothPreAuthWatchdog(generation: 1, startTime: start)
+        watchdog.onPairingSessionStarted(absoluteExpiry: originalExpiry, now: start)
+        watchdog.onInteractiveProgress(now: start.addingTimeInterval(40))
+        watchdog.onInteractiveProgress(now: start.addingTimeInterval(80))
+
+        let restartedAt = start.addingTimeInterval(119)
+        watchdog.onPairingSessionStarted(
+            absoluteExpiry: restartedAt.addingTimeInterval(120),
+            now: restartedAt
+        )
+
+        #expect(watchdog.nextDeadline() == originalExpiry)
+        #expect(watchdog.checkTimeout(now: originalExpiry) == "Pairing session absolute deadline expired.")
+        #expect(watchdog.phase == .expired(reason: "Pairing session absolute deadline expired."))
+
+        let boundaryWatchdog = BoothPreAuthWatchdog(generation: 2, startTime: start)
+        boundaryWatchdog.onPairingSessionStarted(absoluteExpiry: originalExpiry, now: start)
+        #expect(!boundaryWatchdog.onPairingSessionStarted(
+            absoluteExpiry: originalExpiry.addingTimeInterval(120),
+            now: originalExpiry
+        ))
+        #expect(boundaryWatchdog.checkTimeout(now: originalExpiry) == "Pairing session absolute deadline expired.")
+    }
+
     @Test("valid auth progress transitions deadlines correctly")
     func validAuthProgressTransitionsDeadlines() {
         let start = Date()
@@ -144,6 +204,127 @@ struct BoothPreAuthPolicyTests {
             limiter.recordFailure(endpointKey: "client-\(i)", now: now.addingTimeInterval(Double(i)))
             #expect(limiter.trackedEndpointCount <= 10)
         }
+    }
+
+    @Test("only accepted pairing messages count as watchdog progress")
+    func pairingProgressRequiresAcceptance() throws {
+        let now = Date(timeIntervalSince1970: 80_000)
+        let absoluteExpiry = now.addingTimeInterval(120)
+        let acceptedIntentWatchdog = BoothPreAuthWatchdog(generation: 1, startTime: now)
+        acceptedIntentWatchdog.onPairingSessionStarted(absoluteExpiry: absoluteExpiry, now: now)
+        #expect(BoothPreAuthProgressPolicy.advance(
+            acceptedIntentWatchdog,
+            after: .startSession,
+            now: now.addingTimeInterval(10)
+        ))
+        #expect(acceptedIntentWatchdog.nextDeadline() == now.addingTimeInterval(55))
+
+        let reusedIntentWatchdog = BoothPreAuthWatchdog(generation: 5, startTime: now)
+        reusedIntentWatchdog.onPairingSessionStarted(absoluteExpiry: absoluteExpiry, now: now)
+        #expect(BoothPreAuthProgressPolicy.advance(
+            reusedIntentWatchdog,
+            after: .reuseSession,
+            now: now.addingTimeInterval(12)
+        ))
+        #expect(reusedIntentWatchdog.nextDeadline() == now.addingTimeInterval(57))
+
+        let rejectedIntentWatchdog = BoothPreAuthWatchdog(generation: 2, startTime: now)
+        rejectedIntentWatchdog.onPairingSessionStarted(absoluteExpiry: absoluteExpiry, now: now)
+        #expect(!BoothPreAuthProgressPolicy.advance(
+            rejectedIntentWatchdog,
+            after: .reject(reason: "rejected"),
+            now: now.addingTimeInterval(10)
+        ))
+        #expect(rejectedIntentWatchdog.nextDeadline() == now.addingTimeInterval(45))
+
+        let identity = BoothDeviceIdentity(id: "mac-1", displayName: "Booth", role: .mac)
+        let transcript = Data("pairing transcript".utf8)
+
+        var acceptedSession = try BoothPairingSession.make(macIdentity: identity, now: now)
+        let acceptedProof = BoothPairingCrypto.makeAdmissionProof(
+            code: acceptedSession.pin,
+            transcript: transcript
+        )
+        let accepted = acceptedSession.validateAdmissionProof(
+            acceptedProof,
+            method: .pin,
+            transcript: transcript,
+            now: now
+        )
+        #expect(accepted == .accepted)
+        let acceptedProofWatchdog = BoothPreAuthWatchdog(generation: 3, startTime: now)
+        acceptedProofWatchdog.onPairingSessionStarted(absoluteExpiry: absoluteExpiry, now: now)
+        #expect(BoothPreAuthProgressPolicy.advance(
+            acceptedProofWatchdog,
+            after: accepted,
+            now: now.addingTimeInterval(20)
+        ))
+        #expect(acceptedProofWatchdog.nextDeadline() == now.addingTimeInterval(65))
+
+        var rejectedSession = try BoothPairingSession.make(macIdentity: identity, now: now)
+        let rejected = rejectedSession.validateAdmissionProof(
+            Data(repeating: 0, count: 32),
+            method: .pin,
+            transcript: transcript,
+            now: now
+        )
+        #expect(rejected == .rejected(remainingAttempts: 4))
+        let rejectedProofWatchdog = BoothPreAuthWatchdog(generation: 4, startTime: now)
+        rejectedProofWatchdog.onPairingSessionStarted(absoluteExpiry: absoluteExpiry, now: now)
+        #expect(!BoothPreAuthProgressPolicy.advance(
+            rejectedProofWatchdog,
+            after: rejected,
+            now: now.addingTimeInterval(20)
+        ))
+        #expect(rejectedProofWatchdog.nextDeadline() == now.addingTimeInterval(45))
+        #expect(!BoothPreAuthProgressPolicy.advance(
+            rejectedProofWatchdog,
+            after: .expired,
+            now: now.addingTimeInterval(20)
+        ))
+        #expect(!BoothPreAuthProgressPolicy.advance(
+            rejectedProofWatchdog,
+            after: .locked,
+            now: now.addingTimeInterval(20)
+        ))
+
+        let expiredWatchdog = BoothPreAuthWatchdog(generation: 6, startTime: now)
+        expiredWatchdog.onPairingSessionStarted(absoluteExpiry: absoluteExpiry, now: now)
+        #expect(expiredWatchdog.checkTimeout(now: absoluteExpiry) != nil)
+        #expect(!BoothPreAuthProgressPolicy.advance(
+            expiredWatchdog,
+            after: .accepted,
+            now: absoluteExpiry.addingTimeInterval(1)
+        ))
+        #expect(!BoothPreAuthProgressPolicy.advance(
+            expiredWatchdog,
+            after: .reuseSession,
+            now: absoluteExpiry.addingTimeInterval(1)
+        ))
+        #expect(expiredWatchdog.phase.isTerminal)
+        #expect(!expiredWatchdog.onPairingSessionStarted(
+            absoluteExpiry: absoluteExpiry.addingTimeInterval(120),
+            now: absoluteExpiry.addingTimeInterval(1)
+        ))
+    }
+
+    @Test("stale watchdog timer generations and connections are ignored")
+    func staleWatchdogTimerIsIgnored() {
+        #expect(BoothPreAuthProgressPolicy.shouldRunTimerTick(
+            expectedGeneration: 4,
+            currentGeneration: 4,
+            connectionIsCurrent: true
+        ))
+        #expect(!BoothPreAuthProgressPolicy.shouldRunTimerTick(
+            expectedGeneration: 3,
+            currentGeneration: 4,
+            connectionIsCurrent: true
+        ))
+        #expect(!BoothPreAuthProgressPolicy.shouldRunTimerTick(
+            expectedGeneration: 4,
+            currentGeneration: 4,
+            connectionIsCurrent: false
+        ))
     }
 
     @Test("successful authentication clears limiter record")

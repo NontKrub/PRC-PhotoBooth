@@ -147,6 +147,14 @@ final class SessionJobQueue {
         }
     }
 
+    func manualRetryEligibility(jobID: String) async throws -> ManualJobRetryEligibility {
+        try await store.manualRetryEligibility(jobID: jobID)
+    }
+
+    func eligibleManualRetryJobs(jobIDs: Set<String>) async throws -> [SessionJob] {
+        try await store.eligibleManualRetryJobs(jobIDs: jobIDs)
+    }
+
     func resolveUnknownPrint(jobID: String, resolution: UnknownPrintResolution) async throws {
         do {
             _ = try await store.resolveUnknownPrint(jobID: jobID, resolution: resolution)
@@ -157,31 +165,25 @@ final class SessionJobQueue {
         }
     }
 
-    func forceRequeueCloudUpload(
-        sessionID: String,
-        completion: ((CloudUploadRequeueResult) -> Void)? = nil
-    ) {
-        Task { [weak self] in
-            guard let self else { return }
-            do {
-                let result = try await store.forceRequeueCloudUpload(sessionID: sessionID)
-                await reload()
-                completion?(result)
-            } catch {
-                lastQueueError = error.localizedDescription
-            }
+    func forceRequeueCloudUpload(sessionID: String) async throws -> CloudUploadRequeueResult {
+        do {
+            let result = try await store.forceRequeueCloudUpload(sessionID: sessionID)
+            await reload()
+            return result
+        } catch {
+            lastQueueError = error.localizedDescription
+            throw error
         }
     }
 
-    func retryFailedCloudUploads() {
-        Task { [weak self] in
-            guard let self else { return }
-            do {
-                _ = try await store.requeueFailedCloudUploads()
-                await reload()
-            } catch {
-                lastQueueError = error.localizedDescription
-            }
+    func retryFailedCloudUploads(sessionIDs: Set<String>) async throws -> Int {
+        do {
+            let count = try await store.requeueFailedCloudUploads(sessionIDs: sessionIDs)
+            await reload()
+            return count
+        } catch {
+            lastQueueError = error.localizedDescription
+            throw error
         }
     }
 
@@ -246,11 +248,11 @@ final class SessionJobQueue {
     }
 
     @discardableResult
-    func retryAllFailed() async throws -> [SessionJob] {
+    func retryAllFailed(jobIDs: Set<String>) async throws -> ManualRetryBatchResult {
         do {
-            let retried = try await store.retryEligibleFailed()
+            let result = try await store.retryJobs(jobIDs: jobIDs)
             await reload()
-            return retried
+            return result
         } catch {
             lastQueueError = error.localizedDescription
             throw error
@@ -453,7 +455,7 @@ final class SessionJobQueue {
         let runnable = jobs.filter {
             kinds.contains($0.kind)
                 && isRunnable($0, now: now)
-                && dependenciesSatisfied(for: $0)
+                && SessionJobDependencyPolicy.prerequisitesSatisfied(for: $0, in: jobs)
                 && ($0.kind != .autoPrint || executor.isAutoPrintLaneAvailable)
         }
         // Required work is globally oldest-first. Optional GIF work only runs
@@ -477,40 +479,6 @@ final class SessionJobQueue {
             return job.nextAttemptAt.map { $0 <= now } ?? true
         case .running, .succeeded, .failed, .cancelled:
             return false
-        }
-    }
-
-    private func dependenciesSatisfied(for currentJob: SessionJob) -> Bool {
-        func job(for kind: SessionJobKind) -> SessionJob? {
-            jobs
-                .filter {
-                    $0.sessionID == currentJob.sessionID
-                        && $0.kind == kind
-                        && $0.status != .cancelled
-                }
-                .max {
-                    $0.createdAt == $1.createdAt ? $0.id < $1.id : $0.createdAt < $1.createdAt
-                }
-        }
-
-        func succeeded(_ kind: SessionJobKind) -> Bool {
-            job(for: kind)?.status == .succeeded
-        }
-
-        switch currentJob.kind {
-        case .renderStrip:
-            return true
-        case .registerDownload, .autoPrint:
-            return succeeded(.renderStrip)
-        case .updateGallery:
-            return succeeded(.renderStrip)
-        case .renderGIF:
-            guard let download = job(for: .registerDownload) else { return true }
-            return download.status == .succeeded || download.status == .failed || download.status == .cancelled
-        case .cloudUpload:
-            guard succeeded(.renderStrip) else { return false }
-            guard let gif = job(for: .renderGIF) else { return true }
-            return gif.status == .succeeded || gif.status == .failed || gif.status == .cancelled
         }
     }
 

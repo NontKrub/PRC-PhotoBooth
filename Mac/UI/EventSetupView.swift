@@ -189,14 +189,21 @@ struct EventDetailView: View {
             }
 
             Section("Guest Downloads") {
-                TextField("Public HTTPS URL (optional)", text: $publicBaseURL)
+                Text("Global booth guest-delivery setting")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                TextField("Public guest URL (HTTPS)", text: $publicBaseURL)
                     .font(.caption.monospaced())
-                Text("QR codes use this URL when cloud upload is enabled. Public URLs must use HTTPS.\nExample: https://photos.yourdomain.com")
+                Text("QR codes use this URL when cloud upload is enabled. Example: https://photos.yourdomain.com")
                     .font(.caption).foregroundStyle(.secondary)
 
-                Toggle("Allow guest downloads over trusted private LAN (HTTP)", isOn: $allowTrustedLocalHTTP)
-                Text("Use only on an isolated or operator-controlled network. Guest photos and download links are not encrypted in transit.")
-                    .font(.caption).foregroundStyle(.secondary)
+                Toggle("Trusted private LAN HTTP", isOn: $allowTrustedLocalHTTP)
+                Label(
+                    "Guest photos and download links are unencrypted on the local network. Use only on an isolated, operator-controlled network.",
+                    systemImage: "exclamationmark.triangle.fill"
+                )
+                .font(.caption)
+                .foregroundStyle(.orange)
             }
 
             Section("Default Template") {

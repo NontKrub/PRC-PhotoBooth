@@ -1380,23 +1380,213 @@ final class BoothDeviceIdentityStore {
     }
 }
 
+enum GenericPasswordKeychainAccessibility: Sendable {
+    case whenUnlockedThisDeviceOnly
+    case afterFirstUnlockThisDeviceOnly
+
+    var securityAttribute: CFString {
+        switch self {
+        case .whenUnlockedThisDeviceOnly: return kSecAttrAccessibleWhenUnlockedThisDeviceOnly
+        case .afterFirstUnlockThisDeviceOnly: return kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
+        }
+    }
+}
+
+protocol GenericPasswordKeychainStore: Sendable {
+    func readData(
+        service: String,
+        account: String,
+        useDataProtectionKeychain: Bool
+    ) -> (status: OSStatus, data: Data?)
+
+    func writeData(
+        _ data: Data,
+        service: String,
+        account: String,
+        useDataProtectionKeychain: Bool,
+        accessibility: GenericPasswordKeychainAccessibility
+    ) -> OSStatus
+
+    func deleteData(service: String, account: String, useDataProtectionKeychain: Bool) -> OSStatus
+}
+
+struct GenericPasswordMigrationReadResult: Equatable, Sendable {
+    var data: Data?
+    var legacyCleanupError: OSStatus?
+}
+
+func reportLegacyKeychainCleanupFailure(_ status: OSStatus) {
+    NSLog("Data Protection Keychain credential is active, but legacy cleanup failed (OSStatus %d).", status)
+}
+
+extension GenericPasswordKeychainStore {
+    func readDataMigratingToDataProtection(
+        service: String,
+        account: String,
+        accessibility: GenericPasswordKeychainAccessibility
+    ) -> GenericPasswordMigrationReadResult {
+        let preferred = readData(service: service, account: account, useDataProtectionKeychain: true)
+        if preferred.status == errSecSuccess {
+            let cleanupStatus = deleteData(service: service, account: account, useDataProtectionKeychain: false)
+            return GenericPasswordMigrationReadResult(
+                data: preferred.data,
+                legacyCleanupError: Self.isSuccessfulDelete(cleanupStatus) ? nil : cleanupStatus
+            )
+        }
+
+        let legacy = readData(service: service, account: account, useDataProtectionKeychain: false)
+        guard legacy.status == errSecSuccess, let legacyData = legacy.data else {
+            return GenericPasswordMigrationReadResult(data: nil, legacyCleanupError: nil)
+        }
+
+        let writeStatus = writeData(
+            legacyData,
+            service: service,
+            account: account,
+            useDataProtectionKeychain: true,
+            accessibility: accessibility
+        )
+        guard writeStatus == errSecSuccess else {
+            return GenericPasswordMigrationReadResult(data: legacyData, legacyCleanupError: nil)
+        }
+
+        let verified = readData(service: service, account: account, useDataProtectionKeychain: true)
+        guard verified.status == errSecSuccess, verified.data == legacyData else {
+            _ = deleteData(service: service, account: account, useDataProtectionKeychain: true)
+            return GenericPasswordMigrationReadResult(data: legacyData, legacyCleanupError: nil)
+        }
+
+        let cleanupStatus = deleteData(service: service, account: account, useDataProtectionKeychain: false)
+        return GenericPasswordMigrationReadResult(
+            data: verified.data,
+            legacyCleanupError: Self.isSuccessfulDelete(cleanupStatus) ? nil : cleanupStatus
+        )
+    }
+
+    private static func isSuccessfulDelete(_ status: OSStatus) -> Bool {
+        status == errSecSuccess || status == errSecItemNotFound
+    }
+
+    func writeDataAndVerify(
+        _ data: Data,
+        service: String,
+        account: String,
+        useDataProtectionKeychain: Bool,
+        accessibility: GenericPasswordKeychainAccessibility
+    ) -> OSStatus {
+        let writeStatus = writeData(
+            data,
+            service: service,
+            account: account,
+            useDataProtectionKeychain: useDataProtectionKeychain,
+            accessibility: accessibility
+        )
+        guard writeStatus == errSecSuccess else { return writeStatus }
+
+        let readback = readData(service: service, account: account, useDataProtectionKeychain: useDataProtectionKeychain)
+        guard readback.status == errSecSuccess else { return readback.status }
+        return readback.data == data ? errSecSuccess : errSecIO
+    }
+
+    func deleteBothCopies(service: String, account: String) -> OSStatus {
+        let dataProtectionStatus = deleteData(service: service, account: account, useDataProtectionKeychain: true)
+        let legacyStatus = deleteData(service: service, account: account, useDataProtectionKeychain: false)
+        for status in [dataProtectionStatus, legacyStatus]
+        where status != errSecSuccess && status != errSecItemNotFound {
+            return status
+        }
+        return errSecSuccess
+    }
+}
+
+struct SecurityGenericPasswordKeychainStore: GenericPasswordKeychainStore, Sendable {
+    func readData(
+        service: String,
+        account: String,
+        useDataProtectionKeychain: Bool
+    ) -> (status: OSStatus, data: Data?) {
+        var query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecAttrAccount as String: account,
+            kSecReturnData as String: true,
+            kSecMatchLimit as String: kSecMatchLimitOne
+        ]
+        if useDataProtectionKeychain {
+            query[kSecUseDataProtectionKeychain as String] = true
+        }
+
+        var result: CFTypeRef?
+        let status = SecItemCopyMatching(query as CFDictionary, &result)
+        guard status == errSecSuccess else { return (status, nil) }
+        guard let data = result as? Data else { return (errSecDecode, nil) }
+        return (errSecSuccess, data)
+    }
+
+    func writeData(
+        _ data: Data,
+        service: String,
+        account: String,
+        useDataProtectionKeychain: Bool,
+        accessibility: GenericPasswordKeychainAccessibility
+    ) -> OSStatus {
+        var query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecAttrAccount as String: account
+        ]
+        if useDataProtectionKeychain {
+            query[kSecUseDataProtectionKeychain as String] = true
+        }
+
+        let attributes: [String: Any] = [
+            kSecValueData as String: data,
+            kSecAttrAccessible as String: accessibility.securityAttribute
+        ]
+        let updateStatus = SecItemUpdate(query as CFDictionary, attributes as CFDictionary)
+        guard updateStatus == errSecItemNotFound else { return updateStatus }
+
+        var addQuery = query
+        addQuery[kSecValueData as String] = data
+        addQuery[kSecAttrAccessible as String] = accessibility.securityAttribute
+        let addStatus = SecItemAdd(addQuery as CFDictionary, nil)
+        guard addStatus == errSecDuplicateItem else { return addStatus }
+        return SecItemUpdate(query as CFDictionary, attributes as CFDictionary)
+    }
+
+    func deleteData(service: String, account: String, useDataProtectionKeychain: Bool) -> OSStatus {
+        var query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecAttrAccount as String: account
+        ]
+        if useDataProtectionKeychain {
+            query[kSecUseDataProtectionKeychain as String] = true
+        }
+        return SecItemDelete(query as CFDictionary)
+    }
+}
+
 final class BoothTrustedPeerStore {
     private let defaults: UserDefaults
     private let metadataKey: String
     private let preferredKey: String
     private let autoReconnectKey: String
     private let keychainService: String
+    private let keychain: any GenericPasswordKeychainStore
 
     init(
         defaults: UserDefaults = .standard,
         namespace: String = "boothTrustedPeers",
-        keychainService: String = "com.nont.prcphoto.booth-pairing"
+        keychainService: String = "com.nont.prcphoto.booth-pairing",
+        keychain: any GenericPasswordKeychainStore = SecurityGenericPasswordKeychainStore()
     ) {
         self.defaults = defaults
         self.metadataKey = "\(namespace).metadata"
         self.preferredKey = "\(namespace).preferred"
         self.autoReconnectKey = "\(namespace).autoReconnect"
         self.keychainService = keychainService
+        self.keychain = keychain
     }
 
     var trustedPeers: [TrustedBoothPeer] {
@@ -1445,58 +1635,61 @@ final class BoothTrustedPeerStore {
     }
 
     func secret(for peerID: String) -> Data? {
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: keychainService,
-            kSecAttrAccount as String: peerID,
-            kSecReturnData as String: true,
-            kSecMatchLimit as String: kSecMatchLimitOne
-        ]
-        var result: CFTypeRef?
-        guard SecItemCopyMatching(query as CFDictionary, &result) == errSecSuccess else { return nil }
-        return result as? Data
+        let result = keychain.readDataMigratingToDataProtection(
+            service: keychainService,
+            account: peerID,
+            accessibility: .afterFirstUnlockThisDeviceOnly
+        )
+        if let status = result.legacyCleanupError {
+            reportLegacyKeychainCleanupFailure(status)
+        }
+        return result.data
     }
 
-    func forget(peerID: String) {
+    @discardableResult
+    func forget(peerID: String) -> OSStatus {
+        let status = deleteSecret(peerID: peerID)
+        guard status == errSecSuccess else { return status }
         trustedPeers.removeAll { $0.id == peerID }
         if preferredPeerID == peerID {
             preferredPeerID = nil
             autoReconnect = false
         }
-        deleteSecret(peerID: peerID)
+        return errSecSuccess
     }
 
-    func forgetAll() {
-        for peer in trustedPeers { deleteSecret(peerID: peer.id) }
-        trustedPeers = []
+    @discardableResult
+    func forgetAll() -> OSStatus {
+        var remainingPeers: [TrustedBoothPeer] = []
+        var failureStatus: OSStatus = errSecSuccess
+        for peer in trustedPeers {
+            let status = deleteSecret(peerID: peer.id)
+            if status == errSecSuccess {
+                continue
+            }
+            remainingPeers.append(peer)
+            if failureStatus == errSecSuccess { failureStatus = status }
+        }
+        trustedPeers = remainingPeers
         preferredPeerID = nil
         autoReconnect = false
+        return failureStatus
     }
 
     private func saveSecret(_ secret: Data, peerID: String) throws {
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: keychainService,
-            kSecAttrAccount as String: peerID
-        ]
-        let update = [kSecValueData as String: secret]
-        let status = SecItemUpdate(query as CFDictionary, update as CFDictionary)
-        if status == errSecSuccess { return }
-        guard status == errSecItemNotFound else { throw BoothPairingError.keychain(status) }
-        var add = query
-        add[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
-        add[kSecValueData as String] = secret
-        let addStatus = SecItemAdd(add as CFDictionary, nil)
-        guard addStatus == errSecSuccess else { throw BoothPairingError.keychain(addStatus) }
+        let status = keychain.writeDataAndVerify(
+            secret,
+            service: keychainService,
+            account: peerID,
+            useDataProtectionKeychain: true,
+            accessibility: .afterFirstUnlockThisDeviceOnly
+        )
+        guard status == errSecSuccess else { throw BoothPairingError.keychain(status) }
+        _ = keychain.deleteData(service: keychainService, account: peerID, useDataProtectionKeychain: false)
     }
 
-    private func deleteSecret(peerID: String) {
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: keychainService,
-            kSecAttrAccount as String: peerID
-        ]
-        SecItemDelete(query as CFDictionary)
+    private func deleteSecret(peerID: String) -> OSStatus {
+        keychain.deleteBothCopies(service: keychainService, account: peerID)
     }
 }
 

@@ -49,19 +49,22 @@ enum LocalDownloadRoute: Sendable, Equatable {
 struct LocalDownloadRouter: Sendable {
     private let sessionRoutes: [String: SessionRouteRegistration]
     private let galleryRoutes: [String: EventGalleryRouteRegistration]
+    private let guestRouteExposure: LocalGuestRouteExposure
 
-    init(tokenMap: [String: URL]) {
+    init(tokenMap: [String: URL], guestRouteExposure: LocalGuestRouteExposure = .disabled) {
         self.init(
             sessionRoutes: tokenMap.mapValues {
                 SessionRouteRegistration(sessionDirectory: $0, language: .english, eventGalleryPath: nil)
             },
-            galleryRoutes: [:]
+            galleryRoutes: [:],
+            guestRouteExposure: guestRouteExposure
         )
     }
 
     init(
         sessionRoutes: [String: SessionRouteRegistration],
-        galleryRoutes: [String: EventGalleryRouteRegistration]
+        galleryRoutes: [String: EventGalleryRouteRegistration],
+        guestRouteExposure: LocalGuestRouteExposure = .disabled
     ) {
         self.sessionRoutes = sessionRoutes.mapValues {
             SessionRouteRegistration(
@@ -72,10 +75,11 @@ struct LocalDownloadRouter: Sendable {
             )
         }
         self.galleryRoutes = galleryRoutes
+        self.guestRouteExposure = guestRouteExposure
     }
 
     func response(for requestPath: String) -> LocalDownloadResponse {
-        let path = decodePath(requestPath)
+        let path = Self.decodePath(requestPath)
         guard !path.contains("\0"),
               !path.split(separator: "/").contains(".."),
               path.hasPrefix("/") else {
@@ -92,6 +96,7 @@ struct LocalDownloadRouter: Sendable {
                 body: body
             )
         }
+        if isGuestRouteDisabled(path) { return notFound() }
 
         if let galleryResponse = galleryResponse(for: path) {
             return galleryResponse
@@ -100,12 +105,13 @@ struct LocalDownloadRouter: Sendable {
     }
 
     func route(for requestPath: String) -> LocalDownloadRoute {
-        let path = decodePath(requestPath)
+        let path = Self.decodePath(requestPath)
         guard !path.contains("\0"),
               !path.split(separator: "/").contains(".."),
               path.hasPrefix("/") else {
             return .response(notFound())
         }
+        if isGuestRouteDisabled(path) { return .response(notFound()) }
         if let file = sessionFileResponse(for: path) {
             return .file(file)
         }
@@ -373,7 +379,7 @@ struct LocalDownloadRouter: Sendable {
         }
     }
 
-    private func decodePath(_ requestPath: String) -> String {
+    private static func decodePath(_ requestPath: String) -> String {
         let withoutQuery = requestPath.split(separator: "?", maxSplits: 1, omittingEmptySubsequences: false).first.map(String.init) ?? requestPath
         var decoded = withoutQuery
         for _ in 0..<2 {
@@ -381,6 +387,19 @@ struct LocalDownloadRouter: Sendable {
             decoded = next
         }
         return decoded
+    }
+
+    private func isGuestRouteDisabled(_ path: String) -> Bool {
+        guestRouteExposure == .disabled && Self.isGuestMediaPath(inNormalizedPath: path)
+    }
+
+    static func isGuestMediaPath(_ requestPath: String) -> Bool {
+        isGuestMediaPath(inNormalizedPath: decodePath(requestPath))
+    }
+
+    private static func isGuestMediaPath(inNormalizedPath path: String) -> Bool {
+        let firstComponent = path.dropFirst().split(separator: "/", omittingEmptySubsequences: true).first
+        return firstComponent == "s" || firstComponent == "e"
     }
 
     private func notFound() -> LocalDownloadResponse {

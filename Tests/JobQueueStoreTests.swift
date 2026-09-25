@@ -41,7 +41,7 @@ struct JobQueueStoreTests {
         #expect(jobs[0].nextAttemptAt != nil)
     }
 
-    @Test("manual retry resets failed and cancelled jobs")
+    @Test("manual retry resets an eligible failed job")
     func retriesJobs() async throws {
         let file = try temporaryFile()
         defer { try? FileManager.default.removeItem(at: file.deletingLastPathComponent()) }
@@ -50,7 +50,7 @@ struct JobQueueStoreTests {
         failed.status = .failed
         failed.attemptCount = 4
         failed.lastError = "printer offline"
-        failed.lastFailureDisposition = .permanent
+        failed.lastFailureDisposition = .retryable
         try await store.update(failed)
         try await store.retry(jobID: failed.id)
 
@@ -60,6 +60,40 @@ struct JobQueueStoreTests {
         #expect(retried?.lastError == nil)
         #expect(retried?.lastFailureDisposition == nil)
         #expect(retried?.nextAttemptAt != nil)
+    }
+
+    @Test("manual retry eligibility is shared and excludes non-retryable states")
+    func manualRetryEligibility() {
+        let now = Date()
+        let retryable = SessionJob(
+            id: "retryable",
+            sessionID: "retryable-session",
+            kind: .renderStrip,
+            status: .failed,
+            createdAt: now,
+            updatedAt: now,
+            lastAttemptAt: now,
+            nextAttemptAt: nil,
+            attemptCount: 1,
+            lastError: "temporary failure",
+            lastFailureDisposition: .retryable
+        )
+        #expect(ManualJobRetryEligibility.evaluate(retryable) == .eligible)
+        #expect(ManualJobRetryEligibility.evaluate(retryable, sessionIsCancelled: true) == .sessionCancelled)
+        #expect(ManualJobRetryEligibility.evaluate(retryable, manifestIsCancelled: true) == .sessionCancelled)
+
+        var permanent = retryable
+        permanent.lastFailureDisposition = .permanent
+        #expect(ManualJobRetryEligibility.evaluate(permanent) == .permanent)
+        var unknown = retryable
+        unknown.lastFailureDisposition = .sideEffectUnknown
+        #expect(ManualJobRetryEligibility.evaluate(unknown) == .sideEffectUnknown)
+        var cancelled = retryable
+        cancelled.status = .cancelled
+        #expect(ManualJobRetryEligibility.evaluate(cancelled) == .cancelled)
+        var waiting = retryable
+        waiting.status = .waitingRetry
+        #expect(ManualJobRetryEligibility.evaluate(waiting) == .notFailed)
     }
 
     @Test("force requeue resets every recoverable cloud upload state")
@@ -147,8 +181,14 @@ struct JobQueueStoreTests {
         var cancelled = try await store.enqueue(sessionID: "cancelled", kind: .cloudUpload)
         cancelled.status = .cancelled
         try await store.update(cancelled)
+        var outside = try await store.enqueue(sessionID: "outside", kind: .cloudUpload)
+        outside.status = .failed
+        outside.lastFailureDisposition = .retryable
+        try await store.update(outside)
 
-        #expect(try await store.requeueFailedCloudUploads() == 1)
+        #expect(try await store.requeueFailedCloudUploads(sessionIDs: [
+            "failed", "permanent", "legacy", "succeeded", "cancelled"
+        ]) == 1)
         let jobs = await store.snapshot()
         #expect(jobs.first { $0.sessionID == "failed" }?.status == .pending)
         #expect(jobs.first { $0.sessionID == "failed" }?.attemptCount == 0)
@@ -156,6 +196,7 @@ struct JobQueueStoreTests {
         #expect(jobs.first { $0.sessionID == "legacy" }?.status == .failed)
         #expect(jobs.first { $0.sessionID == "succeeded" }?.status == .succeeded)
         #expect(jobs.first { $0.sessionID == "cancelled" }?.status == .cancelled)
+        #expect(jobs.first { $0.sessionID == "outside" }?.status == .failed)
     }
 
     @Test("corrupt queue is preserved and remains fail-closed")

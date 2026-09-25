@@ -145,4 +145,87 @@ struct SessionQRCodePayloadResolverTests {
             isRelease: true
         ) == .unavailable)
     }
+
+    @Test("local guest routes require an available policy and explicit LAN enablement")
+    func localGuestRoutesFollowPolicy() {
+        #expect(GuestDeliveryPolicy.publicHTTPS.permitsLocalGuestHTTP(allowTrustedLocalHTTP: true))
+        #expect(!GuestDeliveryPolicy.publicHTTPS.permitsLocalGuestHTTP(allowTrustedLocalHTTP: false))
+        #expect(GuestDeliveryPolicy.trustedLocalHTTP.permitsLocalGuestHTTP(allowTrustedLocalHTTP: true))
+        #expect(!GuestDeliveryPolicy.unavailable.permitsLocalGuestHTTP(allowTrustedLocalHTTP: true))
+    }
+
+    @Test("public base accepts HTTPS host, path prefix, and port")
+    func acceptsSupportedHTTPSBases() throws {
+        for base in [
+            "https://photos.example.com",
+            "https://photos.example.com/base/path",
+            "https://photos.example.com:8443"
+        ] {
+            #expect(try SessionQRCodePayloadResolver.resolve(
+                token: "token",
+                localBaseURL: "http://192.168.1.10:8585",
+                publicBaseURL: base,
+                cloudUploadEnabled: true,
+                isRelease: true
+            ) == "\(base)/s/token/")
+        }
+    }
+
+    @Test("shared validator canonicalizes HTTPS base URLs")
+    func validatesAndCanonicalizesPublicBase() throws {
+        let validated = try #require(ValidatedPublicGuestBaseURL(
+            string: " https://photos.example.com/base/path/// "
+        ))
+        #expect(validated.canonicalString == "https://photos.example.com/base/path")
+        #expect(validated.url.absoluteString == validated.canonicalString)
+        #expect(ValidatedPublicGuestBaseURL(string: "http://photos.example.com") == nil)
+    }
+
+    @Test("public base rejects HTTP and malformed or credentialed URLs in every build")
+    func rejectsInvalidPublicBasesInDebugAndRelease() {
+        for base in [
+            "http://photos.example.com",
+            "https-not-really://photos.example.com",
+            "//https://photos.example.com",
+            "https://",
+            "https://user:password@photos.example.com",
+            "https://photos.example.com?event=one",
+            "https://photos.example.com#gallery",
+            "https://["
+        ] {
+            #expect(ValidatedPublicGuestBaseURL(string: base) == nil)
+            for isRelease in [false, true] {
+                #expect(SessionQRCodePayloadResolver.evaluatePolicy(
+                    publicBaseURL: base,
+                    cloudUploadEnabled: true,
+                    allowTrustedLocalHTTP: false,
+                    isRelease: isRelease
+                ) == .unavailable, "Expected \(base) to be rejected")
+                #expect(throws: SessionQRCodePayloadError.insecurePublicBaseURL) {
+                    try SessionQRCodePayloadResolver.resolve(
+                        token: "token",
+                        localBaseURL: "http://192.168.1.10:8585",
+                        publicBaseURL: base,
+                        cloudUploadEnabled: true,
+                        isRelease: isRelease
+                    )
+                }
+            }
+        }
+
+        #expect(SessionQRCodePayloadResolver.evaluatePolicy(
+            publicBaseURL: "//https://photos.example.com",
+            cloudUploadEnabled: true,
+            allowTrustedLocalHTTP: true
+        ) == .unavailable)
+        #expect(throws: SessionQRCodePayloadError.insecurePublicBaseURL) {
+            try SessionQRCodePayloadResolver.resolve(
+                token: "token",
+                localBaseURL: "http://192.168.1.10:8585",
+                publicBaseURL: "//https://photos.example.com",
+                cloudUploadEnabled: true,
+                allowTrustedLocalHTTP: true
+            )
+        }
+    }
 }

@@ -58,6 +58,8 @@ targets:
         com.apple.security.files.user-selected.read-write: true
         com.apple.security.files.downloads.read-write: true
         com.apple.security.print: true
+        keychain-access-groups:
+          - "$(AppIdentifierPrefix)$(PRODUCT_BUNDLE_IDENTIFIER)"
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.nont.prcphoto.mac

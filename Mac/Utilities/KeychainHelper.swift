@@ -8,9 +8,13 @@ import CommonCrypto
 struct PINCredentialRecord: Codable, Equatable, Sendable {
     static let currentVersion = 1
     static let defaultAlgorithm = "PBKDF2-HMAC-SHA256"
-    static let defaultIterations: UInt32 = 100_000
+    static let minimumAcceptedIterations: UInt32 = 100_000
+    static let defaultIterations: UInt32 = 600_000
+    static let maximumAcceptedIterations: UInt32 = 2_000_000
     static let saltByteCount = 16
+    static let maximumSaltByteCount = 64
     static let verifierByteCount = 32
+    static let maximumEncodedRecordByteCount = 4_096
 
     var version: Int
     var algorithm: String
@@ -21,21 +25,30 @@ struct PINCredentialRecord: Codable, Equatable, Sendable {
     var isValid: Bool {
         version == Self.currentVersion
             && algorithm == Self.defaultAlgorithm
-            && salt.count >= Self.saltByteCount
-            && iterations >= 10_000
+            && (Self.saltByteCount...Self.maximumSaltByteCount).contains(salt.count)
+            && (Self.minimumAcceptedIterations...Self.maximumAcceptedIterations).contains(iterations)
             && verifier.count == Self.verifierByteCount
     }
 }
 
 // MARK: - Cryptographic Helpers
 
+func isValidPINFormat(_ pin: String) -> Bool {
+    let digits = pin.utf8
+    return digits.count == 4 && digits.allSatisfy { (48...57).contains($0) }
+}
+
 func derivePBKDF2SHA256(
     pin: String,
     salt: Data,
     iterations: UInt32,
-    outputLength: Int = 32
+    outputLength: Int = PINCredentialRecord.verifierByteCount
 ) -> Data? {
-    guard !pin.isEmpty, !salt.isEmpty, iterations > 0, outputLength > 0 else { return nil }
+    guard isValidPINFormat(pin),
+          (PINCredentialRecord.saltByteCount...PINCredentialRecord.maximumSaltByteCount).contains(salt.count),
+          (PINCredentialRecord.minimumAcceptedIterations...PINCredentialRecord.maximumAcceptedIterations).contains(iterations),
+          outputLength == PINCredentialRecord.verifierByteCount else { return nil }
+
     var derived = [UInt8](repeating: 0, count: outputLength)
     let pinData = Array(pin.utf8)
     let saltData = Array(salt)
@@ -70,8 +83,39 @@ private let kPINFailedAttemptsKey = "admin_pin_failed_attempts"
 private let kPINLockedUntilKey = "admin_pin_locked_until"
 private let kPINMaximumBackoff: TimeInterval = 60
 
+private final class PINCredentialKeychainStoreBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var store: any GenericPasswordKeychainStore
+
+    init(store: any GenericPasswordKeychainStore) {
+        self.store = store
+    }
+
+    func snapshot() -> any GenericPasswordKeychainStore {
+        lock.lock()
+        defer { lock.unlock() }
+        return store
+    }
+
+#if DEBUG
+    func replaceForTesting(with store: any GenericPasswordKeychainStore) {
+        lock.lock()
+        defer { lock.unlock() }
+        self.store = store
+    }
+#endif
+}
+
+private let pinKeychainStore = PINCredentialKeychainStoreBox(store: SecurityGenericPasswordKeychainStore())
+
+#if DEBUG
+func setPINKeychainStoreForTesting(_ store: any GenericPasswordKeychainStore) {
+    pinKeychainStore.replaceForTesting(with: store)
+}
+#endif
+
 func isPINSet() -> Bool {
-    if let data = readPINData() {
+    if let data = readPINData(), data.count <= PINCredentialRecord.maximumEncodedRecordByteCount {
         if let record = try? JSONDecoder().decode(PINCredentialRecord.self, from: data) {
             return record.isValid
         }
@@ -85,117 +129,21 @@ func isPINSet() -> Bool {
     return false
 }
 
-func setPIN(_ pin: String) -> Bool {
-    guard !pin.isEmpty else { return false }
-    var salt = [UInt8](repeating: 0, count: PINCredentialRecord.saltByteCount)
-    let randomStatus = SecRandomCopyBytes(kSecRandomDefault, salt.count, &salt)
-    guard randomStatus == errSecSuccess else { return false }
-    let saltData = Data(salt)
-    guard let verifier = derivePBKDF2SHA256(
-        pin: pin,
-        salt: saltData,
-        iterations: PINCredentialRecord.defaultIterations,
-        outputLength: PINCredentialRecord.verifierByteCount
-    ) else {
-        return false
-    }
+func setPIN(_ pin: String) async -> Bool {
+    await PINCredentialService.shared.setPIN(pin)
+}
 
-    let record = PINCredentialRecord(
-        version: PINCredentialRecord.currentVersion,
-        algorithm: PINCredentialRecord.defaultAlgorithm,
-        salt: saltData,
-        iterations: PINCredentialRecord.defaultIterations,
-        verifier: verifier
-    )
-    guard let encoded = try? JSONEncoder().encode(record) else { return false }
+func verifyPIN(_ pin: String) async -> Bool {
+    await PINCredentialService.shared.verifyPIN(pin)
+}
 
-    let query: [String: Any] = [
-        kSecClass as String: kSecClassGenericPassword,
-        kSecAttrService as String: kPINService,
-        kSecAttrAccount as String: kPINAccount
-    ]
-    let updateStatus = SecItemUpdate(
-        query as CFDictionary,
-        [
-            kSecValueData as String: encoded,
-            kSecAttrAccessible as String: kSecAttrAccessibleWhenUnlockedThisDeviceOnly
-        ] as CFDictionary
-    )
-    let status: OSStatus
-    if updateStatus == errSecItemNotFound {
-        var addQuery = query
-        addQuery[kSecValueData as String] = encoded
-        addQuery[kSecAttrAccessible as String] = kSecAttrAccessibleWhenUnlockedThisDeviceOnly
-        status = SecItemAdd(addQuery as CFDictionary, nil)
-    } else {
-        status = updateStatus
-    }
+@discardableResult
+func clearPIN() -> Bool {
+    let status = pinKeychainStore.snapshot().deleteBothCopies(service: kPINService, account: kPINAccount)
     guard status == errSecSuccess else { return false }
     UserDefaults.standard.removeObject(forKey: kPINKey)
     resetPINBackoff()
     return true
-}
-
-func verifyPIN(_ pin: String) -> Bool {
-    guard pinLockoutRemaining() == 0 else { return false }
-    let storedKeychain = readPINData()
-    let storedUserDefaults = UserDefaults.standard.string(forKey: kPINKey).map { Data($0.utf8) }
-
-    guard let stored = storedKeychain ?? storedUserDefaults else {
-        return false
-    }
-
-    // Modern versioned record
-    if let record = try? JSONDecoder().decode(PINCredentialRecord.self, from: stored) {
-        guard record.isValid else {
-            // Malformed record fails closed without clearing or resetting PIN
-            recordPINFailure()
-            return false
-        }
-        guard let computedVerifier = derivePBKDF2SHA256(
-            pin: pin,
-            salt: record.salt,
-            iterations: record.iterations,
-            outputLength: record.verifier.count
-        ) else {
-            recordPINFailure()
-            return false
-        }
-        guard constantTimeEquals(computedVerifier, record.verifier) else {
-            recordPINFailure()
-            return false
-        }
-        resetPINBackoff()
-        return true
-    }
-
-    // Legacy SHA-256 verification (hex string or raw bytes)
-    let legacyHex = hashPINLegacy(pin)
-    let matchesHex = constantTimeEquals(stored, Data(legacyHex.utf8))
-    let matchesRaw = constantTimeEquals(stored, Data(SHA256.hash(data: Data(pin.utf8))))
-
-    if matchesHex || matchesRaw {
-        // Valid legacy PIN: migrate to versioned PBKDF2 record in Keychain
-        if setPIN(pin) {
-            UserDefaults.standard.removeObject(forKey: kPINKey)
-        }
-        resetPINBackoff()
-        return true
-    }
-
-    // Verification failed
-    recordPINFailure()
-    return false
-}
-
-func clearPIN() {
-    SecItemDelete([
-        kSecClass as String: kSecClassGenericPassword,
-        kSecAttrService as String: kPINService,
-        kSecAttrAccount as String: kPINAccount
-    ] as CFDictionary)
-    UserDefaults.standard.removeObject(forKey: kPINKey)
-    resetPINBackoff()
 }
 
 func pinLockoutRemaining(now: Date = Date()) -> TimeInterval {
@@ -203,16 +151,127 @@ func pinLockoutRemaining(now: Date = Date()) -> TimeInterval {
 }
 
 func readPINData() -> Data? {
-    var result: AnyObject?
-    let status = SecItemCopyMatching([
-        kSecClass as String: kSecClassGenericPassword,
-        kSecAttrService as String: kPINService,
-        kSecAttrAccount as String: kPINAccount,
-        kSecReturnData as String: true,
-        kSecMatchLimit as String: kSecMatchLimitOne
-    ] as CFDictionary, &result)
-    guard status == errSecSuccess else { return nil }
-    return result as? Data
+    let result = pinKeychainStore.snapshot().readDataMigratingToDataProtection(
+        service: kPINService,
+        account: kPINAccount,
+        accessibility: .whenUnlockedThisDeviceOnly
+    )
+    if let status = result.legacyCleanupError {
+        reportLegacyKeychainCleanupFailure(status)
+    }
+    return result.data
+}
+
+private actor PINCredentialService {
+    static let shared = PINCredentialService()
+
+    func setPIN(_ pin: String) -> Bool {
+        guard isValidPINFormat(pin), storeCredential(pin) else { return false }
+        UserDefaults.standard.removeObject(forKey: kPINKey)
+        resetPINBackoff()
+        return true
+    }
+
+    func verifyPIN(_ pin: String) -> Bool {
+        guard !Task.isCancelled else { return false }
+        guard pinLockoutRemaining() == 0 else { return false }
+        guard isValidPINFormat(pin) else {
+            recordPINFailure()
+            return false
+        }
+
+        let storedKeychain = readPINData()
+        let storedUserDefaults = UserDefaults.standard.string(forKey: kPINKey).map { Data($0.utf8) }
+        guard let stored = storedKeychain ?? storedUserDefaults,
+              stored.count <= PINCredentialRecord.maximumEncodedRecordByteCount else {
+            return false
+        }
+
+        if let record = try? JSONDecoder().decode(PINCredentialRecord.self, from: stored) {
+            guard record.isValid,
+                  let computedVerifier = derivePBKDF2SHA256(
+                    pin: pin,
+                    salt: record.salt,
+                    iterations: record.iterations,
+                    outputLength: record.verifier.count
+                  ) else {
+                recordPINFailure()
+                return false
+            }
+            guard !Task.isCancelled else { return false }
+            guard constantTimeEquals(computedVerifier, record.verifier) else {
+                recordPINFailure()
+                return false
+            }
+
+            resetPINBackoff()
+            let upgradedCredential = record.iterations < PINCredentialRecord.defaultIterations
+                && storeCredential(pin)
+            if storedKeychain != nil || upgradedCredential {
+                UserDefaults.standard.removeObject(forKey: kPINKey)
+            }
+            return true
+        }
+
+        // Legacy SHA-256 verification (hex string or raw bytes).
+        let legacyHex = hashPINLegacy(pin)
+        let matchesHex = constantTimeEquals(stored, Data(legacyHex.utf8))
+        let matchesRaw = constantTimeEquals(stored, Data(SHA256.hash(data: Data(pin.utf8))))
+
+        if matchesHex || matchesRaw {
+            guard !Task.isCancelled else { return false }
+            if storeCredential(pin) {
+                UserDefaults.standard.removeObject(forKey: kPINKey)
+            }
+            resetPINBackoff()
+            return true
+        }
+
+        recordPINFailure()
+        return false
+    }
+
+    private func storeCredential(_ pin: String) -> Bool {
+        guard !Task.isCancelled, isValidPINFormat(pin) else { return false }
+        var salt = [UInt8](repeating: 0, count: PINCredentialRecord.saltByteCount)
+        let randomStatus = SecRandomCopyBytes(kSecRandomDefault, salt.count, &salt)
+        guard randomStatus == errSecSuccess else { return false }
+        let saltData = Data(salt)
+        guard let verifier = derivePBKDF2SHA256(
+            pin: pin,
+            salt: saltData,
+            iterations: PINCredentialRecord.defaultIterations
+        ), !Task.isCancelled else { return false }
+
+        let record = PINCredentialRecord(
+            version: PINCredentialRecord.currentVersion,
+            algorithm: PINCredentialRecord.defaultAlgorithm,
+            salt: saltData,
+            iterations: PINCredentialRecord.defaultIterations,
+            verifier: verifier
+        )
+        guard let encoded = try? JSONEncoder().encode(record),
+              encoded.count <= PINCredentialRecord.maximumEncodedRecordByteCount else { return false }
+
+        let keychainStore = pinKeychainStore.snapshot()
+        let status = keychainStore.writeDataAndVerify(
+            encoded,
+            service: kPINService,
+            account: kPINAccount,
+            useDataProtectionKeychain: true,
+            accessibility: .whenUnlockedThisDeviceOnly
+        )
+        guard status == errSecSuccess else { return false }
+        let legacyDeleteStatus = keychainStore.deleteData(
+            service: kPINService,
+            account: kPINAccount,
+            useDataProtectionKeychain: false
+        )
+        if legacyDeleteStatus != errSecSuccess && legacyDeleteStatus != errSecItemNotFound {
+            reportLegacyKeychainCleanupFailure(legacyDeleteStatus)
+        }
+        return true
+    }
 }
 
 private func recordPINFailure(now: Date = Date()) {

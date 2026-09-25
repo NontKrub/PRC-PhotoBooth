@@ -27,7 +27,138 @@ private enum ControlStressError: Error {
     case connectionClosed
     case unexpectedFrame
     case unexpectedMessage(Int)
+    case sendFailed(sessionID: String, messageIndex: Int, outcome: BoothControlSendOutcome)
+    case connectionNotReady(sessionID: String, detail: String?)
     case listenerHasNoPort
+    case timedOut
+}
+
+private final class ControlStressSendWaiter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var continuation: CheckedContinuation<BoothControlSendOutcome, Never>?
+    private var timeout: DispatchWorkItem?
+
+    init(_ continuation: CheckedContinuation<BoothControlSendOutcome, Never>) {
+        self.continuation = continuation
+    }
+
+    func scheduleTimeout(on queue: DispatchQueue) {
+        let timeout = DispatchWorkItem { [weak self] in
+            self?.finish(.networkSendFailed)
+        }
+        lock.lock()
+        guard continuation != nil else {
+            lock.unlock()
+            return
+        }
+        self.timeout = timeout
+        lock.unlock()
+        queue.asyncAfter(deadline: .now() + .seconds(10), execute: timeout)
+    }
+
+    func finish(_ outcome: BoothControlSendOutcome) {
+        lock.lock()
+        guard let continuation else {
+            lock.unlock()
+            return
+        }
+        self.continuation = nil
+        let timeout = self.timeout
+        self.timeout = nil
+        lock.unlock()
+        timeout?.cancel()
+        continuation.resume(returning: outcome)
+    }
+}
+
+private final class ControlStressConnectionLifetime: @unchecked Sendable {
+    private enum ReadinessState: Equatable {
+        case ready
+        case failed(String)
+    }
+
+    private let lock = NSLock()
+    private let readinessSemaphore = DispatchSemaphore(value: 0)
+    private var isClosed = false
+    private var continuation: CheckedContinuation<Void, Never>?
+    private var readinessState: ReadinessState?
+    private var lastWaitingError: String?
+
+    func didBecomeReady() {
+        resolveReadiness(.ready)
+    }
+
+    func didFail(_ error: Error) {
+        resolveReadiness(.failed(error.localizedDescription))
+    }
+
+    func didWait(_ error: Error) {
+        lock.lock()
+        if readinessState == nil { lastWaitingError = error.localizedDescription }
+        lock.unlock()
+    }
+
+    func waitUntilReady(sessionID: String, timeout: TimeInterval = 10) throws {
+        guard readinessSemaphore.wait(timeout: .now() + timeout) == .success else {
+            lock.lock()
+            let detail = lastWaitingError
+            lock.unlock()
+            throw ControlStressError.connectionNotReady(sessionID: sessionID, detail: detail)
+        }
+        lock.lock()
+        let state = readinessState
+        lock.unlock()
+        switch state {
+        case .ready:
+            return
+        case .failed(let detail):
+            throw ControlStressError.connectionNotReady(sessionID: sessionID, detail: detail)
+        case nil:
+            throw ControlStressError.connectionNotReady(sessionID: sessionID, detail: nil)
+        }
+    }
+
+    private func resolveReadiness(_ state: ReadinessState) {
+        lock.lock()
+        guard readinessState == nil else {
+            lock.unlock()
+            return
+        }
+        readinessState = state
+        lock.unlock()
+        readinessSemaphore.signal()
+    }
+
+    func didClose() {
+        resolveReadiness(.failed(ControlStressError.connectionCancelled.localizedDescription))
+        lock.lock()
+        isClosed = true
+        let continuation = self.continuation
+        self.continuation = nil
+        lock.unlock()
+        continuation?.resume()
+    }
+
+    func cancel(_ connection: NWConnection) async {
+        await withCheckedContinuation { continuation in
+            lock.lock()
+            guard !isClosed else {
+                lock.unlock()
+                continuation.resume()
+                return
+            }
+            self.continuation = continuation
+            lock.unlock()
+            connection.cancel()
+        }
+    }
+
+    func cancelIfNeeded(_ connection: NWConnection) {
+        lock.lock()
+        let shouldCancel = !isClosed
+        lock.unlock()
+        if shouldCancel { connection.cancel() }
+    }
 }
 
 private final class ControlStressReceiver: @unchecked Sendable {
@@ -39,6 +170,9 @@ private final class ControlStressReceiver: @unchecked Sendable {
     private var nextMessageIndex = 0
     private var finalResult: Result<Void, Error>?
     private var continuation: CheckedContinuation<Void, Error>?
+    private var waitTimeout: DispatchWorkItem?
+    private var isConnectionClosed = false
+    private var closeContinuation: CheckedContinuation<Void, Never>?
 
     init(expected: [Message], secureChannel: BoothSecureChannel) {
         self.expected = expected
@@ -61,6 +195,9 @@ private final class ControlStressReceiver: @unchecked Sendable {
                 case .failed(let error):
                     self.finish(.failure(error))
                 case .cancelled:
+                    self.isConnectionClosed = true
+                    self.closeContinuation?.resume()
+                    self.closeContinuation = nil
                     if self.finalResult == nil {
                         self.finish(.failure(ControlStressError.connectionCancelled))
                     }
@@ -80,6 +217,11 @@ private final class ControlStressReceiver: @unchecked Sendable {
                     Self.resume(continuation, with: finalResult)
                 } else {
                     self.continuation = continuation
+                    let timeout = DispatchWorkItem { [weak self] in
+                        self?.finish(.failure(ControlStressError.timedOut))
+                    }
+                    self.waitTimeout = timeout
+                    self.queue.asyncAfter(deadline: .now() + .seconds(10), execute: timeout)
                 }
             }
         }
@@ -88,6 +230,19 @@ private final class ControlStressReceiver: @unchecked Sendable {
     func cancel() {
         queue.async { [weak self] in
             self?.connection?.cancel()
+        }
+    }
+
+    func cancelAndWait() async {
+        await withCheckedContinuation { continuation in
+            queue.async { [weak self] in
+                guard let self, !self.isConnectionClosed else {
+                    continuation.resume()
+                    return
+                }
+                self.closeContinuation = continuation
+                self.connection?.cancel()
+            }
         }
     }
 
@@ -131,6 +286,8 @@ private final class ControlStressReceiver: @unchecked Sendable {
     private func finish(_ result: Result<Void, Error>) {
         guard finalResult == nil else { return }
         finalResult = result
+        waitTimeout?.cancel()
+        waitTimeout = nil
         if let continuation {
             self.continuation = nil
             Self.resume(continuation, with: result)
@@ -156,6 +313,9 @@ private final class ControlStressServer: @unchecked Sendable {
     private let listener: NWListener
     private let receiver: ControlStressReceiver
     private var readyContinuation: CheckedContinuation<NWEndpoint.Port, Error>?
+    private var stopContinuation: CheckedContinuation<Void, Never>?
+    private var isStopped = false
+    private var stopRequested = false
 
     init(expected: [Message], secureChannel: BoothSecureChannel) throws {
         listener = try NWListener(using: .tcp)
@@ -178,6 +338,10 @@ private final class ControlStressServer: @unchecked Sendable {
                         self.resolveReady(.success(port))
                     case .failed(let error):
                         self.resolveReady(.failure(error))
+                    case .cancelled:
+                        self.isStopped = true
+                        self.stopContinuation?.resume()
+                        self.stopContinuation = nil
                     default:
                         break
                     }
@@ -195,8 +359,24 @@ private final class ControlStressServer: @unchecked Sendable {
     }
 
     func stop() {
-        listener.cancel()
+        queue.async { [weak self] in
+            self?.cancelListenerIfNeeded()
+        }
         receiver.cancel()
+    }
+
+    func stopAndWait() async {
+        await withCheckedContinuation { continuation in
+            queue.async { [weak self] in
+                guard let self, !self.isStopped else {
+                    continuation.resume()
+                    return
+                }
+                self.stopContinuation = continuation
+                self.cancelListenerIfNeeded()
+            }
+        }
+        await receiver.cancelAndWait()
     }
 
     private func resolveReady(_ result: Result<NWEndpoint.Port, Error>) {
@@ -209,6 +389,20 @@ private final class ControlStressServer: @unchecked Sendable {
             continuation.resume(throwing: error)
         }
     }
+
+    private func cancelListenerIfNeeded() {
+        guard !isStopped, !stopRequested else { return }
+        stopRequested = true
+        listener.cancel()
+    }
+}
+
+private func startControlStressServer(
+    expected: [Message],
+    secureChannel: BoothSecureChannel
+) async throws -> (ControlStressServer, NWEndpoint.Port) {
+    let server = try ControlStressServer(expected: expected, secureChannel: secureChannel)
+    return (server, try await server.start())
 }
 
 private final class TransportLivenessObserver: @unchecked Sendable {
@@ -751,34 +945,67 @@ struct NetworkRouteTests {
             try macChannel.configure(secret: secret, localHello: macHello, peerHello: iPadHello)
             try iPadChannel.configure(secret: secret, localHello: iPadHello, peerHello: macHello)
 
-            let server = try ControlStressServer(expected: messages, secureChannel: macChannel)
-            let port = try await server.start()
-            let queue = DispatchQueue(label: "PRC-PhotoBooth.Tests.TransportSoak.\(index)")
-            let connection = NWConnection(host: "127.0.0.1", port: port, using: .tcp)
-            let pump = BoothControlWritePump(queue: queue, secureChannel: iPadChannel)
-            connection.start(queue: queue)
-            pump.bind(connection, generation: index + 1)
-            defer {
-                pump.invalidate(generation: index + 2)
-                connection.cancel()
-                server.stop()
-            }
-
-            for message in messages {
-                let outcome = await withCheckedContinuation { continuation in
-                    _ = pump.enqueue(
-                        message,
-                        connection: connection,
-                        generation: index + 1,
-                        secure: true,
-                        completion: { outcome in continuation.resume(returning: outcome) }
-                    )
+            do {
+                let (server, port) = try await startControlStressServer(
+                    expected: messages,
+                    secureChannel: macChannel
+                )
+                let queue = DispatchQueue(label: "PRC-PhotoBooth.Tests.TransportSoak.\(index)")
+                let parameters = NWParameters.tcp
+                parameters.allowLocalEndpointReuse = true
+                let connection = NWConnection(host: "127.0.0.1", port: port, using: parameters)
+                let pump = BoothControlWritePump(queue: queue, secureChannel: iPadChannel)
+                let connectionLifetime = ControlStressConnectionLifetime()
+                connection.stateUpdateHandler = { state in
+                    switch state {
+                    case .ready:
+                        connectionLifetime.didBecomeReady()
+                    case .failed(let error):
+                        connectionLifetime.didFail(error)
+                        pump.invalidate(generation: index + 2)
+                    case .waiting(let error):
+                        connectionLifetime.didWait(error)
+                    case .cancelled:
+                        connectionLifetime.didClose()
+                    default:
+                        break
+                    }
                 }
-                #expect(outcome == .sent)
+                pump.bind(connection, generation: index + 1)
+                connection.start(queue: queue)
+                defer {
+                    pump.invalidate(generation: index + 2)
+                    connectionLifetime.cancelIfNeeded(connection)
+                    server.stop()
+                }
+                try connectionLifetime.waitUntilReady(sessionID: sessionID)
+
+                for (messageIndex, message) in messages.enumerated() {
+                    let outcome = await withCheckedContinuation { continuation in
+                        let waiter = ControlStressSendWaiter(continuation)
+                        waiter.scheduleTimeout(on: queue)
+                        _ = pump.enqueue(
+                            message,
+                            connection: connection,
+                            generation: index + 1,
+                            secure: true,
+                            completion: { outcome in waiter.finish(outcome) }
+                        )
+                    }
+                    guard outcome == .sent else {
+                        throw ControlStressError.sendFailed(
+                            sessionID: sessionID,
+                            messageIndex: messageIndex,
+                            outcome: outcome
+                        )
+                    }
+                }
+                try await server.wait()
+                #expect(pump.pendingMessageCount == 0)
+                #expect(pump.pendingByteCount == 0)
+                await connectionLifetime.cancel(connection)
+                await server.stopAndWait()
             }
-            try await server.wait()
-            #expect(pump.pendingMessageCount == 0)
-            #expect(pump.pendingByteCount == 0)
 
             sessionGate.synchronize(sessionID: sessionID, sequence: 0, authorityEpoch: testAuthorityEpoch)
             let actionCount = index.isMultiple(of: 7) ? 2 : 1

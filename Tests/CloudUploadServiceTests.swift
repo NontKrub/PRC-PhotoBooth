@@ -6,6 +6,36 @@ import Darwin
 
 @Suite("CloudUploadService")
 struct CloudUploadServiceTests {
+    @Test("public HTTP URL is rejected before cloud commands or verification")
+    func rejectsPublicHTTPBeforeUpload() async throws {
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try Data([1]).write(to: directory.appendingPathComponent("strip.png"))
+        let runner = TestCloudCommandRunner()
+        let verifier = TestCloudURLVerifier()
+        let service = CloudUploadService(runner: runner, verifier: verifier)
+
+        do {
+            try await service.upload(
+                manifest: makeManifest(directory: directory),
+                configuration: CloudUploadConfiguration(
+                    sshHost: "host",
+                    remoteBasePath: "/srv/photos",
+                    publicBaseURL: "http://photos.example"
+                )
+            )
+            Issue.record("Expected public HTTP URL to be rejected")
+        } catch let error as JobExecutionError {
+            guard case .permanent = error else {
+                Issue.record("Expected a permanent configuration error")
+                return
+            }
+        }
+
+        #expect(await runner.commands.isEmpty)
+        #expect(await verifier.urls.isEmpty)
+    }
+
     @Test("creates remote directories, excludes work files, and publishes token link")
     func uploadsExpectedCommands() async throws {
         let directory = try temporaryDirectory()

@@ -393,11 +393,10 @@ actor CloudUploadService {
               !manifest.relativeDirectoryPath.split(separator: "/").contains(".."),
               isSafeComponent(manifest.id),
               isSafeComponent(manifest.downloadToken),
-              let publicURL = URL(string: publicBase),
-              ["http", "https"].contains(publicURL.scheme?.lowercased() ?? ""),
-              publicURL.host != nil else {
+              let validatedPublicBase = ValidatedPublicGuestBaseURL(string: publicBase) else {
             throw JobExecutionError.permanent("Cloud upload configuration or session path is invalid.")
         }
+        let publicURL = validatedPublicBase.url
 
         let remoteRoot = "/\(remoteBase)"
         let stagingDirectory = "\(remoteRoot)/.staging/\(manifest.id)"

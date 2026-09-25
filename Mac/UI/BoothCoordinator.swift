@@ -36,6 +36,8 @@ enum JobRecoveryError: LocalizedError, Sendable, Equatable {
     case manualPrintResolutionRequired(String)
     case manifestNotFound(String)
     case manifestCancelled(String)
+    case manifestNotRetryable(String, RuntimeSessionStatus)
+    case retryAlreadyInProgress(String)
 
     var errorDescription: String? {
         switch self {
@@ -49,6 +51,10 @@ enum JobRecoveryError: LocalizedError, Sendable, Equatable {
             return "Manifest for session \(id) was not found."
         case .manifestCancelled(let id):
             return "Session \(id) is cancelled and cannot be retried."
+        case .manifestNotRetryable(let id, let status):
+            return "Required job for session \(id) cannot be retried while the manifest is \(status.rawValue)."
+        case .retryAlreadyInProgress(let id):
+            return "A recovery operation is already running for session \(id)."
         }
     }
 }
@@ -184,6 +190,19 @@ final class BoothCoordinator {
     private var currentSession: BoothSession?
     private var currentManifest: SessionManifest?
     private var currentManifestID: String?
+    @ObservationIgnored private var recoveryInFlightSessionIDs: Set<String> = []
+    @ObservationIgnored private var jobReconciliationDirty = false
+    @ObservationIgnored private var jobReconciliationTask: Task<Void, Never>?
+    @ObservationIgnored private var serverRouteRefreshGeneration: UInt64 = 0
+    @ObservationIgnored private var guestDeliveryConfigurationDirty = false
+    @ObservationIgnored private var guestDeliveryConfigurationTask: Task<Void, Never>?
+    @ObservationIgnored private var deferredAutomaticCloudRetrySessionIDs: Set<String> = []
+#if DEBUG
+    @ObservationIgnored var beforeManualRetryQueueMutationForTesting: (@MainActor () async -> Void)?
+    @ObservationIgnored var beforeCloudRetryQueueMutationForTesting: (@MainActor (String) async -> Void)?
+    @ObservationIgnored var beforeCancellationQueueBarrierForTesting: (@MainActor (String) async -> Void)?
+    @ObservationIgnored private var stopCancellationAfterJobBarrierForTesting = false
+#endif
     private(set) var lastCompletedSessionID: String?
     private var retakeCounts: [Int: Int] = [:]
     private var gifFrames: [Int: [CGImage]] = [:]
@@ -343,9 +362,20 @@ final class BoothCoordinator {
             detail: "SwiftData store is available."
         )
         self.startupComponents = initialStartupComponents
+        recoveryService.isSessionRecoveryInFlight = { [weak self] sessionID in
+            self?.recoveryInFlightSessionIDs.contains(sessionID) ?? false
+        }
+        recoveryService.claimSessionRecovery = { [weak self] sessionID in
+            self?.claimSessionRecovery(sessionID) ?? false
+        }
+        recoveryService.releaseSessionRecovery = { [weak self] sessionID in
+            self?.releaseSessionRecovery(sessionID)
+        }
+        recoveryService.onRecoveryScanFinished = { [weak self] in
+            self?.scheduleJobReconciliation()
+        }
         jobQueue.onJobsChanged = { [weak self] in
-            self?.reconcileCurrentSessionJobs()
-            self?.reconcileRecoveredSessions()
+            self?.scheduleJobReconciliation()
             self?.cleanupCompletedWorkingFiles()
             Task { @MainActor [weak self] in
                 guard let self else { return }
@@ -505,9 +535,17 @@ final class BoothCoordinator {
         )
         preflight = BoothPreflightService()
         startupComponents = [:]
+        recoveryService.isSessionRecoveryInFlight = { [weak self] sessionID in
+            self?.recoveryInFlightSessionIDs.contains(sessionID) ?? false
+        }
+        recoveryService.claimSessionRecovery = { [weak self] sessionID in
+            self?.claimSessionRecovery(sessionID) ?? false
+        }
+        recoveryService.releaseSessionRecovery = { [weak self] sessionID in
+            self?.releaseSessionRecovery(sessionID)
+        }
         jobQueue.onJobsChanged = { [weak self] in
-            self?.reconcileCurrentSessionJobs()
-            self?.reconcileRecoveredSessions()
+            self?.scheduleJobReconciliation()
             self?.cleanupCompletedWorkingFiles()
         }
     }
@@ -534,11 +572,35 @@ final class BoothCoordinator {
     }
 
     var sharingStationURL: String? {
-        guard let gallery = activeExperienceDocument?.gallery, gallery.mode != .disabled else { return nil }
+        let defaults = UserDefaults.standard
+        let allowTrustedLocalHTTP = defaults.bool(forKey: "allowTrustedLocalHTTP")
+        let policy = SessionQRCodePayloadResolver.evaluatePolicy(
+            publicBaseURL: defaults.string(forKey: "publicBaseURL"),
+            cloudUploadEnabled: defaults.bool(forKey: "cloudUploadEnabled"),
+            allowTrustedLocalHTTP: allowTrustedLocalHTTP
+        )
+        guard policy.permitsLocalGuestHTTP(allowTrustedLocalHTTP: allowTrustedLocalHTTP),
+              let gallery = activeExperienceDocument?.gallery,
+              gallery.mode != .disabled else { return nil }
         let base = serverURL.isEmpty
             ? "http://\(LocalWebServer.lanIPAddress() ?? "localhost"):8585"
             : serverURL
         return "\(base)/e/\(gallery.eventToken)/station"
+    }
+
+    func guestDeliveryConfigurationDidChange() {
+        serverRouteRefreshGeneration &+= 1
+        guestDeliveryConfigurationDirty = true
+        guard guestDeliveryConfigurationTask == nil else { return }
+        guestDeliveryConfigurationTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            defer { guestDeliveryConfigurationTask = nil }
+            while guestDeliveryConfigurationDirty {
+                guestDeliveryConfigurationDirty = false
+                await refreshServerRoutes()
+                await runSafePreflight()
+            }
+        }
     }
 
     func performRemoteOperatorAction(_ action: RemoteOperatorAction) async -> Bool {
@@ -693,15 +755,25 @@ final class BoothCoordinator {
         }
         Task { @MainActor [weak self] in
             guard let self else { return }
-            let manifest: SessionManifest?
+            guard claimSessionRecovery(sessionID) else {
+                errorMessage = JobRecoveryError.retryAlreadyInProgress(sessionID).localizedDescription
+                return
+            }
+            defer { releaseSessionRecovery(sessionID, scheduleReconciliation: true) }
+
+            let manifest: SessionManifest
             do {
                 manifest = try await manifestStore.load(sessionID: sessionID)
             } catch {
                 errorMessage = "Cloud upload could not load the session: \(error.localizedDescription)"
                 return
             }
-            let snapshot = manifest?.cloudDelivery
-            let cloudEnabled = manifest?.deliveryIntent?.cloudUploadEnabled
+            guard manifest.status != .cancelled else {
+                errorMessage = "This session is cancelled and cannot be requeued."
+                return
+            }
+            let snapshot = manifest.cloudDelivery
+            let cloudEnabled = manifest.deliveryIntent?.cloudUploadEnabled
                 ?? (snapshot != nil || UserDefaults.standard.bool(forKey: "cloudUploadEnabled"))
             if !cloudEnabled {
                 errorMessage = "Cloud upload is disabled."
@@ -716,21 +788,25 @@ final class BoothCoordinator {
             }
             let publicBase = (snapshot?.publicBaseURL ?? UserDefaults.standard.string(forKey: "publicBaseURL") ?? "")
                 .trimmingCharacters(in: .whitespacesAndNewlines)
-            guard let url = URL(string: publicBase),
-                  ["http", "https"].contains(url.scheme?.lowercased() ?? ""),
-                  url.host != nil else {
+            guard ValidatedPublicGuestBaseURL(string: publicBase) != nil else {
                 errorMessage = "Cloud upload is not configured: public URL is missing or invalid."
                 return
             }
 
-            jobQueue.forceRequeueCloudUpload(sessionID: sessionID) { [weak self] result in
-                self?.errorMessage = switch result {
+#if DEBUG
+            await beforeCloudRetryQueueMutationForTesting?(sessionID)
+#endif
+            do {
+                let result = try await jobQueue.forceRequeueCloudUpload(sessionID: sessionID)
+                errorMessage = switch result {
                 case .queued: "Web upload queued."
                 case .alreadyQueued: "Web upload is already waiting."
                 case .alreadyRunning: "Web upload is already running."
                 case .notFound: "No web upload job exists for this session."
                 case .sessionCancelled: "This session is cancelled and cannot be requeued."
                 }
+            } catch {
+                errorMessage = "Cloud upload could not be requeued: \(error.localizedDescription)"
             }
         }
     }
@@ -751,8 +827,21 @@ final class BoothCoordinator {
         guard let job = jobQueue.jobs.first(where: { $0.id == jobID }) else {
             throw JobRecoveryError.jobNotFound(jobID)
         }
-        if job.lastFailureDisposition == .sideEffectUnknown {
+        let eligibility = try await jobQueue.manualRetryEligibility(jobID: jobID)
+        if eligibility == .sideEffectUnknown {
             throw JobRecoveryError.manualPrintResolutionRequired(jobID)
+        }
+        guard eligibility == .eligible else {
+            if eligibility == .sessionCancelled {
+                throw JobRecoveryError.sessionCancelled(job.sessionID)
+            }
+            throw JobQueueStoreError.manualRetryRejected(jobID, eligibility)
+        }
+        guard claimSessionRecovery(job.sessionID) else {
+            throw JobRecoveryError.retryAlreadyInProgress(job.sessionID)
+        }
+        defer {
+            releaseSessionRecovery(job.sessionID, scheduleReconciliation: true)
         }
 
         let manifest: SessionManifest
@@ -769,21 +858,31 @@ final class BoothCoordinator {
 
         var restoredManifest: SessionManifest?
         let isRequired = !job.kind.isOptional
-        if isRequired, manifest.status == .failed {
-            let restored = try await manifestStore.transition(
-                sessionID: job.sessionID,
-                allowedFrom: [.failed]
-            ) { durable in
-                durable.status = .finalizing
-                durable.lastError = nil
-            }
-            restoredManifest = restored
-            if currentManifestID == job.sessionID {
-                currentManifest = restored
+        if isRequired {
+            switch manifest.status {
+            case .failed:
+                let restored = try await manifestStore.transition(
+                    sessionID: job.sessionID,
+                    allowedFrom: [.failed]
+                ) { durable in
+                    durable.status = .finalizing
+                    durable.lastError = nil
+                }
+                restoredManifest = restored
+                if currentManifestID == job.sessionID {
+                    currentManifest = restored
+                }
+            case .finalizing:
+                break
+            case .capturing, .completed, .cancelled:
+                throw JobRecoveryError.manifestNotRetryable(job.sessionID, manifest.status)
             }
         }
 
         do {
+#if DEBUG
+            await beforeManualRetryQueueMutationForTesting?()
+#endif
             try await jobQueue.retry(jobID: jobID)
         } catch {
             if restoredManifest != nil {
@@ -799,7 +898,7 @@ final class BoothCoordinator {
                         currentManifest = rolledBack
                     }
                 } catch {
-                    recoveryService.recordError("Manifest rollback failed for \(job.sessionID): \(error.localizedDescription)")
+                    recoveryService.recordError("HIGH SEVERITY: Manifest rollback failed for \(job.sessionID): \(error.localizedDescription)")
                 }
             }
             throw error
@@ -808,70 +907,101 @@ final class BoothCoordinator {
 
     @discardableResult
     func retryAllFailedJobs() async throws -> [SessionJob] {
-        let eligibleCandidates = jobQueue.jobs.filter {
-            ($0.status == .failed || $0.status == .cancelled)
-                && $0.lastFailureDisposition == .retryable
-                && $0.lastFailureDisposition != .sideEffectUnknown
-        }
+        let requestedIDs = Set(jobQueue.jobs.filter {
+            ManualJobRetryEligibility.evaluate($0) == .eligible
+        }.map(\.id))
+        guard !requestedIDs.isEmpty else { return [] }
+
+        let eligibleCandidates = try await jobQueue.eligibleManualRetryJobs(jobIDs: requestedIDs)
         guard !eligibleCandidates.isEmpty else { return [] }
 
-        let requiredEligibleSessions = Set(
-            eligibleCandidates
-                .filter { !$0.kind.isOptional }
-                .map(\.sessionID)
-        )
-
         let candidateSessionIDs = Set(eligibleCandidates.map(\.sessionID))
-        var restoredSessionIDs: [String] = []
-        for sessionID in candidateSessionIDs {
+        let sessionsToClaim = Set(candidateSessionIDs.filter(claimSessionRecovery))
+        guard !sessionsToClaim.isEmpty else { return [] }
+        defer {
+            for sessionID in sessionsToClaim {
+                releaseSessionRecovery(sessionID, scheduleReconciliation: true)
+            }
+        }
+
+        var retryJobIDs = Set<String>()
+        var restoredSessionIDs = Set<String>()
+        for sessionID in sessionsToClaim.sorted() {
+            let sessionCandidates = eligibleCandidates.filter { $0.sessionID == sessionID }
             do {
                 let manifest = try await manifestStore.load(sessionID: sessionID)
                 if manifest.status == .cancelled {
                     _ = try? await jobQueue.cancelAndQuiesceJobs(sessionID: sessionID)
                     continue
                 }
-                if requiredEligibleSessions.contains(sessionID) && manifest.status == .failed {
-                    let restored = try await manifestStore.transition(
-                        sessionID: sessionID,
-                        allowedFrom: [.failed]
-                    ) { durable in
-                        durable.status = .finalizing
-                        durable.lastError = nil
-                    }
-                    restoredSessionIDs.append(sessionID)
-                    if currentManifestID == sessionID {
-                        currentManifest = restored
+                let hasRequiredCandidate = sessionCandidates.contains { !$0.kind.isOptional }
+                if hasRequiredCandidate {
+                    switch manifest.status {
+                    case .failed:
+                        let restored = try await manifestStore.transition(
+                            sessionID: sessionID,
+                            allowedFrom: [.failed]
+                        ) { durable in
+                            durable.status = .finalizing
+                            durable.lastError = nil
+                        }
+                        restoredSessionIDs.insert(sessionID)
+                        if currentManifestID == sessionID {
+                            currentManifest = restored
+                        }
+                    case .finalizing:
+                        break
+                    case .capturing, .completed, .cancelled:
+                        recoveryService.recordError("Required retry skipped for session \(sessionID): manifest is \(manifest.status.rawValue).")
+                        continue
                     }
                 }
+                retryJobIDs.formUnion(sessionCandidates.map(\.id))
             } catch {
                 recoveryService.recordError("Could not inspect/restore manifest \(sessionID): \(error.localizedDescription)")
             }
         }
+        guard !retryJobIDs.isEmpty else { return [] }
 
-        let retried: [SessionJob]
+        let result: ManualRetryBatchResult
         do {
-            retried = try await jobQueue.retryAllFailed()
+            #if DEBUG
+            await beforeManualRetryQueueMutationForTesting?()
+            #endif
+            result = try await jobQueue.retryAllFailed(jobIDs: retryJobIDs)
         } catch {
             for sessionID in restoredSessionIDs {
-                do {
-                    let rolledBack = try await manifestStore.transition(
-                        sessionID: sessionID,
-                        allowedFrom: [.finalizing]
-                    ) { durable in
-                        durable.status = .failed
-                        durable.lastError = "Queue batch retry failed: \(error.localizedDescription)"
-                    }
-                    if currentManifestID == sessionID {
-                        currentManifest = rolledBack
-                    }
-                } catch {
-                    recoveryService.recordError("Batch rollback failed for \(sessionID): \(error.localizedDescription)")
-                }
+                await rollbackRetryManifest(sessionID: sessionID, message: error.localizedDescription)
             }
             throw error
         }
 
-        return retried
+        for sessionID in restoredSessionIDs where !result.retried.contains(where: {
+            $0.sessionID == sessionID && !$0.kind.isOptional
+        }) {
+            await rollbackRetryManifest(sessionID: sessionID, message: "No required queue job was durably requeued.")
+        }
+        for skipped in result.skipped {
+            recoveryService.recordError("Manual retry skipped \(skipped.jobID): \(skipped.reason).")
+        }
+        return result.retried
+    }
+
+    private func rollbackRetryManifest(sessionID: String, message: String) async {
+        do {
+            let rolledBack = try await manifestStore.transition(
+                sessionID: sessionID,
+                allowedFrom: [.finalizing]
+            ) { durable in
+                durable.status = .failed
+                durable.lastError = "Queue retry failed: \(message)"
+            }
+            if currentManifestID == sessionID {
+                currentManifest = rolledBack
+            }
+        } catch {
+            recoveryService.recordError("HIGH SEVERITY: Retry manifest rollback failed for \(sessionID): \(error.localizedDescription)")
+        }
     }
 
     private func currentCloudDeliverySnapshot() -> SessionCloudDeliverySnapshot? {
@@ -912,7 +1042,32 @@ final class BoothCoordinator {
             guard let self, !Task.isCancelled, self.lastNetworkSatisfied == true else { return }
             self.lastAutomaticCloudRetryAt = Date()
             self.automaticCloudRetryTask = nil
-            self.jobQueue.retryFailedCloudUploads()
+            await self.retryFailedCloudUploadsSafely()
+        }
+    }
+
+    private func retryFailedCloudUploadsSafely(sessionIDs requestedSessionIDs: Set<String>? = nil) async {
+        let sessionIDs = requestedSessionIDs ?? Set(jobQueue.jobs.compactMap { job in
+            job.kind == .cloudUpload
+                && job.status == .failed
+                && job.lastFailureDisposition == .retryable
+                ? job.sessionID
+                : nil
+        })
+
+        for sessionID in sessionIDs.sorted() {
+            guard claimSessionRecovery(sessionID) else {
+                deferredAutomaticCloudRetrySessionIDs.insert(sessionID)
+                continue
+            }
+            do {
+                defer { releaseSessionRecovery(sessionID, scheduleReconciliation: true) }
+                let manifest = try await manifestStore.load(sessionID: sessionID)
+                guard manifest.status != .cancelled else { continue }
+                _ = try await jobQueue.retryFailedCloudUploads(sessionIDs: [sessionID])
+            } catch {
+                recoveryService.recordError("Automatic cloud retry was skipped for \(sessionID): \(error.localizedDescription)")
+            }
         }
     }
 
@@ -3127,6 +3282,12 @@ final class BoothCoordinator {
             resynciPad()
             return
         }
+        guard claimSessionRecovery(manifest.id) else {
+            errorMessage = JobRecoveryError.retryAlreadyInProgress(manifest.id).localizedDescription
+            return
+        }
+        defer { releaseSessionRecovery(manifest.id, scheduleReconciliation: true) }
+
         let lifecycleToken = UUID()
         sessionLifecycleOperation = .cancelling(sessionID: manifest.id, token: lifecycleToken)
         let cancelledManifest: SessionManifest
@@ -3157,6 +3318,9 @@ final class BoothCoordinator {
             sessionID: manifest.id,
             timeout: .seconds(10)
         )
+#if DEBUG
+        await beforeCancellationQueueBarrierForTesting?(manifest.id)
+#endif
         do {
             let result = try await jobQueue.cancelAndQuiesceJobs(sessionID: manifest.id)
             guard sessionLifecycleGeneration == lifecycleGeneration,
@@ -3177,6 +3341,10 @@ final class BoothCoordinator {
             recoveryService.recordError("Cancelled session jobs could not be quiesced: \(error.localizedDescription)")
             errorMessage = "Session cancellation was saved; files were retained because background work could not be stopped."
         }
+
+#if DEBUG
+        if stopCancellationAfterJobBarrierForTesting { return }
+#endif
 
         // Keep the durable cancelled manifest when cleanup is pending so a
         // later startup can retry the retained workspace without making the
@@ -3380,37 +3548,104 @@ final class BoothCoordinator {
         return true
     }
 
-    private func reconcileCurrentSessionJobs() {
+    private func scheduleJobReconciliation() {
+        jobReconciliationDirty = true
+        guard jobReconciliationTask == nil else { return }
+        jobReconciliationTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            defer { jobReconciliationTask = nil }
+            while jobReconciliationDirty {
+                jobReconciliationDirty = false
+                await reconcileJobState()
+            }
+        }
+    }
+
+    private func claimSessionRecovery(_ sessionID: String) -> Bool {
+        recoveryInFlightSessionIDs.insert(sessionID).inserted
+    }
+
+    private func releaseSessionRecovery(_ sessionID: String, scheduleReconciliation: Bool = false) {
+        guard recoveryInFlightSessionIDs.remove(sessionID) != nil else { return }
+        if deferredAutomaticCloudRetrySessionIDs.remove(sessionID) != nil {
+            Task { @MainActor [weak self] in
+                await self?.retryFailedCloudUploadsSafely(sessionIDs: [sessionID])
+            }
+        }
+        if scheduleReconciliation {
+            scheduleJobReconciliation()
+        }
+    }
+
+    private func reconcileJobState() async {
+        await reconcileCurrentSessionJobs()
+        await reconcileRecoveredSessions()
+    }
+
+#if DEBUG
+    func reconcileJobsNowForTesting() async {
+        await reconcileJobState()
+    }
+
+    func cancelSessionForTesting(manifest: SessionManifest) async {
+        let session = BoothSession(eventID: manifest.eventID, photoCount: manifest.eventConfig.photoCount)
+        session.id = manifest.id
+        currentSession = session
+        currentManifest = manifest
+        currentManifestID = manifest.id
+        stopCancellationAfterJobBarrierForTesting = true
+        await cancelCurrentSession()
+    }
+
+    func retryFailedCloudUploadsNowForTesting() async {
+        await retryFailedCloudUploadsSafely()
+    }
+#endif
+
+    private func reconcileCurrentSessionJobs() async {
         guard let manifest = currentManifest,
               currentSession != nil,
-              stateMachine.phase == .processing else { return }
+              stateMachine.phase == .processing,
+              !recoveryInFlightSessionIDs.contains(manifest.id) else { return }
         let jobs = jobQueue.jobs.filter { $0.sessionID == manifest.id }
-        let requiredKinds: Set<SessionJobKind> = Set([
-            .renderStrip,
-            .registerDownload
-        ])
-        if requiredKinds.contains(where: { kind in !jobs.contains { $0.kind == kind } }) {
-            Task { @MainActor [weak self] in
-                guard let self else { return }
+        let decision = SessionJobReconciliationDecision.evaluate(
+            manifestStatus: manifest.status,
+            jobs: jobs
+        )
+        switch decision {
+        case .none:
+            return
+        case .enqueueMissingRequiredJobs:
+            do {
+                guard claimSessionRecovery(manifest.id) else { return }
+                defer { releaseSessionRecovery(manifest.id) }
                 do {
                     try await jobQueue.enqueueFinalizationJobs(for: manifest)
                 } catch {
                     recoveryService.recordError("Required finalization jobs could not be repaired: \(error.localizedDescription)")
                 }
             }
-            return
+        case .restoreFinalizing:
+            do {
+                guard claimSessionRecovery(manifest.id) else { return }
+                defer { releaseSessionRecovery(manifest.id) }
+                let restored = try await manifestStore.transition(
+                    sessionID: manifest.id,
+                    allowedFrom: [.failed]
+                ) { durable in
+                    durable.status = .finalizing
+                    durable.lastError = nil
+                }
+                currentManifest = restored
+                scheduleJobReconciliation()
+            } catch {
+                recoveryService.recordError("Runtime recovery could not restore \(manifest.id): \(error.localizedDescription)")
+            }
+        case .fail(let message):
+            await markCurrentSessionFailed(message: message)
+        case .complete:
+            await completeCurrentSessionIfReady()
         }
-        if let failed = jobs.first(where: {
-            ($0.kind == .renderStrip || $0.kind == .registerDownload) && $0.status == .failed
-        }) {
-            Task { await markCurrentSessionFailed(message: failed.lastError ?? "Required job failed.") }
-            return
-        }
-        guard jobs.first(where: { $0.kind == .renderStrip })?.status == .succeeded,
-              jobs.first(where: { $0.kind == .registerDownload })?.status == .succeeded else {
-            return
-        }
-        Task { await completeCurrentSessionIfReady() }
     }
 
     private func cleanupCompletedWorkingFiles() {
@@ -3433,47 +3668,61 @@ final class BoothCoordinator {
         }
     }
 
-    private func reconcileRecoveredSessions() {
+    private func reconcileRecoveredSessions() async {
         guard currentSession == nil else { return }
-        Task { @MainActor [weak self] in
-            guard let self else { return }
-            let results = await manifestStore.loadAll()
-            for result in results {
-                guard case .loaded(let manifest) = result, manifest.status == .finalizing else { continue }
-                let jobs = jobQueue.jobs.filter { $0.sessionID == manifest.id }
-                let requiredKinds: Set<SessionJobKind> = Set([
-                    .renderStrip,
-                    .registerDownload
-                ])
-                if requiredKinds.contains(where: { kind in !jobs.contains { $0.kind == kind } }) {
-                    do {
-                        try await jobQueue.enqueueFinalizationJobs(for: manifest)
-                    } catch {
-                        recoveryService.recordError("Required finalization jobs could not be repaired for \(manifest.id): \(error.localizedDescription)")
-                    }
-                    continue
-                }
-                if let failed = jobs.first(where: {
-                    ($0.kind == .renderStrip || $0.kind == .registerDownload) && $0.status == .failed
-                }) {
-                    do {
-                        _ = try await manifestStore.transition(
-                            sessionID: manifest.id,
-                            allowedFrom: [.finalizing]
-                        ) { durable in
-                            durable.status = .failed
-                            durable.lastError = failed.lastError ?? "Required job failed."
-                        }
-                    } catch {
-                        recoveryService.recordError("Failed recovery manifest update: \(error.localizedDescription)")
-                    }
-                    continue
-                }
-                guard jobs.first(where: { $0.kind == .renderStrip })?.status == .succeeded,
-                      jobs.first(where: { $0.kind == .registerDownload })?.status == .succeeded else {
-                    continue
-                }
+        let results = await manifestStore.loadAll()
+        for result in results {
+            guard case .loaded(let manifest) = result,
+                  !recoveryInFlightSessionIDs.contains(manifest.id) else { continue }
+            let jobs = jobQueue.jobs.filter { $0.sessionID == manifest.id }
+            let decision = SessionJobReconciliationDecision.evaluate(
+                manifestStatus: manifest.status,
+                jobs: jobs
+            )
+            switch decision {
+            case .none:
+                continue
+            case .restoreFinalizing:
+                guard claimSessionRecovery(manifest.id) else { continue }
                 do {
+                    defer { releaseSessionRecovery(manifest.id) }
+                    _ = try await manifestStore.transition(
+                        sessionID: manifest.id,
+                        allowedFrom: [.failed]
+                    ) { durable in
+                        durable.status = .finalizing
+                        durable.lastError = nil
+                    }
+                    scheduleJobReconciliation()
+                } catch {
+                    recoveryService.recordError("Runtime Case A reconciliation failed for \(manifest.id): \(error.localizedDescription)")
+                }
+            case .enqueueMissingRequiredJobs:
+                guard claimSessionRecovery(manifest.id) else { continue }
+                do {
+                    defer { releaseSessionRecovery(manifest.id) }
+                    try await jobQueue.enqueueFinalizationJobs(for: manifest)
+                } catch {
+                    recoveryService.recordError("Required finalization jobs could not be repaired for \(manifest.id): \(error.localizedDescription)")
+                }
+            case .fail(let message):
+                guard claimSessionRecovery(manifest.id) else { continue }
+                do {
+                    defer { releaseSessionRecovery(manifest.id) }
+                    _ = try await manifestStore.transition(
+                        sessionID: manifest.id,
+                        allowedFrom: [.finalizing]
+                    ) { durable in
+                        durable.status = .failed
+                        durable.lastError = message
+                    }
+                } catch {
+                    recoveryService.recordError("Runtime Case B reconciliation failed for \(manifest.id): \(error.localizedDescription)")
+                }
+            case .complete:
+                guard claimSessionRecovery(manifest.id) else { continue }
+                do {
+                    defer { releaseSessionRecovery(manifest.id) }
                     let completed = try await manifestStore.transition(
                         sessionID: manifest.id,
                         allowedFrom: [.finalizing]
@@ -3505,7 +3754,10 @@ final class BoothCoordinator {
     }
 
     private func markCurrentSessionFailed(message: String) async {
-        guard let current = currentManifest, current.status != .failed else { return }
+        guard let current = currentManifest,
+              current.status != .failed,
+              claimSessionRecovery(current.id) else { return }
+        defer { releaseSessionRecovery(current.id) }
         do {
             let updated = try await manifestStore.transition(
                 sessionID: current.id,
@@ -3526,8 +3778,10 @@ final class BoothCoordinator {
               currentSession != nil,
               stateMachine.phase == .processing,
               case .idle = sessionLifecycleOperation,
+              !recoveryInFlightSessionIDs.contains(original.id),
               completionInFlightSessionID != original.id,
-              finishedAwaitingCustomerAckSessionID != original.id else { return }
+              finishedAwaitingCustomerAckSessionID != original.id,
+              claimSessionRecovery(original.id) else { return }
         let lifecycleGeneration = sessionLifecycleGeneration
         let lifecycleToken = UUID()
         // Claimed synchronously, before the first suspension point, so a
@@ -3535,6 +3789,7 @@ final class BoothCoordinator {
         completionInFlightSessionID = original.id
         sessionLifecycleOperation = .completing(sessionID: original.id, token: lifecycleToken)
         defer {
+            releaseSessionRecovery(original.id)
             completionInFlightSessionID = nil
             if sessionLifecycleOperation == .completing(sessionID: original.id, token: lifecycleToken) {
                 sessionLifecycleOperation = .idle
@@ -3652,6 +3907,20 @@ final class BoothCoordinator {
     }
 
     func refreshServerRoutes() async {
+        serverRouteRefreshGeneration &+= 1
+        let generation = serverRouteRefreshGeneration
+        let defaults = UserDefaults.standard
+        let allowTrustedLocalHTTP = defaults.bool(forKey: "allowTrustedLocalHTTP")
+        let policy = SessionQRCodePayloadResolver.evaluatePolicy(
+            publicBaseURL: defaults.string(forKey: "publicBaseURL"),
+            cloudUploadEnabled: defaults.bool(forKey: "cloudUploadEnabled"),
+            allowTrustedLocalHTTP: allowTrustedLocalHTTP
+        )
+        let exposure: LocalGuestRouteExposure = policy.permitsLocalGuestHTTP(
+            allowTrustedLocalHTTP: allowTrustedLocalHTTP
+        ) ? .trustedLocalHTTP : .disabled
+        await server.setGuestRouteExposure(exposure)
+
         var galleryMappings: [String: EventGalleryRouteRegistration] = [:]
         for result in await galleryStore.loadAll() {
             guard case .loaded(let index) = result else { continue }
@@ -3704,6 +3973,7 @@ final class BoothCoordinator {
                 gifState: gifAvailability(for: manifest, directory: directory)
             )
         }
+        guard generation == serverRouteRefreshGeneration else { return }
         await server.replaceSessionRoutes(sessionMappings)
         await server.replaceGalleryRoutes(galleryMappings)
     }
