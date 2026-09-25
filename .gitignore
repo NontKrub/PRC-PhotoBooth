@@ -2,5 +2,6 @@
 *.profraw
 DerivedData/
 .derivedData/
+.build/
 xcuserdata/
 *.sync-conflict-*

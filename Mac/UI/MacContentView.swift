@@ -115,6 +115,7 @@ private enum SettingsSection: String, CaseIterable, Identifiable {
     case printing = "Printing"
     case cloud = "Cloud"
     case security = "Security"
+    case eventReadiness = "Event Readiness"
 
     var id: String { rawValue }
 }
@@ -244,6 +245,8 @@ struct SettingsView: View {
             cloudSection
         case .security:
             securitySection
+        case .eventReadiness:
+            SoakTestSettingsView()
         }
     }
 

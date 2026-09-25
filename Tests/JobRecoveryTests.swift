@@ -921,7 +921,9 @@ struct JobRecoveryTests {
         job.status = .pending
         try await store.update(job)
 
-        let queue = SessionJobQueue(store: store, executor: MockJobExecutor())
+        let executor = MockJobExecutor()
+        executor.isPaused = true
+        let queue = SessionJobQueue(store: store, executor: executor)
         let recovery = SessionRecoveryService(
             manifestStore: manifestStore,
             workspace: SessionWorkspace(),
@@ -930,6 +932,7 @@ struct JobRecoveryTests {
 
         queue.start()
         await recovery.scanNow()
+        executor.isPaused = false
 
         let restored = try await manifestStore.load(sessionID: sessionID)
         #expect(restored.status == .finalizing)
@@ -1031,8 +1034,12 @@ struct JobRecoveryTests {
 private final class MockJobExecutor: SessionJobExecuting {
     var failKind: SessionJobKind?
     var failDisposition: JobExecutionError?
+    var isPaused = false
 
     func execute(_ job: SessionJob) async throws {
+        while isPaused {
+            try? await Task.sleep(for: .milliseconds(10))
+        }
         if job.kind == failKind, let error = failDisposition {
             throw error
         }

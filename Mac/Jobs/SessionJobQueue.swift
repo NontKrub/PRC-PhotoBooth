@@ -120,15 +120,15 @@ final class SessionJobQueue {
         if manifest.shots.contains(where: { !$0.gifFrameFileNames.isEmpty }) {
             kinds.append(.renderGIF)
         }
-        try await enqueue(kinds: kinds, sessionID: manifest.id)
+        try await enqueue(kinds: kinds, sessionID: manifest.id, finalizationTransactionID: manifest.finalizationTransactionID)
     }
 
     func enqueueAutoPrint(for manifest: SessionManifest) async throws {
-        try await enqueue(kinds: [.autoPrint], sessionID: manifest.id)
+        try await enqueue(kinds: [.autoPrint], sessionID: manifest.id, finalizationTransactionID: manifest.finalizationTransactionID)
     }
 
     func enqueueCloudUpload(for manifest: SessionManifest) async throws {
-        try await enqueue(kinds: [.cloudUpload], sessionID: manifest.id)
+        try await enqueue(kinds: [.cloudUpload], sessionID: manifest.id, finalizationTransactionID: manifest.finalizationTransactionID)
     }
 
     func waitUntilReady() async {
@@ -277,9 +277,9 @@ final class SessionJobQueue {
         await reload()
     }
 
-    private func enqueue(kinds: [SessionJobKind], sessionID: String) async throws {
+    private func enqueue(kinds: [SessionJobKind], sessionID: String, finalizationTransactionID: String? = nil) async throws {
         do {
-            _ = try await store.enqueueBatch(sessionID: sessionID, kinds: kinds)
+            _ = try await store.enqueueBatch(sessionID: sessionID, kinds: kinds, finalizationTransactionID: finalizationTransactionID)
             await reload()
         } catch {
             lastQueueError = error.localizedDescription

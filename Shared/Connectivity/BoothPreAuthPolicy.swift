@@ -21,107 +21,143 @@ public enum BoothPreAuthPhase: Equatable, Sendable {
 // MARK: - Pre-Auth Watchdog (Finding F23)
 
 public final class BoothPreAuthWatchdog: @unchecked Sendable {
+    private let lock = NSLock()
     public let generation: Int
-    public private(set) var phase: BoothPreAuthPhase
-    private var pairingAbsoluteExpiry: Date?
+    private var _phase: BoothPreAuthPhase
+    private var _pairingAbsoluteExpiry: Date?
 
-    public var helloTimeout: TimeInterval = 5.0
-    public var interactiveInactivityTimeout: TimeInterval = 45.0
-    public var authenticatingTimeout: TimeInterval = 25.0
-    public var negotiatingTimeout: TimeInterval = 25.0
+    public var phase: BoothPreAuthPhase {
+        lock.lock()
+        defer { lock.unlock() }
+        return _phase
+    }
 
-    public init(generation: Int, startTime: Date = Date()) {
+    public var helloTimeout: TimeInterval
+    public var interactiveInactivityTimeout: TimeInterval
+    public var authenticatingTimeout: TimeInterval
+    public var negotiatingTimeout: TimeInterval
+
+    public init(
+        generation: Int,
+        startTime: Date = Date(),
+        helloTimeout: TimeInterval = 5.0,
+        interactiveInactivityTimeout: TimeInterval = 45.0,
+        authenticatingTimeout: TimeInterval = 25.0,
+        negotiatingTimeout: TimeInterval = 25.0
+    ) {
         self.generation = generation
-        self.phase = .awaitingHello(deadline: startTime.addingTimeInterval(helloTimeout))
+        self.helloTimeout = helloTimeout
+        self.interactiveInactivityTimeout = interactiveInactivityTimeout
+        self.authenticatingTimeout = authenticatingTimeout
+        self.negotiatingTimeout = negotiatingTimeout
+        self._phase = .awaitingHello(deadline: startTime.addingTimeInterval(helloTimeout))
     }
 
     public func onValidHello(now: Date = Date(), isPairing: Bool, pairingExpiry: Date? = nil) {
-        guard case .awaitingHello = phase else { return }
+        lock.lock()
+        defer { lock.unlock() }
+        guard case .awaitingHello = _phase else { return }
         if isPairing, let pairingExpiry {
-            pairingAbsoluteExpiry = pairingExpiry
+            _pairingAbsoluteExpiry = pairingExpiry
             let inactivity = now.addingTimeInterval(interactiveInactivityTimeout)
-            phase = .interactivePairing(inactivityDeadline: inactivity, absoluteExpiry: pairingExpiry)
+            _phase = .interactivePairing(inactivityDeadline: inactivity, absoluteExpiry: pairingExpiry)
         } else {
-            pairingAbsoluteExpiry = nil
-            phase = .authenticating(deadline: now.addingTimeInterval(authenticatingTimeout))
+            _pairingAbsoluteExpiry = nil
+            _phase = .authenticating(deadline: now.addingTimeInterval(authenticatingTimeout))
         }
     }
 
     @discardableResult
     public func onPairingSessionStarted(absoluteExpiry: Date, now: Date = Date()) -> Bool {
-        guard checkTimeout(now: now) == nil, !phase.isTerminal else { return false }
-        let connectionExpiry = min(pairingAbsoluteExpiry ?? absoluteExpiry, absoluteExpiry)
-        pairingAbsoluteExpiry = connectionExpiry
+        lock.lock()
+        defer { lock.unlock() }
+        guard checkTimeoutLocked(now: now) == nil, !_phase.isTerminal else { return false }
+        let connectionExpiry = min(_pairingAbsoluteExpiry ?? absoluteExpiry, absoluteExpiry)
+        _pairingAbsoluteExpiry = connectionExpiry
         let inactivity = now.addingTimeInterval(interactiveInactivityTimeout)
-        phase = .interactivePairing(inactivityDeadline: inactivity, absoluteExpiry: connectionExpiry)
+        _phase = .interactivePairing(inactivityDeadline: inactivity, absoluteExpiry: connectionExpiry)
         return true
     }
 
     public func onInteractiveProgress(now: Date = Date()) {
-        guard case .interactivePairing(_, let absoluteExpiry) = phase else { return }
+        lock.lock()
+        defer { lock.unlock() }
+        guard case .interactivePairing(_, let absoluteExpiry) = _phase else { return }
         guard now < absoluteExpiry else {
-            phase = .expired(reason: "Pairing session expired.")
+            _phase = .expired(reason: "Pairing session expired.")
             return
         }
         let inactivity = now.addingTimeInterval(interactiveInactivityTimeout)
-        phase = .interactivePairing(inactivityDeadline: inactivity, absoluteExpiry: absoluteExpiry)
+        _phase = .interactivePairing(inactivityDeadline: inactivity, absoluteExpiry: absoluteExpiry)
     }
 
     public func onAuthenticationStarted(now: Date = Date()) {
-        guard !phase.isTerminal else { return }
-        phase = .authenticating(deadline: now.addingTimeInterval(authenticatingTimeout))
+        lock.lock()
+        defer { lock.unlock() }
+        guard !_phase.isTerminal else { return }
+        _phase = .authenticating(deadline: now.addingTimeInterval(authenticatingTimeout))
     }
 
     public func onSecureNegotiationStarted(now: Date = Date()) {
-        guard !phase.isTerminal else { return }
-        phase = .secureChannelNegotiating(deadline: now.addingTimeInterval(negotiatingTimeout))
+        lock.lock()
+        defer { lock.unlock() }
+        guard !_phase.isTerminal else { return }
+        _phase = .secureChannelNegotiating(deadline: now.addingTimeInterval(negotiatingTimeout))
     }
 
     public func onAuthenticated() {
-        pairingAbsoluteExpiry = nil
-        phase = .authenticated
+        lock.lock()
+        defer { lock.unlock() }
+        _pairingAbsoluteExpiry = nil
+        _phase = .authenticated
     }
 
     public func checkTimeout(now: Date = Date()) -> String? {
-        switch phase {
+        lock.lock()
+        defer { lock.unlock() }
+        return checkTimeoutLocked(now: now)
+    }
+
+    private func checkTimeoutLocked(now: Date) -> String? {
+        switch _phase {
         case .interactivePairing, .authenticating, .secureChannelNegotiating:
-            if let pairingAbsoluteExpiry, now >= pairingAbsoluteExpiry {
+            if let pairingAbsoluteExpiry = _pairingAbsoluteExpiry, now >= pairingAbsoluteExpiry {
                 let reason = "Pairing session absolute deadline expired."
-                phase = .expired(reason: reason)
+                _phase = .expired(reason: reason)
                 return reason
             }
         case .awaitingHello, .authenticated, .expired:
             break
         }
 
-        switch phase {
+        switch _phase {
         case .awaitingHello(let deadline):
             if now >= deadline {
                 let reason = "Bootstrap Hello deadline expired (no protocol hello received within \(Int(helloTimeout))s)."
-                phase = .expired(reason: reason)
+                _phase = .expired(reason: reason)
                 return reason
             }
         case .interactivePairing(let inactivityDeadline, let absoluteExpiry):
             if now >= absoluteExpiry {
                 let reason = "Pairing session absolute deadline expired."
-                phase = .expired(reason: reason)
+                _phase = .expired(reason: reason)
                 return reason
             }
             if now >= inactivityDeadline {
                 let reason = "Pairing interactive inactivity deadline expired."
-                phase = .expired(reason: reason)
+                _phase = .expired(reason: reason)
                 return reason
             }
         case .authenticating(let deadline):
             if now >= deadline {
                 let reason = "Authentication deadline expired."
-                phase = .expired(reason: reason)
+                _phase = .expired(reason: reason)
                 return reason
             }
         case .secureChannelNegotiating(let deadline):
             if now >= deadline {
                 let reason = "Secure channel negotiation deadline expired."
-                phase = .expired(reason: reason)
+                _phase = .expired(reason: reason)
                 return reason
             }
         case .authenticated:
@@ -133,15 +169,17 @@ public final class BoothPreAuthWatchdog: @unchecked Sendable {
     }
 
     public func nextDeadline() -> Date? {
-        switch phase {
+        lock.lock()
+        defer { lock.unlock() }
+        switch _phase {
         case .awaitingHello(let deadline):
             return deadline
         case .interactivePairing(let inactivityDeadline, let absoluteExpiry):
             return min(inactivityDeadline, absoluteExpiry)
         case .authenticating(let deadline):
-            return min(deadline, pairingAbsoluteExpiry ?? deadline)
+            return min(deadline, _pairingAbsoluteExpiry ?? deadline)
         case .secureChannelNegotiating(let deadline):
-            return min(deadline, pairingAbsoluteExpiry ?? deadline)
+            return min(deadline, _pairingAbsoluteExpiry ?? deadline)
         case .authenticated, .expired:
             return nil
         }
@@ -203,7 +241,7 @@ public enum BoothPreAuthProgressPolicy {
     }
 }
 
-// MARK: - Pre-Auth Admission Limiter (Finding F26)
+// MARK: - Pre-Auth Admission Limiter (Finding F26 & Finding A04)
 
 public struct BoothPreAuthAdmissionLimiter: Sendable {
     public struct EndpointRecord: Sendable {
@@ -223,6 +261,7 @@ public struct BoothPreAuthAdmissionLimiter: Sendable {
     public static let defaultBaseCooldown: TimeInterval = 2.0
     public static let defaultMaxCooldown: TimeInterval = 10.0
     public static let defaultGlobalFailureThreshold = 30
+    public static let defaultReservedFailureThreshold = 5
 
     private var records: [String: EndpointRecord] = [:]
     private var globalFailureTimestamps: [Date] = []
@@ -234,6 +273,7 @@ public struct BoothPreAuthAdmissionLimiter: Sendable {
     public let baseCooldown: TimeInterval
     public let maxCooldown: TimeInterval
     public let globalFailureThreshold: Int
+    public let reservedFailureThreshold: Int
 
     public init(
         maxTrackedEndpoints: Int = defaultMaxTrackedEndpoints,
@@ -242,7 +282,8 @@ public struct BoothPreAuthAdmissionLimiter: Sendable {
         failureThreshold: Int = defaultFailureThreshold,
         baseCooldown: TimeInterval = defaultBaseCooldown,
         maxCooldown: TimeInterval = defaultMaxCooldown,
-        globalFailureThreshold: Int = defaultGlobalFailureThreshold
+        globalFailureThreshold: Int = defaultGlobalFailureThreshold,
+        reservedFailureThreshold: Int = defaultReservedFailureThreshold
     ) {
         self.maxTrackedEndpoints = maxTrackedEndpoints
         self.failureWindow = failureWindow
@@ -251,40 +292,61 @@ public struct BoothPreAuthAdmissionLimiter: Sendable {
         self.baseCooldown = baseCooldown
         self.maxCooldown = maxCooldown
         self.globalFailureThreshold = globalFailureThreshold
+        self.reservedFailureThreshold = reservedFailureThreshold
     }
 
     public var trackedEndpointCount: Int { records.count }
 
-    public func shouldAdmit(endpointKey: String, now: Date = Date()) -> (admitted: Bool, reason: String?) {
-        // Check global abuse threshold
+    public func shouldAdmit(
+        endpointKey: String,
+        isPreferredCandidate: Bool = false,
+        now: Date = Date()
+    ) -> (admitted: Bool, reason: String?) {
+        if let record = records[endpointKey],
+           let cooldownUntil = record.cooldownUntil,
+           now < cooldownUntil {
+            let remaining = Int(ceil(cooldownUntil.timeIntervalSince(now)))
+            return (false, "Pre-authentication throttled due to repeated failures. Cooldown: \(remaining)s remaining.")
+        }
+
+        if isPreferredCandidate {
+            // Preferred peer bypasses anonymous global ceiling, but still subject to candidate-lane quota
+            if let record = records[endpointKey] {
+                let recentFailures = record.failureTimestamps.filter { now.timeIntervalSince($0) <= failureWindow }
+                if recentFailures.count >= reservedFailureThreshold {
+                    return (false, "Reserved candidate pre-authentication throttled due to repeated failures.")
+                }
+            }
+            return (true, nil)
+        }
+
+        // Check global abuse threshold for anonymous endpoints
         let recentGlobal = globalFailureTimestamps.filter { now.timeIntervalSince($0) <= failureWindow }
         if recentGlobal.count >= globalFailureThreshold {
             return (false, "Global pre-auth failure rate limit exceeded.")
         }
 
-        guard let record = records[endpointKey] else {
-            return (true, nil)
-        }
-
-        if let cooldownUntil = record.cooldownUntil, now < cooldownUntil {
-            let remaining = Int(ceil(cooldownUntil.timeIntervalSince(now)))
-            return (false, "Pre-authentication throttled due to repeated failures. Cooldown: \(remaining)s remaining.")
-        }
-
         return (true, nil)
     }
 
-    public mutating func recordFailure(endpointKey: String, now: Date = Date()) {
+    public mutating func recordFailure(
+        endpointKey: String,
+        isPreferredCandidate: Bool = false,
+        now: Date = Date()
+    ) {
         purgeExpired(now: now)
 
-        globalFailureTimestamps.append(now)
+        if !isPreferredCandidate {
+            globalFailureTimestamps.append(now)
+        }
 
         var record = records[endpointKey] ?? EndpointRecord()
         record.failureTimestamps = record.failureTimestamps.filter { now.timeIntervalSince($0) <= failureWindow }
         record.failureTimestamps.append(now)
 
-        if record.failureTimestamps.count >= failureThreshold {
-            let excess = record.failureTimestamps.count - failureThreshold
+        let threshold = isPreferredCandidate ? reservedFailureThreshold : failureThreshold
+        if record.failureTimestamps.count >= threshold {
+            let excess = record.failureTimestamps.count - threshold
             let factor = pow(2.0, Double(min(excess, 4)))
             let cooldown = min(maxCooldown, baseCooldown * factor)
             record.cooldownUntil = now.addingTimeInterval(cooldown)
@@ -315,3 +377,4 @@ public struct BoothPreAuthAdmissionLimiter: Sendable {
         }
     }
 }
+

@@ -86,8 +86,19 @@ struct SessionManifest: Codable, Sendable, Identifiable, Equatable {
     // Optional keeps v1.1/v1.2 manifests readable without a migration.
     var captureAttempts: [CaptureAttemptRecord]?
 
+    // Links manifest to its finalization job bundle. Optional for backward compatibility.
+    var finalizationTransactionID: String? = nil
+
+    // Distinguishes real customer sessions from automated event readiness soak sessions.
+    var origin: SessionOrigin? = .normal
+
     var lastError: String?
     var updatedAt: Date
+}
+
+public enum SessionOrigin: String, Codable, Sendable, Equatable {
+    case normal
+    case soakTest
 }
 
 enum SessionManifestError: LocalizedError, Equatable {

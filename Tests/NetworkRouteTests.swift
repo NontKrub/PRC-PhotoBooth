@@ -703,6 +703,48 @@ struct NetworkRouteTests {
         runtime.cancelReconnect()
     }
 
+    @Test("pre-auth watchdog timer cancels connection and frees slot while MainActor is blocked")
+    func preAuthWatchdogCancelsConnectionWhileMainActorBlocked() throws {
+        let queue = DispatchQueue(
+            label: "PRC-PhotoBooth.Tests.PreAuthWatchdogRuntime",
+            qos: .userInitiated
+        )
+        let runtime = BoothNetworkTransportRuntime(queue: queue)
+        let mainEntered = DispatchSemaphore(value: 0)
+        let releaseMain = DispatchSemaphore(value: 0)
+        let timeoutFired = DispatchSemaphore(value: 0)
+
+        runtime.onPreAuthTimeout = { _, _, _ in
+            timeoutFired.signal()
+        }
+
+        let connection = NWConnection(host: "127.0.0.1", port: 65432, using: .tcp)
+        connection.start(queue: queue)
+
+        runtime.bindControlConnection(connection, generation: 1, authenticated: false)
+        #expect(runtime.isControlConnectionActive(generation: 1))
+        #expect(!runtime.isControlSlotAvailable())
+
+        let watchdog = BoothPreAuthWatchdog(generation: 1, helloTimeout: 0.05)
+
+        DispatchQueue.main.async(qos: .userInitiated) {
+            mainEntered.signal()
+            releaseMain.wait()
+        }
+        #expect(mainEntered.wait(timeout: .now() + 1) == .success)
+
+        runtime.startPreAuthWatchdog(connection: connection, generation: 1, watchdog: watchdog)
+
+        #expect(timeoutFired.wait(timeout: .now() + 2) == .success)
+        #expect(runtime.isControlSlotAvailable())
+        #expect(!runtime.isControlConnectionActive(generation: 1))
+
+        releaseMain.signal()
+        runtime.stopPreAuthWatchdog()
+        connection.cancel()
+    }
+
+
     @Test("runtime cleanup is safe from its own queue")
     func runtimeCleanupDoesNotDeadlock() {
         let queue = DispatchQueue(label: "PRC-PhotoBooth.Tests.RuntimeCleanup")

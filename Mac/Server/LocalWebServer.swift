@@ -29,6 +29,7 @@ struct OperatorWebHandlers: Sendable {
 
 actor LocalWebServer {
     private static let maximumActiveConnections = 48
+    private static let maximumActiveConnectionsPerClient = 8
     private static let requestTimeoutNanoseconds: UInt64 = 10_000_000_000
     private static let fileChunkTimeoutNanoseconds: UInt64 = 15_000_000_000
     private static let securityHeaders = [
@@ -48,6 +49,7 @@ actor LocalWebServer {
     private var operatorHandlers: OperatorWebHandlers?
     private var activePort: UInt16?
     private var activeConnectionCount = 0
+    private var activeConnectionsPerClient: [String: Int] = [:]
 #if DEBUG
     private var beforeFileResponseForTesting: (@Sendable () async -> Void)?
 #endif
@@ -194,6 +196,7 @@ actor LocalWebServer {
         listener?.cancel()
         listener = nil
         activePort = nil
+        activeConnectionsPerClient.removeAll()
         state = .stopped
     }
 
@@ -214,6 +217,15 @@ actor LocalWebServer {
         }
     }
 
+    private func clientHost(for connection: NWConnection) -> String? {
+        switch connection.endpoint {
+        case .hostPort(let host, _):
+            return "\(host)"
+        default:
+            return connection.endpoint.debugDescription
+        }
+    }
+
     private func handle(_ connection: NWConnection) async {
         guard activeConnectionCount < Self.maximumActiveConnections else {
             connection.start(queue: ioQueue)
@@ -221,8 +233,30 @@ actor LocalWebServer {
             connection.cancel()
             return
         }
+        let clientKey = clientHost(for: connection)
+        if let clientKey {
+            let clientCount = activeConnectionsPerClient[clientKey, default: 0]
+            guard clientCount < Self.maximumActiveConnectionsPerClient else {
+                connection.start(queue: ioQueue)
+                _ = await send(connection, data: secured(busy()).httpData, timeoutNanoseconds: Self.fileChunkTimeoutNanoseconds)
+                connection.cancel()
+                return
+            }
+            activeConnectionsPerClient[clientKey] = clientCount + 1
+        }
         activeConnectionCount += 1
-        defer { activeConnectionCount -= 1 }
+        defer {
+            activeConnectionCount -= 1
+            if let clientKey {
+                if let count = activeConnectionsPerClient[clientKey] {
+                    if count <= 1 {
+                        activeConnectionsPerClient.removeValue(forKey: clientKey)
+                    } else {
+                        activeConnectionsPerClient[clientKey] = count - 1
+                    }
+                }
+            }
+        }
         defer { connection.cancel() }
         connection.start(queue: ioQueue)
         var parser = HTTPServerRequestParser()
@@ -484,38 +518,7 @@ actor LocalWebServer {
     private func notFound() -> LocalDownloadResponse { LocalDownloadResponse(statusCode: 404, reason: "Not Found", contentType: "text/plain; charset=utf-8", headers: [:], body: Data("Not found".utf8)) }
 
     static func lanIPAddress() -> String? {
-        var address: String?
-        var ifaddr: UnsafeMutablePointer<ifaddrs>?
-        guard getifaddrs(&ifaddr) == 0 else { return nil }
-        defer { freeifaddrs(ifaddr) }
-        var pointer = ifaddr
-        while let current = pointer {
-            let flags = Int32(current.pointee.ifa_flags)
-            let isUp = (flags & IFF_UP) != 0
-            let isLoopback = (flags & IFF_LOOPBACK) != 0
-            if isUp && !isLoopback,
-               current.pointee.ifa_addr.pointee.sa_family == UInt8(AF_INET) {
-                var hostname = [CChar](repeating: 0, count: Int(NI_MAXHOST))
-                getnameinfo(
-                    current.pointee.ifa_addr,
-                    socklen_t(current.pointee.ifa_addr.pointee.sa_len),
-                    &hostname,
-                    socklen_t(hostname.count),
-                    nil,
-                    0,
-                    NI_NUMERICHOST
-                )
-                let ip = hostname.withUnsafeBufferPointer { buffer in
-                    String(decoding: buffer.prefix(while: { $0 != 0 }).map(UInt8.init), as: UTF8.self)
-                }
-                if ip.hasPrefix("192.168") || ip.hasPrefix("10.") || ip.hasPrefix("172.") {
-                    address = ip
-                    break
-                }
-            }
-            pointer = current.pointee.ifa_next
-        }
-        return address
+        GuestDeliveryEndpointResolver.resolveBestGuestDeliveryIP()
     }
 }
 

@@ -58,6 +58,9 @@ struct SessionJob: Codable, Sendable, Identifiable, Equatable {
     var attemptCount: Int
     var lastError: String?
     var lastFailureDisposition: SessionJobFailureDisposition? = nil
+    
+    // Links job to its finalization transaction. Optional for backward compatibility.
+    var finalizationTransactionID: String? = nil
 }
 
 enum JobExecutionError: LocalizedError, Sendable {

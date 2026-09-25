@@ -12,6 +12,14 @@ struct CaptureAttempt: Sendable, Equatable {
     }
 }
 
+struct DSLRCaptureAttemptContext: Sendable {
+    let id: UUID
+    let requestedAt: Date
+    let baselineFileNames: Set<String>
+    let baselineObjectHandles: Set<UInt32>
+    let expectedCameraIdentifier: String?
+}
+
 struct CaptureAttemptGate {
     private(set) var activeAttemptID: UUID?
 

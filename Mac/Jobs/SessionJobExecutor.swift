@@ -350,9 +350,11 @@ final class SessionJobExecutor: SessionJobExecuting {
         let cloudUploadEnabled = manifest.deliveryIntent?.cloudUploadEnabled
             ?? (manifest.cloudDelivery != nil || defaults.bool(forKey: "cloudUploadEnabled"))
         let allowTrustedLocalHTTP = defaults.bool(forKey: "allowTrustedLocalHTTP")
+        let localIP = LocalWebServer.lanIPAddress()
+        let localBaseURL = localIP.map { "http://\($0):\(server.port)" } ?? ""
         return try SessionQRCodePayloadResolver.resolve(
             token: manifest.downloadToken,
-            localBaseURL: "http://\(LocalWebServer.lanIPAddress() ?? "localhost"):\(server.port)",
+            localBaseURL: localBaseURL,
             publicBaseURL: manifest.cloudDelivery?.publicBaseURL ?? defaults.string(forKey: "publicBaseURL"),
             cloudUploadEnabled: cloudUploadEnabled,
             allowTrustedLocalHTTP: allowTrustedLocalHTTP

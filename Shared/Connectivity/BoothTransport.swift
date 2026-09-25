@@ -405,6 +405,7 @@ public enum BoothTransportDiagnosticKind: String, Codable, Sendable {
     case transportReconnectScheduled
     case transportReconnectSucceeded
     case heartbeatTimedOut
+    case preAuthTimedOut
     case routeChanged
     case controlSendFailed
     case controlPayloadRejected

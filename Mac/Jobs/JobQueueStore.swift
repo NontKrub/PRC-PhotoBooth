@@ -182,11 +182,11 @@ actor JobQueueStore {
         jobs
     }
 
-    func enqueue(sessionID: String, kind: SessionJobKind) throws -> SessionJob {
-        try enqueueBatch(sessionID: sessionID, kinds: [kind]).first!
+    func enqueue(sessionID: String, kind: SessionJobKind, finalizationTransactionID: String? = nil) throws -> SessionJob {
+        try enqueueBatch(sessionID: sessionID, kinds: [kind], finalizationTransactionID: finalizationTransactionID).first!
     }
 
-    func enqueueBatch(sessionID: String, kinds: [SessionJobKind]) throws -> [SessionJob] {
+    func enqueueBatch(sessionID: String, kinds: [SessionJobKind], finalizationTransactionID: String? = nil) throws -> [SessionJob] {
         try ensureLoaded()
         guard !cancelledSessionIDs.contains(sessionID) else {
             throw JobQueueStoreError.sessionCancelled(sessionID)
@@ -198,6 +198,7 @@ actor JobQueueStore {
                 $0.sessionID == sessionID
                     && $0.kind == kind
                     && $0.status != .cancelled
+                    && (finalizationTransactionID == nil || $0.finalizationTransactionID == finalizationTransactionID)
             }) {
                 result.append(existing)
                 continue
@@ -214,7 +215,8 @@ actor JobQueueStore {
                 nextAttemptAt: now,
                 attemptCount: 0,
                 lastError: nil,
-                lastFailureDisposition: nil
+                lastFailureDisposition: nil,
+                finalizationTransactionID: finalizationTransactionID
             )
             jobs.append(job)
             result.append(job)

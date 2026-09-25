@@ -44,6 +44,7 @@ public enum SessionQRCodePayloadError: LocalizedError, Equatable {
     case emptyBaseURL
     case insecurePublicBaseURL
     case localHTTPNotAllowed
+    case unroutableLocalBaseURL(String)
 
     public var errorDescription: String? {
         switch self {
@@ -55,15 +56,33 @@ public enum SessionQRCodePayloadError: LocalizedError, Equatable {
             return "Public download base URL must use HTTPS."
         case .localHTTPNotAllowed:
             return "Guest downloads over local HTTP are disabled. Configure HTTPS or enable trusted local HTTP."
+        case .unroutableLocalBaseURL(let reason):
+            return "Guest downloads over local HTTP are unavailable: \(reason)."
         }
     }
 }
 
 public struct SessionQRCodePayloadResolver {
+    public static func isRoutableLocalBase(_ baseURL: String) -> Bool {
+        let trimmed = trimBaseURL(baseURL)
+        guard !trimmed.isEmpty,
+              let components = URLComponents(string: trimmed),
+              let rawHost = components.host?.lowercased(),
+              !rawHost.isEmpty else {
+            return false
+        }
+        let host = rawHost.trimmingCharacters(in: CharacterSet(charactersIn: "[]"))
+        if host == "localhost" || host == "127.0.0.1" || host == "::1" || host == "0.0.0.0" || host.hasPrefix("127.") {
+            return false
+        }
+        return true
+    }
+
     public static func evaluatePolicy(
         publicBaseURL: String?,
         cloudUploadEnabled: Bool,
         allowTrustedLocalHTTP: Bool,
+        localBaseURL: String? = nil,
         isRelease: Bool = isReleaseBuild
     ) -> GuestDeliveryPolicy {
         let hasConfiguredPublicBase = publicBaseURL.map {
@@ -73,6 +92,11 @@ public struct SessionQRCodePayloadResolver {
             return ValidatedPublicGuestBaseURL(string: publicBaseURL ?? "") == nil ? .unavailable : .publicHTTPS
         }
         if allowTrustedLocalHTTP {
+            if let localBaseURL {
+                guard isRoutableLocalBase(localBaseURL) else {
+                    return .unavailable
+                }
+            }
             return .trustedLocalHTTP
         }
         return .unavailable
@@ -106,6 +130,9 @@ public struct SessionQRCodePayloadResolver {
         }
         guard !localBase.isEmpty else {
             throw SessionQRCodePayloadError.emptyBaseURL
+        }
+        guard isRoutableLocalBase(localBase) else {
+            throw SessionQRCodePayloadError.unroutableLocalBaseURL("Localhost and loopback addresses cannot be reached by guests.")
         }
         return "\(localBase)/s/\(token)/"
     }

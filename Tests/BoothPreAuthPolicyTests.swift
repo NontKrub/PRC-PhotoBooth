@@ -340,4 +340,59 @@ struct BoothPreAuthPolicyTests {
         limiter.recordSuccess(endpointKey: peer)
         #expect(limiter.trackedEndpointCount == 0)
     }
+
+    @Test("attacker flooding global limit does not block preferred candidate")
+    func attackerFloodingDoesNotBlockPreferredCandidate() {
+        var limiter = BoothPreAuthAdmissionLimiter(
+            failureThreshold: 3,
+            globalFailureThreshold: 30,
+            reservedFailureThreshold: 5
+        )
+        let now = Date()
+
+        // 50 invalid attacker attempts flood the global threshold
+        for i in 0..<50 {
+            limiter.recordFailure(endpointKey: "attacker-\(i)", isPreferredCandidate: false, now: now)
+        }
+
+        // Random anonymous client is blocked by the global failure limit
+        let anonymousCheck = limiter.shouldAdmit(endpointKey: "anonymous-guest", isPreferredCandidate: false, now: now)
+        #expect(!anonymousCheck.admitted)
+        #expect(anonymousCheck.reason?.contains("Global pre-auth failure rate limit exceeded") == true)
+
+        // Preferred iPad candidate with reserved lane is NOT blocked by global ceiling
+        let preferredCheck = limiter.shouldAdmit(endpointKey: "preferred-ipad-192.168.4.2", isPreferredCandidate: true, now: now)
+        #expect(preferredCheck.admitted)
+        #expect(preferredCheck.reason == nil)
+    }
+
+    @Test("spoofed preferred candidate is throttled after exceeding reserved quota")
+    func spoofedPreferredCandidateThrottledAfterQuota() {
+        var limiter = BoothPreAuthAdmissionLimiter(
+            failureThreshold: 3,
+            baseCooldown: 2.0,
+            maxCooldown: 10.0,
+            reservedFailureThreshold: 3
+        )
+        let now = Date()
+        let spoofedKey = "spoofed-preferred-candidate"
+
+        // Initially admitted
+        #expect(limiter.shouldAdmit(endpointKey: spoofedKey, isPreferredCandidate: true, now: now).admitted)
+
+        // 1st failure
+        limiter.recordFailure(endpointKey: spoofedKey, isPreferredCandidate: true, now: now)
+        #expect(limiter.shouldAdmit(endpointKey: spoofedKey, isPreferredCandidate: true, now: now).admitted)
+
+        // 2nd failure
+        limiter.recordFailure(endpointKey: spoofedKey, isPreferredCandidate: true, now: now.addingTimeInterval(1.0))
+        #expect(limiter.shouldAdmit(endpointKey: spoofedKey, isPreferredCandidate: true, now: now.addingTimeInterval(1.0)).admitted)
+
+        // 3rd failure reaches reserved threshold -> triggers cooldown
+        limiter.recordFailure(endpointKey: spoofedKey, isPreferredCandidate: true, now: now.addingTimeInterval(2.0))
+        let throttledCheck = limiter.shouldAdmit(endpointKey: spoofedKey, isPreferredCandidate: true, now: now.addingTimeInterval(2.5))
+        #expect(!throttledCheck.admitted)
+        #expect(throttledCheck.reason?.contains("throttled") == true)
+    }
 }
+

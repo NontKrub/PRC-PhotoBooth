@@ -107,6 +107,35 @@ public final class NetworkBoothTransport: BoothTransport {
         }
     }
 
+    private func isPreferredCandidateEndpoint(_ endpoint: NWEndpoint) -> Bool {
+        if activeInterface == .wiredEthernet {
+            if case let .hostPort(host, _) = endpoint, "\(host)" == "192.168.4.2" {
+                return true
+            }
+        }
+        let candidateIDs: [String] = [
+            trustedStore.preferredPeerID,
+            targetPeerID
+        ].compactMap { $0 } + Array(trustedStore.trustedPeerIDs)
+
+        let endpointHost: String? = {
+            if case let .hostPort(host, _) = endpoint { return "\(host)" }
+            return nil
+        }()
+
+        for peerID in candidateIDs {
+            if let candidates = routeCandidatesByPeerID[peerID] {
+                for candidate in candidates.values {
+                    if candidate.endpoint == endpoint { return true }
+                    if let host = endpointHost, case let .hostPort(candHost, _) = candidate.endpoint, "\(candHost)" == host {
+                        return true
+                    }
+                }
+            }
+        }
+        return false
+    }
+
     public var requestedNetworkPreference: BoothNetworkPreference {
         get { requestedPreference }
         set {
@@ -449,6 +478,30 @@ public final class NetworkBoothTransport: BoothTransport {
                       self.shouldReconnect else { return }
                 self.reconnectAttempt = max(self.reconnectAttempt, attempt)
                 self.handleReconnectDue()
+            }
+        }
+        self.transportRuntime.onPreAuthTimeout = { [weak self] connection, generation, reason in
+            Task { @MainActor [weak self] in
+                guard let self,
+                      self.isCurrent(connection, channel: .control),
+                      self.controlConnectionGeneration == generation,
+                      !self.peerAuthenticated else { return }
+                let key = self.endpointKey(for: connection.endpoint)
+                let isPreferred = self.isPreferredCandidateEndpoint(connection.endpoint)
+                self.preAuthAdmissionLimiter.recordFailure(endpointKey: key, isPreferredCandidate: isPreferred)
+                self.cancelUnauthenticatedIdleTimer()
+                self.emitTransportEvent(
+                    .preAuthTimedOut,
+                    channel: .control,
+                    reason: reason
+                )
+                if self.currentConnectionOwnsPairingState {
+                    self.failPairing(reason, closeConnection: false)
+                } else if !self.hasEphemeralPairingState {
+                    self.lastNetworkError = reason
+                    self.setPairingStage(.failed, state: .failed(reason))
+                }
+                self.connectionDidClose(connection, channel: .control, reason: reason)
             }
         }
         publishPairingStatus()
@@ -2065,6 +2118,7 @@ public final class NetworkBoothTransport: BoothTransport {
         controlConnection = nil
         previewConnection = nil
         assetConnection = nil
+        transportRuntime.invalidateControlConnection(generation: controlConnectionGeneration)
         controlConnectionIsViable = false
         controlEndpointDescription = nil
         previewEndpointDescription = nil
@@ -2443,24 +2497,35 @@ public final class NetworkBoothTransport: BoothTransport {
     private func accept(_ connection: NWConnection, channel: BoothTransportChannel) {
         if role == .mac, channel == .control {
             let key = endpointKey(for: connection.endpoint)
-            let check = preAuthAdmissionLimiter.shouldAdmit(endpointKey: key)
+            let isPreferred = isPreferredCandidateEndpoint(connection.endpoint)
+            let check = preAuthAdmissionLimiter.shouldAdmit(endpointKey: key, isPreferredCandidate: isPreferred)
             if !check.admitted {
                 let reason = check.reason ?? "Pre-authentication throttled."
                 rejectIncomingConnection(connection, reason: reason)
                 return
             }
         }
-        if role == .mac, channel == .control, controlConnection != nil {
-            let reason: String
-            if peerAuthenticated {
-                reason = "Another iPad is currently connected."
-            } else if currentPairingSession?.isActive() == true {
-                reason = "Another iPad is currently being paired."
+        if role == .mac, channel == .control, let existing = controlConnection {
+            let isExistingAlive: Bool = {
+                switch existing.state {
+                case .cancelled, .failed: return false
+                default: return true
+                }
+            }()
+            if isExistingAlive && transportRuntime.isControlConnectionActive(generation: controlConnectionGeneration) {
+                let reason: String
+                if peerAuthenticated {
+                    reason = "Another iPad is currently connected."
+                } else if currentPairingSession?.isActive() == true {
+                    reason = "Another iPad is currently being paired."
+                } else {
+                    reason = "Another pairing request is already in progress."
+                }
+                rejectIncomingConnection(connection, reason: reason)
+                return
             } else {
-                reason = "Another pairing request is already in progress."
+                controlConnection = nil
             }
-            rejectIncomingConnection(connection, reason: reason)
-            return
         }
         guard activeInterface != nil else {
             connection.cancel()
@@ -2508,6 +2573,11 @@ public final class NetworkBoothTransport: BoothTransport {
             controlConnection = connection
             controlEndpointDescription = connection.endpoint.debugDescription
             resetControlAuthentication()
+            transportRuntime.bindControlConnection(
+                connection,
+                generation: controlConnectionGeneration,
+                authenticated: false
+            )
             emitTransportEvent(
                 .controlConnectionCreated,
                 channel: .control,
@@ -2569,6 +2639,11 @@ public final class NetworkBoothTransport: BoothTransport {
             controlEndpointDescription = description
             resetControlAuthentication()
             if let connection = controlConnection {
+                transportRuntime.bindControlConnection(
+                    connection,
+                    generation: controlConnectionGeneration,
+                    authenticated: false
+                )
                 emitTransportEvent(
                     .controlConnectionCreated,
                     channel: .control,
@@ -4472,7 +4547,8 @@ public final class NetworkBoothTransport: BoothTransport {
         let connection = controlConnection
         if role == .mac, let connection {
             let key = endpointKey(for: connection.endpoint)
-            preAuthAdmissionLimiter.recordFailure(endpointKey: key)
+            let isPreferred = isPreferredCandidateEndpoint(connection.endpoint)
+            preAuthAdmissionLimiter.recordFailure(endpointKey: key, isPreferredCandidate: isPreferred)
         }
         cancelUnauthenticatedIdleTimer()
         if currentConnectionOwnsPairingState {
@@ -4969,6 +5045,7 @@ public final class NetworkBoothTransport: BoothTransport {
                 assetWritePump.invalidate(generation: assetConnectionGeneration)
                 controlConnection = nil
                 controlEndpointDescription = nil
+                transportRuntime.invalidateControlConnection(generation: controlConnectionGeneration)
                 resetControlAuthentication()
                 connectionState = .disconnected
                 lanHandshakeState = .waiting
@@ -5130,42 +5207,15 @@ public final class NetworkBoothTransport: BoothTransport {
         guard let connection = controlConnection else { return }
         let watchdog = BoothPreAuthWatchdog(generation: generation)
         preAuthWatchdog = watchdog
-        schedulePreAuthWatchdogTick(generation: generation, connection: connection)
+        transportRuntime.startPreAuthWatchdog(
+            connection: connection,
+            generation: generation,
+            watchdog: watchdog
+        )
     }
 
     private func schedulePreAuthWatchdogTick(generation: Int, connection: NWConnection) {
-        preAuthWatchdogTimer?.cancel()
-        preAuthWatchdogTimer = nil
-        guard role == .mac,
-              let watchdog = preAuthWatchdog,
-              watchdog.generation == generation,
-              !peerAuthenticated,
-              let nextDeadline = watchdog.nextDeadline() else { return }
-
-        let delay = max(0.1, nextDeadline.timeIntervalSinceNow)
-        let timer = DispatchSource.makeTimerSource(queue: transportQueue)
-        timer.schedule(deadline: .now() + delay)
-        timer.setEventHandler { [weak self, weak connection] in
-            guard let self, let connection else { return }
-            Task { @MainActor [weak self, weak connection] in
-                guard let self, let connection,
-                      BoothPreAuthProgressPolicy.shouldRunTimerTick(
-                        expectedGeneration: generation,
-                        currentGeneration: self.controlConnectionGeneration,
-                        connectionIsCurrent: self.isCurrent(connection, channel: .control)
-                      ),
-                      !self.peerAuthenticated else { return }
-                guard let watchdog = self.preAuthWatchdog, watchdog.generation == generation else { return }
-                if let reason = watchdog.checkTimeout() {
-                    NSLog("[Transport] Pre-auth timeout (generation %d): %@", generation, reason)
-                    self.rejectControlConnection(reason)
-                } else {
-                    self.schedulePreAuthWatchdogTick(generation: generation, connection: connection)
-                }
-            }
-        }
-        timer.resume()
-        preAuthWatchdogTimer = timer
+        transportRuntime.reschedulePreAuthWatchdog()
     }
 
     @discardableResult
@@ -5179,8 +5229,7 @@ public final class NetworkBoothTransport: BoothTransport {
               watchdog.generation == controlConnectionGeneration,
               let connection = controlConnection,
               isCurrent(connection, channel: .control),
-              BoothPreAuthProgressPolicy.advance(watchdog, after: decision, now: now) else { return false }
-        schedulePreAuthWatchdogTick(generation: watchdog.generation, connection: connection)
+              transportRuntime.advancePreAuthWatchdog(after: decision, now: now) else { return false }
         return true
     }
 
@@ -5192,12 +5241,12 @@ public final class NetworkBoothTransport: BoothTransport {
               watchdog.generation == controlConnectionGeneration,
               let connection = controlConnection,
               isCurrent(connection, channel: .control),
-              BoothPreAuthProgressPolicy.advance(watchdog, after: result) else { return false }
-        schedulePreAuthWatchdogTick(generation: watchdog.generation, connection: connection)
+              transportRuntime.advancePreAuthWatchdog(after: result) else { return false }
         return true
     }
 
     private func cancelUnauthenticatedIdleTimer() {
+        transportRuntime.stopPreAuthWatchdog()
         preAuthWatchdogTimer?.cancel()
         preAuthWatchdogTimer = nil
         preAuthWatchdog = nil

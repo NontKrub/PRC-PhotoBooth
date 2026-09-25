@@ -228,4 +228,44 @@ struct SessionQRCodePayloadResolverTests {
             )
         }
     }
+
+    @Test("rejects localhost and loopback local base URLs")
+    func rejectsLocalhostAndLoopbackBaseURLs() {
+        for localURL in [
+            "http://localhost:8585",
+            "http://127.0.0.1:8585",
+            "http://127.0.0.2:8585",
+            "http://0.0.0.0:8585",
+            "http://[::1]:8585"
+        ] {
+            #expect(!SessionQRCodePayloadResolver.isRoutableLocalBase(localURL))
+            #expect(throws: SessionQRCodePayloadError.self) {
+                try SessionQRCodePayloadResolver.resolve(
+                    token: "token",
+                    localBaseURL: localURL,
+                    publicBaseURL: nil,
+                    cloudUploadEnabled: false,
+                    allowTrustedLocalHTTP: true
+                )
+            }
+            #expect(SessionQRCodePayloadResolver.evaluatePolicy(
+                publicBaseURL: nil,
+                cloudUploadEnabled: false,
+                allowTrustedLocalHTTP: true,
+                localBaseURL: localURL
+            ) == .unavailable)
+        }
+    }
+
+    @Test("accepts routable private IPv4 local base URL")
+    func acceptsRoutablePrivateIPv4LocalBaseURL() throws {
+        let payload = try SessionQRCodePayloadResolver.resolve(
+            token: "guest-token",
+            localBaseURL: "http://192.168.4.1:8585",
+            publicBaseURL: nil,
+            cloudUploadEnabled: false,
+            allowTrustedLocalHTTP: true
+        )
+        #expect(payload == "http://192.168.4.1:8585/s/guest-token/")
+    }
 }

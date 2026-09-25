@@ -224,6 +224,55 @@ struct LocalWebServerTests {
             #expect(httpResponse?.statusCode != 200 || body != media)
         }
     }
+
+    @Test("per-client connection limit throttles excess concurrent requests from same client")
+    func perClientConnectionLimitThrottlesExcessRequests() async throws {
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let media = Data("throttle test".utf8)
+        try media.write(to: directory.appendingPathComponent("strip.png"))
+
+        let server = LocalWebServer(port: 0)
+        await server.setGuestRouteExposure(.trustedLocalHTTP)
+        await server.registerToken("token", sessionDirectory: directory)
+
+        let gate = AsyncTestMultiGate(expectedPauseCount: 8)
+        await server.setBeforeFileResponseForTesting { await gate.pause() }
+        try await server.start()
+        defer { Task { await gate.releaseAll(); await server.stop() } }
+        let status = await server.waitUntilReady(timeout: 2)
+        guard case .ready(let port) = status.state else {
+            Issue.record("Server did not become ready: \(status)")
+            return
+        }
+
+        let url = try #require(URL(string: "http://127.0.0.1:\(port)/s/token/strip.png"))
+        let sessionConfig = URLSessionConfiguration.ephemeral
+        sessionConfig.httpMaximumConnectionsPerHost = 16
+        sessionConfig.timeoutIntervalForRequest = 10
+        let session = URLSession(configuration: sessionConfig)
+
+        var tasks: [Task<Int, Error>] = []
+        for _ in 0..<8 {
+            tasks.append(Task {
+                let (_, response) = try await session.data(from: url)
+                return (response as? HTTPURLResponse)?.statusCode ?? 0
+            })
+        }
+
+        await gate.waitUntilAllPaused()
+
+        let (_, overflowResponse) = try await session.data(from: url)
+        let overflowStatus = (overflowResponse as? HTTPURLResponse)?.statusCode
+        #expect(overflowStatus == 503)
+
+        await gate.releaseAll()
+
+        for task in tasks {
+            let code = try await task.value
+            #expect(code == 200)
+        }
+    }
 }
 
 private enum TestError: Error {
@@ -249,6 +298,38 @@ private actor AsyncTestGate {
     func release() {
         releaseContinuation?.resume()
         releaseContinuation = nil
+    }
+}
+
+private actor AsyncTestMultiGate {
+    private let expectedPauseCount: Int
+    private var pausedCount = 0
+    private var allPausedContinuation: CheckedContinuation<Void, Never>?
+    private var releaseContinuations: [CheckedContinuation<Void, Never>] = []
+
+    init(expectedPauseCount: Int) {
+        self.expectedPauseCount = expectedPauseCount
+    }
+
+    func pause() async {
+        pausedCount += 1
+        if pausedCount >= expectedPauseCount {
+            allPausedContinuation?.resume()
+            allPausedContinuation = nil
+        }
+        await withCheckedContinuation { releaseContinuations.append($0) }
+    }
+
+    func waitUntilAllPaused() async {
+        guard pausedCount < expectedPauseCount else { return }
+        await withCheckedContinuation { allPausedContinuation = $0 }
+    }
+
+    func releaseAll() {
+        for cont in releaseContinuations {
+            cont.resume()
+        }
+        releaseContinuations.removeAll()
     }
 }
 

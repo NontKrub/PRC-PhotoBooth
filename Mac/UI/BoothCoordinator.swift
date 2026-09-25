@@ -574,17 +574,25 @@ final class BoothCoordinator {
     var sharingStationURL: String? {
         let defaults = UserDefaults.standard
         let allowTrustedLocalHTTP = defaults.bool(forKey: "allowTrustedLocalHTTP")
+        let localIP = LocalWebServer.lanIPAddress()
+        let localBaseURL = localIP.map { "http://\($0):8585" }
         let policy = SessionQRCodePayloadResolver.evaluatePolicy(
             publicBaseURL: defaults.string(forKey: "publicBaseURL"),
             cloudUploadEnabled: defaults.bool(forKey: "cloudUploadEnabled"),
-            allowTrustedLocalHTTP: allowTrustedLocalHTTP
+            allowTrustedLocalHTTP: allowTrustedLocalHTTP,
+            localBaseURL: localBaseURL
         )
         guard policy.permitsLocalGuestHTTP(allowTrustedLocalHTTP: allowTrustedLocalHTTP),
               let gallery = activeExperienceDocument?.gallery,
               gallery.mode != .disabled else { return nil }
-        let base = serverURL.isEmpty
-            ? "http://\(LocalWebServer.lanIPAddress() ?? "localhost"):8585"
-            : serverURL
+        let base: String
+        if !serverURL.isEmpty && SessionQRCodePayloadResolver.isRoutableLocalBase(serverURL) {
+            base = serverURL
+        } else if let localBaseURL {
+            base = localBaseURL
+        } else {
+            return nil
+        }
         return "\(base)/e/\(gallery.eventToken)/station"
     }
 
@@ -1337,9 +1345,15 @@ final class BoothCoordinator {
 
     // MARK: - External display viewer
 
+    var customerDisplayAuthority: CustomerDisplayAuthority {
+        CustomerDisplayAuthority.evaluate(
+            isAuthenticatedIPadConnected: isAuthenticatedIPadConnected && connectionStatus.isPreviewChannelConnected,
+            isExternalViewerActive: isExternalViewerActive
+        )
+    }
+
     var isCustomerDisplayReady: Bool {
-        if isExternalViewerActive { return true }
-        return isAuthenticatedIPadConnected && connectionStatus.isPreviewChannelConnected
+        customerDisplayAuthority.isCustomerDisplayReady
     }
 
     private var isAuthenticatedIPadConnected: Bool {
@@ -2168,30 +2182,33 @@ final class BoothCoordinator {
                     throw NSError(domain: "PRCPhotoBooth.Session", code: 1, userInfo: [NSLocalizedDescriptionKey: "Session identity could not be issued."])
                 }
                 let sessionID = session.id
+                let authority = customerDisplayAuthority
                 for asset in pendingPromptAssets.values {
                     assetSources[asset.reference] = asset.data
                 }
-                multipeer.sendControl(.sessionStart(context: startContext))
-                multipeer.sendControl(.eventConfig(config: config))
-                multipeer.sendControl(.sessionPrepared(
-                    config: config,
-                    presentation: presentation,
-                    context: preparedContext
-                )) { [weak self] outcome in
-                    guard let self else { return }
-                    guard outcome == .sent,
-                          self.currentSession?.id == sessionID,
-                          self.stateMachine.currentSessionID == sessionID else {
-                        // Only show error if an iPad was expected (Finding 6).
-                        if self.isAuthenticatedIPadConnected {
-                            self.errorMessage = "The iPad did not receive session setup. Reconnect before retrying."
+                if authority.requiresIPadSetupSend {
+                    multipeer.sendControl(.sessionStart(context: startContext))
+                    multipeer.sendControl(.eventConfig(config: config))
+                    multipeer.sendControl(.sessionPrepared(
+                        config: config,
+                        presentation: presentation,
+                        context: preparedContext
+                    )) { [weak self] outcome in
+                        guard let self else { return }
+                        guard outcome == .sent,
+                              self.currentSession?.id == sessionID,
+                              self.stateMachine.currentSessionID == sessionID else {
+                            // Only show error if an iPad was expected (Finding 6).
+                            if self.isAuthenticatedIPadConnected {
+                                self.errorMessage = "The iPad did not receive session setup. Reconnect before retrying."
+                            }
+                            return
                         }
-                        return
+                        self.beginCountdown(photoIndex: 0)
                     }
-                    self.beginCountdown(photoIndex: 0)
                 }
                 // External-display-only: no iPad to acknowledge, begin countdown directly (Finding 6).
-                if !isAuthenticatedIPadConnected, isExternalViewerActive {
+                if authority.shouldStartCountdownImmediatelyLocally {
                     beginCountdown(photoIndex: 0)
                 }
                 self.lastSessionStartRequestID = startRequestID
@@ -2526,9 +2543,11 @@ final class BoothCoordinator {
         let cloudUploadEnabled = manifest.deliveryIntent?.cloudUploadEnabled
             ?? (manifest.cloudDelivery != nil || UserDefaults.standard.bool(forKey: "cloudUploadEnabled"))
         let allowTrustedLocalHTTP = UserDefaults.standard.bool(forKey: "allowTrustedLocalHTTP")
+        let localIP = LocalWebServer.lanIPAddress()
+        let localBaseURL = localIP.map { "http://\($0):8585" } ?? ""
         let qrPayload = config.qrCodeElements.isEmpty ? nil : try? SessionQRCodePayloadResolver.resolve(
             token: manifest.downloadToken,
-            localBaseURL: "http://\(LocalWebServer.lanIPAddress() ?? "localhost"):8585",
+            localBaseURL: localBaseURL,
             publicBaseURL: manifest.cloudDelivery?.publicBaseURL
                 ?? UserDefaults.standard.string(forKey: "publicBaseURL"),
             cloudUploadEnabled: cloudUploadEnabled,
@@ -3435,24 +3454,32 @@ final class BoothCoordinator {
         }
         let recoveredSessionID = manifest.id
         let recoveredPhotoIndex = manifest.nextPhotoIndex
+        let authority = customerDisplayAuthority
         for asset in pendingPromptAssets.values {
             assetSources[asset.reference] = asset.data
         }
-        multipeer.sendControl(.sessionStart(context: startContext))
-        multipeer.sendControl(.eventConfig(config: manifest.eventConfig))
-        multipeer.sendControl(.sessionPrepared(
-            config: manifest.eventConfig,
-            presentation: presentation,
-            context: preparedContext
-        )) { [weak self] outcome in
-            guard let self else { return }
-            guard outcome == .sent,
-                  self.currentSession?.id == recoveredSessionID,
-                  self.stateMachine.currentSessionID == recoveredSessionID else {
-                self.errorMessage = "The iPad did not receive recovered session setup. Reconnect before retrying."
-                return
+        if authority.requiresIPadSetupSend {
+            multipeer.sendControl(.sessionStart(context: startContext))
+            multipeer.sendControl(.eventConfig(config: manifest.eventConfig))
+            multipeer.sendControl(.sessionPrepared(
+                config: manifest.eventConfig,
+                presentation: presentation,
+                context: preparedContext
+            )) { [weak self] outcome in
+                guard let self else { return }
+                guard outcome == .sent,
+                      self.currentSession?.id == recoveredSessionID,
+                      self.stateMachine.currentSessionID == recoveredSessionID else {
+                    if self.isAuthenticatedIPadConnected {
+                        self.errorMessage = "The iPad did not receive recovered session setup. Reconnect before retrying."
+                    }
+                    return
+                }
+                self.beginCountdown(photoIndex: recoveredPhotoIndex)
             }
-            self.beginCountdown(photoIndex: recoveredPhotoIndex)
+        }
+        if authority.shouldStartCountdownImmediatelyLocally {
+            beginCountdown(photoIndex: recoveredPhotoIndex)
         }
     }
 
@@ -3488,6 +3515,7 @@ final class BoothCoordinator {
             }
         }
 
+        let transactionID = UUID().uuidString
         let manifest: SessionManifest
         do {
             manifest = try await manifestStore.transition(
@@ -3504,6 +3532,7 @@ final class BoothCoordinator {
                     )
                 }
                 durable.status = .finalizing
+                durable.finalizationTransactionID = transactionID
                 durable.lastError = nil
             }
         } catch {
@@ -3527,21 +3556,12 @@ final class BoothCoordinator {
                 try await jobQueue.enqueueAutoPrint(for: manifest)
             }
         } catch {
-            // Roll back manifest to .capturing so the guest can retry (Finding 10).
-            do {
-                let rolledBack = try await manifestStore.transition(
-                    sessionID: sessionID,
-                    allowedFrom: [.finalizing]
-                ) { durable in
-                    durable.status = .capturing
-                    durable.lastError = "Job queue failure: \(error.localizedDescription)"
-                }
-                currentManifest = rolledBack
-            } catch {
-                recoveryService.recordError(
-                    "Could not roll back session \(sessionID) from finalizing: \(error.localizedDescription)"
-                )
-            }
+            // Error logged and displayed.
+            // Do not roll back manifest to .capturing. Reconciliation will 
+            // handle the missing jobs and re-enqueue them via .enqueueMissingRequiredJobs.
+            recoveryService.recordError(
+                "Job enqueue failed for finalizing session \(sessionID): \(error.localizedDescription)"
+            )
             errorMessage = "Could not queue session processing: \(error.localizedDescription)"
             return false
         }
@@ -3849,11 +3869,12 @@ final class BoothCoordinator {
             .trimmingCharacters(in: CharacterSet(charactersIn: "/ "))
         let cloudUploadEnabled = manifest.deliveryIntent?.cloudUploadEnabled
             ?? (manifest.cloudDelivery != nil || UserDefaults.standard.bool(forKey: "cloudUploadEnabled"))
-        let ip = LocalWebServer.lanIPAddress() ?? "localhost"
+        let ip = LocalWebServer.lanIPAddress()
+        let localBaseURL = ip.map { "http://\($0):8585" } ?? ""
         let allowTrustedLocalHTTP = UserDefaults.standard.bool(forKey: "allowTrustedLocalHTTP")
         let qr = Self.downloadURL(
             publicBaseURL: publicBase,
-            localBaseURL: "http://\(ip):8585",
+            localBaseURL: localBaseURL,
             token: token,
             cloudUploadEnabled: cloudUploadEnabled,
             allowTrustedLocalHTTP: allowTrustedLocalHTTP
