@@ -443,10 +443,11 @@ final class BoothNetworkTransportRuntime: @unchecked Sendable {
                 compatibility = true
                 parameters = .tcp
             }
+            let browserParameters = parameters
             let key = "\(generation):\(interface.rawValue):\(compatibility)"
             let browser = NWBrowser(
                 for: .bonjourWithTXTRecord(type: "_prc-control._tcp", domain: nil),
-                using: parameters
+                using: browserParameters
             )
             browser.browseResultsChangedHandler = { [weak self, weak browser] results, _ in
                 guard let self, let browser else { return }
@@ -460,7 +461,7 @@ final class BoothNetworkTransportRuntime: @unchecked Sendable {
                         preference: preference,
                         interface: interface,
                         compatibility: compatibility,
-                        parameters: parameters,
+                        parameters: browserParameters,
                         generation: generation
                     )
                 }

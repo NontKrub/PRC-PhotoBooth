@@ -2618,54 +2618,54 @@ final class BoothCoordinator {
         var finalJobs: [SessionJob] = []
         while Date() < completionDeadline {
             try Task.checkCancellation()
-            let latest = (try? await manifestStore.load(sessionID: startedManifest.id)) ?? currentManifest
+            let latest = (try? await manifestStore.load(sessionID: startedManifest.id))
+                ?? currentManifest.flatMap { $0.id == startedManifest.id ? $0 : nil }
+                ?? startedManifest
             await publishStage(soakStage(for: latest, config: config))
-            if let latest {
-                if latest.status == .failed || latest.status == .cancelled {
-                    if latest.status == .cancelled {
-                        throw CancellationError()
-                    }
-                    throw BoothSoakTestError.productionRunUnavailable(
-                        latest.lastError ?? "session entered \(latest.status.rawValue)"
-                    )
+            if latest.status == .failed || latest.status == .cancelled {
+                if latest.status == .cancelled {
+                    throw CancellationError()
                 }
-                if latest.status == .finalizing, finalizingAt == nil { finalizingAt = Date() }
+                throw BoothSoakTestError.productionRunUnavailable(
+                    latest.lastError ?? "session entered \(latest.status.rawValue)"
+                )
+            }
+            if latest.status == .finalizing, finalizingAt == nil { finalizingAt = Date() }
 
-                if case .review(let photoIndex) = stateMachine.phase,
-                   currentManifest?.id == latest.id,
-                   !reviewDecisionPending {
-                    handleReviewDecision(photoIndex: photoIndex, action: .keep)
-                }
-                if case .captureRecovery = stateMachine.phase {
-                    throw BoothSoakTestError.productionRunUnavailable(
-                        currentManifest?.lastError ?? "camera capture entered recovery"
-                    )
-                }
+            if case .review(let photoIndex) = stateMachine.phase,
+               currentManifest?.id == latest.id,
+               !reviewDecisionPending {
+                handleReviewDecision(photoIndex: photoIndex, action: .keep)
+            }
+            if case .captureRecovery = stateMachine.phase {
+                throw BoothSoakTestError.productionRunUnavailable(
+                    currentManifest?.lastError ?? "camera capture entered recovery"
+                )
+            }
 
-                if latest.status == .completed,
-                   let plan = FinalizationPlan.make(from: latest) {
-                    let matching = jobQueue.jobs.filter { plan.authorizes($0, for: latest) }
-                    let isTerminal = matching.count == plan.jobKinds.count && matching.allSatisfy {
-                        $0.status == .succeeded || $0.status == .failed || $0.status == .cancelled
-                    }
-                    if isTerminal {
-                        guard matching.allSatisfy({ $0.status == .succeeded }) else {
-                            if matching.contains(where: {
-                                $0.kind == .autoPrint
-                                    && $0.lastFailureDisposition == .sideEffectUnknown
-                            }) {
-                                throw BoothSoakTestError.productionRunUnavailable(
-                                    "Physical Print: UNKNOWN — operator verification required. The print job will not be retried automatically."
-                                )
-                            }
-                            let failures = matching.filter { $0.status != .succeeded }
-                                .map { "\($0.kind.rawValue): \($0.lastError ?? $0.status.rawValue)" }
-                            throw BoothSoakTestError.productionRunUnavailable(failures.joined(separator: "; "))
+            if latest.status == .completed,
+               let plan = FinalizationPlan.make(from: latest) {
+                let matching = jobQueue.jobs.filter { plan.authorizes($0, for: latest) }
+                let isTerminal = matching.count == plan.jobKinds.count && matching.allSatisfy {
+                    $0.status == .succeeded || $0.status == .failed || $0.status == .cancelled
+                }
+                if isTerminal {
+                    guard matching.allSatisfy({ $0.status == .succeeded }) else {
+                        if matching.contains(where: {
+                            $0.kind == .autoPrint
+                                && $0.lastFailureDisposition == .sideEffectUnknown
+                        }) {
+                            throw BoothSoakTestError.productionRunUnavailable(
+                                "Physical Print: UNKNOWN — operator verification required. The print job will not be retried automatically."
+                            )
                         }
-                        completedManifest = latest
-                        finalJobs = matching
-                        break
+                        let failures = matching.filter { $0.status != .succeeded }
+                            .map { "\($0.kind.rawValue): \($0.lastError ?? $0.status.rawValue)" }
+                        throw BoothSoakTestError.productionRunUnavailable(failures.joined(separator: "; "))
                     }
+                    completedManifest = latest
+                    finalJobs = matching
+                    break
                 }
             }
             try await Task.sleep(for: .milliseconds(75))

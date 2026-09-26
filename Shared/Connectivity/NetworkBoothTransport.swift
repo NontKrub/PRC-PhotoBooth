@@ -572,8 +572,9 @@ public final class NetworkBoothTransport: BoothTransport {
                   peerAuthenticated,
                   secureChannelEstablished else { return }
             handleDecodedFrames(frames)
-        case let .disconnected(generation, reason),
-             let .rejected(generation, reason):
+        case let .disconnected(generation, reason):
+            handleCoreOwnedControlDisconnect(generation: generation, reason: reason)
+        case let .rejected(generation, reason):
             handleCoreOwnedControlDisconnect(generation: generation, reason: reason)
         case .listenerFailed(let generation, let reason):
             guard generation == coreControlListenerGeneration else { return }
@@ -2950,7 +2951,7 @@ public final class NetworkBoothTransport: BoothTransport {
             bufferedFrames: bufferedFrames
         )
         if let preAuthHello {
-            handleControl(.helloDetails(preAuthHello))
+            handleControl(.helloDetails(hello: preAuthHello))
         }
     }
 
