@@ -652,7 +652,7 @@ private extension SessionJobQueue {
 
 private func makeManifest(withGIFFrames: Bool = false) -> SessionManifest {
     let config = EventConfig(eventID: "event", eventName: "Event", photoCount: 1, slots: [])
-    return SessionManifest(
+    var manifest = SessionManifest(
         schemaVersion: SessionManifest.currentSchemaVersion,
         id: UUID().uuidString,
         eventID: config.eventID,
@@ -680,6 +680,14 @@ private func makeManifest(withGIFFrames: Bool = false) -> SessionManifest {
         lastError: nil,
         updatedAt: Date()
     )
+    manifest.finalizationTransactionID = UUID().uuidString
+    manifest.deliveryIntent = SessionDeliveryIntentSnapshot(
+        cloudUploadEnabled: false,
+        automaticPrintEnabled: false,
+        updateGalleryEnabled: true,
+        renderGIFEnabled: withGIFFrames
+    )
+    return manifest
 }
 
 private func waitUntil(

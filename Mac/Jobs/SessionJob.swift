@@ -67,10 +67,12 @@ enum JobExecutionError: LocalizedError, Sendable {
     case retryable(String)
     case permanent(String)
     case sideEffectUnknown(String)
+    case obsoleteTransaction(String)
 
     var errorDescription: String? {
         switch self {
-        case .retryable(let message), .permanent(let message), .sideEffectUnknown(let message): return message
+        case .retryable(let message), .permanent(let message), .sideEffectUnknown(let message),
+             .obsoleteTransaction(let message): return message
         }
     }
 }
@@ -93,7 +95,12 @@ enum SessionJobDependencyPolicy {
     static func prerequisitesSatisfied(for job: SessionJob, in jobs: [SessionJob]) -> Bool {
         func latest(_ kind: SessionJobKind) -> SessionJob? {
             jobs
-                .filter { $0.sessionID == job.sessionID && $0.kind == kind && $0.status != .cancelled }
+                .filter {
+                    $0.sessionID == job.sessionID
+                        && $0.finalizationTransactionID == job.finalizationTransactionID
+                        && $0.kind == kind
+                        && $0.status != .cancelled
+                }
                 .max { $0.createdAt == $1.createdAt ? $0.id < $1.id : $0.createdAt < $1.createdAt }
         }
 
@@ -147,8 +154,11 @@ struct SessionDeliveryStatus: Codable, Sendable, Equatable {
 }
 
 enum SessionDeliveryResolver {
-    static func resolve(_ jobs: [SessionJob]) -> SessionDeliveryStatus {
-        let localJobs = jobs.filter { $0.kind == .renderStrip || $0.kind == .registerDownload }
+    static func resolve(_ jobs: [SessionJob], transactionID: String? = nil) -> SessionDeliveryStatus {
+        let matchingJobs = transactionID.map { transactionID in
+            jobs.filter { $0.finalizationTransactionID == transactionID }
+        } ?? jobs
+        let localJobs = matchingJobs.filter { $0.kind == .renderStrip || $0.kind == .registerDownload }
         let local: SessionDeliveryState
         if localJobs.contains(where: { $0.status == .failed }) {
             local = .localFailed
@@ -159,8 +169,8 @@ enum SessionDeliveryResolver {
         }
         return SessionDeliveryStatus(
             local: local,
-            cloud: state(for: jobs.first(where: { $0.kind == .cloudUpload }), pending: .cloudPending, succeeded: .cloudUploaded, failed: .cloudFailed),
-            print: state(for: jobs.first(where: { $0.kind == .autoPrint }), pending: .printPending, succeeded: .printed, failed: .printFailed)
+            cloud: state(for: matchingJobs.first(where: { $0.kind == .cloudUpload }), pending: .cloudPending, succeeded: .cloudUploaded, failed: .cloudFailed),
+            print: state(for: matchingJobs.first(where: { $0.kind == .autoPrint }), pending: .printPending, succeeded: .printed, failed: .printFailed)
         )
     }
 

@@ -273,6 +273,150 @@ struct LocalWebServerTests {
             #expect(code == 200)
         }
     }
+
+    @Test("request timeout releases per-client capacity and active client records")
+    func requestTimeoutReleasesAdmissionCapacity() async throws {
+        let server = LocalWebServer(port: 0, requestTimeoutSeconds: 0.15)
+        try await server.start()
+        defer { Task { await server.stop() } }
+        let status = await server.waitUntilReady(timeout: 2)
+        guard case .ready(let port) = status.state else {
+            Issue.record("Server did not become ready: \(status)")
+            return
+        }
+
+        var slowConnections: [NWConnection] = []
+        for _ in 0..<8 {
+            slowConnections.append(try await openSlowConnection(port: port))
+        }
+        defer { slowConnections.forEach { $0.cancel() } }
+        try await waitUntilServer(server) { $0.activeConnections == 8 }
+        #expect(await server.connectionAdmissionSnapshot().perClientCounts.values.first == 8)
+
+        try await waitUntilServer(server) { $0.activeConnections == 0 }
+        let released = await server.connectionAdmissionSnapshot()
+        #expect(released.activeClientCount == 0)
+        #expect(released.perClientCounts.isEmpty)
+
+        let url = try #require(URL(string: "http://127.0.0.1:\(port)/health"))
+        let (_, response) = try await URLSession.shared.data(from: url)
+        #expect((response as? HTTPURLResponse)?.statusCode == 200)
+    }
+
+    @Test("connection admission enforces global cap with exact-once leases")
+    func globalConnectionLimitAndLeaseReleaseAreBounded() {
+        var admission = LocalWebServerConnectionAdmission(maximumConnections: 48, maximumPerClient: 8)
+        var leases: [LocalWebServerConnectionAdmission.Lease] = []
+        for clientIndex in 0..<6 {
+            for _ in 0..<8 {
+                let lease = admission.acquire(clientKey: "client-\(clientIndex)")
+                #expect(lease != nil)
+                if let lease { leases.append(lease) }
+            }
+        }
+
+        #expect(admission.snapshot.activeConnections == 48)
+        #expect(admission.acquire(clientKey: "new-client") == nil)
+        #expect(admission.snapshot.activeClientCount == 6)
+
+        let released = leases.removeFirst()
+        admission.release(released)
+        admission.release(released)
+        #expect(admission.snapshot.activeConnections == 47)
+        #expect(admission.acquire(clientKey: "client-0") != nil)
+
+        for lease in leases {
+            admission.release(lease)
+        }
+        #expect(admission.snapshot.activeConnections == 1)
+        #expect(admission.snapshot.activeClientCount == 1)
+    }
+
+    @Test("IPv6 address spellings share a normalized client identity")
+    func ipv6ClientIdentityIsCanonical() {
+        #expect(LocalWebServerClientIdentity.normalizedHost("2001:0db8:0:0:0:0:0:1")
+            == LocalWebServerClientIdentity.normalizedHost("2001:db8::1"))
+        #expect(LocalWebServerClientIdentity.normalizedHost("::ffff:192.0.2.9")
+            == LocalWebServerClientIdentity.normalizedHost("192.0.2.9"))
+    }
+}
+
+private func openSlowConnection(port: UInt16) async throws -> NWConnection {
+    let connection = NWConnection(
+        to: .hostPort(host: .ipv4(.loopback), port: NWEndpoint.Port(rawValue: port)!),
+        using: .tcp
+    )
+    let ready = ConnectionReadinessGate()
+    connection.stateUpdateHandler = { state in
+        switch state {
+        case .ready:
+            ready.resolve(.success(()))
+        case .failed(let error):
+            ready.resolve(.failure(error))
+        default:
+            break
+        }
+    }
+    connection.start(queue: DispatchQueue(label: "PRC-PhotoBooth.LocalWebServerTests.Client"))
+    let timeout = Task {
+        do {
+            try await Task.sleep(for: .seconds(2))
+            ready.resolve(.failure(TestError.missingPort))
+        } catch {}
+    }
+    defer { timeout.cancel() }
+    do {
+        try await ready.wait()
+    } catch {
+        connection.cancel()
+        throw error
+    }
+    return connection
+}
+
+private func waitUntilServer(
+    _ server: LocalWebServer,
+    timeout: TimeInterval = 2,
+    condition: (LocalWebServerConnectionAdmission.Snapshot) -> Bool
+) async throws {
+    let deadline = Date().addingTimeInterval(timeout)
+    while Date() < deadline {
+        if condition(await server.connectionAdmissionSnapshot()) { return }
+        try await Task.sleep(for: .milliseconds(10))
+    }
+    Issue.record("Timed out waiting for local server admission state.")
+}
+
+private final class ConnectionReadinessGate: @unchecked Sendable {
+    private let lock = NSLock()
+    private var continuation: CheckedContinuation<Void, Error>?
+    private var result: Result<Void, Error>?
+
+    func wait() async throws {
+        try await withCheckedThrowingContinuation { continuation in
+            lock.lock()
+            if let result {
+                lock.unlock()
+                continuation.resume(with: result)
+            } else {
+                self.continuation = continuation
+                lock.unlock()
+            }
+        }
+    }
+
+    func resolve(_ result: Result<Void, Error>) {
+        lock.lock()
+        guard case nil = self.result else {
+            lock.unlock()
+            return
+        }
+        self.result = result
+        let continuation = self.continuation
+        self.continuation = nil
+        lock.unlock()
+        continuation?.resume(with: result)
+    }
 }
 
 private enum TestError: Error {

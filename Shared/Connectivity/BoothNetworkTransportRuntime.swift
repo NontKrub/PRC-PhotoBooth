@@ -5,6 +5,26 @@ import Network
 /// MainActor facade remains responsible for user-facing state and route
 /// policy; socket cancellation and timer expiry do not depend on it.
 final class BoothNetworkTransportRuntime: @unchecked Sendable {
+    struct InboundControlAdmission: Sendable {
+        let token: UUID
+        let generation: Int
+        let endpointKey: String
+        let isPreferredCandidate: Bool
+    }
+
+    struct InboundControlAdmissionResult: Sendable {
+        let admission: InboundControlAdmission?
+        let rejectionReason: String?
+    }
+
+    private struct ControlReconnectRoute {
+        let endpoint: NWEndpoint
+        let parameters: NWParameters
+        let interface: BoothNetworkInterfacePolicy
+        let provenance: BoothRouteCandidateProvenance
+        let generation: Int
+    }
+
     private let queue: DispatchQueue
     private let queueKey = DispatchSpecificKey<Void>()
     private let heartbeatState = BoothTransportHeartbeatState()
@@ -15,6 +35,15 @@ final class BoothNetworkTransportRuntime: @unchecked Sendable {
     private var reconnectSource: DispatchSourceTimer?
     private var reconnectAttempt = 0
     private var reconnectGeneration = 0
+    private var reconnectRoute: ControlReconnectRoute?
+    private var pendingReconnectConnection: NWConnection?
+    private var pendingReconnectTimeoutSource: DispatchSourceTimer?
+    private var nextInboundAdmissionGeneration = 0
+    private var inboundAdmission: InboundControlAdmission?
+    private var inboundAdmissionSource: DispatchSourceTimer?
+    private var admissionLimiter = BoothPreAuthAdmissionLimiter()
+    private var trustedPeerIDs = Set<String>()
+    private var authenticatedEndpointsByPeerID: [String: Set<String>] = [:]
 
     // Pre-Auth Watchdog state (Finding A03)
     private var preAuthWatchdog: BoothPreAuthWatchdog?
@@ -29,6 +58,15 @@ final class BoothNetworkTransportRuntime: @unchecked Sendable {
 
     var onHeartbeatTimeout: (@Sendable (NWConnection, Int) -> Void)?
     var onReconnectDue: (@Sendable (Int, Int) -> Void)?
+    var onReconnectConnectionStarted: (@Sendable (
+        NWConnection,
+        NWEndpoint,
+        NWParameters,
+        BoothNetworkInterfacePolicy,
+        BoothRouteCandidateProvenance,
+        Int,
+        Int
+    ) -> Void)?
     var onPreAuthTimeout: (@Sendable (NWConnection, Int, String) -> Void)?
 
     init(queue: DispatchQueue) {
@@ -138,8 +176,276 @@ final class BoothNetworkTransportRuntime: @unchecked Sendable {
         onQueue {
             reconnectSource?.cancel()
             reconnectSource = nil
+            stopPendingReconnectTimeoutOnQueue()
             reconnectAttempt = 0
             reconnectGeneration = 0
+            pendingReconnectConnection?.cancel()
+            pendingReconnectConnection = nil
+        }
+    }
+
+    func setControlReconnectRoute(
+        endpoint: NWEndpoint,
+        parameters: NWParameters,
+        interface: BoothNetworkInterfacePolicy,
+        provenance: BoothRouteCandidateProvenance,
+        generation: Int
+    ) {
+        onQueue {
+            if reconnectRoute?.endpoint != endpoint || reconnectRoute?.generation != generation {
+                cancelReconnectOnQueue()
+            }
+            reconnectRoute = ControlReconnectRoute(
+                endpoint: endpoint,
+                parameters: parameters,
+                interface: interface,
+                provenance: provenance,
+                generation: generation
+            )
+        }
+    }
+
+    func clearControlReconnectRoute() {
+        onQueue {
+            cancelReconnectOnQueue()
+            reconnectRoute = nil
+        }
+    }
+
+    func updateTrustedPeerIDs(_ peerIDs: Set<String>) {
+        onQueue {
+            trustedPeerIDs = peerIDs
+        }
+    }
+
+    func recordAuthenticatedPeer(_ peerID: String, endpoint: NWEndpoint) {
+        onQueue {
+            let key = Self.endpointKey(for: endpoint)
+            var endpoints = authenticatedEndpointsByPeerID[peerID, default: []]
+            endpoints.insert(key)
+            authenticatedEndpointsByPeerID[peerID] = Set(endpoints.sorted().suffix(8))
+            admissionLimiter.recordSuccess(endpointKey: key)
+        }
+    }
+
+    func admitInboundControlConnection(
+        _ connection: NWConnection,
+        preferredCandidateHint: Bool = false,
+        adoptionTimeout: TimeInterval = 10
+    ) -> InboundControlAdmissionResult {
+        onQueue {
+            let key = Self.endpointKey(for: connection.endpoint)
+            let isPreferred = isPreferredEndpoint(key) || preferredCandidateHint
+            let check = admissionLimiter.shouldAdmit(
+                endpointKey: key,
+                isPreferredCandidate: isPreferred
+            )
+            guard check.admitted else {
+                connection.cancel()
+                return InboundControlAdmissionResult(admission: nil, rejectionReason: check.reason)
+            }
+
+            if let active = activeControlConnection {
+                switch active.state {
+                case .cancelled, .failed:
+                    clearControlSlotOnQueue(connection: active)
+                default:
+                    guard !activeControlAuthenticated, isPreferred,
+                          !isPreferredEndpoint(Self.endpointKey(for: active.endpoint)) else {
+                        connection.cancel()
+                        return InboundControlAdmissionResult(
+                            admission: nil,
+                            rejectionReason: "Another control connection is already active."
+                        )
+                    }
+                    recordAdmissionFailureOnQueue(active.endpoint)
+                    active.cancel()
+                    clearControlSlotOnQueue(connection: active)
+                }
+            }
+
+            nextInboundAdmissionGeneration &+= 1
+            let admission = InboundControlAdmission(
+                token: UUID(),
+                generation: nextInboundAdmissionGeneration,
+                endpointKey: key,
+                isPreferredCandidate: isPreferred
+            )
+            inboundAdmission = admission
+            activeControlConnection = connection
+            activeControlGeneration = admission.generation
+            activeControlAuthenticated = false
+            startInboundAdmissionTimeoutOnQueue(
+                connection: connection,
+                admission: admission,
+                timeout: max(1, adoptionTimeout)
+            )
+            return InboundControlAdmissionResult(admission: admission, rejectionReason: nil)
+        }
+    }
+
+    func startInboundControlConnection(
+        _ connection: NWConnection,
+        preferredCandidateHint: Bool = false,
+        adoptionTimeout: TimeInterval = 10
+    ) -> InboundControlAdmissionResult {
+        onQueue {
+            let result = admitInboundControlConnection(
+                connection,
+                preferredCandidateHint: preferredCandidateHint,
+                adoptionTimeout: adoptionTimeout
+            )
+            guard result.admission != nil else { return result }
+            connection.stateUpdateHandler = { [weak self, weak connection] state in
+                guard let self, let connection else { return }
+                switch state {
+                case .failed, .cancelled:
+                    self.controlConnectionEnded(connection)
+                default:
+                    break
+                }
+            }
+            connection.start(queue: queue)
+            return result
+        }
+    }
+
+    func confirmInboundControlAdmission(
+        _ admission: InboundControlAdmission,
+        connection: NWConnection,
+        generation: Int
+    ) -> Bool {
+        onQueue {
+            guard inboundAdmission?.token == admission.token,
+                  activeControlConnection === connection else { return false }
+            stopInboundAdmissionTimeoutOnQueue()
+            inboundAdmission = nil
+            activeControlGeneration = generation
+            return true
+        }
+    }
+
+    func abandonInboundControlAdmission(_ admission: InboundControlAdmission, connection: NWConnection) {
+        onQueue {
+            guard inboundAdmission?.token == admission.token,
+                  activeControlConnection === connection else { return }
+            stopInboundAdmissionTimeoutOnQueue()
+            inboundAdmission = nil
+            admissionLimiter.recordFailure(
+                endpointKey: admission.endpointKey,
+                isPreferredCandidate: admission.isPreferredCandidate
+            )
+            connection.cancel()
+            clearControlSlotOnQueue(connection: connection)
+        }
+    }
+
+    func controlConnectionEnded(_ connection: NWConnection, generation: Int? = nil) {
+        onQueue {
+            guard activeControlConnection === connection,
+                  generation == nil || activeControlGeneration == generation else { return }
+            if !activeControlAuthenticated {
+                if let admission = inboundAdmission,
+                   admission.generation == generation {
+                    admissionLimiter.recordFailure(
+                        endpointKey: admission.endpointKey,
+                        isPreferredCandidate: admission.isPreferredCandidate
+                    )
+                } else {
+                    recordAdmissionFailureOnQueue(connection.endpoint)
+                }
+            }
+            clearControlSlotOnQueue(connection: connection)
+        }
+    }
+
+    func isReconnectConnectionCurrent(_ connection: NWConnection, generation: Int) -> Bool {
+        onQueue {
+            guard reconnectGeneration == generation,
+                  pendingReconnectConnection === connection else { return false }
+            return true
+        }
+    }
+
+    private func cancelReconnectOnQueue() {
+        reconnectSource?.cancel()
+        reconnectSource = nil
+        stopPendingReconnectTimeoutOnQueue()
+        reconnectAttempt = 0
+        reconnectGeneration = 0
+        pendingReconnectConnection?.cancel()
+        pendingReconnectConnection = nil
+    }
+
+    private func stopPendingReconnectTimeoutOnQueue() {
+        pendingReconnectTimeoutSource?.cancel()
+        pendingReconnectTimeoutSource = nil
+    }
+
+    private func startInboundAdmissionTimeoutOnQueue(
+        connection: NWConnection,
+        admission: InboundControlAdmission,
+        timeout: TimeInterval
+    ) {
+        stopInboundAdmissionTimeoutOnQueue()
+        let source = DispatchSource.makeTimerSource(queue: queue)
+        source.schedule(deadline: .now() + timeout)
+        source.setEventHandler { [weak self, weak connection] in
+            guard let self, let connection,
+                  self.inboundAdmission?.token == admission.token,
+                  self.activeControlConnection === connection else { return }
+            self.admissionLimiter.recordFailure(
+                endpointKey: admission.endpointKey,
+                isPreferredCandidate: admission.isPreferredCandidate
+            )
+            connection.cancel()
+            self.inboundAdmission = nil
+            self.clearControlSlotOnQueue(connection: connection)
+            self.onPreAuthTimeout?(connection, admission.generation, "Control connection was not adopted before its admission deadline.")
+        }
+        inboundAdmissionSource = source
+        source.resume()
+    }
+
+    private func stopInboundAdmissionTimeoutOnQueue() {
+        inboundAdmissionSource?.cancel()
+        inboundAdmissionSource = nil
+    }
+
+    private func clearControlSlotOnQueue(connection: NWConnection) {
+        guard activeControlConnection === connection else { return }
+        stopInboundAdmissionTimeoutOnQueue()
+        if inboundAdmission?.token != nil,
+           inboundAdmission?.generation == activeControlGeneration {
+            inboundAdmission = nil
+        }
+        activeControlConnection = nil
+        activeControlAuthenticated = false
+        stopPreAuthWatchdogOnQueue()
+        if pendingReconnectConnection === connection {
+            pendingReconnectConnection = nil
+            stopPendingReconnectTimeoutOnQueue()
+        }
+    }
+
+    private func recordAdmissionFailureOnQueue(_ endpoint: NWEndpoint) {
+        let key = Self.endpointKey(for: endpoint)
+        admissionLimiter.recordFailure(
+            endpointKey: key,
+            isPreferredCandidate: isPreferredEndpoint(key)
+        )
+    }
+
+    private func isPreferredEndpoint(_ key: String) -> Bool {
+        trustedPeerIDs.contains { authenticatedEndpointsByPeerID[$0]?.contains(key) == true }
+    }
+
+    private static func endpointKey(for endpoint: NWEndpoint) -> String {
+        switch endpoint {
+        case .hostPort(let host, _):
+            return "\(host)"
+        default:
+            return endpoint.debugDescription
         }
     }
 
@@ -170,7 +476,7 @@ final class BoothNetworkTransportRuntime: @unchecked Sendable {
         attempt: Int,
         generation: Int
     ) -> Bool {
-        guard reconnectSource == nil else { return false }
+        guard reconnectSource == nil, pendingReconnectConnection == nil else { return false }
         reconnectAttempt = attempt
         reconnectGeneration = generation
         let source = DispatchSource.makeTimerSource(queue: queue)
@@ -178,12 +484,79 @@ final class BoothNetworkTransportRuntime: @unchecked Sendable {
         source.setEventHandler { [weak self] in
             guard let self else { return }
             self.reconnectSource = nil
-            self.onReconnectDue?(self.reconnectAttempt, self.reconnectGeneration)
+            self.beginReconnectOnQueue()
         }
         reconnectSource = source
         source.resume()
         return true
     }
+
+    private func beginReconnectOnQueue() {
+        guard let route = reconnectRoute,
+              route.generation == reconnectGeneration,
+              reconnectAttempt <= 5 else {
+            onReconnectDue?(reconnectAttempt, reconnectGeneration)
+            return
+        }
+
+        let connection = NWConnection(to: route.endpoint, using: route.parameters)
+        pendingReconnectConnection = connection
+        let attempt = reconnectAttempt
+        let generation = reconnectGeneration
+        let timeoutSource = DispatchSource.makeTimerSource(queue: queue)
+        timeoutSource.schedule(deadline: .now() + 10)
+        timeoutSource.setEventHandler { [weak self, weak connection] in
+            guard let self, let connection,
+                  self.pendingReconnectConnection === connection,
+                  self.reconnectGeneration == generation else { return }
+            self.pendingReconnectConnection = nil
+            self.stopPendingReconnectTimeoutOnQueue()
+            connection.cancel()
+            self.retryOrFinishReconnectOnQueue(attempt: attempt, generation: generation)
+        }
+        pendingReconnectTimeoutSource = timeoutSource
+        timeoutSource.resume()
+        connection.stateUpdateHandler = { [weak self, weak connection] state in
+            guard let self, let connection else { return }
+            switch state {
+            case .failed, .cancelled:
+                break
+            default:
+                return
+            }
+            self.onQueue {
+                guard self.pendingReconnectConnection === connection,
+                      self.reconnectGeneration == generation else { return }
+                self.pendingReconnectConnection = nil
+                self.stopPendingReconnectTimeoutOnQueue()
+                connection.cancel()
+                self.retryOrFinishReconnectOnQueue(attempt: attempt, generation: generation)
+            }
+        }
+        connection.start(queue: queue)
+        onReconnectConnectionStarted?(
+            connection,
+            route.endpoint,
+            route.parameters,
+            route.interface,
+            route.provenance,
+            attempt,
+            generation
+        )
+    }
+
+    private func retryOrFinishReconnectOnQueue(attempt: Int, generation: Int) {
+        if attempt < 5 {
+            _ = scheduleReconnectOnQueue(
+                after: [0.5, 1, 2, 4, 5][min(attempt, 4)],
+                attempt: attempt + 1,
+                generation: generation
+            )
+        } else {
+            onReconnectDue?(attempt, generation)
+        }
+    }
+
 
     // MARK: - Control Connection Slot Ownership (Finding A03)
 
@@ -193,6 +566,10 @@ final class BoothNetworkTransportRuntime: @unchecked Sendable {
         authenticated: Bool = false
     ) {
         onQueue {
+            if pendingReconnectConnection === connection {
+                pendingReconnectConnection = nil
+                stopPendingReconnectTimeoutOnQueue()
+            }
             activeControlConnection = connection
             activeControlGeneration = generation
             activeControlAuthenticated = authenticated
@@ -204,6 +581,8 @@ final class BoothNetworkTransportRuntime: @unchecked Sendable {
             if activeControlGeneration == generation {
                 activeControlConnection = nil
                 activeControlAuthenticated = false
+                stopInboundAdmissionTimeoutOnQueue()
+                inboundAdmission = nil
                 stopPreAuthWatchdogOnQueue()
                 stopHeartbeatOnQueue()
             }
@@ -301,6 +680,7 @@ final class BoothNetworkTransportRuntime: @unchecked Sendable {
                 connection.cancel()
                 self.stopPreAuthWatchdogOnQueue()
                 if self.activeControlConnection === connection {
+                    self.recordAdmissionFailureOnQueue(connection.endpoint)
                     self.activeControlConnection = nil
                     self.activeControlAuthenticated = false
                 }
@@ -417,7 +797,8 @@ final class BoothNetworkTransportRuntime: @unchecked Sendable {
             preAuthWatchdog?.onAuthenticated()
             stopPreAuthWatchdogOnQueue()
             activeControlAuthenticated = true
+            reconnectAttempt = 0
+            pendingReconnectConnection = nil
         }
     }
 }
-

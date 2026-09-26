@@ -676,8 +676,179 @@ private func waitForSemaphore(
     semaphore.wait(timeout: .now() + timeout) == .success
 }
 
+private final class NetworkTestConnectionBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var connections = [NWConnection]()
+
+    func store(_ connection: NWConnection) {
+        lock.lock()
+        connections.append(connection)
+        lock.unlock()
+    }
+
+    func cancel() {
+        lock.lock()
+        let connections = self.connections
+        self.connections.removeAll()
+        lock.unlock()
+        connections.forEach { $0.cancel() }
+    }
+}
+
 @Suite("Network route policy")
 struct NetworkRouteTests {
+    @Test("production listener admission releases a stalled control slot while MainActor is blocked")
+    func productionListenerAdmissionIsQueueOwned() async throws {
+        let queue = DispatchQueue(label: "PRC-PhotoBooth.Tests.ProductionAdmission")
+        let runtime = BoothNetworkTransportRuntime(queue: queue)
+        let listener = try NWListener(using: .tcp)
+        let listenerReady = DispatchSemaphore(value: 0)
+        let accepted = DispatchSemaphore(value: 0)
+        let preAuthTimeout = DispatchSemaphore(value: 0)
+        let serverConnection = NetworkTestConnectionBox()
+        let clientQueue = DispatchQueue(label: "PRC-PhotoBooth.Tests.ProductionAdmissionClient")
+        runtime.onPreAuthTimeout = { _, _, _ in preAuthTimeout.signal() }
+        listener.stateUpdateHandler = { state in
+            if case .ready = state { listenerReady.signal() }
+        }
+        listener.newConnectionHandler = { connection in
+            let result = runtime.startInboundControlConnection(
+                connection,
+                adoptionTimeout: 0.2
+            )
+            if result.admission != nil {
+                serverConnection.store(connection)
+                accepted.signal()
+            }
+        }
+        listener.start(queue: queue)
+        defer {
+            listener.cancel()
+            serverConnection.cancel()
+            runtime.cancelReconnect()
+        }
+        #expect(waitForSemaphore(listenerReady))
+        let port = try #require(listener.port)
+
+        let mainEntered = DispatchSemaphore(value: 0)
+        let releaseMain = DispatchSemaphore(value: 0)
+        defer { releaseMain.signal() }
+        DispatchQueue.main.async {
+            mainEntered.signal()
+            releaseMain.wait()
+        }
+        try await Task.sleep(for: .milliseconds(25))
+        #expect(waitForSemaphore(mainEntered))
+
+        let first = NWConnection(host: "127.0.0.1", port: port, using: .tcp)
+        let second = NWConnection(host: "127.0.0.1", port: port, using: .tcp)
+        defer {
+            first.cancel()
+            second.cancel()
+        }
+        first.start(queue: clientQueue)
+        #expect(waitForSemaphore(accepted))
+        #expect(waitForSemaphore(preAuthTimeout))
+        #expect(runtime.isControlSlotAvailable())
+
+        second.start(queue: clientQueue)
+        #expect(waitForSemaphore(accepted))
+        #expect(!runtime.isControlSlotAvailable())
+    }
+
+    @Test("previously authenticated endpoint bypasses anonymous flood ceiling without bypassing authentication")
+    func trustedEndpointAdmissionSurvivesAnonymousFlood() {
+        let runtime = BoothNetworkTransportRuntime(
+            queue: DispatchQueue(label: "PRC-PhotoBooth.Tests.TrustedAdmission")
+        )
+        runtime.updateTrustedPeerIDs(["paired-ipad"])
+        let trustedEndpoint = NWEndpoint.hostPort(
+            host: "192.168.1.44",
+            port: NWEndpoint.Port(rawValue: 54_321)!
+        )
+        runtime.recordAuthenticatedPeer("paired-ipad", endpoint: trustedEndpoint)
+
+        for index in 1...BoothPreAuthAdmissionLimiter.defaultGlobalFailureThreshold {
+            let endpoint = NWEndpoint.hostPort(
+                host: NWEndpoint.Host(String(format: "192.0.2.%d", index)),
+                port: NWEndpoint.Port(rawValue: 54_321)!
+            )
+            let connection = NWConnection(to: endpoint, using: .tcp)
+            let result = runtime.admitInboundControlConnection(connection)
+            #expect(result.admission != nil)
+            if let admission = result.admission {
+                runtime.abandonInboundControlAdmission(admission, connection: connection)
+            }
+        }
+
+        let anonymous = NWConnection(
+            to: .hostPort(host: "198.51.100.7", port: NWEndpoint.Port(rawValue: 54_321)!),
+            using: .tcp
+        )
+        let anonymousResult = runtime.admitInboundControlConnection(anonymous)
+        #expect(anonymousResult.admission == nil)
+
+        let trusted = NWConnection(to: trustedEndpoint, using: .tcp)
+        let trustedResult = runtime.admitInboundControlConnection(trusted)
+        #expect(trustedResult.admission?.isPreferredCandidate == true)
+        if let admission = trustedResult.admission {
+            runtime.abandonInboundControlAdmission(admission, connection: trusted)
+        }
+    }
+
+    @Test("production cached reconnect starts a replacement socket while MainActor is blocked")
+    func productionReconnectStartsSocketOffMainActor() async throws {
+        let queue = DispatchQueue(label: "PRC-PhotoBooth.Tests.ProductionReconnect")
+        let runtime = BoothNetworkTransportRuntime(queue: queue)
+        let listener = try NWListener(using: .tcp)
+        let listenerReady = DispatchSemaphore(value: 0)
+        let accepted = DispatchSemaphore(value: 0)
+        let connectionStarted = DispatchSemaphore(value: 0)
+        let serverConnection = NetworkTestConnectionBox()
+        let generation = 88
+        listener.stateUpdateHandler = { state in
+            if case .ready = state { listenerReady.signal() }
+        }
+        listener.newConnectionHandler = { connection in
+            serverConnection.store(connection)
+            connection.start(queue: queue)
+            accepted.signal()
+        }
+        listener.start(queue: queue)
+        defer {
+            listener.cancel()
+            serverConnection.cancel()
+            runtime.cancelReconnect()
+        }
+        #expect(waitForSemaphore(listenerReady))
+        let port = try #require(listener.port)
+        runtime.setControlReconnectRoute(
+            endpoint: .hostPort(host: "127.0.0.1", port: port),
+            parameters: .tcp,
+            interface: .wifi,
+            provenance: .localNetworkBonjour,
+            generation: generation
+        )
+        runtime.onReconnectConnectionStarted = { _, _, _, _, _, _, _ in
+            connectionStarted.signal()
+        }
+
+        let mainEntered = DispatchSemaphore(value: 0)
+        let releaseMain = DispatchSemaphore(value: 0)
+        defer { releaseMain.signal() }
+        DispatchQueue.main.async {
+            mainEntered.signal()
+            releaseMain.wait()
+        }
+        try await Task.sleep(for: .milliseconds(25))
+        #expect(waitForSemaphore(mainEntered))
+
+        #expect(runtime.scheduleReconnect(after: 0.05, attempt: 1, generation: generation))
+        #expect(waitForSemaphore(connectionStarted))
+        #expect(waitForSemaphore(accepted))
+        #expect(!waitForSemaphore(accepted, timeout: 0.2))
+    }
+
     @Test("reconnect timer fires while MainActor is blocked")
     func reconnectTimerIsQueueOwned() {
         let queue = DispatchQueue(

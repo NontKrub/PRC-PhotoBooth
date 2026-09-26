@@ -80,6 +80,13 @@ final class CaptureService {
         isRunning = false
     }
 
+    func invalidateCaptureRecovery() {
+        dslr.invalidateCaptureRecovery()
+#if DEBUG
+        pendingDemoRecoveryImage = nil
+#endif
+    }
+
     func startDSLR() throws {
         try dslr.start()
     }
@@ -237,6 +244,7 @@ final class CaptureService {
     }
 
     func resetStills() {
+        invalidateCaptureRecovery()
         capturedStills = [:]
         lastCaptureImage = nil
 #if DEBUG

@@ -78,15 +78,79 @@ struct GuestDeliveryEndpointResolverTests {
         #expect(GuestDeliveryEndpointResolver.isGuestRoutable(interface: en1Nineteen))
     }
 
-    @Test("prefers primary physical interface en0 over others")
-    func prefersPrimaryPhysicalInterface() {
+    @Test("automatic selection fails closed when physical networks are ambiguous")
+    func automaticSelectionFailsClosedWhenAmbiguous() {
         let en1 = NetworkInterfaceSnapshot(name: "en1", flags: activeFlags, address: "192.168.1.100")
         let en0 = NetworkInterfaceSnapshot(name: "en0", flags: activeFlags, address: "10.0.0.50")
         let bridge = NetworkInterfaceSnapshot(name: "bridge100", flags: activeFlags, address: "192.168.2.1")
         let lo0 = NetworkInterfaceSnapshot(name: "lo0", flags: loopbackFlags, address: "127.0.0.1")
 
-        let best = GuestDeliveryEndpointResolver.resolveBestGuestDeliveryIP(from: [bridge, en1, lo0, en0])
-        #expect(best == "10.0.0.50")
+        let result = GuestDeliveryEndpointResolver.resolve(from: [bridge, en1, lo0, en0], selection: .automatic)
+        #expect(result == .ambiguous(interfaceNames: ["en0", "en1"]))
+        #expect(GuestDeliveryEndpointResolver.resolveBestGuestDeliveryIP(from: [bridge, en1, lo0, en0]) == nil)
+    }
+
+    @Test("selected Ethernet chooses direct Ethernet even when Wi-Fi is also active")
+    func selectedEthernetWinsOverWiFi() throws {
+        let wifi = NetworkInterfaceSnapshot(
+            name: "en0", flags: activeFlags, address: "10.10.0.5",
+            interfaceIndex: 4, interfaceType: .wifi
+        )
+        let ethernet = NetworkInterfaceSnapshot(
+            name: "en5", flags: activeFlags, address: "192.168.4.1",
+            interfaceIndex: 9, interfaceType: .ethernet
+        )
+
+        let endpoint = try #require(GuestDeliveryEndpointResolver.resolve(
+            from: [wifi, ethernet], selection: .ethernet
+        ).endpoint)
+        #expect(endpoint.address == "192.168.4.1")
+        #expect(endpoint.interfaceName == "en5")
+        #expect(endpoint.interfaceIndex == 9)
+        #expect(endpoint.interfaceType == .ethernet)
+        #expect(endpoint.port == 8585)
+    }
+
+    @Test("selected Wi-Fi chooses the active Wi-Fi interface when Ethernet is also active")
+    func selectedWiFiWinsOverEthernet() throws {
+        let wifi = NetworkInterfaceSnapshot(
+            name: "en0", flags: activeFlags, address: "10.10.0.5", interfaceType: .wifi
+        )
+        let ethernet = NetworkInterfaceSnapshot(
+            name: "en5", flags: activeFlags, address: "192.168.4.1", interfaceType: .ethernet
+        )
+
+        let endpoint = try #require(GuestDeliveryEndpointResolver.resolve(
+            from: [wifi, ethernet], selection: .wifi
+        ).endpoint)
+        #expect(endpoint.address == "10.10.0.5")
+        #expect(endpoint.interfaceName == "en0")
+        #expect(endpoint.interfaceType == .wifi)
+    }
+
+    @Test("multiple matching interfaces remain ambiguous")
+    func matchingInterfacesRemainAmbiguous() {
+        let first = NetworkInterfaceSnapshot(
+            name: "en0", flags: activeFlags, address: "10.10.0.5", interfaceType: .wifi
+        )
+        let second = NetworkInterfaceSnapshot(
+            name: "en1", flags: activeFlags, address: "10.10.0.6", interfaceType: .wifi
+        )
+        #expect(GuestDeliveryEndpointResolver.resolve(from: [first, second], selection: .wifi)
+            == .ambiguous(interfaceNames: ["en0", "en1"]))
+    }
+
+    @Test("guest endpoint reports unavailable for filtered virtual interfaces")
+    func virtualOnlyEndpointIsUnavailable() {
+        let vm = NetworkInterfaceSnapshot(name: "vmnet1", flags: activeFlags, address: "192.168.56.1")
+        #expect(GuestDeliveryEndpointResolver.resolve(from: [vm], selection: .ethernet) == .unavailable)
+    }
+
+    @Test("booth network preference maps to effective guest interface")
+    func boothNetworkPreferenceMapsToEffectiveGuestInterface() {
+        #expect(GuestDeliveryInterfaceSelection.forBoothNetwork(requested: .lan, effective: .unavailable) == .ethernet)
+        #expect(GuestDeliveryInterfaceSelection.forBoothNetwork(requested: .wifi, effective: .lan) == .ethernet)
+        #expect(GuestDeliveryInterfaceSelection.forBoothNetwork(requested: .lan, effective: .wifi) == .wifi)
     }
 
     @Test("returns nil when no routable interface exists")

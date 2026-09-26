@@ -1,40 +1,64 @@
 import Foundation
 
 struct DSLRCaptureAttemptValidator: Sendable {
+    static func authorizes(
+        _ candidate: CaptureMediaCandidate,
+        context: DSLRCaptureAttemptContext,
+        cameraIdentifier: String?
+    ) -> Bool {
+        guard let expected = context.expectedCameraIdentifier,
+              let cameraIdentifier,
+              expected == cameraIdentifier,
+              context.shutterIssuedAt != nil else { return false }
+
+        switch candidate {
+        case .cameraFile(let name, let creationDate):
+            guard let name,
+                  !name.isEmpty,
+                  !context.baselineFileNames.contains(name),
+                  let creationDate,
+                  let shutterIssuedAt = context.shutterIssuedAt else { return false }
+            return creationDate >= shutterIssuedAt
+
+        case .ptpObjectHandle(let handle):
+            guard handle != 0,
+                  handle != 0xFFFFFFFF,
+                  handle != 0xFFFFC001,
+                  context.allowsPTPHandleCandidates,
+                  case .success(let baselineHandles) = context.baselineObjectHandles else { return false }
+            return !baselineHandles.contains(handle)
+
+        case .sonyPCBuffer(let objectInMemoryValue):
+            guard let baseline = context.baselineObjectInMemoryValue,
+                  baseline < 0x8000,
+                  let objectInMemoryValue,
+                  objectInMemoryValue >= 0x8000 else { return false }
+            return context.objectInMemoryTransitionObserved
+        }
+    }
+
     static func isNewMediaFile(
         name: String?,
         creationDate: Date?,
         context: DSLRCaptureAttemptContext
     ) -> Bool {
-        // File must NOT be in the baseline
-        guard let name, !context.baselineFileNames.contains(name) else { return false }
-        // Creation date must be compatible (within 60s before capture request)
-        let cutoff = context.requestedAt.addingTimeInterval(-60)
-        guard let date = creationDate, date >= cutoff else {
-            // If no date, we can't prove freshness — reject
-            return false
-        }
-        return true
+        guard let name,
+              !name.isEmpty,
+              !context.baselineFileNames.contains(name),
+              let creationDate,
+              let shutterIssuedAt = context.shutterIssuedAt else { return false }
+        return creationDate >= shutterIssuedAt
     }
-    
+
     static func isNewObjectHandle(
         _ handle: UInt32,
         context: DSLRCaptureAttemptContext
     ) -> Bool {
-        // Fixed buffer handle 0xFFFFC001 requires separate freshness proof
-        guard handle != 0xFFFFC001 else { return false }
-        // Handle must NOT be in baseline
-        return !context.baselineObjectHandles.contains(handle)
-    }
-    
-    // For the fixed PC buffer handle, we need additional freshness proof
-    static func canTrustPCBufferContent(
-        objectInMemoryValue: UInt16?,
-        shutterWasIssued: Bool
-    ) -> Bool {
-        // Only trust if we know we issued a shutter AND the camera reports a new object ready
-        guard shutterWasIssued else { return false }
-        guard let value = objectInMemoryValue, value >= 0x8000 else { return false }
-        return true
+        guard handle != 0,
+              handle != 0xFFFFFFFF,
+              handle != 0xFFFFC001,
+              context.allowsPTPHandleCandidates,
+              case .success(let baselineHandles) = context.baselineObjectHandles else { return false }
+        return !baselineHandles.contains(handle)
     }
 }

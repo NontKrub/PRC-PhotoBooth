@@ -127,6 +127,7 @@ struct BoothPreflightContext: Sendable {
     var localServerStatus: LocalWebServerStatus
     var localServerHealthPassed: Bool
     var localIPAddress: String?
+    var guestDeliveryResolution: GuestDeliveryResolution
     var runtimeDirectoryURL: URL
     var runtimePersistenceAvailable: Bool
     var queuePersistenceAvailable: Bool
@@ -184,6 +185,7 @@ struct BoothPreflightContext: Sendable {
         localServerStatus: LocalWebServerStatus = LocalWebServerStatus(state: .stopped, registeredTokenCount: 0),
         localServerHealthPassed: Bool = false,
         localIPAddress: String? = nil,
+        guestDeliveryResolution: GuestDeliveryResolution = .unavailable,
         runtimeDirectoryURL: URL = FileManager.default.temporaryDirectory,
         runtimePersistenceAvailable: Bool = true,
         queuePersistenceAvailable: Bool = true,
@@ -240,6 +242,7 @@ struct BoothPreflightContext: Sendable {
         self.localServerStatus = localServerStatus
         self.localServerHealthPassed = localServerHealthPassed
         self.localIPAddress = localIPAddress
+        self.guestDeliveryResolution = guestDeliveryResolution
         self.runtimeDirectoryURL = runtimeDirectoryURL
         self.runtimePersistenceAvailable = runtimePersistenceAvailable
         self.queuePersistenceAvailable = queuePersistenceAvailable

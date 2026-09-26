@@ -23,28 +23,67 @@ public final class BoothSoakTestController {
         preflightErrors.removeAll()
         preflightWarnings.removeAll()
 
-        // 1. Storage check
-        let tempDir = FileManager.default.temporaryDirectory
+        if !(1...500).contains(config.targetCycles) {
+            preflightErrors.append("Target cycles must be between 1 and 500.")
+        }
+        if !(1...8).contains(config.photosPerSession) {
+            preflightErrors.append("Photos per session must be between 1 and 8.")
+        }
+        if !(1...500).contains(config.physicalPrintEveryCycles) {
+            preflightErrors.append("Physical print interval must be between 1 and 500 cycles.")
+        }
+        if config.testCloudUpload && config.mode != .productionPipeline {
+            preflightErrors.append("Cloud testing is available only in Production Pipeline mode.")
+        }
+        if config.enablePhysicalPrint && config.mode != .productionPipeline {
+            preflightErrors.append("Physical printing requires Production Pipeline mode.")
+        }
+
+        // Production uses the same volume as real session files; the benchmark uses scratch storage.
+        let storageURL = config.mode == .productionPipeline
+            ? coordinator.flatMap { $0.productionSoakOutputDirectory }
+            : FileManager.default.temporaryDirectory
+        if config.mode == .productionPipeline && storageURL == nil {
+            preflightErrors.append("The production session output volume is unavailable.")
+        }
+        let tempDir = storageURL ?? FileManager.default.temporaryDirectory
         if let values = try? tempDir.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey, .volumeAvailableCapacityKey]),
            let bytes = values.volumeAvailableCapacityForImportantUsage ?? values.volumeAvailableCapacity.map(Int64.init) {
             let freeGB = Double(bytes) / (1024 * 1024 * 1024)
-            if freeGB < 1.0 {
-                preflightErrors.append("Critically low disk space: \(String(format: "%.1f", freeGB)) GB available. At least 2.0 GB required.")
+            if freeGB < 2.0 {
+                preflightErrors.append("Critically low disk space: \(String(format: "%.1f", freeGB)) GB available. At least 2.0 GB is required.")
             } else if freeGB < 3.0 {
                 preflightWarnings.append("Low disk space: \(String(format: "%.1f", freeGB)) GB available.")
             }
         }
 
         // 2. Camera check
-        if let coord = coordinator {
-            if !coord.cameraPermissionGranted {
-                preflightErrors.append("Camera access permission has not been granted.")
+        switch config.mode {
+        case .syntheticBenchmark:
+            break
+        case .cameraHardware:
+            guard let coordinator else {
+                preflightErrors.append("Camera Hardware mode requires the live booth camera service.")
+                break
             }
+            if !coordinator.selectedCaptureSourceReady {
+                preflightErrors.append("The selected physical camera is not ready.")
+            }
+            if coordinator.capture.demoMode {
+                preflightErrors.append("Demo camera mode cannot be counted as hardware verification.")
+            }
+        case .productionPipeline:
+            guard let coordinator else {
+                preflightErrors.append("Production Pipeline mode requires the live BoothCoordinator.")
+                break
+            }
+            preflightErrors.append(contentsOf: coordinator.productionSoakReadinessIssues(config: config))
         }
 
         // 3. Print safety invariant
         if config.enablePhysicalPrint {
-            preflightWarnings.append("⚠️ PHYSICAL PRINTING IS ENABLED! Real paper and ribbon will be consumed for all \(config.targetCycles) sessions.")
+            let count = (config.targetCycles + config.physicalPrintEveryCycles - 1) / config.physicalPrintEveryCycles
+            preflightWarnings.append("PHYSICAL PRINTING IS ENABLED: up to \(count) real print jobs, at a rate of one on the first cycle and every \(config.physicalPrintEveryCycles) cycles after that.")
         }
     }
 
@@ -57,6 +96,7 @@ public final class BoothSoakTestController {
         self.runner = activeRunner
         let testConfig = self.config
         let captureService = coordinator?.capture
+        latestReport = nil
 
         state = .preflight(message: "Starting soak test runner...")
 
@@ -67,13 +107,22 @@ public final class BoothSoakTestController {
                     captureService: captureService,
                     coordinator: coordinator,
                     progressHandler: { [weak self] newState in
-                        Task { @MainActor in
+                        await MainActor.run {
                             self?.state = newState
                         }
                     }
                 )
                 self.latestReport = report
-                self.state = .completed(report: report)
+                switch report.outcome {
+                case .passed:
+                    self.state = .completed(report: report)
+                case .failed:
+                    self.state = .failed(error: report.summaryVerdict, partialReport: report)
+                case .stoppedEarly:
+                    self.state = .stopped(report: report)
+                case .cancelled:
+                    self.state = .cancelled(report: report)
+                }
             } catch {
                 self.state = .failed(error: error.localizedDescription, partialReport: self.latestReport)
             }
@@ -90,8 +139,7 @@ public final class BoothSoakTestController {
         Task {
             await runner?.cancel()
         }
-        runTask?.cancel()
-        state = .idle
+        state = .stopping(reason: "Canceling the active session at a safe capture and persistence boundary.")
     }
 
     public func exportReport(to destinationURL: URL) throws {

@@ -56,7 +56,17 @@ final class BoothPreflightService {
             serverDetail = "The local download server is not healthy."
         }
         checked.append(result(.localDownloadServer, "Local download server", serverDetail, context.localServerHealthPassed ? .passed : .failed, .required, now))
-        checked.append(result(.localIPAddress, "Local IP address", context.localIPAddress == nil ? "No LAN address was found." : context.localIPAddress!, context.localIPAddress == nil ? .warning : .passed, .recommended, now))
+        let guestEndpointResult: (detail: String, status: PreflightCheckStatus) = switch context.guestDeliveryResolution {
+        case .ready(let endpoint):
+            (endpoint.diagnosticDescription, .passed)
+        case .ambiguous(let names):
+            ("Multiple private networks detected (\(names.joined(separator: ", "))). Select or verify the guest delivery network.", .warning)
+        case .unavailable where context.localIPAddress != nil:
+            (context.localIPAddress!, .passed)
+        case .unavailable:
+            ("No authoritative guest delivery interface is available.", .warning)
+        }
+        checked.append(result(.localIPAddress, "Guest delivery endpoint", guestEndpointResult.detail, guestEndpointResult.status, .recommended, now))
         checked.append(runtimeResult(context, now: now))
         checked.append(startupResult(.recoveryStorage, component: .recoveryStore, title: "Recovery storage", context: context, now: now))
         checked.append(result(.unfinishedSession, "Unfinished session", context.unfinishedCaptureSession ? "An unfinished capture session awaits Resume or Discard." : "No unfinished capture session is waiting.", context.unfinishedCaptureSession ? .failed : .passed, .required, now))
@@ -391,7 +401,8 @@ final class BoothPreflightService {
         let policy = SessionQRCodePayloadResolver.evaluatePolicy(
             publicBaseURL: context.publicBaseURL,
             cloudUploadEnabled: context.cloudUploadEnabled,
-            allowTrustedLocalHTTP: context.allowTrustedLocalHTTP
+            allowTrustedLocalHTTP: context.allowTrustedLocalHTTP,
+            localBaseURL: context.guestDeliveryResolution.endpoint?.baseURL ?? ""
         )
         switch policy {
         case .publicHTTPS:

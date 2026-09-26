@@ -1,5 +1,6 @@
 import Foundation
 import Network
+import Darwin
 
 enum LocalWebServerState: Sendable, Equatable {
     case stopped
@@ -30,7 +31,6 @@ struct OperatorWebHandlers: Sendable {
 actor LocalWebServer {
     private static let maximumActiveConnections = 48
     private static let maximumActiveConnectionsPerClient = 8
-    private static let requestTimeoutNanoseconds: UInt64 = 10_000_000_000
     private static let fileChunkTimeoutNanoseconds: UInt64 = 15_000_000_000
     private static let securityHeaders = [
         "Cache-Control": "no-store",
@@ -48,8 +48,11 @@ actor LocalWebServer {
     private var activeGuestConnections: [UUID: NWConnection] = [:]
     private var operatorHandlers: OperatorWebHandlers?
     private var activePort: UInt16?
-    private var activeConnectionCount = 0
-    private var activeConnectionsPerClient: [String: Int] = [:]
+    private var connectionAdmission = LocalWebServerConnectionAdmission(
+        maximumConnections: maximumActiveConnections,
+        maximumPerClient: maximumActiveConnectionsPerClient
+    )
+    private let requestTimeoutNanoseconds: UInt64
 #if DEBUG
     private var beforeFileResponseForTesting: (@Sendable () async -> Void)?
 #endif
@@ -57,8 +60,9 @@ actor LocalWebServer {
 
     private var state: LocalWebServerState = .stopped
 
-    init(port: UInt16 = 8585) {
+    init(port: UInt16 = 8585, requestTimeoutSeconds: TimeInterval = 10) {
         self.port = port
+        requestTimeoutNanoseconds = UInt64(max(0.001, requestTimeoutSeconds) * 1_000_000_000)
     }
 
     func registerToken(_ token: String, sessionDirectory: URL) {
@@ -146,6 +150,10 @@ actor LocalWebServer {
         LocalWebServerStatus(state: state, registeredTokenCount: sessionRoutes.count)
     }
 
+    func connectionAdmissionSnapshot() -> LocalWebServerConnectionAdmission.Snapshot {
+        connectionAdmission.snapshot
+    }
+
     func waitUntilReady(timeout: TimeInterval = 5) async -> LocalWebServerStatus {
         let deadline = Date().addingTimeInterval(timeout)
         while Date() < deadline {
@@ -196,7 +204,6 @@ actor LocalWebServer {
         listener?.cancel()
         listener = nil
         activePort = nil
-        activeConnectionsPerClient.removeAll()
         state = .stopped
     }
 
@@ -220,48 +227,26 @@ actor LocalWebServer {
     private func clientHost(for connection: NWConnection) -> String? {
         switch connection.endpoint {
         case .hostPort(let host, _):
-            return "\(host)"
+            return LocalWebServerClientIdentity.normalizedHost("\(host)")
         default:
             return connection.endpoint.debugDescription
         }
     }
 
     private func handle(_ connection: NWConnection) async {
-        guard activeConnectionCount < Self.maximumActiveConnections else {
+        let clientKey = clientHost(for: connection)
+        guard let admission = connectionAdmission.acquire(clientKey: clientKey) else {
             connection.start(queue: ioQueue)
             _ = await send(connection, data: secured(busy()).httpData, timeoutNanoseconds: Self.fileChunkTimeoutNanoseconds)
             connection.cancel()
             return
         }
-        let clientKey = clientHost(for: connection)
-        if let clientKey {
-            let clientCount = activeConnectionsPerClient[clientKey, default: 0]
-            guard clientCount < Self.maximumActiveConnectionsPerClient else {
-                connection.start(queue: ioQueue)
-                _ = await send(connection, data: secured(busy()).httpData, timeoutNanoseconds: Self.fileChunkTimeoutNanoseconds)
-                connection.cancel()
-                return
-            }
-            activeConnectionsPerClient[clientKey] = clientCount + 1
-        }
-        activeConnectionCount += 1
-        defer {
-            activeConnectionCount -= 1
-            if let clientKey {
-                if let count = activeConnectionsPerClient[clientKey] {
-                    if count <= 1 {
-                        activeConnectionsPerClient.removeValue(forKey: clientKey)
-                    } else {
-                        activeConnectionsPerClient[clientKey] = count - 1
-                    }
-                }
-            }
-        }
+        defer { connectionAdmission.release(admission) }
         defer { connection.cancel() }
         connection.start(queue: ioQueue)
         var parser = HTTPServerRequestParser()
         var request: HTTPServerRequest?
-        let deadline = DispatchTime.now().uptimeNanoseconds + Self.requestTimeoutNanoseconds
+        let deadline = DispatchTime.now().uptimeNanoseconds + requestTimeoutNanoseconds
         do {
             while request == nil, let data = await receive(from: connection, deadline: deadline) {
                 request = try parser.append(data)
@@ -517,8 +502,18 @@ actor LocalWebServer {
     private func serverError() -> LocalDownloadResponse { LocalDownloadResponse(statusCode: 500, reason: "Internal Server Error", contentType: "text/plain; charset=utf-8", headers: [:], body: Data("Internal server error".utf8)) }
     private func notFound() -> LocalDownloadResponse { LocalDownloadResponse(statusCode: 404, reason: "Not Found", contentType: "text/plain; charset=utf-8", headers: [:], body: Data("Not found".utf8)) }
 
-    static func lanIPAddress() -> String? {
-        GuestDeliveryEndpointResolver.resolveBestGuestDeliveryIP()
+    static func guestDeliveryEndpoint(
+        selection: GuestDeliveryInterfaceSelection = .automatic,
+        port: UInt16 = 8585
+    ) -> GuestDeliveryResolution {
+        GuestDeliveryEndpointResolver.resolveSystem(selection: selection, port: port)
+    }
+
+    static func lanIPAddress(
+        selection: GuestDeliveryInterfaceSelection = .automatic,
+        port: UInt16 = 8585
+    ) -> String? {
+        guestDeliveryEndpoint(selection: selection, port: port).endpoint?.address
     }
 }
 

@@ -10,25 +10,34 @@ enum SessionJobReconciliationDecision: Sendable, Equatable {
     case complete
 
     static func evaluate(
-        manifestStatus: RuntimeSessionStatus,
+        manifest: SessionManifest,
         jobs: [SessionJob]
     ) -> Self {
-        let requiredKinds: [SessionJobKind] = [.renderStrip, .registerDownload]
-        let requiredJobs = requiredKinds.compactMap { kind -> SessionJob? in
-            let matching = jobs.filter { $0.kind == kind }
+        guard let plan = FinalizationPlan.make(from: manifest) else {
+            return .none
+        }
+        let transactionJobs = jobs.filter {
+            $0.sessionID == manifest.id && $0.finalizationTransactionID == plan.transactionID
+        }
+        func latest(_ kind: SessionJobKind) -> SessionJob? {
+            let matching = transactionJobs.filter { $0.kind == kind }
             let nonCancelled = matching.filter { $0.status != .cancelled }
             return (nonCancelled.isEmpty ? matching : nonCancelled).max {
                 $0.createdAt == $1.createdAt ? $0.id < $1.id : $0.createdAt < $1.createdAt
             }
         }
+        let requiredJobs = FinalizationPlan.requiredJobKinds.compactMap(latest)
 
-        switch manifestStatus {
+        switch manifest.status {
         case .failed:
             return requiredJobs.contains(where: { SessionJobDependencyPolicy.hasRunnableWork($0, in: jobs) })
                 ? .restoreFinalizing
                 : .none
         case .finalizing:
-            if requiredJobs.count == requiredKinds.count,
+            if plan.jobKinds.contains(where: { latest($0) == nil }) {
+                return .enqueueMissingRequiredJobs
+            }
+            if requiredJobs.count == FinalizationPlan.requiredJobKinds.count,
                requiredJobs.allSatisfy({ $0.status == .succeeded }) {
                 return .complete
             }
@@ -38,7 +47,7 @@ enum SessionJobReconciliationDecision: Sendable, Equatable {
                !requiredJobs.contains(where: { SessionJobDependencyPolicy.hasRunnableWork($0, in: jobs) }) {
                 return .fail(unfinished.compactMap(\.lastError).first ?? "Required finalization jobs failed.")
             }
-            return requiredJobs.count < requiredKinds.count ? .enqueueMissingRequiredJobs : .none
+            return requiredJobs.count < FinalizationPlan.requiredJobKinds.count ? .enqueueMissingRequiredJobs : .none
         case .capturing, .completed, .cancelled:
             return .none
         }
@@ -221,9 +230,21 @@ final class SessionRecoveryService {
                 reconciledManifests.append(manifest)
                 continue
             }
+            let hasLegacyFinalizationWork = jobQueue.jobs.contains {
+                $0.sessionID == manifest.id
+                    && ($0.kind == .renderStrip || $0.kind == .registerDownload)
+            }
+            if manifest.status == .finalizing
+                || (manifest.status == .failed && hasLegacyFinalizationWork && FinalizationPlan.make(from: manifest) == nil) {
+                do {
+                    manifest = try await prepareFinalizationPlanForRecovery(for: manifest)
+                } catch {
+                    recoveryErrors.append("Could not persist finalization plan for \(manifest.id): \(error.localizedDescription)")
+                }
+            }
             let sessionJobs = jobQueue.jobs.filter { $0.sessionID == manifest.id }
             let decision = SessionJobReconciliationDecision.evaluate(
-                manifestStatus: manifest.status,
+                manifest: manifest,
                 jobs: sessionJobs
             )
 #if DEBUG
@@ -296,17 +317,6 @@ final class SessionRecoveryService {
             automaticallyRecoveringSessions.append(manifest.id)
             do {
                 try await jobQueue.enqueueFinalizationJobs(for: manifest)
-                let cloudEnabled = manifest.deliveryIntent?.cloudUploadEnabled
-                    ?? (manifest.cloudDelivery != nil
-                        || defaults.bool(forKey: "cloudUploadEnabled"))
-                if cloudEnabled {
-                    try await jobQueue.enqueueCloudUpload(for: manifest)
-                }
-                let printEnabled = manifest.deliveryIntent?.automaticPrintEnabled
-                    ?? defaults.bool(forKey: "selphyAutoPrintAfterSession")
-                if printEnabled {
-                    try await jobQueue.enqueueAutoPrint(for: manifest)
-                }
             } catch {
                 recoveryErrors.append("Could not restore jobs for \(manifest.id): \(error.localizedDescription)")
             }
@@ -334,6 +344,62 @@ final class SessionRecoveryService {
                 recoveryErrors.append("\(manifest.eventName): \(error)")
             }
         }
+    }
+
+    func prepareFinalizationPlanForRecovery(for manifest: SessionManifest) async throws -> SessionManifest {
+        guard manifest.status == .finalizing || manifest.status == .failed || manifest.status == .completed else {
+            return manifest
+        }
+        let knownJobs = try await jobQueue.reloadJobsForRecovery()
+        let legacyJobs = knownJobs.filter {
+            $0.sessionID == manifest.id && $0.finalizationTransactionID == nil
+        }
+        let existingIntent = manifest.deliveryIntent
+        let transactionID = manifest.finalizationTransactionID.flatMap { $0.isEmpty ? nil : $0 }
+            ?? "legacy-\(manifest.id)"
+        let cloudEnabled = existingIntent?.cloudUploadEnabled
+            ?? (manifest.cloudDelivery != nil
+                || legacyJobs.contains { $0.kind == .cloudUpload }
+                || defaults.bool(forKey: "cloudUploadEnabled"))
+        let printEnabled = existingIntent?.automaticPrintEnabled
+            ?? (legacyJobs.contains { $0.kind == .autoPrint }
+                || defaults.bool(forKey: "selphyAutoPrintAfterSession"))
+        let deliveryIntent = SessionDeliveryIntentSnapshot(
+            cloudUploadEnabled: cloudEnabled,
+            automaticPrintEnabled: printEnabled,
+            updateGalleryEnabled: existingIntent?.updateGalleryEnabled
+                ?? (manifest.eventConfig.eventGalleryPath != nil),
+            renderGIFEnabled: existingIntent?.renderGIFEnabled
+                ?? manifest.shots.contains { !$0.gifFrameFileNames.isEmpty }
+        )
+        var cloudDelivery = manifest.cloudDelivery
+        if cloudEnabled, cloudDelivery == nil, defaults.bool(forKey: "cloudUploadEnabled") {
+            cloudDelivery = SessionCloudDeliverySnapshot(
+                publicBaseURL: defaults.string(forKey: "publicBaseURL") ?? "",
+                remoteBasePath: defaults.string(forKey: "cloudRemotePath")
+                    ?? CloudUploadConfiguration.defaultRemoteBasePath,
+                sshHost: defaults.string(forKey: "cloudSSHHost") ?? ""
+            )
+        }
+        let persistedCloudDelivery = cloudDelivery
+
+        let needsPersistence = manifest.finalizationTransactionID != transactionID
+            || manifest.deliveryIntent != deliveryIntent
+            || manifest.cloudDelivery != persistedCloudDelivery
+        var durableManifest = manifest
+        if needsPersistence {
+            durableManifest = try await manifestStore.update(
+                sessionID: manifest.id,
+                allowedStatuses: [manifest.status]
+            ) { durable in
+                durable.finalizationTransactionID = transactionID
+                durable.deliveryIntent = deliveryIntent
+                durable.cloudDelivery = persistedCloudDelivery
+            }
+        }
+
+        try await jobQueue.migrateLegacyFinalizationJobs(for: durableManifest)
+        return durableManifest
     }
 
     private func claimRecoverySession(_ sessionID: String) -> Bool {

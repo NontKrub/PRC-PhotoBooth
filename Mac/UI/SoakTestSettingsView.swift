@@ -34,18 +34,28 @@ public struct SoakTestSettingsView: View {
             case .stopping(let reason):
                 stoppingView(reason: reason)
             case .completed(let report):
-                reportView(report: report, isFailed: false)
+                reportView(report: report)
             case .failed(let err, let report):
                 if let report {
-                    reportView(report: report, isFailed: true, errorMessage: err)
+                    reportView(report: report, errorMessage: err)
                 } else {
                     failureView(error: err)
                 }
+            case .stopped(let report), .cancelled(let report):
+                reportView(report: report)
             }
         }
         .padding(.vertical, 8)
         .onAppear {
             controller.validatePreflight(coordinator: coordinator)
+        }
+        .onChange(of: controller.config) { _, _ in
+            controller.validatePreflight(coordinator: coordinator)
+        }
+        .onChange(of: controller.config.mode) { oldMode, newMode in
+            guard oldMode == .productionPipeline, newMode != .productionPipeline else { return }
+            controller.config.enablePhysicalPrint = false
+            controller.config.testCloudUpload = false
         }
         .confirmationDialog(
             "Start Event Readiness Soak Test?",
@@ -57,23 +67,42 @@ public struct SoakTestSettingsView: View {
             }
             Button("Cancel", role: .cancel) {}
         } message: {
-            Text("This will execute \(controller.config.targetCycles) automated sessions to verify hardware stability, thermal state, and memory bounds.\(controller.config.enablePhysicalPrint ? "\n\n⚠️ WARNING: PHYSICAL PRINTING IS ENABLED!" : "")")
+            Text(confirmationMessage)
+        }
+    }
+
+    private var confirmationMessage: String {
+        switch controller.config.mode {
+        case .syntheticBenchmark:
+            return "Generates synthetic images and runs isolated compositor and queue benchmarks. This does not validate production sessions, camera hardware, networking, printing, or iPad compatibility."
+        case .cameraHardware:
+            return "Captures \(controller.config.photosPerSession) images per cycle from the selected physical camera. It does not create sessions or validate finalization, delivery, printing, or iPad compatibility."
+        case .productionPipeline:
+            var message = "Runs \(controller.config.targetCycles) real sessions using the active event, camera, production storage, finalization queue, and configured guest delivery. Completed soak sessions are cleaned up when auto-cleanup is enabled."
+            if controller.config.testCloudUpload {
+                message += "\n\nCloud upload is enabled. Each cycle will perform a real upload using the current production configuration."
+            }
+            if controller.config.enablePhysicalPrint {
+                let count = (controller.config.targetCycles + controller.config.physicalPrintEveryCycles - 1) / controller.config.physicalPrintEveryCycles
+                message += "\n\nPHYSICAL PRINTING IS ENABLED: up to \(count) real print jobs, starting in cycle 1 and repeating every \(controller.config.physicalPrintEveryCycles) cycles."
+            }
+            return message
         }
     }
 
     private var headerSection: some View {
         VStack(alignment: .leading, spacing: 4) {
-            Label("Event Readiness Soak Test", systemImage: "flame.fill")
+            Label("Event Readiness & Soak Testing", systemImage: "flame.fill")
                 .font(.title2.bold())
                 .foregroundStyle(.primary)
-            Text("Automated sustained-load verification to stress camera capture, compositing, job queueing, and local delivery before major live events.")
+            Text("Choose a synthetic benchmark, physical camera check, or production session soak. Only Production Pipeline exercises the live booth workflow.")
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
         }
     }
 
     private var configurationForm: some View {
-        VStack(alignment: .leading, spacing: 16) {
+        return VStack(alignment: .leading, spacing: 16) {
             Text("Test Configuration")
                 .font(.headline)
 
@@ -82,11 +111,23 @@ public struct SoakTestSettingsView: View {
                     Text(mode.rawValue).tag(mode)
                 }
             }
-            .pickerStyle(.segmented)
+            .pickerStyle(.menu)
 
             Text(controller.config.mode.description)
                 .font(.caption)
                 .foregroundStyle(.secondary)
+
+            if controller.config.mode != .productionPipeline {
+                Stepper(
+                    "Photos per cycle: \(controller.config.photosPerSession)",
+                    value: $controller.config.photosPerSession,
+                    in: 1...8
+                )
+            } else {
+                Label("Uses the active event’s configured template and photo count.", systemImage: "info.circle")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
 
             HStack {
                 Text("Target Cycles:")
@@ -114,7 +155,19 @@ public struct SoakTestSettingsView: View {
             VStack(alignment: .leading, spacing: 8) {
                 Toggle("Auto-cleanup test session files", isOn: $controller.config.autoCleanupWorkingFiles)
                     .font(.body)
-                Text("Removes working photos and test strips after each cycle to prevent filling disk space.")
+                Text(controller.config.mode == .productionPipeline
+                    ? "Removes only completed sessions tagged as this soak run. Failed production sessions remain available for diagnosis."
+                    : "Removes this run’s isolated benchmark files when the run finishes.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            Divider()
+
+            VStack(alignment: .leading, spacing: 8) {
+                Toggle("Test cloud upload using current production settings", isOn: $controller.config.testCloudUpload)
+                    .disabled(controller.config.mode != .productionPipeline)
+                Text("Each production cycle performs a real upload. Review the configured destination and credentials before enabling.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -137,7 +190,16 @@ public struct SoakTestSettingsView: View {
                         }
                     }
                 }
-                Text("DO NOT enable during normal testing! Real paper and ribbon will be printed for every session.")
+                .disabled(controller.config.mode != .productionPipeline)
+                if controller.config.mode == .productionPipeline {
+                    Stepper(
+                        "Print first cycle, then every \(controller.config.physicalPrintEveryCycles) cycles",
+                        value: $controller.config.physicalPrintEveryCycles,
+                        in: 1...500
+                    )
+                    .disabled(!controller.config.enablePhysicalPrint)
+                }
+                Text("Opt-in sends real print jobs to the configured printer. The cadence limits paper and ribbon use.")
                     .font(.caption)
                     .foregroundStyle(controller.config.enablePhysicalPrint ? .red : .secondary)
             }
@@ -221,7 +283,7 @@ public struct SoakTestSettingsView: View {
                 }
                 .buttonStyle(.bordered)
 
-                Button("Cancel Immediately", role: .destructive) {
+                Button("Cancel Active Session", role: .destructive) {
                     controller.cancel()
                 }
                 .buttonStyle(.bordered)
@@ -244,15 +306,36 @@ public struct SoakTestSettingsView: View {
         .frame(maxWidth: .infinity, minHeight: 180)
     }
 
-    private func reportView(report: BoothSoakTestReport, isFailed: Bool, errorMessage: String? = nil) -> some View {
-        VStack(alignment: .leading, spacing: 16) {
+    private func reportView(report: BoothSoakTestReport, errorMessage: String? = nil) -> some View {
+        let title: String
+        let symbol: String
+        let tint: Color
+        switch report.outcome {
+        case .passed:
+            title = "Soak Test Passed"
+            symbol = "checkmark.seal.fill"
+            tint = .green
+        case .failed:
+            title = "Soak Test Failed"
+            symbol = "xmark.octagon.fill"
+            tint = .red
+        case .stoppedEarly:
+            title = "Soak Test Stopped Early"
+            symbol = "stop.circle.fill"
+            tint = .orange
+        case .cancelled:
+            title = "Soak Test Cancelled"
+            symbol = "xmark.circle.fill"
+            tint = .secondary
+        }
+        return VStack(alignment: .leading, spacing: 16) {
             HStack {
                 Label(
-                    isFailed ? "Soak Test Incomplete / Failed" : "Soak Test Passed",
-                    systemImage: isFailed ? "exclamationmark.triangle.fill" : "checkmark.seal.fill"
+                    title,
+                    systemImage: symbol
                 )
                 .font(.title3.bold())
-                .foregroundStyle(isFailed ? .red : .green)
+                .foregroundStyle(tint)
 
                 Spacer()
 
@@ -264,7 +347,7 @@ public struct SoakTestSettingsView: View {
 
             Text(report.summaryVerdict)
                 .font(.subheadline)
-                .foregroundStyle(isFailed ? .red : .primary)
+                .foregroundStyle(report.outcome == .failed ? .red : .primary)
 
             if let err = errorMessage {
                 Text(err)
@@ -278,17 +361,38 @@ public struct SoakTestSettingsView: View {
             LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible()), GridItem(.flexible())], spacing: 16) {
                 metricCell(title: "Cycles Completed", value: "\(report.completedCycles) / \(report.targetCycles)")
                 metricCell(title: "Avg Cycle Duration", value: String(format: "%.2f s", report.averageCycleDurationSeconds))
-                metricCell(title: "Avg Capture Latency", value: String(format: "%.3f s", report.avgCaptureLatencySeconds))
-                metricCell(title: "P95 Capture Latency", value: String(format: "%.3f s", report.p95CaptureLatencySeconds))
+                if report.captureSampleCount > 0 {
+                    metricCell(title: "Avg Capture Latency", value: String(format: "%.3f s", report.avgCaptureLatencySeconds))
+                    metricCell(title: "P95 Capture Latency", value: String(format: "%.3f s", report.p95CaptureLatencySeconds))
+                }
                 if let avgR = report.avgRenderLatencySeconds {
                     metricCell(title: "Avg Render Latency", value: String(format: "%.3f s", avgR))
                 }
                 if let p95R = report.p95RenderLatencySeconds {
                     metricCell(title: "P95 Render Latency", value: String(format: "%.3f s", p95R))
                 }
-                metricCell(title: "Peak Memory", value: String(format: "%.1f MB", Double(report.peakMemoryBytes) / (1024 * 1024)))
+                metricCell(title: "Peak RSS", value: String(format: "%.1f MB", Double(report.peakMemoryBytes) / (1024 * 1024)))
+                metricCell(title: "Peak RSS Growth", value: rssGrowth(from: report.baselineMemoryBytes, to: report.peakMemoryBytes))
+                metricCell(title: "Final RSS Growth", value: rssGrowth(from: report.baselineMemoryBytes, to: report.finalMemoryBytes))
                 metricCell(title: "Thermal Events", value: "\(report.thermalTransitions)")
-                metricCell(title: "Camera Reconnects", value: "\(report.reconnectCount)")
+                metricCell(title: "Camera Reconnects", value: report.reconnectCount.map { String($0) } ?? "NOT TESTED")
+            }
+
+            if !report.subsystemCoverage.isEmpty {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Subsystem Coverage")
+                        .font(.headline)
+                    ForEach(report.subsystemCoverage.keys.sorted(), id: \.self) { subsystem in
+                        HStack(alignment: .top) {
+                            Text(subsystem)
+                                .frame(width: 230, alignment: .leading)
+                            Text(report.subsystemCoverage[subsystem] ?? "NOT TESTED")
+                                .foregroundStyle((report.subsystemCoverage[subsystem] ?? "").hasPrefix("FAIL") ? .red : .secondary)
+                            Spacer(minLength: 0)
+                        }
+                        .font(.caption)
+                    }
+                }
             }
 
             if !report.invariantViolations.isEmpty {
@@ -330,6 +434,10 @@ public struct SoakTestSettingsView: View {
                 .font(.headline.monospacedDigit())
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func rssGrowth(from baseline: UInt64, to sample: UInt64) -> String {
+        String(format: "%+.1f MB", (Double(sample) - Double(baseline)) / (1024 * 1024))
     }
 
     private func failureView(error: String) -> some View {

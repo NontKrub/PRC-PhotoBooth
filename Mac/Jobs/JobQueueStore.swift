@@ -197,8 +197,7 @@ actor JobQueueStore {
             if let existing = jobs.first(where: {
                 $0.sessionID == sessionID
                     && $0.kind == kind
-                    && $0.status != .cancelled
-                    && (finalizationTransactionID == nil || $0.finalizationTransactionID == finalizationTransactionID)
+                    && $0.finalizationTransactionID == finalizationTransactionID
             }) {
                 result.append(existing)
                 continue
@@ -395,11 +394,16 @@ actor JobQueueStore {
         return jobs[index]
     }
 
-    func forceRequeueCloudUpload(sessionID: String) throws -> CloudUploadRequeueResult {
+    func forceRequeueCloudUpload(
+        sessionID: String,
+        finalizationTransactionID: String? = nil
+    ) throws -> CloudUploadRequeueResult {
         try ensureLoaded()
         guard !cancelledSessionIDs.contains(sessionID) else { return .sessionCancelled }
         guard let index = jobs.firstIndex(where: {
-            $0.sessionID == sessionID && $0.kind == .cloudUpload
+            $0.sessionID == sessionID
+                && $0.kind == .cloudUpload
+                && (finalizationTransactionID == nil || $0.finalizationTransactionID == finalizationTransactionID)
         }) else {
             return .notFound
         }
@@ -422,13 +426,18 @@ actor JobQueueStore {
         }
     }
 
-    func requeueFailedCloudUploads(sessionIDs: Set<String>) throws -> Int {
+    func requeueFailedCloudUploads(
+        sessionIDs: Set<String>,
+        finalizationTransactionIDs: [String: String] = [:]
+    ) throws -> Int {
         try ensureLoaded()
         let now = Date()
         var count = 0
         for index in jobs.indices where sessionIDs.contains(jobs[index].sessionID)
             && !cancelledSessionIDs.contains(jobs[index].sessionID)
             && jobs[index].kind == .cloudUpload
+            && (finalizationTransactionIDs[jobs[index].sessionID] == nil
+                || jobs[index].finalizationTransactionID == finalizationTransactionIDs[jobs[index].sessionID])
             && jobs[index].status == .failed
             && jobs[index].lastFailureDisposition == .retryable {
             jobs[index].status = .pending
@@ -493,10 +502,38 @@ actor JobQueueStore {
         let now = Date()
         var changed = false
         for index in jobs.indices where jobs[index].status == .running {
-            jobs[index].status = .pending
-            jobs[index].lastAttemptAt = nil
-            jobs[index].nextAttemptAt = now
+            if jobs[index].kind == .autoPrint {
+                jobs[index].status = .failed
+                jobs[index].lastError = "Print submission outcome is unknown after app restart. Verify the printer before retrying."
+                jobs[index].lastFailureDisposition = .sideEffectUnknown
+                jobs[index].nextAttemptAt = nil
+            } else {
+                jobs[index].status = .pending
+                jobs[index].lastAttemptAt = nil
+                jobs[index].nextAttemptAt = now
+            }
             jobs[index].updatedAt = now
+            changed = true
+        }
+        if changed { try persist() }
+    }
+
+    func migrateLegacyJobs(sessionID: String, transactionID: String, kinds: Set<SessionJobKind>) throws {
+        try ensureLoaded()
+        var changed = false
+        for kind in kinds {
+            guard !jobs.contains(where: {
+                $0.sessionID == sessionID
+                    && $0.kind == kind
+                    && $0.finalizationTransactionID == transactionID
+            }),
+            let candidate = jobs.indices
+                .filter({ jobs[$0].sessionID == sessionID && jobs[$0].kind == kind && jobs[$0].finalizationTransactionID == nil })
+                .min(by: { jobs[$0].createdAt == jobs[$1].createdAt ? jobs[$0].id < jobs[$1].id : jobs[$0].createdAt < jobs[$1].createdAt }) else {
+                continue
+            }
+            jobs[candidate].finalizationTransactionID = transactionID
+            jobs[candidate].updatedAt = Date()
             changed = true
         }
         if changed { try persist() }
@@ -674,7 +711,7 @@ actor JobQueueStore {
         // side effect; otherwise keep the oldest stable record. Every other
         // record is cancelled so recovery cannot schedule duplicate work.
         let groups = Dictionary(grouping: jobs.indices.filter { jobs[$0].status != .cancelled }) {
-            "\(jobs[$0].sessionID)|\(jobs[$0].kind.rawValue)"
+            "\(jobs[$0].sessionID)|\(jobs[$0].finalizationTransactionID ?? "legacy")|\(jobs[$0].kind.rawValue)"
         }
         for indices in groups.values where indices.count > 1 {
             let winner = indices.min { left, right in

@@ -5,7 +5,7 @@ import Foundation
 
 @Suite("JobQueueStore")
 struct JobQueueStoreTests {
-    @Test("enqueue is idempotent by session and job kind")
+    @Test("enqueue is idempotent by session, transaction, and job kind")
     func enqueueIsIdempotent() async throws {
         let file = try temporaryFile()
         defer { try? FileManager.default.removeItem(at: file.deletingLastPathComponent()) }
@@ -15,11 +15,49 @@ struct JobQueueStoreTests {
         let second = try await store.enqueue(sessionID: "session", kind: .renderStrip)
         let otherKind = try await store.enqueue(sessionID: "session", kind: .renderGIF)
         let otherSession = try await store.enqueue(sessionID: "other", kind: .renderStrip)
+        let transactionA = try await store.enqueue(
+            sessionID: "transactional",
+            kind: .renderStrip,
+            finalizationTransactionID: "tx-a"
+        )
+        let transactionB = try await store.enqueue(
+            sessionID: "transactional",
+            kind: .renderStrip,
+            finalizationTransactionID: "tx-b"
+        )
+        let transactionARetry = try await store.enqueue(
+            sessionID: "transactional",
+            kind: .renderStrip,
+            finalizationTransactionID: "tx-a"
+        )
 
         #expect(first == second)
         #expect(first.id != otherKind.id)
         #expect(first.id != otherSession.id)
-        #expect((await store.snapshot()).count == 3)
+        #expect(transactionA == transactionARetry)
+        #expect(transactionA.id != transactionB.id)
+        #expect((await store.snapshot()).count == 5)
+    }
+
+    @Test("jobs in different transactions survive duplicate recovery")
+    func preservesJobsAcrossTransactions() async throws {
+        let file = try temporaryFile()
+        defer { try? FileManager.default.removeItem(at: file.deletingLastPathComponent()) }
+        let store = JobQueueStore(fileURL: file)
+        let first = try await store.enqueue(
+            sessionID: "session",
+            kind: .renderStrip,
+            finalizationTransactionID: "tx-a"
+        )
+        let second = try await store.enqueue(
+            sessionID: "session",
+            kind: .renderStrip,
+            finalizationTransactionID: "tx-b"
+        )
+
+        let recovered = try await JobQueueStore(fileURL: file).load()
+        #expect(recovered.first { $0.id == first.id }?.status == .pending)
+        #expect(recovered.first { $0.id == second.id }?.status == .pending)
     }
 
     @Test("running jobs reset to pending after reload")
@@ -39,6 +77,24 @@ struct JobQueueStoreTests {
         #expect(jobs[0].lastAttemptAt == nil)
         #expect(jobs[0].attemptCount == 3)
         #expect(jobs[0].nextAttemptAt != nil)
+    }
+
+    @Test("interrupted auto print is failed with unknown side effect after reload")
+    func quarantinesInterruptedAutoPrint() async throws {
+        let file = try temporaryFile()
+        defer { try? FileManager.default.removeItem(at: file.deletingLastPathComponent()) }
+        let store = JobQueueStore(fileURL: file)
+        var job = try await store.enqueue(sessionID: "print-session", kind: .autoPrint)
+        job.status = .running
+        job.attemptCount = 1
+        job.lastAttemptAt = Date()
+        try await store.update(job)
+
+        let recovered = try await JobQueueStore(fileURL: file).load()
+        let interrupted = try #require(recovered.first { $0.id == job.id })
+        #expect(interrupted.status == .failed)
+        #expect(interrupted.lastFailureDisposition == .sideEffectUnknown)
+        #expect(interrupted.nextAttemptAt == nil)
     }
 
     @Test("manual retry resets an eligible failed job")
@@ -467,7 +523,8 @@ private func storedJob(
     status: SessionJobStatus,
     createdAt: Date,
     lastError: String? = nil,
-    disposition: SessionJobFailureDisposition? = nil
+    disposition: SessionJobFailureDisposition? = nil,
+    transactionID: String? = nil
 ) -> SessionJob {
     SessionJob(
         id: id,
@@ -480,6 +537,7 @@ private func storedJob(
         nextAttemptAt: nil,
         attemptCount: 0,
         lastError: lastError,
-        lastFailureDisposition: disposition
+        lastFailureDisposition: disposition,
+        finalizationTransactionID: transactionID
     )
 }

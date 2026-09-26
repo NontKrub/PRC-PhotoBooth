@@ -296,6 +296,49 @@ struct JobRecoveryTests {
         #expect(!retried.contains { $0.id == job.id })
     }
 
+    @Test("obsolete finalization transactions are rejected before manual retry")
+    @MainActor
+    func obsoleteTransactionCannotBeManuallyRetried() async throws {
+        let root = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let manifestStore = SessionManifestStore(baseDirectory: root.appendingPathComponent("Runtime"))
+        var manifest = makeManifest(id: "session-obsolete-tx", status: .finalizing, root: root)
+        manifest.finalizationTransactionID = "tx-current"
+        manifest.deliveryIntent = SessionDeliveryIntentSnapshot(
+            cloudUploadEnabled: false,
+            automaticPrintEnabled: false,
+            updateGalleryEnabled: false,
+            renderGIFEnabled: false
+        )
+        try await manifestStore.create(manifest)
+
+        let store = JobQueueStore(fileURL: root.appendingPathComponent("jobs.json"))
+        var oldJob = try await store.enqueue(
+            sessionID: manifest.id,
+            kind: .renderStrip,
+            finalizationTransactionID: "tx-old"
+        )
+        oldJob.status = .failed
+        oldJob.lastFailureDisposition = .retryable
+        try await store.update(oldJob)
+
+        let queue = SessionJobQueue(store: store, executor: MockJobExecutor())
+        queue.pauseWorkersForRecovery()
+        queue.start()
+        await queue.waitUntilReady()
+        let coordinator = BoothCoordinator(
+            testingManifestStore: manifestStore,
+            testingJobQueue: queue,
+            runtimeDirectory: root
+        )
+
+        await #expect(throws: JobRecoveryError.obsoleteTransaction(oldJob.id)) {
+            try await coordinator.retryJob(jobID: oldJob.id)
+        }
+        #expect(await store.snapshot().first { $0.id == oldJob.id }?.status == .failed)
+        queue.stop()
+    }
+
     @Test("Retry All requeues only the exact failed retryable candidates")
     @MainActor
     func retryAllUsesExactEligibleIDs() async throws {
@@ -694,7 +737,7 @@ struct JobRecoveryTests {
         #expect(await store.snapshot().first { $0.id == job.id }?.status == .cancelled)
     }
 
-    @Test("Capture discard cannot race an in-flight cloud retry")
+    @Test("capturing sessions reject cloud retry without a finalization transaction")
     @MainActor
     func captureDiscardCannotRaceInFlightCloudRetry() async throws {
         let root = try temporaryDirectory()
@@ -741,37 +784,11 @@ struct JobRecoveryTests {
             await withCheckedContinuation { resumeRetry = $0 }
         }
         coordinator.retryCloudUpload(sessionID: sessionID)
-        try await waitUntil { retryPaused }
-
-        var discardPaused = false
-        var resumeDiscard: CheckedContinuation<Bool, Never>?
-        recovery.quiesceSessionOperations = { _ in
-            discardPaused = true
-            return await withCheckedContinuation { resumeDiscard = $0 }
-        }
-        recovery.discardCaptureSession(sessionID: sessionID)
-        try await waitUntil {
-            discardPaused || recovery.recoveryErrors.contains { $0.contains(sessionID) }
-        }
-
-        let reachedCancellationWindow = discardPaused
-        #expect(!reachedCancellationWindow)
+        try await waitUntil { coordinator.errorMessage?.contains("active finalization transaction") == true }
+        #expect(!retryPaused)
         #expect(try await manifestStore.load(sessionID: sessionID).status == .capturing)
         #expect(await store.snapshot().first { $0.id == job.id }?.status == .failed)
-
-        resumeRetry?.resume()
-        resumeRetry = nil
-        try await waitUntil { await store.snapshot().first { $0.id == job.id }?.status == .pending }
-
-        if reachedCancellationWindow {
-            resumeDiscard?.resume(returning: true)
-            resumeDiscard = nil
-            try await waitUntil {
-                let currentManifest = try? await manifestStore.load(sessionID: sessionID)
-                let currentJob = await store.snapshot().first { $0.id == job.id }
-                return currentManifest?.status == .cancelled && currentJob?.status == .cancelled
-            }
-        }
+        #expect(recovery.isSessionRecoveryInFlight?(sessionID) == false)
     }
 
     @Test("Session cancellation cannot overtake an in-flight manual retry")

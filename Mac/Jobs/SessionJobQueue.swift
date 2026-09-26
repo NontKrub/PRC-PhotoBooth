@@ -35,6 +35,7 @@ final class SessionJobQueue {
     private var activeReservations: [String: String] = [:]
     private var quiescenceWaiters: [UUID: (sessionID: String, continuation: CheckedContinuation<Bool, Never>)] = [:]
     private var persistentQueueError: String?
+    private var workersPausedForRecovery = false
 
     private let finalizationKinds: [SessionJobKind] = [
         .renderStrip,
@@ -62,6 +63,14 @@ final class SessionJobQueue {
         startupTask = Task { [weak self] in
             await self?.prepareWorkers()
         }
+    }
+
+    func pauseWorkersForRecovery() {
+        workersPausedForRecovery = true
+    }
+
+    func resumeWorkersAfterRecovery() {
+        workersPausedForRecovery = false
     }
 
     func stop() {
@@ -116,11 +125,46 @@ final class SessionJobQueue {
     }
 
     func enqueueFinalizationJobs(for manifest: SessionManifest) async throws {
-        var kinds: [SessionJobKind] = [.renderStrip, .registerDownload, .updateGallery]
-        if manifest.shots.contains(where: { !$0.gifFrameFileNames.isEmpty }) {
-            kinds.append(.renderGIF)
+        guard let plan = FinalizationPlan.make(from: manifest) else {
+            throw JobExecutionError.permanent("Finalization transaction ID is missing for session \(manifest.id).")
         }
-        try await enqueue(kinds: kinds, sessionID: manifest.id, finalizationTransactionID: manifest.finalizationTransactionID)
+        do {
+            try await enqueue(
+                kinds: plan.jobKinds,
+                sessionID: manifest.id,
+                finalizationTransactionID: plan.transactionID
+            )
+        } catch {
+            let firstError = error
+            let storedJobs = await store.snapshot()
+            guard activeReservations.isEmpty,
+                  !storedJobs.contains(where: { $0.status == .running }),
+                  await retryPersistenceRecovery() else {
+                throw firstError
+            }
+            try await enqueue(
+                kinds: plan.jobKinds,
+                sessionID: manifest.id,
+                finalizationTransactionID: plan.transactionID
+            )
+        }
+    }
+
+    func migrateLegacyFinalizationJobs(for manifest: SessionManifest) async throws {
+        guard let plan = FinalizationPlan.make(from: manifest) else {
+            throw JobExecutionError.permanent("Finalization transaction ID is missing for session \(manifest.id).")
+        }
+        do {
+            try await store.migrateLegacyJobs(
+                sessionID: manifest.id,
+                transactionID: plan.transactionID,
+                kinds: Set(plan.jobKinds)
+            )
+            await reload()
+        } catch {
+            lastQueueError = error.localizedDescription
+            throw error
+        }
     }
 
     func enqueueAutoPrint(for manifest: SessionManifest) async throws {
@@ -135,6 +179,21 @@ final class SessionJobQueue {
         if let task = startupTask {
             _ = await task.value
         }
+    }
+
+    func reloadJobsForRecovery() async throws -> [SessionJob] {
+        jobs = try await store.load()
+        return jobs
+    }
+
+    func removeCompletedSoakJobs(sessionID: String) async throws {
+        let sessionJobs = jobs.filter { $0.sessionID == sessionID }
+        guard sessionJobs.allSatisfy({ $0.status == .succeeded || $0.status == .cancelled }) else {
+            throw JobQueueStoreError.manualRetryRejected(sessionID, .notFailed)
+        }
+        try await store.deleteJobs(sessionID: sessionID)
+        jobs.removeAll { $0.sessionID == sessionID }
+        onJobsChanged?()
     }
 
     func retry(jobID: String) async throws {
@@ -165,9 +224,15 @@ final class SessionJobQueue {
         }
     }
 
-    func forceRequeueCloudUpload(sessionID: String) async throws -> CloudUploadRequeueResult {
+    func forceRequeueCloudUpload(
+        sessionID: String,
+        finalizationTransactionID: String? = nil
+    ) async throws -> CloudUploadRequeueResult {
         do {
-            let result = try await store.forceRequeueCloudUpload(sessionID: sessionID)
+            let result = try await store.forceRequeueCloudUpload(
+                sessionID: sessionID,
+                finalizationTransactionID: finalizationTransactionID
+            )
             await reload()
             return result
         } catch {
@@ -176,9 +241,15 @@ final class SessionJobQueue {
         }
     }
 
-    func retryFailedCloudUploads(sessionIDs: Set<String>) async throws -> Int {
+    func retryFailedCloudUploads(
+        sessionIDs: Set<String>,
+        finalizationTransactionIDs: [String: String] = [:]
+    ) async throws -> Int {
         do {
-            let count = try await store.requeueFailedCloudUploads(sessionIDs: sessionIDs)
+            let count = try await store.requeueFailedCloudUploads(
+                sessionIDs: sessionIDs,
+                finalizationTransactionIDs: finalizationTransactionIDs
+            )
             await reload()
             return count
         } catch {
@@ -325,6 +396,10 @@ final class SessionJobQueue {
 
     private func runWorker(kinds: [SessionJobKind]) async {
         while !Task.isCancelled {
+            if workersPausedForRecovery {
+                await waitForWakeOrPoll()
+                continue
+            }
             if await runNextJob(kinds: kinds) {
                 continue
             }
@@ -446,6 +521,10 @@ final class SessionJobQueue {
         case .sideEffectUnknown:
             job.lastFailureDisposition = .sideEffectUnknown
             job.status = .failed
+            job.nextAttemptAt = nil
+        case .obsoleteTransaction:
+            job.lastFailureDisposition = .permanent
+            job.status = .cancelled
             job.nextAttemptAt = nil
         }
     }

@@ -14,6 +14,7 @@ final class SessionJobExecutor: SessionJobExecuting {
     private let filterPipeline: PhotoFilterPipeline
     private let experienceStore: EventExperienceStore
     private let galleryStore: EventGalleryStore
+    private let guestDeliverySelection: @MainActor () -> GuestDeliveryInterfaceSelection
 
     init(
         manifestStore: SessionManifestStore,
@@ -25,7 +26,8 @@ final class SessionJobExecutor: SessionJobExecuting {
         defaults: UserDefaults = .standard,
         filterPipeline: PhotoFilterPipeline = PhotoFilterPipeline(),
         experienceStore: EventExperienceStore = EventExperienceStore(baseDirectory: BoothCoordinator.appSupportRootURL()),
-        galleryStore: EventGalleryStore = EventGalleryStore(baseDirectory: BoothCoordinator.appSupportRootURL())
+        galleryStore: EventGalleryStore = EventGalleryStore(baseDirectory: BoothCoordinator.appSupportRootURL()),
+        guestDeliverySelection: @escaping @MainActor () -> GuestDeliveryInterfaceSelection = { .automatic }
     ) {
         self.manifestStore = manifestStore
         self.workspace = workspace
@@ -37,6 +39,7 @@ final class SessionJobExecutor: SessionJobExecuting {
         self.filterPipeline = filterPipeline
         self.experienceStore = experienceStore
         self.galleryStore = galleryStore
+        self.guestDeliverySelection = guestDeliverySelection
     }
 
     var isAutoPrintLaneAvailable: Bool { printer.isIdle }
@@ -49,6 +52,13 @@ final class SessionJobExecutor: SessionJobExecuting {
             throw CancellationError()
         } catch {
             throw JobExecutionError.permanent(error.localizedDescription)
+        }
+
+        guard let plan = FinalizationPlan.make(from: manifest),
+              plan.authorizes(job, for: manifest) else {
+            throw JobExecutionError.obsoleteTransaction(
+                "Job \(job.id) does not belong to the manifest's active finalization plan."
+            )
         }
 
         switch job.kind {
@@ -178,11 +188,10 @@ final class SessionJobExecutor: SessionJobExecuting {
         } catch {
             throw JobExecutionError.permanent("Gallery configuration could not load: \(error.localizedDescription)")
         }
-        guard document.gallery.mode != .disabled else { return }
         do {
             let worker = Task.detached(priority: .utility) {
                 try Task.checkCancellation()
-                try GalleryThumbnailGenerator().generate(manifest: manifest)
+                _ = try GalleryThumbnailGenerator().generate(manifest: manifest)
             }
             try await withTaskCancellationHandler(operation: {
                 try await worker.value
@@ -272,7 +281,7 @@ final class SessionJobExecutor: SessionJobExecuting {
             )
             do {
                 if let document = try? await experienceStore.load(eventID: updated.eventID),
-                   document.gallery.mode != .disabled {
+                   FinalizationPlan.make(from: updated)?.jobKinds.contains(.updateGallery) == true {
                     try await galleryStore.upsertSession(manifest: updated, configuration: document.gallery)
                 }
             } catch {
@@ -308,9 +317,12 @@ final class SessionJobExecutor: SessionJobExecuting {
         defaults: UserDefaults
     ) -> CloudUploadConfiguration? {
         if let intent = manifest.deliveryIntent {
-            guard intent.cloudUploadEnabled,
-                  let snapshot = manifest.cloudDelivery else { return nil }
-            return CloudUploadConfiguration(snapshot: snapshot)
+            guard intent.cloudUploadEnabled else { return nil }
+            if let snapshot = manifest.cloudDelivery {
+                return CloudUploadConfiguration(snapshot: snapshot)
+            }
+            // Only legacy manifests can reach this path; new finalization plans
+            // persist both the intent and the destination snapshot together.
         }
         if let snapshot = manifest.cloudDelivery {
             return CloudUploadConfiguration(snapshot: snapshot)
@@ -350,8 +362,10 @@ final class SessionJobExecutor: SessionJobExecuting {
         let cloudUploadEnabled = manifest.deliveryIntent?.cloudUploadEnabled
             ?? (manifest.cloudDelivery != nil || defaults.bool(forKey: "cloudUploadEnabled"))
         let allowTrustedLocalHTTP = defaults.bool(forKey: "allowTrustedLocalHTTP")
-        let localIP = LocalWebServer.lanIPAddress()
-        let localBaseURL = localIP.map { "http://\($0):\(server.port)" } ?? ""
+        let localBaseURL = LocalWebServer.guestDeliveryEndpoint(
+            selection: guestDeliverySelection(),
+            port: server.port
+        ).endpoint?.baseURL ?? ""
         return try SessionQRCodePayloadResolver.resolve(
             token: manifest.downloadToken,
             localBaseURL: localBaseURL,

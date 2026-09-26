@@ -103,6 +103,65 @@ struct SessionRecoveryTests {
         }
     }
 
+    @Test("legacy finalization migration is stable and quarantines interrupted print")
+    @MainActor
+    func migratesLegacyFinalizationAndUnknownPrint() async throws {
+        let root = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let defaultsName = "PRC-Recovery-Legacy-\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: defaultsName))
+        defer { defaults.removePersistentDomain(forName: defaultsName) }
+        defaults.set(false, forKey: "cloudUploadEnabled")
+        defaults.set(false, forKey: "selphyAutoPrintAfterSession")
+
+        let manifestStore = SessionManifestStore(baseDirectory: root.appendingPathComponent("Runtime"))
+        let manifest = makeManifest(
+            id: "legacy-session",
+            status: .finalizing,
+            startedAt: Date(timeIntervalSince1970: 20),
+            directory: root
+        )
+        try await manifestStore.create(manifest)
+
+        let queueStore = JobQueueStore(fileURL: root.appendingPathComponent("jobs.json"))
+        var interruptedPrint = try await queueStore.enqueue(sessionID: manifest.id, kind: .autoPrint)
+        interruptedPrint.status = .running
+        interruptedPrint.attemptCount = 1
+        interruptedPrint.lastAttemptAt = Date()
+        try await queueStore.update(interruptedPrint)
+
+        let queue = SessionJobQueue(store: queueStore, executor: RecoveryTestExecutor())
+        queue.pauseWorkersForRecovery()
+        queue.start()
+        await queue.waitUntilReady()
+        let service = SessionRecoveryService(
+            manifestStore: manifestStore,
+            workspace: SessionWorkspace(),
+            jobQueue: queue,
+            defaults: defaults
+        )
+
+        await service.scanNow()
+        let migrated = try await manifestStore.load(sessionID: manifest.id)
+        let plan = try #require(FinalizationPlan.make(from: migrated))
+        let jobs = try await queueStore.load().filter { $0.sessionID == manifest.id }
+        let migratedPrint = try #require(jobs.first { $0.kind == .autoPrint })
+        #expect(migrated.finalizationTransactionID == "legacy-legacy-session")
+        #expect(migrated.deliveryIntent?.automaticPrintEnabled == true)
+        #expect(plan.jobKinds.contains(.autoPrint))
+        #expect(migratedPrint.finalizationTransactionID == plan.transactionID)
+        #expect(migratedPrint.status == .failed)
+        #expect(migratedPrint.lastFailureDisposition == .sideEffectUnknown)
+        #expect(jobs.filter { $0.kind == .autoPrint }.count == 1)
+
+        await service.scanNow()
+        let rescanned = try await manifestStore.load(sessionID: manifest.id)
+        let rescannedJobs = try await queueStore.load().filter { $0.sessionID == manifest.id }
+        #expect(rescanned.finalizationTransactionID == migrated.finalizationTransactionID)
+        #expect(rescannedJobs.filter { $0.kind == .autoPrint }.count == 1)
+        queue.stop()
+    }
+
     @Test("startup removes abandoned temporary GIF files")
     @MainActor
     func removesAbandonedGIFTemporaries() async throws {
