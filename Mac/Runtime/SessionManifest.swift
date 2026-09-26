@@ -59,6 +59,7 @@ struct FinalizationPlan: Sendable, Equatable {
 
     var transactionID: String
     var jobKinds: [SessionJobKind]
+    var requiresCloudPublicationBeforePrint: Bool
 
     static func make(from manifest: SessionManifest) -> FinalizationPlan? {
         guard let transactionID = manifest.finalizationTransactionID,
@@ -72,13 +73,23 @@ struct FinalizationPlan: Sendable, Equatable {
         let cloudEnabled = intent?.cloudUploadEnabled
             ?? (manifest.cloudDelivery != nil)
         let printEnabled = intent?.automaticPrintEnabled ?? false
+        let printQRUsesPublicCloudRoute = printEnabled
+            && cloudEnabled
+            && !manifest.eventConfig.qrCodeElements.isEmpty
+            && manifest.cloudDelivery.flatMap {
+                ValidatedPublicGuestBaseURL(string: $0.publicBaseURL)
+            } != nil
 
         var kinds = requiredJobKinds
         if galleryEnabled { kinds.append(.updateGallery) }
         if gifEnabled { kinds.append(.renderGIF) }
         if cloudEnabled { kinds.append(.cloudUpload) }
         if printEnabled { kinds.append(.autoPrint) }
-        return FinalizationPlan(transactionID: transactionID, jobKinds: kinds)
+        return FinalizationPlan(
+            transactionID: transactionID,
+            jobKinds: kinds,
+            requiresCloudPublicationBeforePrint: printQRUsesPublicCloudRoute
+        )
     }
 
     func authorizes(_ job: SessionJob, for manifest: SessionManifest) -> Bool {
@@ -87,6 +98,27 @@ struct FinalizationPlan: Sendable, Equatable {
             && manifest.finalizationTransactionID == transactionID
             && jobKinds.contains(job.kind)
     }
+
+    func cloudPublicationReadiness(in jobs: [SessionJob], for manifest: SessionManifest) -> CloudPublicationReadiness {
+        guard jobKinds.contains(.cloudUpload) else { return .notRequired }
+        let uploadJobs = jobs.filter { $0.kind == .cloudUpload && authorizes($0, for: manifest) }
+        guard uploadJobs.count == 1, let job = uploadJobs.first else { return .pending }
+        switch job.status {
+        case .succeeded:
+            return .published
+        case .failed, .cancelled:
+            return .failed
+        case .pending, .running, .waitingRetry:
+            return .pending
+        }
+    }
+}
+
+enum CloudPublicationReadiness: Sendable, Equatable {
+    case notRequired
+    case pending
+    case published
+    case failed
 }
 
 struct SessionManifest: Codable, Sendable, Identifiable, Equatable {
@@ -131,14 +163,23 @@ struct SessionManifest: Codable, Sendable, Identifiable, Equatable {
     var origin: SessionOrigin? = .normal
     var soakRunID: String? = nil
     var soakCycleIndex: Int? = nil
+    // Retained on diagnostic manifests when soak cleanup needs a retry.
+    var soakCleanupWarning: String? = nil
+    var soakCleanupLastAttemptAt: Date? = nil
+    // Persist the user's cleanup policy so startup can safely resume interrupted cleanup.
+    var soakAutoCleanupEnabled: Bool? = nil
+    var soakDiagnosticRetained: Bool? = nil
 
     var lastError: String?
     var updatedAt: Date
 
-    func isEligibleForGuestPublication(activeSoakRunID: String?) -> Bool {
-        guard origin == .soakTest else { return true }
-        guard let activeSoakRunID else { return false }
-        return soakRunID == activeSoakRunID
+    func isEligibleForGuestPublication(activeSoakRunID _: String?) -> Bool {
+        origin != .soakTest
+    }
+
+    var isRetainedSoakDiagnostic: Bool {
+        guard origin == .soakTest else { return false }
+        return soakDiagnosticRetained ?? (lastError != nil)
     }
 }
 
@@ -156,6 +197,7 @@ enum SessionManifestError: LocalizedError, Equatable {
     case mutationNotAllowed(sessionID: String, status: RuntimeSessionStatus)
     case invalidTransition(sessionID: String, from: RuntimeSessionStatus, to: RuntimeSessionStatus)
     case staleWrite(sessionID: String)
+    case soakCleanupNotAllowed(String)
 
     var errorDescription: String? {
         switch self {
@@ -175,6 +217,8 @@ enum SessionManifestError: LocalizedError, Equatable {
             return "Invalid session transition for \(sessionID): \(from.rawValue) -> \(to.rawValue)"
         case .staleWrite(let sessionID):
             return "Stale session manifest write rejected: \(sessionID)"
+        case .soakCleanupNotAllowed(let sessionID):
+            return "Refusing soak cleanup metadata update for an unrelated session: \(sessionID)"
         }
     }
 }

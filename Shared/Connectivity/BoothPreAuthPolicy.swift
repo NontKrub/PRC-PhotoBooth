@@ -262,9 +262,12 @@ public struct BoothPreAuthAdmissionLimiter: Sendable {
     public static let defaultMaxCooldown: TimeInterval = 10.0
     public static let defaultGlobalFailureThreshold = 30
     public static let defaultReservedFailureThreshold = 5
+    public static let defaultIdentityProbeGlobalFailureThreshold = 30
 
     private var records: [String: EndpointRecord] = [:]
     private var globalFailureTimestamps: [Date] = []
+    private var identityProbeGlobalFailureTimestamps: [Date] = []
+    private var identityProbeGlobalCooldownUntil: Date?
 
     public let maxTrackedEndpoints: Int
     public let failureWindow: TimeInterval
@@ -274,6 +277,8 @@ public struct BoothPreAuthAdmissionLimiter: Sendable {
     public let maxCooldown: TimeInterval
     public let globalFailureThreshold: Int
     public let reservedFailureThreshold: Int
+    public let identityProbeGlobalFailureThreshold: Int
+    public let identityProbeGlobalCooldown: TimeInterval
 
     public init(
         maxTrackedEndpoints: Int = defaultMaxTrackedEndpoints,
@@ -283,7 +288,9 @@ public struct BoothPreAuthAdmissionLimiter: Sendable {
         baseCooldown: TimeInterval = defaultBaseCooldown,
         maxCooldown: TimeInterval = defaultMaxCooldown,
         globalFailureThreshold: Int = defaultGlobalFailureThreshold,
-        reservedFailureThreshold: Int = defaultReservedFailureThreshold
+        reservedFailureThreshold: Int = defaultReservedFailureThreshold,
+        identityProbeGlobalFailureThreshold: Int = defaultIdentityProbeGlobalFailureThreshold,
+        identityProbeGlobalCooldown: TimeInterval? = nil
     ) {
         self.maxTrackedEndpoints = maxTrackedEndpoints
         self.failureWindow = failureWindow
@@ -293,9 +300,15 @@ public struct BoothPreAuthAdmissionLimiter: Sendable {
         self.maxCooldown = maxCooldown
         self.globalFailureThreshold = globalFailureThreshold
         self.reservedFailureThreshold = reservedFailureThreshold
+        self.identityProbeGlobalFailureThreshold = max(1, identityProbeGlobalFailureThreshold)
+        self.identityProbeGlobalCooldown = max(0, identityProbeGlobalCooldown ?? maxCooldown)
     }
 
     public var trackedEndpointCount: Int { records.count }
+
+    public func isIdentityProbeCoolingDown(now: Date = Date()) -> Bool {
+        identityProbeGlobalCooldownUntil.map { now < $0 } ?? false
+    }
 
     public func shouldAdmit(
         endpointKey: String,
@@ -352,12 +365,25 @@ public struct BoothPreAuthAdmissionLimiter: Sendable {
         trustedPeerIDs: Set<String>,
         now: Date = Date()
     ) {
+        recordIdentityProbeAttemptFailure(now: now)
         guard !peerID.isEmpty, trustedPeerIDs.contains(peerID) else { return }
-        recordFailure(
-            endpointKey: Self.identityProbeKey(for: peerID),
-            isPreferredCandidate: true,
-            now: now
-        )
+        recordFailure(endpointKey: Self.identityProbeKey(for: peerID), isPreferredCandidate: true, now: now)
+    }
+
+    /// Counts failures in the bounded probe lane even when a candidate never
+    /// supplied a trusted claimed ID (for example, a slow or malformed Hello).
+    public mutating func recordIdentityProbeAttemptFailure(now: Date = Date()) {
+        if let cooldownUntil = identityProbeGlobalCooldownUntil {
+            guard now >= cooldownUntil else { return }
+            identityProbeGlobalCooldownUntil = nil
+        }
+        identityProbeGlobalFailureTimestamps = identityProbeGlobalFailureTimestamps.filter {
+            now.timeIntervalSince($0) <= failureWindow
+        }
+        identityProbeGlobalFailureTimestamps.append(now)
+        guard identityProbeGlobalFailureTimestamps.count >= identityProbeGlobalFailureThreshold else { return }
+        identityProbeGlobalFailureTimestamps.removeAll(keepingCapacity: true)
+        identityProbeGlobalCooldownUntil = now.addingTimeInterval(identityProbeGlobalCooldown)
     }
 
     public mutating func recordIdentityProbeSuccess(peerID: String) {
@@ -405,6 +431,10 @@ public struct BoothPreAuthAdmissionLimiter: Sendable {
 
     public mutating func purgeExpired(now: Date = Date()) {
         globalFailureTimestamps.removeAll { now.timeIntervalSince($0) > failureWindow }
+        identityProbeGlobalFailureTimestamps.removeAll { now.timeIntervalSince($0) > failureWindow }
+        if let cooldownUntil = identityProbeGlobalCooldownUntil, now >= cooldownUntil {
+            identityProbeGlobalCooldownUntil = nil
+        }
         records = records.filter { _, record in
             if let cooldown = record.cooldownUntil, now < cooldown { return true }
             guard let last = record.failureTimestamps.last else { return false }

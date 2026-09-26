@@ -96,6 +96,8 @@ struct SessionManifestStoreTests {
         object.removeValue(forKey: "captureAttempts")
         object.removeValue(forKey: "cloudDelivery")
         object.removeValue(forKey: "deliveryIntent")
+        object.removeValue(forKey: "soakAutoCleanupEnabled")
+        object.removeValue(forKey: "soakDiagnosticRetained")
         if var shots = object["shots"] as? [[String: Any]], var shot = shots.first {
             shot.removeValue(forKey: "previousImageFileName")
             shot.removeValue(forKey: "previousGifFrameFileNames")
@@ -112,7 +114,138 @@ struct SessionManifestStoreTests {
         #expect(decoded.captureAttempts == nil)
         #expect(decoded.cloudDelivery == nil)
         #expect(decoded.deliveryIntent == nil)
+        #expect(decoded.soakAutoCleanupEnabled == nil)
+        #expect(decoded.soakDiagnosticRetained == nil)
         #expect(decoded.shots[0].previousImageFileName == nil)
+    }
+
+    @Test("cleanup diagnostics persist only for the matching soak run")
+    func soakCleanupDiagnosticIsRunScoped() async throws {
+        let root = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = SessionManifestStore(baseDirectory: root)
+        var manifest = makeManifest()
+        manifest.id = "soak-session"
+        manifest.origin = .soakTest
+        manifest.soakRunID = "run-123"
+        try await store.create(manifest)
+
+        _ = try await store.recordSoakCleanupResult(
+            sessionID: manifest.id,
+            expectedRunID: "run-123",
+            warning: "Remote deletion failed"
+        )
+        let updated = try await store.load(sessionID: manifest.id)
+        #expect(updated.soakCleanupWarning == "Remote deletion failed")
+        #expect(updated.soakCleanupLastAttemptAt != nil)
+
+        do {
+            _ = try await store.recordSoakCleanupResult(
+                sessionID: manifest.id,
+                expectedRunID: "another-run",
+                warning: nil
+            )
+            Issue.record("A different run changed this session's cleanup state.")
+        } catch SessionManifestError.soakCleanupNotAllowed(let sessionID) {
+            #expect(sessionID == manifest.id)
+        }
+        #expect(try await store.load(sessionID: manifest.id).soakCleanupWarning == "Remote deletion failed")
+    }
+
+    @Test("failed soak diagnostics are retained only by the owning run")
+    func soakFailureDiagnosticsAreRunScoped() async throws {
+        let root = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = SessionManifestStore(baseDirectory: root)
+        var manifest = makeManifest()
+        manifest.id = "diagnostic-soak-session"
+        manifest.origin = .soakTest
+        manifest.soakRunID = "run-123"
+        try await store.create(manifest)
+
+        let retained = try await store.retainSoakFailureDiagnostics(
+            sessionID: manifest.id,
+            expectedRunID: "run-123",
+            reason: "QR verification failed"
+        )
+        #expect(retained.lastError == "QR verification failed")
+        #expect(retained.isRetainedSoakDiagnostic)
+
+        do {
+            _ = try await store.retainSoakFailureDiagnostics(
+                sessionID: manifest.id,
+                expectedRunID: "another-run",
+                reason: "wrong owner"
+            )
+            Issue.record("A different run changed this session's diagnostic reason.")
+        } catch SessionManifestError.soakCleanupNotAllowed(let sessionID) {
+            #expect(sessionID == manifest.id)
+        }
+        #expect(try await store.load(sessionID: manifest.id).lastError == "QR verification failed")
+    }
+
+    @Test("cleanup retains soak data when print outcome is unresolved without manifest failure metadata")
+    func cleanupRetainsUnknownPrintDiagnostics() async throws {
+        let root = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        var manifest = makeManifest()
+        manifest.id = "unknown-print-soak-session"
+        manifest.origin = .soakTest
+        manifest.soakRunID = "run-123"
+        manifest.status = .completed
+        manifest.lastError = nil
+        manifest.soakDiagnosticRetained = nil
+
+        let queue = JobQueueStore(fileURL: root.appendingPathComponent("jobs.json"))
+        var printJob = try await queue.enqueue(sessionID: manifest.id, kind: .autoPrint)
+        printJob.status = .failed
+        printJob.lastFailureDisposition = .sideEffectUnknown
+        printJob.lastError = "AppKit completion is unknown"
+
+        #expect(BoothSoakCleanupPolicy.shouldRetainDiagnostics(manifest: manifest, jobs: [printJob]))
+        manifest.origin = .normal
+        #expect(!BoothSoakCleanupPolicy.shouldRetainDiagnostics(manifest: manifest, jobs: [printJob]))
+    }
+
+    @Test("startup cleanup retry can clear only the previous cleanup retention marker")
+    func cleanupRetryClearsTemporaryRetentionMarker() async throws {
+        let root = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = SessionManifestStore(baseDirectory: root)
+        var manifest = makeManifest()
+        manifest.id = "cleanup-retry-soak-session"
+        manifest.origin = .soakTest
+        manifest.soakRunID = "run-123"
+        manifest.status = .completed
+        manifest.soakAutoCleanupEnabled = true
+        manifest.soakDiagnosticRetained = true
+        manifest.soakCleanupWarning = "Remote deletion failed"
+        try await store.create(manifest)
+
+        let prepared = try await store.prepareOrphanedSoakForCleanup(
+            sessionID: manifest.id,
+            expectedRunID: "run-123",
+            retainForDiagnostics: false
+        )
+
+        #expect(prepared.soakDiagnosticRetained == false)
+        #expect(prepared.soakCleanupWarning == "Remote deletion failed")
+        #expect(prepared.lastError == nil)
+    }
+
+    @Test("automatic cleanup warning does not become permanent diagnostic retention")
+    func cleanupWarningRemainsRetryable() {
+        var manifest = makeManifest()
+        manifest.origin = .soakTest
+        manifest.soakRunID = "run-123"
+        manifest.soakAutoCleanupEnabled = true
+        manifest.soakCleanupWarning = "Remote cloud cleanup failed."
+        manifest.soakDiagnosticRetained = true
+
+        #expect(!BoothSoakCleanupPolicy.shouldRetainDiagnostics(manifest: manifest, jobs: []))
+
+        manifest.lastError = "Production pipeline failed."
+        #expect(BoothSoakCleanupPolicy.shouldRetainDiagnostics(manifest: manifest, jobs: []))
     }
 
     @Test("status changes require an explicit compare-and-set transition")
@@ -275,8 +408,8 @@ struct SessionManifestStoreTests {
         #expect(SessionJobExecutor.cloudUploadConfiguration(for: legacy) == nil)
     }
 
-    @Test("soak guest routes are visible only while their run owns the booth")
-    func soakGuestPublicationEndsWithRun() {
+    @Test("soak manifests are never eligible for production guest publication")
+    func soakGuestPublicationIsAlwaysIsolated() {
         let normal = makeManifest()
         var soak = normal
         soak.id = "soak-session"
@@ -284,7 +417,7 @@ struct SessionManifestStoreTests {
         soak.soakRunID = "run-123"
 
         #expect(normal.isEligibleForGuestPublication(activeSoakRunID: nil))
-        #expect(soak.isEligibleForGuestPublication(activeSoakRunID: "run-123"))
+        #expect(!soak.isEligibleForGuestPublication(activeSoakRunID: "run-123"))
         #expect(!soak.isEligibleForGuestPublication(activeSoakRunID: nil))
         #expect(!soak.isEligibleForGuestPublication(activeSoakRunID: "different-run"))
 

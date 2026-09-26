@@ -3,6 +3,26 @@ import SwiftData
 import Charts
 import UniformTypeIdentifiers
 
+@MainActor
+enum AdminDashboardHistory {
+    static func productionSessions(
+        from sessions: [BoothSession],
+        startDate: Date,
+        endDate: Date,
+        eventID: String?,
+        excludingSessionIDs: Set<String> = []
+    ) -> [BoothSession] {
+        let endExclusive = Calendar.current.date(byAdding: .day, value: 1, to: endDate) ?? endDate
+        return sessions.filter {
+            $0.isNormalProductionSession
+                && !excludingSessionIDs.contains($0.id)
+                && $0.startedAt >= startDate
+                && $0.startedAt <= endExclusive
+                && (eventID == nil || $0.eventID == eventID)
+        }
+    }
+}
+
 struct AdminDashboardView: View {
     @Environment(BoothCoordinator.self) private var coordinator
     @Environment(\.modelContext) private var modelContext
@@ -15,17 +35,26 @@ struct AdminDashboardView: View {
     @State private var selectedEventFilter: String? = nil   // nil = all events
     @State private var selectedSession: BoothSession? = nil
     @State private var manifests: [String: SessionManifest] = [:]
+    @State private var diagnosticSessionIDs: Set<String> = []
+    @State private var manifestIndexLoaded = false
     @State private var galleryStatuses: [String: GalleryApprovalStatus] = [:]
 
 
     // MARK: - Derived data
 
+    private var productionHistorySessions: [BoothSession] {
+        guard manifestIndexLoaded else { return [] }
+        return AdminDashboardHistory.productionSessions(
+            from: allSessions,
+            startDate: startDate,
+            endDate: endDate,
+            eventID: selectedEventFilter,
+            excludingSessionIDs: diagnosticSessionIDs
+        )
+    }
+
     private var filteredSessions: [BoothSession] {
-        allSessions.filter {
-            $0.startedAt >= startDate && $0.startedAt <= Calendar.current.date(byAdding: .day, value: 1, to: endDate)!
-            && (selectedEventFilter == nil || $0.eventID == selectedEventFilter)
-            && $0.finishedAt != nil
-        }
+        productionHistorySessions.filter { $0.finishedAt != nil }
     }
 
     private var dayStats: [(date: Date, sessions: Int, photos: Int)] {
@@ -126,6 +155,7 @@ struct AdminDashboardView: View {
             }
         }
         .task(id: allSessions.count) {
+            manifestIndexLoaded = false
             await loadExperienceAnalytics()
         }
     }
@@ -202,10 +232,7 @@ struct AdminDashboardView: View {
         let successful = completedAttempts.filter { $0.result == .success || $0.result == .transferRecovered }.count
         let failed = completedAttempts.filter { $0.result == .failed }.count
         let receiveDurations = completedAttempts.compactMap(\.receiveDuration)
-        let started = allSessions.filter {
-            $0.startedAt >= startDate && $0.startedAt <= Calendar.current.date(byAdding: .day, value: 1, to: endDate)!
-                && (selectedEventFilter == nil || $0.eventID == selectedEventFilter)
-        }.count
+        let started = productionHistorySessions.count
         let completionRate = started == 0 ? 0 : Double(filteredSessions.count) / Double(started) * 100
         return GroupBox("Reliability") {
             LazyVGrid(columns: [GridItem(.adaptive(minimum: 145))], alignment: .leading, spacing: 12) {
@@ -329,8 +356,15 @@ struct AdminDashboardView: View {
     private func loadExperienceAnalytics() async {
         let loadedManifests = await coordinator.manifestStore.loadAll()
         var byID: [String: SessionManifest] = [:]
+        var excludedIDs = Set<String>()
         for result in loadedManifests {
-            if case .loaded(let manifest) = result { byID[manifest.id] = manifest }
+            switch result {
+            case .loaded(let manifest):
+                byID[manifest.id] = manifest
+                if manifest.origin == .soakTest { excludedIDs.insert(manifest.id) }
+            case .failed(let fileURL, _):
+                excludedIDs.insert(fileURL.deletingPathExtension().lastPathComponent)
+            }
         }
 
         let loadedGalleries = await coordinator.galleryStore.loadAll()
@@ -341,7 +375,9 @@ struct AdminDashboardView: View {
             }
         }
         manifests = byID
+        diagnosticSessionIDs = excludedIDs
         galleryStatuses = statuses
+        manifestIndexLoaded = true
     }
 
     private func sessionDuration(_ s: BoothSession) -> String? {

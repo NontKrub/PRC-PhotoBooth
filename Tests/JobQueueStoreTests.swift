@@ -302,6 +302,81 @@ struct JobQueueStoreTests {
         #expect(jobs.first { $0.id == optional.id }?.status == .cancelled)
     }
 
+    @Test("session cancellation preserves unresolved print outcomes for operator resolution")
+    func cancellationPreservesUnknownPrintOutcome() async throws {
+        let file = try temporaryFile()
+        defer { try? FileManager.default.removeItem(at: file.deletingLastPathComponent()) }
+        let store = JobQueueStore(fileURL: file)
+        var unknown = try await store.enqueue(sessionID: "soak-session", kind: .autoPrint)
+        unknown.status = .failed
+        unknown.lastFailureDisposition = .sideEffectUnknown
+        unknown.lastError = "AppKit completion is unknown"
+        try await store.update(unknown)
+
+        try await store.cancelJobs(sessionID: "soak-session")
+        let retained = await store.snapshot().first { $0.id == unknown.id }
+        #expect(retained?.status == .failed)
+        #expect(retained?.lastFailureDisposition == .sideEffectUnknown)
+
+        let resolved = try await store.resolveUnknownPrint(jobID: unknown.id, resolution: .printed)
+        #expect(resolved.status == .succeeded)
+    }
+
+    @Test("a running print can durably finish after session cancellation")
+    func runningPrintFinishesAfterSessionCancellation() async throws {
+        let file = try temporaryFile()
+        defer { try? FileManager.default.removeItem(at: file.deletingLastPathComponent()) }
+        let store = JobQueueStore(fileURL: file)
+        let pending = try await store.enqueue(sessionID: "soak-session", kind: .autoPrint)
+        var running = try #require(await store.claim(jobID: pending.id))
+
+        try await store.cancelJobs(sessionID: "soak-session")
+        running.status = .succeeded
+        running.lastError = nil
+        running.lastFailureDisposition = nil
+
+        #expect(try await store.finish(running))
+        #expect(await store.snapshot().first { $0.id == pending.id }?.status == .succeeded)
+    }
+
+    @Test("restart preserves a cancelled print whose side effect is unknown")
+    func restartRestoresCancelledUnknownPrintForResolution() async throws {
+        let file = try temporaryFile()
+        defer { try? FileManager.default.removeItem(at: file.deletingLastPathComponent()) }
+        let store = JobQueueStore(fileURL: file)
+        var unknown = try await store.enqueue(sessionID: "soak-session", kind: .autoPrint)
+        unknown.status = .cancelled
+        unknown.lastFailureDisposition = .sideEffectUnknown
+        unknown.lastError = "AppKit completion is unknown"
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        try encoder.encode([unknown]).write(to: file, options: [.atomic])
+        let cancellationFile = file.deletingPathExtension().appendingPathExtension("cancelled-sessions.json")
+        try JSONEncoder().encode(["soak-session"]).write(to: cancellationFile, options: [.atomic])
+
+        let recovered = try await JobQueueStore(fileURL: file).load()
+        #expect(recovered.first?.status == .failed)
+        #expect(recovered.first?.lastFailureDisposition == .sideEffectUnknown)
+    }
+
+    @Test("operator confirmation of not printed explicitly releases a cancelled session print")
+    func notPrintedResolutionReleasesCancellationBarrier() async throws {
+        let file = try temporaryFile()
+        defer { try? FileManager.default.removeItem(at: file.deletingLastPathComponent()) }
+        let store = JobQueueStore(fileURL: file)
+        var unknown = try await store.enqueue(sessionID: "soak-session", kind: .autoPrint)
+        unknown.status = .failed
+        unknown.lastFailureDisposition = .sideEffectUnknown
+        unknown.lastError = "AppKit completion is unknown"
+        try await store.update(unknown)
+        try await store.cancelJobs(sessionID: "soak-session")
+
+        let resolved = try await store.resolveUnknownPrint(jobID: unknown.id, resolution: .notPrinted)
+        #expect(resolved.status == .pending)
+        #expect(resolved.lastFailureDisposition == nil)
+        #expect(try await store.claim(jobID: unknown.id)?.status == .running)
+    }
+
     @Test("durable cancellation blocks delayed enqueue after store recreation")
     func cancellationBarrierSurvivesReload() async throws {
         let file = try temporaryFile()

@@ -28,6 +28,30 @@ struct FinalizationTransactionTests {
         #expect(!plan.authorizes(makeJob(sessionID: "other-session", kind: .renderStrip, transactionID: "tx-current"), for: manifest))
     }
 
+    @Test("guest QR waits for the cloud publication job in the current transaction")
+    func guestQRWaitsForCloudPublication() throws {
+        var manifest = makeManifest(id: "session-cloud-qr", root: FileManager.default.temporaryDirectory)
+        manifest.status = .finalizing
+        manifest.finalizationTransactionID = "tx-current"
+        manifest.deliveryIntent = SessionDeliveryIntentSnapshot(
+            cloudUploadEnabled: true,
+            automaticPrintEnabled: false,
+            updateGalleryEnabled: false,
+            renderGIFEnabled: false
+        )
+        let plan = try #require(FinalizationPlan.make(from: manifest))
+        var staleUpload = makeJob(sessionID: manifest.id, kind: .cloudUpload, transactionID: "tx-old")
+        staleUpload.status = .succeeded
+        #expect(plan.cloudPublicationReadiness(in: [staleUpload], for: manifest) == .pending)
+
+        var currentUpload = makeJob(sessionID: manifest.id, kind: .cloudUpload, transactionID: "tx-current")
+        #expect(plan.cloudPublicationReadiness(in: [currentUpload], for: manifest) == .pending)
+        currentUpload.status = .failed
+        #expect(plan.cloudPublicationReadiness(in: [currentUpload], for: manifest) == .failed)
+        currentUpload.status = .succeeded
+        #expect(plan.cloudPublicationReadiness(in: [currentUpload], for: manifest) == .published)
+    }
+
     @Test("finalizeSession flow does not roll back on failure, job queue handles finalizationTransactionID")
     @MainActor
     func transactionIDPersistence() async throws {

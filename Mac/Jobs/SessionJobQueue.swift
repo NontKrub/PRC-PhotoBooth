@@ -132,7 +132,8 @@ final class SessionJobQueue {
             try await enqueue(
                 kinds: plan.jobKinds,
                 sessionID: manifest.id,
-                finalizationTransactionID: plan.transactionID
+                finalizationTransactionID: plan.transactionID,
+                requiresCloudPublicationBeforePrint: plan.requiresCloudPublicationBeforePrint
             )
         } catch {
             let firstError = error
@@ -145,7 +146,8 @@ final class SessionJobQueue {
             try await enqueue(
                 kinds: plan.jobKinds,
                 sessionID: manifest.id,
-                finalizationTransactionID: plan.transactionID
+                finalizationTransactionID: plan.transactionID,
+                requiresCloudPublicationBeforePrint: plan.requiresCloudPublicationBeforePrint
             )
         }
     }
@@ -158,7 +160,8 @@ final class SessionJobQueue {
             try await store.migrateLegacyJobs(
                 sessionID: manifest.id,
                 transactionID: plan.transactionID,
-                kinds: Set(plan.jobKinds)
+                kinds: Set(plan.jobKinds),
+                requiresCloudPublicationBeforePrint: plan.requiresCloudPublicationBeforePrint
             )
             await reload()
         } catch {
@@ -168,7 +171,12 @@ final class SessionJobQueue {
     }
 
     func enqueueAutoPrint(for manifest: SessionManifest) async throws {
-        try await enqueue(kinds: [.autoPrint], sessionID: manifest.id, finalizationTransactionID: manifest.finalizationTransactionID)
+        try await enqueue(
+            kinds: [.autoPrint],
+            sessionID: manifest.id,
+            finalizationTransactionID: manifest.finalizationTransactionID,
+            requiresCloudPublicationBeforePrint: FinalizationPlan.make(from: manifest)?.requiresCloudPublicationBeforePrint ?? false
+        )
     }
 
     func enqueueCloudUpload(for manifest: SessionManifest) async throws {
@@ -184,6 +192,10 @@ final class SessionJobQueue {
     func reloadJobsForRecovery() async throws -> [SessionJob] {
         jobs = try await store.load()
         return jobs
+    }
+
+    func loadJobsForCleanup(sessionID: String) async throws -> [SessionJob] {
+        try await store.load().filter { $0.sessionID == sessionID }
     }
 
     func removeCompletedSoakJobs(sessionID: String) async throws {
@@ -263,6 +275,11 @@ final class SessionJobQueue {
             guard let self else { return }
             do {
                 try await store.cancel(jobID: jobID)
+                let cancelled = await store.snapshot().first { $0.id == jobID }?.status == .cancelled
+                guard cancelled else {
+                    await reload()
+                    return
+                }
                 if activeCloudJobID == jobID {
                     activeCloudExecutionTask?.cancel()
                 }
@@ -290,10 +307,8 @@ final class SessionJobQueue {
            snapshot.contains(where: { $0.id == activeFinalizationJobID && $0.sessionID == sessionID }) {
             activeFinalizationExecutionTask?.cancel()
         }
-        if let activePrintJobID,
-           snapshot.contains(where: { $0.id == activePrintJobID && $0.sessionID == sessionID }) {
-            activePrintExecutionTask?.cancel()
-        }
+        // Physical print submission cannot be cancelled safely. Let AppKit's
+        // callback settle the durable outcome before cleanup proceeds.
         // A non-cooperative executor must not keep cancellation suspended
         // forever. The durable barrier makes later enqueue/claim attempts safe
         // while this bounded wait decides whether cleanup can delete files.
@@ -316,6 +331,15 @@ final class SessionJobQueue {
         return !quiesced || remaining || printLaneHeld || activeReservations.values.contains(sessionID)
             ? .cleanupPending
             : .quiesced
+    }
+
+    func waitUntilQuiescent(sessionID: String) async -> Bool {
+        guard activeReservations.values.contains(sessionID) else { return true }
+        let waiterID = UUID()
+        return await withCheckedContinuation { continuation in
+            quiescenceWaiters[waiterID] = (sessionID, continuation)
+            resumeReadyQuiescenceWaiters()
+        }
     }
 
     @discardableResult
@@ -348,9 +372,19 @@ final class SessionJobQueue {
         await reload()
     }
 
-    private func enqueue(kinds: [SessionJobKind], sessionID: String, finalizationTransactionID: String? = nil) async throws {
+    private func enqueue(
+        kinds: [SessionJobKind],
+        sessionID: String,
+        finalizationTransactionID: String? = nil,
+        requiresCloudPublicationBeforePrint: Bool = false
+    ) async throws {
         do {
-            _ = try await store.enqueueBatch(sessionID: sessionID, kinds: kinds, finalizationTransactionID: finalizationTransactionID)
+            _ = try await store.enqueueBatch(
+                sessionID: sessionID,
+                kinds: kinds,
+                finalizationTransactionID: finalizationTransactionID,
+                requiresCloudPublicationBeforePrint: requiresCloudPublicationBeforePrint
+            )
             await reload()
         } catch {
             lastQueueError = error.localizedDescription
@@ -428,6 +462,7 @@ final class SessionJobQueue {
             await reload()
             return true
         }
+        defer { clearReservation(for: running) }
         await reload()
         do {
             try await execute(running)
@@ -457,7 +492,6 @@ final class SessionJobQueue {
 
     private func execute(_ job: SessionJob) async throws {
         guard await store.snapshot().first(where: { $0.id == job.id })?.status == .running else {
-            clearReservation(for: job)
             throw CancellationError()
         }
         let task: Task<Void, Error> = Task { @MainActor [weak self] in
@@ -482,7 +516,6 @@ final class SessionJobQueue {
                 activePrintJobID = nil
                 activePrintExecutionTask = nil
             }
-            clearReservation(for: job)
         }
         try await task.value
     }

@@ -19,6 +19,86 @@ extension CloudUploadConfiguration {
     }
 }
 
+struct CloudSessionLayout: Sendable, Equatable {
+    let route: CloudGuestRoute
+    let stagingDirectory: String
+    let publishedRoot: String
+    let publishedDirectory: String?
+    let publicAlias: String
+    let publicAliasParentDirectory: String
+    let verificationURL: URL?
+    let sessionID: String
+
+    init(
+        manifest: SessionManifest,
+        remoteRoot: String,
+        publicBaseURL: URL? = nil,
+        stripFileName: String = "strip.png",
+        publishedVersionID: String? = nil
+    ) throws {
+        guard remoteRoot.hasPrefix("/"),
+              !remoteRoot.split(separator: "/").contains(".."),
+              Self.isSafeRemotePath(remoteRoot),
+              Self.isSafeComponent(manifest.id) else {
+            throw JobExecutionError.permanent("Cloud upload configuration or session path is invalid.")
+        }
+        let runID = manifest.origin == .soakTest ? manifest.soakRunID : nil
+        if let runID, !Self.isSafeComponent(runID) {
+            throw JobExecutionError.permanent("Soak cloud upload is missing a safe run identifier.")
+        }
+        if manifest.origin == .soakTest, runID == nil {
+            throw JobExecutionError.permanent("Soak cloud upload is missing a safe run identifier.")
+        }
+        if let publishedVersionID, !Self.isSafeComponent(publishedVersionID) {
+            throw JobExecutionError.permanent("Cloud publication version is invalid.")
+        }
+
+        let route: CloudGuestRoute
+        do {
+            route = try CloudGuestRoute.resolve(for: manifest)
+        } catch {
+            throw JobExecutionError.permanent("Cloud upload configuration or session path is invalid.")
+        }
+
+        let stagingDirectory: String
+        let publishedRoot: String
+        if let runID {
+            stagingDirectory = "\(remoteRoot)/.soak/\(runID)/.staging/\(manifest.id)"
+            publishedRoot = "\(remoteRoot)/.soak/\(runID)/.published"
+        } else {
+            stagingDirectory = "\(remoteRoot)/.staging/\(manifest.id)"
+            publishedRoot = "\(remoteRoot)/.published"
+        }
+
+        let publicAlias = "\(remoteRoot)\(route.relativePath)"
+        self.route = route
+        self.stagingDirectory = stagingDirectory
+        self.publishedRoot = publishedRoot
+        self.publishedDirectory = publishedVersionID.map {
+            "\(publishedRoot)/\(manifest.id)-\($0)"
+        }
+        self.publicAlias = publicAlias
+        self.publicAliasParentDirectory = URL(fileURLWithPath: publicAlias).deletingLastPathComponent().path
+        self.verificationURL = publicBaseURL.flatMap {
+            route.childURL(stripFileName, baseURL: $0)
+        }
+        self.sessionID = manifest.id
+    }
+
+    private static func isSafeRemotePath(_ value: String) -> Bool {
+        let allowed = CharacterSet(charactersIn: "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789/._-")
+        return !value.isEmpty && value.unicodeScalars.allSatisfy { allowed.contains($0) }
+    }
+
+    private static func isSafeComponent(_ value: String) -> Bool {
+        let allowed = CharacterSet(charactersIn: "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-")
+        return !value.isEmpty
+            && value != "."
+            && value != ".."
+            && value.unicodeScalars.allSatisfy { allowed.contains($0) }
+    }
+}
+
 struct CloudCommandResult: Sendable, Equatable {
     var exitCode: Int32
     var output: String
@@ -391,7 +471,6 @@ actor CloudUploadService {
               !remoteBase.split(separator: "/").contains(".."),
               !manifest.relativeDirectoryPath.hasPrefix("/"),
               !manifest.relativeDirectoryPath.split(separator: "/").contains(".."),
-              isSafeComponent(manifest.id),
               isSafeComponent(manifest.downloadToken),
               let validatedPublicBase = ValidatedPublicGuestBaseURL(string: publicBase) else {
             throw JobExecutionError.permanent("Cloud upload configuration or session path is invalid.")
@@ -399,26 +478,17 @@ actor CloudUploadService {
         let publicURL = validatedPublicBase.url
 
         let remoteRoot = "/\(remoteBase)"
-        let soakRunID: String?
-        if manifest.origin == .soakTest {
-            guard let runID = manifest.soakRunID, isSafeComponent(runID) else {
-                throw JobExecutionError.permanent("Soak cloud upload is missing a safe run identifier.")
-            }
-            soakRunID = runID
-        } else {
-            soakRunID = nil
+        let layout = try CloudSessionLayout(
+            manifest: manifest,
+            remoteRoot: remoteRoot,
+            publicBaseURL: publicURL,
+            stripFileName: stripFileName,
+            publishedVersionID: UUID().uuidString
+        )
+        guard let publishedDirectory = layout.publishedDirectory,
+              let verificationURL = layout.verificationURL else {
+            throw JobExecutionError.permanent("Cloud publication route could not be constructed.")
         }
-        let stagingDirectory = soakRunID.map {
-            "\(remoteRoot)/.soak/\($0)/.staging/\(manifest.id)"
-        } ?? "\(remoteRoot)/.staging/\(manifest.id)"
-        let publishedRoot = soakRunID.map {
-            "\(remoteRoot)/.soak/\($0)/.published"
-        } ?? "\(remoteRoot)/.published"
-        let publishedDirectory = "\(publishedRoot)/\(manifest.id)-\(UUID().uuidString)"
-        let remoteSessions = soakRunID.map {
-            "\(remoteRoot)/s/soak/\($0)"
-        } ?? "\(remoteRoot)/s"
-        let publicAlias = "\(remoteSessions)/\(soakRunID == nil ? manifest.downloadToken : manifest.id)"
         let page = cloudDownloadPageHTML(
             hasGIF: manifest.gifFileName != nil
         )
@@ -438,7 +508,7 @@ actor CloudUploadService {
             executable: "/usr/bin/ssh",
             arguments: Self.sshArguments(
                 host: configuration.sshHost,
-                command: "mkdir -p \(Self.shellQuoted(stagingDirectory)) \(Self.shellQuoted(publishedRoot)) \(Self.shellQuoted(remoteSessions))"
+                command: "mkdir -p \(Self.shellQuoted(layout.stagingDirectory)) \(Self.shellQuoted(layout.publishedRoot)) \(Self.shellQuoted(layout.publicAliasParentDirectory))"
             ),
             timeout: Timeout.ssh
         )
@@ -454,21 +524,21 @@ actor CloudUploadService {
                 "--exclude", ".work",
                 "-e", Self.rsyncSSHCommand,
                 directory.path + "/",
-                "\(configuration.sshHost):\(Self.rsyncRemoteEscapedPath(stagingDirectory))/"
+                "\(configuration.sshHost):\(Self.rsyncRemoteEscapedPath(layout.stagingDirectory))/"
             ],
             timeout: Timeout.rsync
         )
 
         let remoteChecks = [
-            "test -s \(Self.shellQuoted("\(stagingDirectory)/\(stripFileName)"))",
-            "test -s \(Self.shellQuoted("\(stagingDirectory)/index.html"))"
+            "test -s \(Self.shellQuoted("\(layout.stagingDirectory)/\(stripFileName)"))",
+            "test -s \(Self.shellQuoted("\(layout.stagingDirectory)/index.html"))"
         ]
         let gifCheck = manifest.gifFileName.map {
-            "test -s \(Self.shellQuoted("\(stagingDirectory)/\($0)"))"
+            "test -s \(Self.shellQuoted("\(layout.stagingDirectory)/\($0)"))"
         }
         let publishCommand = (remoteChecks + (gifCheck.map { [$0] } ?? []) + [
-            "mv \(Self.shellQuoted(stagingDirectory)) \(Self.shellQuoted(publishedDirectory))",
-            "ln -sfn \(Self.shellQuoted(publishedDirectory)) \(Self.shellQuoted(publicAlias))"
+            "mv \(Self.shellQuoted(layout.stagingDirectory)) \(Self.shellQuoted(publishedDirectory))",
+            "ln -sfn \(Self.shellQuoted(publishedDirectory)) \(Self.shellQuoted(layout.publicAlias))"
         ]).joined(separator: " && ")
         try await run(
             label: "ssh publish download link",
@@ -477,20 +547,6 @@ actor CloudUploadService {
             timeout: Timeout.ssh
         )
 
-        let verificationURL: URL
-        if let soakRunID {
-            verificationURL = publicURL
-                .appendingPathComponent("s")
-                .appendingPathComponent("soak")
-                .appendingPathComponent(soakRunID)
-                .appendingPathComponent(manifest.id)
-                .appendingPathComponent(stripFileName)
-        } else {
-            verificationURL = publicURL
-                .appendingPathComponent("s")
-                .appendingPathComponent(manifest.downloadToken)
-                .appendingPathComponent(stripFileName)
-        }
         do {
             let verification = try await verifier.verify(url: verificationURL, timeout: Timeout.verification)
             guard verification.statusCode == 200, verification.contentLength > 0 else {
@@ -511,8 +567,8 @@ actor CloudUploadService {
         try Task.checkCancellation()
 
         let cleanupCommand = cleanupPublishedVersionsCommand(
-            publishedRoot: publishedRoot,
-            sessionID: manifest.id,
+            publishedRoot: layout.publishedRoot,
+            sessionID: layout.sessionID,
             keeping: publishedDirectory
         )
         do {
@@ -534,9 +590,6 @@ actor CloudUploadService {
     ) async throws {
         let remoteBase = configuration.remoteBasePath.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
         guard manifest.origin == .soakTest,
-              let runID = manifest.soakRunID,
-              isSafeComponent(runID),
-              isSafeComponent(manifest.id),
               isSafeHost(configuration.sshHost),
               isSafeRemotePath(remoteBase),
               !remoteBase.isEmpty,
@@ -545,16 +598,46 @@ actor CloudUploadService {
         }
 
         let remoteRoot = "/\(remoteBase)"
-        let stagingDirectory = "\(remoteRoot)/.soak/\(runID)/.staging/\(manifest.id)"
-        let publishedRoot = "\(remoteRoot)/.soak/\(runID)/.published"
-        let publicAlias = "\(remoteRoot)/s/soak/\(runID)/\(manifest.id)"
+        let layout: CloudSessionLayout
+        do {
+            layout = try CloudSessionLayout(manifest: manifest, remoteRoot: remoteRoot)
+        } catch {
+            throw JobExecutionError.permanent("Refusing cloud cleanup for an invalid soak session path.")
+        }
         let command = [
-            "if [ -e \(Self.shellQuoted(publicAlias)) ] || [ -L \(Self.shellQuoted(publicAlias)) ]; then rm -f -- \(Self.shellQuoted(publicAlias)); fi",
-            "rm -rf -- \(Self.shellQuoted(stagingDirectory))",
-            cleanupPublishedVersionsCommand(publishedRoot: publishedRoot, sessionID: manifest.id)
+            "if [ -e \(Self.shellQuoted(layout.publicAlias)) ] || [ -L \(Self.shellQuoted(layout.publicAlias)) ]; then rm -f -- \(Self.shellQuoted(layout.publicAlias)); fi",
+            "rm -rf -- \(Self.shellQuoted(layout.stagingDirectory))",
+            cleanupPublishedVersionsCommand(publishedRoot: layout.publishedRoot, sessionID: layout.sessionID)
         ].joined(separator: " && ")
         try await run(
             label: "clean isolated soak cloud artifacts",
+            executable: "/usr/bin/ssh",
+            arguments: Self.sshArguments(host: configuration.sshHost, command: command),
+            timeout: Timeout.ssh
+        )
+    }
+
+    func hideSoakAlias(
+        manifest: SessionManifest,
+        configuration: CloudUploadConfiguration
+    ) async throws {
+        let remoteBase = configuration.remoteBasePath.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        guard manifest.origin == .soakTest,
+              isSafeHost(configuration.sshHost),
+              isSafeRemotePath(remoteBase),
+              !remoteBase.isEmpty,
+              !remoteBase.split(separator: "/").contains("..") else {
+            throw JobExecutionError.permanent("Refusing cloud route cleanup for an invalid soak session path.")
+        }
+        let layout: CloudSessionLayout
+        do {
+            layout = try CloudSessionLayout(manifest: manifest, remoteRoot: "/\(remoteBase)")
+        } catch {
+            throw JobExecutionError.permanent("Refusing cloud route cleanup for an invalid soak session path.")
+        }
+        let command = "if [ -e \(Self.shellQuoted(layout.publicAlias)) ] || [ -L \(Self.shellQuoted(layout.publicAlias)) ]; then rm -f -- \(Self.shellQuoted(layout.publicAlias)); fi"
+        try await run(
+            label: "depublish isolated soak cloud route",
             executable: "/usr/bin/ssh",
             arguments: Self.sshArguments(host: configuration.sshHost, command: command),
             timeout: Timeout.ssh

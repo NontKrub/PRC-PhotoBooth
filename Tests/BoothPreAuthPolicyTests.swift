@@ -437,4 +437,41 @@ struct BoothPreAuthPolicyTests {
             now: now.addingTimeInterval(6)
         ).admitted)
     }
+
+    @Test("anonymous probe cooldown does not block a known peer proving its identity")
+    func identityProbeGlobalQuotaUsesBoundedCooldown() {
+        var limiter = BoothPreAuthAdmissionLimiter(
+            identityProbeGlobalFailureThreshold: 3,
+            identityProbeGlobalCooldown: 4,
+            reservedFailureThreshold: 10
+        )
+        let trustedPeerIDs: Set<String> = ["paired-ipad-a", "paired-ipad-b"]
+        let now = Date()
+
+        for attempt in 0..<3 {
+            limiter.recordIdentityProbeFailure(
+                peerID: "paired-ipad-a",
+                trustedPeerIDs: trustedPeerIDs,
+                now: now.addingTimeInterval(Double(attempt))
+            )
+        }
+
+        let duringCooldown = limiter.shouldAdmitIdentityProbe(
+            peerID: "paired-ipad-b",
+            trustedPeerIDs: trustedPeerIDs,
+            now: now.addingTimeInterval(3.5)
+        )
+        #expect(duringCooldown.admitted)
+        #expect(limiter.isIdentityProbeCoolingDown(now: now.addingTimeInterval(3.5)))
+
+        // Bad anonymous attempts still cannot turn a bounded cooldown into a
+        // denial of the stored-secret identity proof path.
+        limiter.recordIdentityProbeAttemptFailure(now: now.addingTimeInterval(3.5))
+        #expect(limiter.shouldAdmitIdentityProbe(
+            peerID: "paired-ipad-b",
+            trustedPeerIDs: trustedPeerIDs,
+            now: now.addingTimeInterval(4.1)
+        ).admitted)
+        #expect(!limiter.isIdentityProbeCoolingDown(now: now.addingTimeInterval(6.1)))
+    }
 }

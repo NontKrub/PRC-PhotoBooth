@@ -105,6 +105,7 @@ public final class NetworkBoothTransport: BoothTransport {
             cancelLANRecovery()
             let oldValue = requestedPreference
             requestedPreference = newValue
+            refreshControlCoreCredentials()
             fallbackActive = false
             fallbackReason = nil
             print("[NetworkRoute] Preference changed: \(oldValue.rawValue) -> \(newValue.rawValue)")
@@ -168,6 +169,7 @@ public final class NetworkBoothTransport: BoothTransport {
     private var didInitiateAuthentication = false
     private var discoveredPeersByID: [String: BoothDiscoveredPeer] = [:]
     private var controlListener: NWListener?
+    private var coreControlListenerGeneration = 0
     private var previewListener: NWListener?
     private var assetListener: NWListener?
     private var controlBrowser: NWBrowser?
@@ -195,6 +197,9 @@ public final class NetworkBoothTransport: BoothTransport {
     private var callbackGate = BoothTransportCallbackGate()
     private var controlConnection: NWConnection?
     private var controlConnectionGeneration = 0
+    /// A trusted control socket promoted by the runtime remains runtime-owned.
+    /// The facade tracks its generation but never retains its NWConnection.
+    private var coreOwnedControlGeneration: Int?
     private var pairingGeneration = 0
     private var pairingRequestSubmission = BoothPairingRequestSubmissionGate()
     private var previewConnection: NWConnection?
@@ -372,10 +377,34 @@ public final class NetworkBoothTransport: BoothTransport {
         self.controlWritePump.onFailure = { [weak self] outcome, reason, generation in
             Task { @MainActor [weak self] in
                 guard let self,
-                      generation == self.controlConnectionGeneration,
-                      let connection = self.controlConnection else { return }
+                      generation == self.controlConnectionGeneration else { return }
                 self.recordControlSendFailure(outcome)
-                self.connectionDidClose(connection, channel: .control, reason: reason)
+                if self.coreOwnedControlGeneration == generation {
+                    self.transportRuntime.invalidateControlConnection(generation: generation)
+                } else if let connection = self.controlConnection {
+                    self.connectionDidClose(connection, channel: .control, reason: reason)
+                }
+            }
+        }
+        self.transportRuntime.onHeartbeatTimeout = { [weak self] generation in
+            Task { @MainActor [weak self] in
+                guard let self,
+                      generation == self.controlConnectionGeneration else { return }
+                if self.coreOwnedControlGeneration == generation {
+                    guard self.peerAuthenticated, self.secureChannelEstablished else { return }
+                    self.emitTransportEvent(
+                        .heartbeatTimedOut,
+                        channel: .control,
+                        reason: "No valid control traffic within heartbeat timeout"
+                    )
+                } else if let connection = self.controlConnection,
+                          self.isCurrent(connection, channel: .control) {
+                    self.connectionDidClose(
+                        connection,
+                        channel: .control,
+                        reason: "heartbeat timeout"
+                    )
+                }
             }
         }
         self.assetWritePump.onFailure = { [weak self] outcome, reason, generation in
@@ -414,25 +443,6 @@ public final class NetworkBoothTransport: BoothTransport {
                 pendingFrames: diagnostics.pendingFrames
             )
             self.onPreviewFrame?(data)
-        }
-        self.transportRuntime.onHeartbeatTimeout = { [weak self] connection, generation in
-            Task { @MainActor [weak self] in
-                guard let self,
-                      self.isCurrent(connection, channel: .control),
-                      self.controlConnectionGeneration == generation,
-                      self.peerAuthenticated,
-                      self.secureChannelEstablished else { return }
-                self.emitTransportEvent(
-                    .heartbeatTimedOut,
-                    channel: .control,
-                    reason: "No valid control traffic within heartbeat timeout"
-                )
-                self.connectionDidClose(
-                    connection,
-                    channel: .control,
-                    reason: "heartbeat timeout"
-                )
-            }
         }
         self.transportRuntime.onReconnectDue = { [weak self] attempt, generation in
             Task { @MainActor [weak self] in
@@ -485,7 +495,279 @@ public final class NetworkBoothTransport: BoothTransport {
                 self.connectionDidClose(connection, channel: .control, reason: reason)
             }
         }
+        configureControlCore()
         publishPairingStatus()
+    }
+
+    private func configureControlCore() {
+        let credentials = Dictionary(uniqueKeysWithValues: trustedStore.trustedPeerIDs.compactMap { peerID in
+            trustedStore.secret(for: peerID).map { (peerID, $0) }
+        })
+        transportRuntime.configureControlCore(
+            localIdentity: localIdentity,
+            networkPreference: requestedPreference,
+            trustedSecrets: credentials,
+            selectedPeerID: targetPeerID ?? trustedStore.preferredPeerID,
+            secureChannel: secureChannel,
+            writer: controlWritePump
+        ) { [weak self] event in
+            Task { @MainActor [weak self] in
+                self?.handleControlCoreEvent(event)
+            }
+        }
+    }
+
+    private func refreshControlCoreCredentials() {
+        let credentials = Dictionary(uniqueKeysWithValues: trustedStore.trustedPeerIDs.compactMap { peerID in
+            trustedStore.secret(for: peerID).map { (peerID, $0) }
+        })
+        transportRuntime.updateControlCredentials(
+            trustedSecrets: credentials,
+            selectedPeerID: targetPeerID ?? trustedStore.preferredPeerID,
+            localIdentity: localIdentity,
+            networkPreference: requestedPreference
+        )
+        transportRuntime.updateTrustedPeerIDs(Set(credentials.keys))
+    }
+
+    private func handleControlCoreEvent(_ event: BoothNetworkTransportRuntime.ControlCoreEvent) {
+        switch event {
+        case let .pairingCandidate(connection, admission, hello, decoder, bufferedFrames):
+            guard role == .mac, shouldReconnect else {
+                transportRuntime.abandonInboundControlAdmission(admission, connection: connection)
+                return
+            }
+            accept(
+                connection,
+                channel: .control,
+                preAuthAdmission: admission,
+                connectionAlreadyStarted: true,
+                preAuthHello: hello,
+                preAuthDecoder: decoder,
+                bufferedFrames: bufferedFrames
+            )
+        case let .trustedAuthenticated(
+            generation,
+            endpointDescription,
+            hello,
+            localHello,
+            peerHello,
+            interface,
+            provenance,
+            routeGeneration
+        ):
+            adoptTrustedControlState(
+                generation: generation,
+                endpointDescription: endpointDescription,
+                hello: hello,
+                localSecureHello: localHello,
+                peerSecureHello: peerHello,
+                interface: interface,
+                provenance: provenance,
+                routeGeneration: routeGeneration
+            )
+        case let .controlFrames(generation, frames):
+            guard coreOwnedControlGeneration == generation,
+                  controlConnectionGeneration == generation,
+                  peerAuthenticated,
+                  secureChannelEstablished else { return }
+            handleDecodedFrames(frames)
+        case let .disconnected(generation, reason),
+             let .rejected(generation, reason):
+            handleCoreOwnedControlDisconnect(generation: generation, reason: reason)
+        case .listenerFailed(let generation, let reason):
+            guard generation == coreControlListenerGeneration else { return }
+            lastNetworkError = reason
+            if activeInterface == .wiredEthernet {
+                handleLANHandshakeFailure(reason: reason, retainManualListener: false)
+            } else if shouldReconnect {
+                scheduleReconnect()
+            }
+        case .listenerReady:
+            break
+        }
+    }
+
+    private func handleCoreOwnedControlDisconnect(generation: Int, reason: String?) {
+        guard coreOwnedControlGeneration == generation,
+              controlConnectionGeneration == generation else { return }
+        coreOwnedControlGeneration = nil
+        invalidateReceiveToken(for: .control)
+        controlConnectionIsViable = false
+        cancelWaitingRecovery(for: .control)
+        resetPreviewConnection()
+        assetConnection?.cancel()
+        assetConnection = nil
+        assetEndpointDescription = nil
+        resetAssetBinding()
+        deferredAssetRequests.removeAll()
+        controlConnection = nil
+        controlEndpointDescription = nil
+        peerAuthenticated = false
+        secureChannelEstablished = false
+        connectionStatus.publishPairing(authenticated: false, stage: .discovering)
+        connectionStatus.publishSecureChannel(ready: false)
+        if let reason { lastNetworkError = reason }
+        peerName = ""
+        connectedPeerNames = []
+        peerDeviceID = nil
+        connectionState = role == .iPad && shouldReconnect ? .connecting : .disconnected
+        emitTransportEvent(.transportDisconnected, channel: .control, reason: reason)
+        publishStatus()
+    }
+
+    private func adoptTrustedControlState(
+        generation: Int,
+        endpointDescription: String,
+        hello: BoothTransportHello,
+        localSecureHello: BoothSecureChannelHello,
+        peerSecureHello: BoothSecureChannelHello,
+        interface: BoothNetworkInterfacePolicy?,
+        provenance: BoothRouteCandidateProvenance?,
+        routeGeneration: Int?
+    ) {
+        guard transportRuntime.isControlConnectionAuthenticated(generation: generation) else {
+            transportRuntime.invalidateControlConnection(generation: generation)
+            return
+        }
+        if role == .iPad, routeGeneration != routeDiscoveryGate.generation {
+            transportRuntime.invalidateControlConnection(generation: generation)
+            return
+        }
+        guard shouldReconnect,
+              hello.role == (role == .mac ? .iPad : .mac),
+              trustedStore.secret(for: hello.deviceID) != nil,
+              role != .iPad || targetPeerID == hello.deviceID else {
+            transportRuntime.invalidateControlConnection(generation: generation)
+            return
+        }
+        if let interface, role == .iPad {
+            activeInterface = interface
+            fallbackActive = interface == .wifi && requestedPreference == .lan
+            fallbackReason = fallbackActive ? "LAN unavailable" : nil
+            if interface == .wiredEthernet {
+                _ = routeMachine.beginLANAttempt()
+            } else {
+                _ = routeMachine.startWiFiAttempt(
+                    wifiAvailable: true,
+                    fallback: fallbackActive
+                )
+            }
+            if previewBrowser == nil { startBrowser(channel: .preview) }
+        }
+        guard activeInterface != nil else {
+            transportRuntime.invalidateControlConnection(generation: generation)
+            return
+        }
+        invalidateReceiveToken(for: .control)
+        resetPreviewConnection()
+        controlConnection?.cancel()
+        controlConnectionGeneration = generation
+        coreOwnedControlGeneration = generation
+        assetConnectionGeneration &+= 1
+        assetWritePump.invalidate(generation: assetConnectionGeneration)
+        assetConnection?.cancel()
+        assetConnection = nil
+        assetEndpointDescription = nil
+        resetAssetBinding()
+        deferredAssetRequests.removeAll()
+        controlConnection = nil
+        controlEndpointDescription = endpointDescription
+        cancelUnauthenticatedIdleTimer()
+        didReceiveHello = false
+        didSendTransportHello = false
+        peerAuthenticated = false
+        previewPeerSupportsIdentity = false
+        setFrameDecoderHandshake(false, channel: .control)
+        secureNegotiationTimeoutSource?.cancel()
+        secureNegotiationTimeoutSource = nil
+        secureNegotiator = BoothSecureChannelNegotiator(
+            role: role,
+            localDeviceID: localIdentity.id,
+            connectionGeneration: generation
+        )
+        localSecureChannelHello = nil
+        peerSecureChannelHello = nil
+        deferredSecureChannelHello = nil
+        secureChannelSessionID = nil
+        secureChannelReadySent = false
+        secureChannelReadyReceived = false
+        secureChannelEstablished = false
+        didInitiateAuthentication = false
+        pendingAuthChallenge = nil
+        deferredAuthChallenge = nil
+        peerHello = nil
+        peerDeviceID = nil
+        expectedPeerDeviceID = nil
+        peerName = ""
+        connectedPeerNames = []
+        peerHello = hello
+        didReceiveHello = true
+        didSendTransportHello = true
+        peerAuthenticated = true
+        secureChannelEstablished = true
+        localSecureChannelHello = localSecureHello
+        peerSecureChannelHello = peerSecureHello
+        secureChannelSessionID = localSecureHello.sessionID
+        secureChannelReadySent = true
+        secureChannelReadyReceived = true
+        secureNegotiator = BoothSecureChannelNegotiator(
+            role: role,
+            localDeviceID: localIdentity.id,
+            connectionGeneration: generation
+        )
+        peerDeviceID = hello.deviceID
+        expectedPeerDeviceID = hello.deviceID
+        peerName = hello.deviceName.isEmpty ? hello.deviceID : hello.deviceName
+        connectedPeerNames = [peerName]
+        previewPeerSupportsIdentity = hello.capabilities.contains(Self.previewIdentityCapability)
+        controlConnectionIsViable = true
+        lastControlMessageAt = Date()
+        connectionStatus.publishControlActivity(at: lastControlMessageAt)
+        connectionStatus.publishPairing(authenticated: true, stage: .authenticated)
+        connectionStatus.publishSecureChannel(ready: true)
+        connectionStatus.publishReconnectState(inProgress: false)
+        connectionStatus.publishNetworkError(nil)
+        connectionState = .connected(peerName: peerName)
+        reconnectAttempt = 0
+        directLANControlAttemptInFlight = false
+        lastNetworkError = nil
+        trustedStore.updateLastSeen(peerID: hello.deviceID, name: peerName)
+        if activeInterface == .wiredEthernet {
+            lanHandshakeState = .ready
+            _ = routeMachine.lanHandshakeSucceeded(peer: peerName)
+        } else {
+            lanHandshakeState = .unknown
+            _ = routeMachine.wifiConnected(peer: peerName, fallback: fallbackActive)
+        }
+        publishStatus()
+        setPairingStage(.authenticated, state: .authenticated(peerID: hello.deviceID))
+        emitTransportEvent(
+            .authenticated,
+            channel: .control,
+            candidateSource: provenance?.rawValue
+        )
+        emitTransportEvent(.secureChannelEstablished, channel: .control)
+        emitTransportEvent(.transportReconnectSucceeded, channel: .control)
+        if role == .iPad, previewConnection == nil {
+            if activeInterface == .wiredEthernet {
+                connect(
+                    to: directLANEndpoint(for: .preview),
+                    channel: .preview,
+                    parameters: makeParameters(for: .wiredEthernet),
+                    provenance: .directStaticLAN
+                )
+            } else {
+                startBrowser(channel: .preview)
+            }
+        }
+        startAssetChannelIfNeeded()
+        validatePreviewIdentity()
+        onTransportReady?(BoothDeviceIdentity(
+            id: peerSecureHello.senderDeviceID,
+            displayName: peerName,
+            role: peerSecureHello.senderRole
+        ))
     }
 
     public var deviceIdentity: BoothDeviceIdentity { localIdentity }
@@ -502,7 +784,9 @@ public final class NetworkBoothTransport: BoothTransport {
             targetPeerID: targetPeerID,
             targetCandidateAvailable: candidate != nil,
             targetCandidateSource: candidate?.provenance.rawValue,
-            controlConnectionState: controlConnection.map { String(describing: $0.state) } ?? "none",
+            controlConnectionState: coreOwnedControlGeneration == controlConnectionGeneration
+                ? "runtime-owned"
+                : controlConnection.map { String(describing: $0.state) } ?? "none",
             controlConnectionGeneration: controlConnectionGeneration,
             helloSent: didSendTransportHello,
             helloReceived: didReceiveHello,
@@ -858,6 +1142,7 @@ public final class NetworkBoothTransport: BoothTransport {
         } else if let currentPeerID = peerDeviceID, currentPeerID != peerID {
             controlConnection?.cancel()
         }
+        refreshControlCoreCredentials()
         publishPairingStatus()
     }
 
@@ -869,6 +1154,7 @@ public final class NetworkBoothTransport: BoothTransport {
         pendingPairingIntent = nil
         trustedStore.preferredPeerID = peerID
         targetPeerID = peerID
+        refreshControlCoreCredentials()
         emitTransportEvent(.targetSelected, reason: "Trusted peer selected for connection.")
         setPairingStage(.idle, state: .idle)
         ensureDiscoveryForPeerSelection()
@@ -1026,7 +1312,7 @@ public final class NetworkBoothTransport: BoothTransport {
         if targetPeerID == peerID {
             resetPairingState(clearTarget: true, clearPendingCommit: true, clearFailure: true)
         }
-        transportRuntime.updateTrustedPeerIDs(trustedStore.trustedPeerIDs)
+        refreshControlCoreCredentials()
         if wasCurrent { controlConnection?.cancel() }
         setPairingStage(.idle, state: .idle)
         if role == .iPad { restartDiscoveryForPeerSelection() }
@@ -1037,8 +1323,8 @@ public final class NetworkBoothTransport: BoothTransport {
     @discardableResult
     public func forgetAllPeers() -> Bool {
         let deletionStatus = trustedStore.forgetAll()
-        transportRuntime.updateTrustedPeerIDs(trustedStore.trustedPeerIDs)
         resetPairingState(clearTarget: true, clearPendingCommit: true, clearFailure: true)
+        refreshControlCoreCredentials()
         peerAuthenticated = false
         controlConnection?.cancel()
         setPairingStage(.idle, state: .idle)
@@ -1535,10 +1821,11 @@ public final class NetworkBoothTransport: BoothTransport {
             startListener(channel: .preview)
             startListener(channel: .asset)
         case .iPad:
-            if !directLANControlAttemptInFlight {
+            if !directLANControlAttemptInFlight,
+               targetPeerID.map({ trustedStore.secret(for: $0) == nil }) ?? true {
                 if controlBrowser == nil { startBrowser(channel: .control) }
-                startBrowser(channel: .preview)
             }
+            startBrowser(channel: .preview)
         }
 
         // A Mac must keep its LAN listeners alive while waiting for an iPad.
@@ -1589,6 +1876,18 @@ public final class NetworkBoothTransport: BoothTransport {
                 : "Route discovery started for the selected peer.",
             routeGeneration: generation
         )
+        if let targetPeerID,
+           trustedStore.secret(for: targetPeerID) != nil {
+            transportRuntime.startTrustedRouteDiscovery(
+                targetPeerID: targetPeerID,
+                preference: requestedPreference,
+                generation: generation,
+                directLANEndpoint: !skipDirectLANFallback && requestedPreference == .lan
+                    ? directLANEndpoint(for: .control) : nil,
+                directLANParameters: !skipDirectLANFallback && requestedPreference == .lan
+                    ? makeParameters(for: .wiredEthernet) : nil
+            )
+        }
         if !skipDirectLANFallback,
            startDirectLANPairingFallbackIfNeeded(routeGeneration: generation) { return }
         startRouteDiscoveryBrowsers(generation: generation)
@@ -1615,6 +1914,7 @@ public final class NetworkBoothTransport: BoothTransport {
     private func startDirectLANPairingFallbackIfNeeded(routeGeneration: Int) -> Bool {
         guard requestedPreference == .lan,
               let targetPeerID,
+              trustedStore.secret(for: targetPeerID) == nil,
               directLANAttemptedRouteGeneration != routeGeneration,
               trustedStore.trustedPeerIDs.contains(targetPeerID) || hasEphemeralPairingState else {
             return false
@@ -1696,7 +1996,7 @@ public final class NetworkBoothTransport: BoothTransport {
                 )
                 self.updateDiscoveredPeers(from: results, provenance: candidateProvenance)
                 for result in results {
-                    guard self.controlConnection == nil || !self.peerAuthenticated else { continue }
+                    guard !self.hasRuntimeOwnedControl || !self.peerAuthenticated else { continue }
                     guard let peer = self.discoveredPeer(from: result, interface: interface),
                           peer.role == .mac,
                           let targetPeerID = self.targetPeerID,
@@ -1714,6 +2014,11 @@ public final class NetworkBoothTransport: BoothTransport {
                         self.setPairingStage(.failed, state: .failed(reason))
                         continue
                     }
+
+                    // The browser may continue updating the device list, but
+                    // only the queue-owned core may create a trusted control
+                    // socket or select its reconnect route.
+                    if self.trustedStore.secret(for: peer.id) != nil { continue }
 
                     let advertisedPreference = peer.networkPreference
                     guard !isLANCompatibilityFallback || advertisedPreference == .lan else {
@@ -1902,6 +2207,20 @@ public final class NetworkBoothTransport: BoothTransport {
             fallback: interface == .wifi && requestedPreference == .lan,
             reason: interface == .wifi && requestedPreference == .lan ? "LAN unavailable" : nil
         )
+        if role == .iPad,
+           let targetPeerID,
+           trustedStore.secret(for: targetPeerID) != nil {
+            transportRuntime.startTrustedControlConnection(
+                endpoint: endpoint,
+                parameters: connectionParameters ?? makeParameters(for: interface),
+                interface: interface,
+                provenance: provenance ?? (interface == .wiredEthernet
+                    ? .ethernetConstrainedBonjour
+                    : .localNetworkBonjour),
+                generation: routeDiscoveryGate.generation
+            )
+            return
+        }
         connect(
             to: endpoint,
             channel: .control,
@@ -1947,7 +2266,8 @@ public final class NetworkBoothTransport: BoothTransport {
     private func prepareForPeerSelection(_ peerID: String?) {
         guard role == .iPad,
               peerDeviceID != peerID,
-              activeInterface != nil || controlConnection != nil || controlBrowser != nil else {
+              activeInterface != nil || controlConnection != nil
+                || hasRuntimeOwnedControl || controlBrowser != nil else {
             return
         }
         tearDownActiveTransport()
@@ -1977,6 +2297,7 @@ public final class NetworkBoothTransport: BoothTransport {
 
     private func connectCachedRouteIfAvailable() -> Bool {
         guard let targetPeerID = targetPeerID,
+              !hasRuntimeOwnedControl,
               controlConnection == nil || !peerAuthenticated,
               let candidate = cachedRouteCandidate(for: targetPeerID) else {
             return false
@@ -2029,7 +2350,8 @@ public final class NetworkBoothTransport: BoothTransport {
             || lanRouteDiscoveryBrowser != nil
             || lanCompatibilityRouteDiscoveryBrowser != nil
             || routeDiscoveryFallbackTask != nil
-        let hasActiveControlAttempt = controlConnection != nil
+        let hasActiveControlAttempt = hasRuntimeOwnedControl
+            || controlConnection != nil
             || controlBrowser != nil
             || directLANControlAttemptInFlight
         let decision = BoothRouteDiscoveryPolicy.decision(
@@ -2079,8 +2401,11 @@ public final class NetworkBoothTransport: BoothTransport {
         invalidateReceiveToken(for: .control)
         invalidateReceiveToken(for: .preview)
         invalidateReceiveToken(for: .asset)
+        coreControlListenerGeneration &+= 1
+        transportRuntime.stopControlCore()
         transportRuntime.invalidateControlConnection(generation: controlConnectionGeneration)
         controlConnectionGeneration &+= 1
+        coreOwnedControlGeneration = nil
         assetConnectionGeneration &+= 1
         controlWritePump.invalidate(generation: controlConnectionGeneration)
         assetWritePump.invalidate(generation: assetConnectionGeneration)
@@ -2191,6 +2516,9 @@ public final class NetworkBoothTransport: BoothTransport {
 
     private func refreshAdvertisedServices() {
         if let controlListener { controlListener.service = advertisedService(for: .control) }
+        if role == .mac, activeInterface != nil {
+            transportRuntime.updateControlListenerService(advertisedService(for: .control))
+        }
         if let previewListener { previewListener.service = advertisedService(for: .preview) }
         if let assetListener { assetListener.service = advertisedService(for: .asset) }
     }
@@ -2313,6 +2641,19 @@ public final class NetworkBoothTransport: BoothTransport {
         if channel == .control, controlListener != nil { return }
         if channel == .preview, previewListener != nil { return }
         if channel == .asset, assetListener != nil { return }
+        if channel == .control, role == .mac {
+            let port: NWEndpoint.Port? = activeInterface == .wiredEthernet
+                ? Self.directLANControlPort
+                : nil
+            coreControlListenerGeneration &+= 1
+            transportRuntime.startControlListener(
+                using: makeParameters(for: activeInterface),
+                port: port,
+                service: advertisedService(for: .control),
+                generation: coreControlListenerGeneration
+            )
+            return
+        }
         let listener: NWListener
         do {
             if activeInterface == .wiredEthernet {
@@ -2503,7 +2844,10 @@ public final class NetworkBoothTransport: BoothTransport {
         _ connection: NWConnection,
         channel: BoothTransportChannel,
         preAuthAdmission: BoothNetworkTransportRuntime.InboundControlAdmission? = nil,
-        connectionAlreadyStarted: Bool = false
+        connectionAlreadyStarted: Bool = false,
+        preAuthHello: BoothTransportHello? = nil,
+        preAuthDecoder: BoothTransportFrameDecoder? = nil,
+        bufferedFrames: [BoothDecodedTransportFrame] = []
     ) {
         guard activeInterface != nil else {
             if let preAuthAdmission {
@@ -2555,6 +2899,7 @@ public final class NetworkBoothTransport: BoothTransport {
             resetPreviewConnection()
             controlConnection?.cancel()
             controlConnectionGeneration &+= 1
+            coreOwnedControlGeneration = nil
             assetConnectionGeneration &+= 1
             controlWritePump.invalidate(generation: controlConnectionGeneration)
             assetWritePump.invalidate(generation: assetConnectionGeneration)
@@ -2600,8 +2945,13 @@ public final class NetworkBoothTransport: BoothTransport {
             connection,
             channel: channel,
             provenance: activeInterface == .wiredEthernet ? .directStaticLAN : .localNetworkBonjour,
-            connectionAlreadyStarted: connectionAlreadyStarted
+            connectionAlreadyStarted: connectionAlreadyStarted,
+            frameDecoderOverride: preAuthDecoder,
+            bufferedFrames: bufferedFrames
         )
+        if let preAuthHello {
+            handleControl(.helloDetails(preAuthHello))
+        }
     }
 
     private func connect(
@@ -2614,6 +2964,7 @@ public final class NetworkBoothTransport: BoothTransport {
         guard let activeInterface else { return }
         if channel == .preview, expectedPeerDeviceID == nil { return }
         if channel == .asset, expectedPeerDeviceID == nil { return }
+        if channel == .control, hasRuntimeOwnedControl { return }
         let description = endpoint.debugDescription
         if channel == .control {
             let existingIsDead: Bool = {
@@ -2652,6 +3003,7 @@ public final class NetworkBoothTransport: BoothTransport {
                 ?? NWConnection(to: endpoint, using: resolvedParameters)
             controlEndpointDescription = description
             resetControlAuthentication()
+            coreOwnedControlGeneration = nil
             if let connection = controlConnection {
                 transportRuntime.bindControlConnection(
                     connection,
@@ -2730,7 +3082,9 @@ public final class NetworkBoothTransport: BoothTransport {
         _ connection: NWConnection,
         channel: BoothTransportChannel,
         provenance: BoothRouteCandidateProvenance? = nil,
-        connectionAlreadyStarted: Bool = false
+        connectionAlreadyStarted: Bool = false,
+        frameDecoderOverride: BoothTransportFrameDecoder? = nil,
+        bufferedFrames: [BoothDecodedTransportFrame] = []
     ) {
         let resolvedProvenance = provenance ?? {
             guard let activeInterface else { return .localNetworkBonjour }
@@ -2899,7 +3253,13 @@ public final class NetworkBoothTransport: BoothTransport {
                         }
                         self.connectionState = .connecting
                         self.publishStatus()
-                        guard self.receive(on: connection, channel: channel, token: receiveToken) else { return }
+                        if !bufferedFrames.isEmpty { self.handleDecodedFrames(bufferedFrames) }
+                        guard self.receive(
+                            on: connection,
+                            channel: channel,
+                            token: receiveToken,
+                            decoderOverride: frameDecoderOverride
+                        ) else { return }
                         self.sendTransportHello()
                         self.startUnauthenticatedIdleTimer()
                     } else if channel == .preview {
@@ -2999,17 +3359,18 @@ public final class NetworkBoothTransport: BoothTransport {
     private func receive(
         on connection: NWConnection,
         channel: BoothTransportChannel,
-        token: BoothTransportReceiveToken
+        token: BoothTransportReceiveToken,
+        decoderOverride: BoothTransportFrameDecoder? = nil
     ) -> Bool {
         guard token.begin() else { return false }
-        let decoder = frameDecoder(for: channel)
+        let decoder = decoderOverride ?? frameDecoder(for: channel)
         let secureChannel = self.secureChannel
         let transportRuntime = self.transportRuntime
         let previewDeliveryPump = self.previewDeliveryPump
         let previewConnectionGeneration = self.previewConnectionGeneration
         transportQueue.async { [weak self, weak connection] in
             guard let self, let connection, token.isValid else { return }
-            decoder.reset(channel)
+            if decoderOverride == nil { decoder.reset(channel) }
             Self.receive(
                 on: connection,
                 channel: channel,
@@ -4164,7 +4525,7 @@ public final class NetworkBoothTransport: BoothTransport {
                 try trustedStore.trust(commit.peer, secret: commit.secret)
                 trustedStore.preferredPeerID = commit.peer.id
                 trustedStore.autoReconnect = true
-                transportRuntime.updateTrustedPeerIDs(trustedStore.trustedPeerIDs)
+                refreshControlCoreCredentials()
                 pendingPairingCommit = nil
                 pendingPairingVerificationCode = nil
                 didConfirmPairingVerification = false
@@ -4897,13 +5258,24 @@ public final class NetworkBoothTransport: BoothTransport {
         } else {
             wrappedCompletion = nil
         }
-        let outcome = controlWritePump.enqueue(
-            message,
-            connection: connection,
-            generation: controlConnectionGeneration,
-            secure: requiresSecureChannel(message),
-            completion: wrappedCompletion
-        )
+        let outcome: BoothControlSendOutcome
+        if connection == nil,
+           coreOwnedControlGeneration == controlConnectionGeneration {
+            outcome = transportRuntime.enqueueAuthenticatedControl(
+                message,
+                generation: controlConnectionGeneration,
+                secure: requiresSecureChannel(message),
+                completion: wrappedCompletion
+            )
+        } else {
+            outcome = controlWritePump.enqueue(
+                message,
+                connection: connection,
+                generation: controlConnectionGeneration,
+                secure: requiresSecureChannel(message),
+                completion: wrappedCompletion
+            )
+        }
         if outcome == .sent {
             if completion != nil {
                 emitTransportEvent(.criticalSendQueued, channel: .control)
@@ -5095,6 +5467,7 @@ public final class NetworkBoothTransport: BoothTransport {
                 assetEndpointDescription = nil
                 controlConnection?.cancel()
                 controlConnectionGeneration &+= 1
+                coreOwnedControlGeneration = nil
                 assetConnectionGeneration &+= 1
                 controlWritePump.invalidate(generation: controlConnectionGeneration)
                 assetWritePump.invalidate(generation: assetConnectionGeneration)
@@ -5233,6 +5606,9 @@ public final class NetworkBoothTransport: BoothTransport {
     }
 
     private var hasAuthoritativeControl: Bool {
+        if hasRuntimeOwnedControl {
+            return controlConnectionIsViable && peerAuthenticated && secureChannelEstablished
+        }
         guard let connection = controlConnection,
               controlConnectionIsViable else { return false }
         guard case .ready = connection.state else { return false }
@@ -5240,6 +5616,9 @@ public final class NetworkBoothTransport: BoothTransport {
     }
 
     private var shouldDeferPathHintForAuthenticatedControl: Bool {
+        if hasRuntimeOwnedControl {
+            return peerAuthenticated && secureChannelEstablished && !hasAuthoritativeControl
+        }
         guard let connection = controlConnection,
               peerAuthenticated,
               secureChannelEstablished else { return false }
@@ -5252,6 +5631,10 @@ public final class NetworkBoothTransport: BoothTransport {
     private var shouldIgnoreUnavailablePathHint: Bool {
         BoothPathAuthorityPolicy.action(hasAuthenticatedControl: hasAuthoritativeControl) == .observeOnly
             || shouldDeferPathHintForAuthenticatedControl
+    }
+
+    private var hasRuntimeOwnedControl: Bool {
+        coreOwnedControlGeneration == controlConnectionGeneration
     }
 
     private func startUnauthenticatedIdleTimer() {

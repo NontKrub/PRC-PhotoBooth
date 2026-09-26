@@ -29,6 +29,11 @@ struct OperatorWebHandlers: Sendable {
 }
 
 actor LocalWebServer {
+    private struct ActiveGuestConnection {
+        let connection: NWConnection
+        let sessionRoute: String?
+    }
+
     private static let maximumActiveConnections = 48
     private static let maximumActiveConnectionsPerClient = 8
     private static let fileChunkTimeoutNanoseconds: UInt64 = 15_000_000_000
@@ -42,10 +47,11 @@ actor LocalWebServer {
     private var listener: NWListener?
     let port: UInt16
     private var sessionRoutes: [String: SessionRouteRegistration] = [:]
+    private var hiddenGuestRoutes = Set<String>()
     private var galleryRoutes: [String: EventGalleryRouteRegistration] = [:]
     private var guestRouteExposure: LocalGuestRouteExposure = .disabled
     private var guestRouteGeneration: UInt64 = 0
-    private var activeGuestConnections: [UUID: NWConnection] = [:]
+    private var activeGuestConnections: [UUID: ActiveGuestConnection] = [:]
     private var operatorHandlers: OperatorWebHandlers?
     private var activePort: UInt16?
     private var connectionAdmission = LocalWebServerConnectionAdmission(
@@ -76,12 +82,35 @@ actor LocalWebServer {
     }
 
     func registerToken(_ token: String, registration: SessionRouteRegistration) {
-        guard guestRouteExposure == .trustedLocalHTTP, !token.isEmpty else { return }
-        sessionRoutes[token] = registration
+        registerGuestRoute(path: "/s/\(token)", registration: registration)
+    }
+
+    func registerGuestRoute(path: String, registration: SessionRouteRegistration) {
+        guard guestRouteExposure == .trustedLocalHTTP,
+              let route = LocalDownloadRouter.canonicalSessionRouteKey(path),
+              !hiddenGuestRoutes.contains(route) else { return }
+        sessionRoutes[route] = registration
+    }
+
+    /// Permanently hides a session route for this server lifetime. This also
+    /// prevents an already-running finalization job from restoring it after
+    /// cleanup has removed the current registration.
+    func hideGuestRoute(path: String) {
+        guard let route = LocalDownloadRouter.canonicalSessionRouteKey(path) else { return }
+        hiddenGuestRoutes.insert(route)
+        sessionRoutes.removeValue(forKey: route)
+        for active in activeGuestConnections.values where active.sessionRoute == route {
+            active.connection.cancel()
+        }
     }
 
     func unregisterToken(_ token: String) {
-        sessionRoutes.removeValue(forKey: token)
+        unregisterGuestRoute(path: "/s/\(token)")
+    }
+
+    func unregisterGuestRoute(path: String) {
+        guard let route = LocalDownloadRouter.canonicalSessionRouteKey(path) else { return }
+        sessionRoutes.removeValue(forKey: route)
     }
 
     func replaceTokenMap(_ mappings: [String: URL]) {
@@ -90,8 +119,9 @@ actor LocalWebServer {
             return
         }
         sessionRoutes = mappings.reduce(into: [:]) { result, mapping in
-            guard !mapping.key.isEmpty else { return }
-            result[mapping.key] = SessionRouteRegistration(
+            guard let route = LocalDownloadRouter.canonicalSessionRouteKey(mapping.key),
+                  !hiddenGuestRoutes.contains(route) else { return }
+            result[route] = SessionRouteRegistration(
                 sessionDirectory: mapping.value.standardizedFileURL,
                 language: .english,
                 eventGalleryPath: nil,
@@ -106,8 +136,9 @@ actor LocalWebServer {
             return
         }
         sessionRoutes = mappings.reduce(into: [:]) { result, mapping in
-            guard !mapping.key.isEmpty else { return }
-            result[mapping.key] = mapping.value
+            guard let route = LocalDownloadRouter.canonicalSessionRouteKey(mapping.key),
+                  !hiddenGuestRoutes.contains(route) else { return }
+            result[route] = mapping.value
         }
     }
 
@@ -130,8 +161,8 @@ actor LocalWebServer {
         guard exposure == .disabled else { return }
         sessionRoutes.removeAll()
         galleryRoutes.removeAll()
-        for connection in activeGuestConnections.values {
-            connection.cancel()
+        for active in activeGuestConnections.values {
+            active.connection.cancel()
         }
         activeGuestConnections.removeAll()
     }
@@ -263,7 +294,10 @@ actor LocalWebServer {
         let guestGeneration = guestRouteGeneration
         let guestConnectionID = isGuestRequest ? UUID() : nil
         if let guestConnectionID {
-            activeGuestConnections[guestConnectionID] = connection
+            activeGuestConnections[guestConnectionID] = ActiveGuestConnection(
+                connection: connection,
+                sessionRoute: LocalDownloadRouter.canonicalSessionRouteKey(forRequestPath: request.path)
+            )
         }
         defer {
             if let guestConnectionID {

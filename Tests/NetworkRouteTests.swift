@@ -30,6 +30,7 @@ private enum ControlStressError: Error {
     case sendFailed(sessionID: String, messageIndex: Int, outcome: BoothControlSendOutcome)
     case connectionNotReady(sessionID: String, detail: String?)
     case listenerHasNoPort
+    case invalidSourceAddress
     case timedOut
 }
 
@@ -484,9 +485,8 @@ private final class TransportLivenessServer: @unchecked Sendable {
         self.scheduleReconnectOnClose = scheduleReconnectOnClose
         runtime = BoothNetworkTransportRuntime(queue: queue)
         writer = BoothControlWritePump(queue: queue, secureChannel: secureChannel)
-        runtime.onHeartbeatTimeout = { [weak observer] connection, _ in
+        runtime.onHeartbeatTimeout = { [weak observer] _ in
             observer?.markTimeout()
-            connection.cancel()
         }
         runtime.onReconnectDue = { [weak observer] _, _ in
             observer?.markReconnectDue()
@@ -695,8 +695,729 @@ private final class NetworkTestConnectionBox: @unchecked Sendable {
     }
 }
 
+/// Test observer with all shared mutable state protected by `lock`.
+private final class TrustedCoreTestObserver: @unchecked Sendable {
+    private let lock = NSLock()
+    private let listenerReady = DispatchSemaphore(value: 0)
+    private let authenticated = DispatchSemaphore(value: 0)
+    private let rejected = DispatchSemaphore(value: 0)
+    private let controlMessageReceived = DispatchSemaphore(value: 0)
+    private var portValue: NWEndpoint.Port?
+    private var authenticatedGenerations: [Int] = []
+    private var rejectionReasons: [String] = []
+    private var controlMessages: [Message] = []
+
+    func receive(_ event: BoothNetworkTransportRuntime.ControlCoreEvent) {
+        switch event {
+        case .listenerReady(_, let port):
+            lock.lock()
+            portValue = port
+            lock.unlock()
+            listenerReady.signal()
+        case .trustedAuthenticated(let generation, _, _, _, _, _, _, _):
+            lock.lock()
+            authenticatedGenerations.append(generation)
+            lock.unlock()
+            authenticated.signal()
+        case .controlFrames(_, let frames):
+            let messages = frames.compactMap { frame -> Message? in
+                guard case .control(let message) = frame else { return nil }
+                return message
+            }
+            guard !messages.isEmpty else { return }
+            lock.lock()
+            controlMessages.append(contentsOf: messages)
+            lock.unlock()
+            messages.forEach { _ in controlMessageReceived.signal() }
+        case .rejected(_, let reason), .listenerFailed(_, let reason):
+            lock.lock()
+            rejectionReasons.append(reason)
+            lock.unlock()
+            rejected.signal()
+        default:
+            break
+        }
+    }
+
+    func waitForListener(timeout: TimeInterval = 3) -> NWEndpoint.Port? {
+        guard listenerReady.wait(timeout: .now() + timeout) == .success else { return nil }
+        lock.lock()
+        defer { lock.unlock() }
+        return portValue
+    }
+
+    func waitForAuthenticationCount(_ count: Int, timeout: TimeInterval = 5) -> Bool {
+        let deadline = DispatchTime.now() + timeout
+        while authenticationCount < count {
+            guard authenticated.wait(timeout: deadline) == .success else { return false }
+        }
+        return true
+    }
+
+    func waitForRejectionCount(_ count: Int, timeout: TimeInterval = 5) -> Bool {
+        let deadline = DispatchTime.now() + timeout
+        while rejectionCount < count {
+            guard rejected.wait(timeout: deadline) == .success else { return false }
+        }
+        return true
+    }
+
+    func waitForRejectionReason(_ reason: String, timeout: TimeInterval = 5) -> Bool {
+        let deadline = DispatchTime.now() + timeout
+        while !hasRejectionReason(reason) {
+            guard rejected.wait(timeout: deadline) == .success else { return false }
+        }
+        return true
+    }
+
+    private func hasRejectionReason(_ reason: String) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return rejectionReasons.contains(where: { $0.contains(reason) })
+    }
+
+    var authenticationCount: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return authenticatedGenerations.count
+    }
+
+    var lastAuthenticatedGeneration: Int? {
+        lock.lock()
+        defer { lock.unlock() }
+        return authenticatedGenerations.last
+    }
+
+    func waitForControlMessage(_ message: Message, timeout: TimeInterval = 3) -> Bool {
+        let deadline = DispatchTime.now() + timeout
+        while !hasControlMessage(message) {
+            guard controlMessageReceived.wait(timeout: deadline) == .success else { return false }
+        }
+        return true
+    }
+
+    private func hasControlMessage(_ message: Message) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return controlMessages.contains(message)
+    }
+
+    var rejectionCount: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return rejectionReasons.count
+    }
+}
+
+/// A test socket whose callback state is serialized by its queue and lock.
+private final class HostileLoopbackClient: @unchecked Sendable {
+    private let lock = NSLock()
+    private let ready = DispatchSemaphore(value: 0)
+    private let sendFinished = DispatchSemaphore(value: 0)
+    private let closed = DispatchSemaphore(value: 0)
+    private var sent = false
+    private let connection: NWConnection
+    private let queue: DispatchQueue
+    private let payload: Data
+
+    init(port: NWEndpoint.Port, sourceAddress: String, messages: [Message]) throws {
+        guard let address = IPv4Address(sourceAddress) else { throw ControlStressError.invalidSourceAddress }
+        var parameters = NWParameters.tcp
+        parameters.requiredLocalEndpoint = .hostPort(host: .ipv4(address), port: .any)
+        connection = NWConnection(
+            to: .hostPort(host: "127.0.0.1", port: port),
+            using: parameters
+        )
+        queue = DispatchQueue(label: "PRC-PhotoBooth.Tests.Hostile.\(sourceAddress)")
+        payload = try messages.reduce(into: Data()) { bytes, message in
+            bytes.append(try BoothFrameEncoder.encode(channel: .control, payload: message.encoded()))
+        }
+    }
+
+    func start() {
+        connection.stateUpdateHandler = { [weak self] state in
+            guard let self else { return }
+            switch state {
+            case .ready:
+                self.lock.lock()
+                let shouldSend = !self.sent
+                self.sent = true
+                self.lock.unlock()
+                guard shouldSend else { return }
+                self.ready.signal()
+                if self.payload.isEmpty {
+                    self.sendFinished.signal()
+                    return
+                }
+                self.connection.send(content: self.payload, completion: .contentProcessed { [weak self] error in
+                    guard let self else { return }
+                    if error == nil { self.sendFinished.signal() }
+                    else { self.closed.signal() }
+                })
+            case .failed, .cancelled:
+                self.closed.signal()
+            default:
+                break
+            }
+        }
+        connection.start(queue: queue)
+    }
+
+    func waitUntilSent(timeout: TimeInterval = 3) -> Bool {
+        ready.wait(timeout: .now() + timeout) == .success
+            && sendFinished.wait(timeout: .now() + timeout) == .success
+    }
+
+    func waitUntilClosed(timeout: TimeInterval = 3) -> Bool {
+        closed.wait(timeout: .now() + timeout) == .success
+    }
+
+    func cancel() { connection.cancel() }
+}
+
 @Suite("Network route policy")
 struct NetworkRouteTests {
+    @Test("stored-secret Hello and secure reconnect finish during MainActor stall via Bonjour")
+    func trustedBonjourHandshakeAndReconnectSurviveMainActorStall() async throws {
+        let macQueue = DispatchQueue(label: "PRC-PhotoBooth.Tests.TrustedCore.Mac")
+        let iPadQueue = DispatchQueue(label: "PRC-PhotoBooth.Tests.TrustedCore.iPad")
+        let macRuntime = BoothNetworkTransportRuntime(queue: macQueue)
+        let iPadRuntime = BoothNetworkTransportRuntime(queue: iPadQueue)
+        let macIdentity = BoothDeviceIdentity(id: UUID().uuidString, displayName: "Core Mac", role: .mac)
+        let iPadIdentity = BoothDeviceIdentity(id: UUID().uuidString, displayName: "Core iPad", role: .iPad)
+        let secret = Data(repeating: 0xA7, count: 32)
+        let macSecureChannel = BoothSecureChannel()
+        let iPadSecureChannel = BoothSecureChannel()
+        let macWriter = BoothControlWritePump(queue: macQueue, secureChannel: macSecureChannel)
+        let iPadWriter = BoothControlWritePump(queue: iPadQueue, secureChannel: iPadSecureChannel)
+        let macEvents = TrustedCoreTestObserver()
+        let iPadEvents = TrustedCoreTestObserver()
+
+        macRuntime.configureControlCore(
+            localIdentity: macIdentity,
+            networkPreference: .wifi,
+            trustedSecrets: [iPadIdentity.id: secret],
+            selectedPeerID: iPadIdentity.id,
+            secureChannel: macSecureChannel,
+            writer: macWriter
+        ) { [weak macEvents] event in
+            macEvents?.receive(event)
+        }
+        iPadRuntime.configureControlCore(
+            localIdentity: iPadIdentity,
+            networkPreference: .wifi,
+            trustedSecrets: [macIdentity.id: secret],
+            selectedPeerID: macIdentity.id,
+            secureChannel: iPadSecureChannel,
+            writer: iPadWriter
+        ) { [weak iPadEvents] event in
+            iPadEvents?.receive(event)
+        }
+        macRuntime.startControlListener(
+            using: .tcp,
+            port: nil,
+            service: NWListener.Service(
+                name: BoothBonjourServiceIdentity.serviceName(channel: .control, deviceID: macIdentity.id),
+                type: "_prc-control._tcp",
+                txtRecord: NWTXTRecord([
+                    "deviceID": macIdentity.id,
+                    "network": BoothNetworkPreference.wifi.rawValue,
+                    "role": DeviceRole.mac.rawValue,
+                    "protocolVersion": String(BoothTransportHello.currentProtocolVersion)
+                ])
+            ),
+            generation: 771
+        )
+        let port = try #require(macEvents.waitForListener())
+        let mainEntered = DispatchSemaphore(value: 0)
+        let releaseMain = DispatchSemaphore(value: 0)
+        defer {
+            releaseMain.signal()
+            iPadRuntime.stopControlCore()
+            macRuntime.stopControlCore()
+            iPadWriter.invalidate(generation: Int.max)
+            macWriter.invalidate(generation: Int.max)
+        }
+        DispatchQueue.main.async {
+            mainEntered.signal()
+            releaseMain.wait()
+        }
+        #expect(waitForSemaphore(mainEntered))
+        let stallStarted = Date()
+
+        iPadRuntime.startTrustedRouteDiscovery(
+            targetPeerID: macIdentity.id,
+            preference: .wifi,
+            generation: 771,
+            directLANEndpoint: nil,
+            directLANParameters: nil
+        )
+        #expect(iPadEvents.waitForAuthenticationCount(1, timeout: 8))
+        #expect(macEvents.waitForAuthenticationCount(1, timeout: 3))
+        if let generation = iPadEvents.lastAuthenticatedGeneration {
+            #expect(iPadRuntime.enqueueAuthenticatedControl(
+                .boothPaused(isPaused: true),
+                generation: generation,
+                secure: true,
+                completion: nil
+            ) == .sent)
+        }
+        #expect(macEvents.waitForControlMessage(.boothPaused(isPaused: true)))
+        if let generation = iPadEvents.lastAuthenticatedGeneration {
+            iPadRuntime.invalidateControlConnection(generation: generation)
+        }
+        #expect(iPadEvents.waitForAuthenticationCount(2, timeout: 5))
+        #expect(macEvents.waitForAuthenticationCount(2, timeout: 3))
+
+        let elapsed = Date().timeIntervalSince(stallStarted)
+        if elapsed < 12 {
+            try await Task.sleep(for: .seconds(12 - elapsed))
+        }
+        #expect(Date().timeIntervalSince(stallStarted) >= 11.9)
+        #expect(iPadEvents.authenticationCount >= 2)
+        #expect(macEvents.authenticationCount >= 2)
+    }
+
+    @Test("100 loopback hostile Hellos cannot lock out a new-address trusted peer at production limits")
+    func loopbackHostileFloodAllowsChangedAddressTrustedPeer() async throws {
+        let macQueue = DispatchQueue(label: "PRC-PhotoBooth.Tests.TrustedFlood.Mac")
+        let iPadQueue = DispatchQueue(label: "PRC-PhotoBooth.Tests.TrustedFlood.iPad")
+        let macRuntime = BoothNetworkTransportRuntime(queue: macQueue)
+        let iPadRuntime = BoothNetworkTransportRuntime(queue: iPadQueue)
+        let macIdentity = BoothDeviceIdentity(id: UUID().uuidString, displayName: "Flood Mac", role: .mac)
+        let iPadIdentity = BoothDeviceIdentity(id: UUID().uuidString, displayName: "Flood iPad", role: .iPad)
+        let secret = Data(repeating: 0xB4, count: 32)
+        let macSecureChannel = BoothSecureChannel()
+        let iPadSecureChannel = BoothSecureChannel()
+        let macWriter = BoothControlWritePump(queue: macQueue, secureChannel: macSecureChannel)
+        let iPadWriter = BoothControlWritePump(queue: iPadQueue, secureChannel: iPadSecureChannel)
+        let macEvents = TrustedCoreTestObserver()
+        let iPadEvents = TrustedCoreTestObserver()
+        var hostileClients: [HostileLoopbackClient] = []
+
+        macRuntime.configureControlCore(
+            localIdentity: macIdentity,
+            networkPreference: .wifi,
+            trustedSecrets: [iPadIdentity.id: secret],
+            selectedPeerID: iPadIdentity.id,
+            secureChannel: macSecureChannel,
+            writer: macWriter
+        ) { [weak macEvents] event in
+            macEvents?.receive(event)
+        }
+        iPadRuntime.configureControlCore(
+            localIdentity: iPadIdentity,
+            networkPreference: .wifi,
+            trustedSecrets: [macIdentity.id: secret],
+            selectedPeerID: macIdentity.id,
+            secureChannel: iPadSecureChannel,
+            writer: iPadWriter
+        ) { [weak iPadEvents] event in
+            iPadEvents?.receive(event)
+        }
+        macRuntime.startControlListener(
+            using: .tcp,
+            port: nil,
+            service: NWListener.Service(
+                name: BoothBonjourServiceIdentity.serviceName(channel: .control, deviceID: macIdentity.id),
+                type: "_prc-control._tcp",
+                txtRecord: NWTXTRecord([
+                    "deviceID": macIdentity.id,
+                    "network": BoothNetworkPreference.wifi.rawValue,
+                    "role": DeviceRole.mac.rawValue,
+                    "protocolVersion": String(BoothTransportHello.currentProtocolVersion)
+                ])
+            ),
+            generation: 992
+        )
+        let port = try #require(macEvents.waitForListener())
+        let mainEntered = DispatchSemaphore(value: 0)
+        let releaseMain = DispatchSemaphore(value: 0)
+        defer {
+            releaseMain.signal()
+            hostileClients.forEach { $0.cancel() }
+            iPadRuntime.stopControlCore()
+            macRuntime.stopControlCore()
+            iPadWriter.invalidate(generation: Int.max)
+            macWriter.invalidate(generation: Int.max)
+        }
+        DispatchQueue.main.async {
+            mainEntered.signal()
+            releaseMain.wait()
+        }
+        #expect(waitForSemaphore(mainEntered))
+        let stallStarted = Date()
+
+        var trustedProbeStarted = false
+        for index in 0..<100 {
+            let sourceAddress = "127.0.0.\(index + 2)"
+            let messages: [Message]
+            if index == 0 {
+                messages = [] // A connected peer that withholds Hello until the core deadline.
+            } else if index < 5 {
+                let hello = BoothTransportHello(
+                    role: .iPad,
+                    deviceID: iPadIdentity.id,
+                    deviceName: "Spoof \(index)"
+                )
+                let invalidProof = BoothAuthProof(
+                    challengeID: "spoofed-challenge",
+                    responderDeviceID: iPadIdentity.id,
+                    proof: Data(repeating: UInt8(index), count: 32)
+                )
+                messages = [.helloDetails(hello: hello), .authProof(proof: invalidProof)]
+            } else {
+                let deviceID = UUID().uuidString
+                messages = [.helloDetails(hello: BoothTransportHello(
+                    role: .iPad,
+                    deviceID: deviceID,
+                    deviceName: "Untrusted \(index)"
+                ))]
+            }
+            let client = try HostileLoopbackClient(port: port, sourceAddress: sourceAddress, messages: messages)
+            hostileClients.append(client)
+            client.start()
+            #expect(client.waitUntilSent(), "Hostile loopback client \(index) did not send its Hello.")
+            if index != 5 {
+                let closeTimeout: TimeInterval = index == 0 ? 6 : 4
+                #expect(client.waitUntilClosed(timeout: closeTimeout), "Hostile loopback client \(index) was not released.")
+            }
+            if index == 50 {
+                var reconnectParameters = NWParameters.tcp
+                guard let changedAddress = IPv4Address("127.0.0.250") else {
+                    Issue.record("Could not construct the loopback DHCP-change address.")
+                    return
+                }
+                reconnectParameters.requiredLocalEndpoint = .hostPort(
+                    host: .ipv4(changedAddress),
+                    port: .any
+                )
+                iPadRuntime.startTrustedControlConnection(
+                    endpoint: .hostPort(host: "127.0.0.1", port: port),
+                    parameters: reconnectParameters,
+                    interface: .wifi,
+                    provenance: .localNetworkBonjour,
+                    generation: 991
+                )
+                #expect(iPadEvents.waitForAuthenticationCount(1, timeout: 5))
+                #expect(macEvents.waitForAuthenticationCount(1, timeout: 3))
+                trustedProbeStarted = true
+            }
+        }
+
+        #expect(macEvents.rejectionCount >= 4)
+        #expect(trustedProbeStarted)
+        #expect(hostileClients[5].waitUntilClosed(timeout: 2), "Trusted probe did not release the anonymous control slot.")
+
+        let elapsed = Date().timeIntervalSince(stallStarted)
+        if elapsed < 12 {
+            try await Task.sleep(for: .seconds(12 - elapsed))
+        }
+        #expect(Date().timeIntervalSince(stallStarted) >= 11.9)
+    }
+
+    @Test("trusted reconnect waits behind an occupied probe and authenticates during MainActor stall")
+    func trustedProbeWaitsBehindOccupiedProbeAndAuthenticatesDuringMainActorStall() async throws {
+        let macQueue = DispatchQueue(label: "PRC-PhotoBooth.Tests.ProbeWaiter.Mac")
+        let iPadQueue = DispatchQueue(label: "PRC-PhotoBooth.Tests.ProbeWaiter.iPad")
+        let spoofQueue = DispatchQueue(label: "PRC-PhotoBooth.Tests.ProbeWaiter.Spoof")
+        let macRuntime = BoothNetworkTransportRuntime(queue: macQueue)
+        let iPadRuntime = BoothNetworkTransportRuntime(queue: iPadQueue)
+        let spoofRuntime = BoothNetworkTransportRuntime(queue: spoofQueue)
+        let macIdentity = BoothDeviceIdentity(id: UUID().uuidString, displayName: "Waiter Mac", role: .mac)
+        let iPadIdentity = BoothDeviceIdentity(id: UUID().uuidString, displayName: "Waiter iPad", role: .iPad)
+        let secret = Data(repeating: 0xC3, count: 32)
+        let macSecureChannel = BoothSecureChannel()
+        let iPadSecureChannel = BoothSecureChannel()
+        let spoofSecureChannel = BoothSecureChannel()
+        let macWriter = BoothControlWritePump(queue: macQueue, secureChannel: macSecureChannel)
+        let iPadWriter = BoothControlWritePump(queue: iPadQueue, secureChannel: iPadSecureChannel)
+        let spoofWriter = BoothControlWritePump(queue: spoofQueue, secureChannel: spoofSecureChannel)
+        let macEvents = TrustedCoreTestObserver()
+        let iPadEvents = TrustedCoreTestObserver()
+        let spoofEvents = TrustedCoreTestObserver()
+        var hostileClients: [HostileLoopbackClient] = []
+
+        macRuntime.configureControlCore(
+            localIdentity: macIdentity,
+            networkPreference: .wifi,
+            trustedSecrets: [iPadIdentity.id: secret],
+            selectedPeerID: iPadIdentity.id,
+            secureChannel: macSecureChannel,
+            writer: macWriter
+        ) { [weak macEvents] event in macEvents?.receive(event) }
+        iPadRuntime.configureControlCore(
+            localIdentity: iPadIdentity,
+            networkPreference: .wifi,
+            trustedSecrets: [macIdentity.id: secret],
+            selectedPeerID: macIdentity.id,
+            secureChannel: iPadSecureChannel,
+            writer: iPadWriter
+        ) { [weak iPadEvents] event in iPadEvents?.receive(event) }
+        spoofRuntime.configureControlCore(
+            localIdentity: iPadIdentity,
+            networkPreference: .wifi,
+            trustedSecrets: [macIdentity.id: Data(repeating: 0x14, count: 32)],
+            selectedPeerID: macIdentity.id,
+            secureChannel: spoofSecureChannel,
+            writer: spoofWriter
+        ) { [weak spoofEvents] event in spoofEvents?.receive(event) }
+        macRuntime.startControlListener(
+            using: .tcp,
+            port: nil,
+            service: NWListener.Service(
+                name: BoothBonjourServiceIdentity.serviceName(channel: .control, deviceID: macIdentity.id),
+                type: "_prc-control._tcp",
+                txtRecord: NWTXTRecord(["deviceID": macIdentity.id])
+            ),
+            generation: 1501
+        )
+        let port = try #require(macEvents.waitForListener())
+        defer {
+            hostileClients.forEach { $0.cancel() }
+            iPadRuntime.stopControlCore()
+            spoofRuntime.stopControlCore()
+            macRuntime.stopControlCore()
+            iPadWriter.invalidate(generation: Int.max)
+            spoofWriter.invalidate(generation: Int.max)
+            macWriter.invalidate(generation: Int.max)
+        }
+
+        func waitForAdmissionLanes(
+            _ expected: BoothNetworkTransportRuntime.AdmissionLaneSnapshot,
+            timeout: TimeInterval = 3
+        ) async -> Bool {
+            let deadline = Date().addingTimeInterval(timeout)
+            while Date() < deadline {
+                if macRuntime.admissionLaneSnapshot() == expected { return true }
+                try? await Task.sleep(for: .milliseconds(10))
+            }
+            return macRuntime.admissionLaneSnapshot() == expected
+        }
+
+        // The first anonymous socket owns the normal pre-auth slot. The
+        // second occupies the single identity-probe slot with a slow Hello.
+        for (index, source) in ["127.0.0.2", "127.0.0.3"].enumerated() {
+            let client = try HostileLoopbackClient(port: port, sourceAddress: source, messages: [])
+            hostileClients.append(client)
+            client.start()
+            #expect(client.waitUntilSent(), "Probe holder \(index) did not connect.")
+        }
+
+        let occupiedSlots = await waitForAdmissionLanes(
+            .init(
+                normalCandidatePresent: true,
+                identityProbePresent: true,
+                queuedIdentityProbePresent: false
+            )
+        )
+        #expect(occupiedSlots, "The listener did not admit both bounded probe holders.")
+
+        // A peer claiming the trusted iPad ID but holding the wrong secret
+        // occupies the FIFO waiter before the real device reconnects.
+        var spoofParameters = NWParameters.tcp
+        guard let spoofAddress = IPv4Address("127.0.0.4") else {
+            Issue.record("Could not construct the spoof source address.")
+            return
+        }
+        spoofParameters.requiredLocalEndpoint = .hostPort(host: .ipv4(spoofAddress), port: .any)
+        spoofRuntime.startTrustedControlConnection(
+            endpoint: .hostPort(host: "127.0.0.1", port: port),
+            parameters: spoofParameters,
+            interface: .wifi,
+            provenance: .localNetworkBonjour,
+            generation: 1503
+        )
+        let attackerOwnsWaiter = await waitForAdmissionLanes(
+            .init(
+                normalCandidatePresent: true,
+                identityProbePresent: true,
+                queuedIdentityProbePresent: true
+            )
+        )
+        #expect(attackerOwnsWaiter, "The attacker did not occupy the bounded identity-probe waiter.")
+
+        let mainEntered = DispatchSemaphore(value: 0)
+        let releaseMain = DispatchSemaphore(value: 0)
+        defer { releaseMain.signal() }
+        DispatchQueue.main.async {
+            mainEntered.signal()
+            releaseMain.wait()
+        }
+        #expect(waitForSemaphore(mainEntered))
+        let stallStarted = Date()
+
+        guard let sourceAddress = IPv4Address("127.0.0.250") else {
+            Issue.record("Could not construct the changed-source address.")
+            return
+        }
+        var parameters = NWParameters.tcp
+        parameters.requiredLocalEndpoint = .hostPort(host: .ipv4(sourceAddress), port: .any)
+        iPadRuntime.startTrustedControlConnection(
+            endpoint: .hostPort(host: "127.0.0.1", port: port),
+            parameters: parameters,
+            interface: .wifi,
+            provenance: .localNetworkBonjour,
+            generation: 1502
+        )
+
+        // A finite rotating-endpoint flood tries to refill the waiter while
+        // the trusted peer's independent reconnect timer keeps retrying.
+        for index in 0..<100 {
+            let source = "127.0.1.\(index + 1)"
+            let attacker = try HostileLoopbackClient(
+                port: port,
+                sourceAddress: source,
+                messages: [.helloDetails(hello: BoothTransportHello(
+                    role: .iPad,
+                    deviceID: UUID().uuidString,
+                    deviceName: "Probe flood \(index)"
+                ))]
+            )
+            hostileClients.append(attacker)
+            attacker.start()
+            #expect(attacker.waitUntilSent(), "Hostile probe \(index) did not send its Hello.")
+        }
+
+        #expect(macEvents.waitForRejectionReason("Stored-secret authentication failed", timeout: 8))
+        spoofRuntime.stopControlCore()
+        #expect(spoofEvents.authenticationCount == 0)
+        #expect(iPadEvents.waitForAuthenticationCount(1, timeout: 8))
+        #expect(macEvents.waitForAuthenticationCount(1, timeout: 3))
+        let authenticationFinishedAt = Date()
+        #expect(authenticationFinishedAt.timeIntervalSince(stallStarted) < 10)
+        if authenticationFinishedAt.timeIntervalSince(stallStarted) < 12 {
+            try await Task.sleep(for: .seconds(12 - authenticationFinishedAt.timeIntervalSince(stallStarted)))
+        }
+        #expect(Date().timeIntervalSince(stallStarted) >= 11.9)
+        #expect(iPadEvents.authenticationCount == 1)
+        #expect(macEvents.authenticationCount == 1)
+    }
+
+    @Test("an expired queued probe is released so a later candidate can wait")
+    func expiredQueuedProbeReleasesItsAdmission() async throws {
+        let queue = DispatchQueue(label: "PRC-PhotoBooth.Tests.ProbeWaiterExpiry")
+        let runtime = BoothNetworkTransportRuntime(queue: queue)
+        defer { runtime.stopControlCore() }
+        let port = try #require(NWEndpoint.Port(rawValue: 8585))
+
+        func connection(to address: String) throws -> NWConnection {
+            let host = try #require(IPv4Address(address))
+            return NWConnection(to: .hostPort(host: .ipv4(host), port: port), using: .tcp)
+        }
+
+        let normal = runtime.admitInboundControlConnection(
+            try connection(to: "127.0.0.1"),
+            adoptionTimeout: 10
+        )
+        let activeProbe = runtime.admitInboundControlConnection(
+            try connection(to: "127.0.0.2"),
+            adoptionTimeout: 10
+        )
+        let queuedProbe = runtime.admitInboundControlConnection(
+            try connection(to: "127.0.0.3"),
+            adoptionTimeout: 1
+        )
+        #expect(normal.admission != nil)
+        #expect(activeProbe.admission?.isIdentityProbe == true)
+        #expect(queuedProbe.isQueuedProbe)
+
+        let deadline = Date().addingTimeInterval(3)
+        while Date() < deadline, runtime.admissionLaneSnapshot().queuedIdentityProbePresent {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        #expect(!runtime.admissionLaneSnapshot().queuedIdentityProbePresent)
+        #expect(runtime.admissionLaneSnapshot().identityProbePresent)
+
+        let laterProbe = runtime.admitInboundControlConnection(
+            try connection(to: "127.0.0.4"),
+            adoptionTimeout: 10
+        )
+        #expect(laterProbe.isQueuedProbe)
+    }
+
+    @Test("a trusted HMAC proof can pass after spoofed claims cool down the peer ID")
+    func validPeerProofSurvivesRepeatedSpoofClaims() async throws {
+        let macQueue = DispatchQueue(label: "PRC-PhotoBooth.Tests.SpoofCooldown.Mac")
+        let iPadQueue = DispatchQueue(label: "PRC-PhotoBooth.Tests.SpoofCooldown.iPad")
+        let macRuntime = BoothNetworkTransportRuntime(queue: macQueue)
+        let iPadRuntime = BoothNetworkTransportRuntime(queue: iPadQueue)
+        let macIdentity = BoothDeviceIdentity(id: UUID().uuidString, displayName: "Cooldown Mac", role: .mac)
+        let iPadIdentity = BoothDeviceIdentity(id: UUID().uuidString, displayName: "Cooldown iPad", role: .iPad)
+        let storedSecret = Data(repeating: 0x65, count: 32)
+        let spoofSecret = Data(repeating: 0x19, count: 32)
+        let macSecureChannel = BoothSecureChannel()
+        let iPadSecureChannel = BoothSecureChannel()
+        let macWriter = BoothControlWritePump(queue: macQueue, secureChannel: macSecureChannel)
+        let iPadWriter = BoothControlWritePump(queue: iPadQueue, secureChannel: iPadSecureChannel)
+        let macEvents = TrustedCoreTestObserver()
+        let iPadEvents = TrustedCoreTestObserver()
+
+        macRuntime.configureControlCore(
+            localIdentity: macIdentity,
+            networkPreference: .wifi,
+            trustedSecrets: [iPadIdentity.id: storedSecret],
+            selectedPeerID: iPadIdentity.id,
+            secureChannel: macSecureChannel,
+            writer: macWriter
+        ) { [weak macEvents] event in macEvents?.receive(event) }
+        iPadRuntime.configureControlCore(
+            localIdentity: iPadIdentity,
+            networkPreference: .wifi,
+            trustedSecrets: [macIdentity.id: spoofSecret],
+            selectedPeerID: macIdentity.id,
+            secureChannel: iPadSecureChannel,
+            writer: iPadWriter
+        ) { [weak iPadEvents] event in iPadEvents?.receive(event) }
+        macRuntime.startControlListener(
+            using: .tcp,
+            port: nil,
+            service: NWListener.Service(
+                name: BoothBonjourServiceIdentity.serviceName(channel: .control, deviceID: macIdentity.id),
+                type: "_prc-control._tcp",
+                txtRecord: NWTXTRecord(["deviceID": macIdentity.id])
+            ),
+            generation: 1401
+        )
+        let port = try #require(macEvents.waitForListener())
+        defer {
+            iPadRuntime.stopControlCore()
+            macRuntime.stopControlCore()
+            iPadWriter.invalidate(generation: Int.max)
+            macWriter.invalidate(generation: Int.max)
+        }
+
+        func connect(from source: String, generation: Int) {
+            guard let address = IPv4Address(source) else {
+                Issue.record("Could not construct the loopback source address: \(source)")
+                return
+            }
+            var parameters = NWParameters.tcp
+            parameters.requiredLocalEndpoint = .hostPort(host: .ipv4(address), port: .any)
+            iPadRuntime.startTrustedControlConnection(
+                endpoint: .hostPort(host: "127.0.0.1", port: port),
+                parameters: parameters,
+                interface: .wifi,
+                provenance: .localNetworkBonjour,
+                generation: generation
+            )
+        }
+
+        for attempt in 0..<BoothPreAuthAdmissionLimiter.defaultReservedFailureThreshold {
+            connect(from: "127.0.0.\(20 + attempt)", generation: 1410 + attempt)
+            #expect(macEvents.waitForRejectionCount(attempt + 1, timeout: 5))
+            iPadRuntime.stopControlCore()
+        }
+
+        iPadRuntime.updateControlCredentials(
+            trustedSecrets: [macIdentity.id: storedSecret],
+            selectedPeerID: macIdentity.id
+        )
+        connect(from: "127.0.0.250", generation: 1499)
+        #expect(iPadEvents.waitForAuthenticationCount(1, timeout: 5))
+        #expect(macEvents.waitForAuthenticationCount(1, timeout: 3))
+    }
+
     @Test("production listener admission releases a stalled control slot while MainActor is blocked")
     func productionListenerAdmissionIsQueueOwned() async throws {
         let queue = DispatchQueue(label: "PRC-PhotoBooth.Tests.ProductionAdmission")

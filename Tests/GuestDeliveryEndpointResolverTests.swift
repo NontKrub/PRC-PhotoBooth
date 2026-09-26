@@ -169,6 +169,28 @@ struct GuestDeliveryEndpointResolverTests {
         #expect(GuestDeliveryEndpointResolver.resolveBestGuestDeliveryIP(from: [en0]) == nil)
     }
 
+    @Test("a named delivery interface ignores a conflict on an unrelated interface")
+    func namedSelectionIgnoresUnrelatedConflict() throws {
+        let wifi = NetworkInterfaceSnapshot(
+            name: "en0", flags: activeFlags, address: "10.10.0.5", interfaceType: .wifi
+        )
+        let conflictingEthernet = NetworkInterfaceSnapshot(
+            name: "en8", flags: activeFlags, address: "192.168.4.8", interfaceType: .conflicting
+        )
+
+        let resolution = GuestDeliveryEndpointResolver.resolve(
+            from: [wifi, conflictingEthernet],
+            selection: .interface("en0")
+        )
+        let endpoint = try #require(resolution.endpoint)
+        #expect(endpoint.interfaceName == "en0")
+        #expect(endpoint.address == "10.10.0.5")
+        #expect(GuestDeliveryEndpointResolver.resolve(
+            from: [wifi, conflictingEthernet],
+            selection: .wifi
+        ) == .ambiguous(interfaceNames: ["en8"]))
+    }
+
     @Test("separate interfaces retain their own classifications")
     func multiplePathInterfacesKeepIndependentTypes() {
         let map = GuestDeliveryPathInterfaceTypeMap(interfaces: [

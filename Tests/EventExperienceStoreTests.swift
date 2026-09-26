@@ -9,6 +9,113 @@ import UniformTypeIdentifiers
 
 @Suite("EventExperienceStore")
 struct EventExperienceStoreTests {
+    @Test("SwiftData session origin defaults normal and restoration backfills soak metadata")
+    @MainActor
+    func sessionOriginPersistenceAndRestoration() {
+        let normal = BoothSession(eventID: "origin-default", photoCount: 1)
+        #expect(normal.origin == .normal)
+        #expect(normal.soakRunID == nil)
+
+        let legacy = BoothSession(eventID: "origin-legacy", photoCount: 1)
+        legacy.originRawValue = nil
+        #expect(legacy.origin == .normal)
+
+        let now = Date()
+        var manifest = SessionManifest(
+            schemaVersion: SessionManifest.currentSchemaVersion,
+            id: "origin-restore-\(UUID().uuidString)",
+            eventID: "origin-restore-event",
+            eventName: "Origin restore",
+            eventConfig: EventConfig(
+                eventID: "origin-restore-event",
+                eventName: "Origin restore",
+                photoCount: 1,
+                slots: [SharedPhotoSlot(normalizedRect: CGRect(x: 0, y: 0, width: 1, height: 1))]
+            ),
+            startedAt: now,
+            completedAt: nil,
+            cancelledAt: nil,
+            status: .capturing,
+            nextPhotoIndex: 0,
+            outputRootPath: "/tmp",
+            relativeDirectoryPath: "origin-restore",
+            absoluteDirectoryPath: "/tmp/origin-restore",
+            frameSnapshotFileName: nil,
+            stripFileName: nil,
+            gifFileName: nil,
+            downloadToken: "origin-restore-token",
+            shots: [],
+            lastError: nil,
+            updatedAt: now
+        )
+        manifest.origin = .soakTest
+        manifest.soakRunID = "run-restore"
+        manifest.soakCycleIndex = 12
+
+        let store = DataStore.shared
+        let restored = store.restoreSessionRecord(from: manifest)
+        defer { store.deleteSession(restored) }
+        #expect(restored.origin == .soakTest)
+        #expect(restored.originRawValue == SessionOrigin.soakTest.rawValue)
+        #expect(restored.soakRunID == "run-restore")
+        #expect(restored.soakCycleIndex == 12)
+    }
+
+    @Test("dashboard production history excludes soak starts from its shared cohort")
+    @MainActor
+    func dashboardHistoryExcludesSoakStarts() {
+        let start = Date(timeIntervalSince1970: 1_700_000_000)
+        let normal = BoothSession(eventID: "event-history", photoCount: 1)
+        normal.startedAt = start
+        let soak = BoothSession(
+            eventID: "event-history",
+            photoCount: 1,
+            origin: .soakTest,
+            soakRunID: "history-run",
+            soakCycleIndex: 2
+        )
+        soak.startedAt = start
+
+        let cohort = AdminDashboardHistory.productionSessions(
+            from: [normal, soak],
+            startDate: start,
+            endDate: start,
+            eventID: "event-history"
+        )
+        #expect(cohort.map(\.id) == [normal.id])
+        #expect(cohort.filter { $0.finishedAt != nil }.count == 0)
+
+        let legacySoak = BoothSession(eventID: "event-history", photoCount: 1)
+        legacySoak.id = "legacy-soak-session"
+        legacySoak.originRawValue = nil
+        legacySoak.startedAt = start
+        let reconciled = AdminDashboardHistory.productionSessions(
+            from: [normal, legacySoak],
+            startDate: start,
+            endDate: start,
+            eventID: "event-history",
+            excludingSessionIDs: [legacySoak.id]
+        )
+        #expect(reconciled.map(\.id) == [normal.id])
+    }
+
+    @Test("cleanup record deletion is safe to retry after the record is absent")
+    @MainActor
+    func cleanupSessionRecordDeletionIsIdempotent() throws {
+        let store = DataStore.shared
+        let event = store.createEvent(name: "Soak cleanup \(UUID().uuidString)", photoCount: 1)
+        let session = store.startSession(
+            for: event,
+            origin: .soakTest,
+            soakRunID: "cleanup-retry-\(UUID().uuidString)",
+            soakCycleIndex: 1
+        )
+        let sessionID = session.id
+        try store.deleteSessionRecordIfPresent(sessionID: sessionID)
+        try store.deleteSessionRecordIfPresent(sessionID: sessionID)
+        #expect(store.fetchSession(id: sessionID) == nil)
+    }
+
     @Test("new events without legacy slots receive usable template slots")
     func createsDefaultSlotsForNewEvent() async throws {
         let root = try temporaryDirectory()

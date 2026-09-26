@@ -7,6 +7,7 @@ public final class BoothSoakTestController {
     public var config: BoothSoakTestConfig = BoothSoakTestConfig()
     public var state: BoothSoakTestState = .idle
     public var latestReport: BoothSoakTestReport?
+    public private(set) var runStartedAt: Date?
     public var preflightErrors: [String] = []
     public var preflightWarnings: [String] = []
 
@@ -117,6 +118,7 @@ public final class BoothSoakTestController {
         self.runner = activeRunner
         let testConfig = self.config
         let captureService = coordinator?.capture
+        runStartedAt = Date()
         latestReport = nil
 
         state = .preflight(message: "Starting soak test runner...")
@@ -136,6 +138,8 @@ public final class BoothSoakTestController {
                 self.latestReport = report
                 switch report.outcome {
                 case .passed:
+                    self.state = .completed(report: report)
+                case .completedWithWarnings:
                     self.state = .completed(report: report)
                 case .failed:
                     self.state = .failed(error: report.summaryVerdict, partialReport: report)

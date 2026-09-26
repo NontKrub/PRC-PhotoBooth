@@ -282,6 +282,67 @@ struct SessionRecoveryTests {
 
         #expect(!FileManager.default.fileExists(atPath: temporaryGIF.path))
     }
+
+    @Test("startup preserves cancelled soak diagnostics and still cleans normal cancellations")
+    @MainActor
+    func retainsCancelledSoakDiagnosticsOnRestart() async throws {
+        let root = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let manifestStore = SessionManifestStore(baseDirectory: root.appendingPathComponent("Runtime"))
+        let normalDirectory = root.appendingPathComponent("normal-cancelled")
+        let diagnosticDirectory = root.appendingPathComponent("soak-diagnostic")
+        try FileManager.default.createDirectory(at: normalDirectory, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: diagnosticDirectory, withIntermediateDirectories: true)
+        let normalOutput = normalDirectory.appendingPathComponent("evidence.txt")
+        let diagnosticOutput = diagnosticDirectory.appendingPathComponent("evidence.txt")
+        try Data([1]).write(to: normalOutput)
+        try Data([2]).write(to: diagnosticOutput)
+
+        let now = Date()
+        let normal = makeManifest(
+            id: "cancelled-normal",
+            status: .cancelled,
+            startedAt: now,
+            directory: normalDirectory
+        )
+        var diagnostic = makeManifest(
+            id: "cancelled-soak-diagnostic",
+            status: .cancelled,
+            startedAt: now,
+            directory: diagnosticDirectory
+        )
+        diagnostic.origin = .soakTest
+        diagnostic.soakRunID = "run-retained"
+        diagnostic.soakDiagnosticRetained = true
+        diagnostic.soakAutoCleanupEnabled = true
+        diagnostic.lastError = "Cloud verification failed"
+        try await manifestStore.create(normal)
+        try await manifestStore.create(diagnostic)
+
+        let queue = makeQueue(root: root)
+        queue.pauseWorkersForRecovery()
+        queue.start()
+        await queue.waitUntilReady()
+        let service = SessionRecoveryService(
+            manifestStore: manifestStore,
+            workspace: SessionWorkspace(),
+            jobQueue: queue
+        )
+        await service.scanNow()
+
+        #expect(try await manifestStore.load(sessionID: diagnostic.id).isRetainedSoakDiagnostic)
+        #expect(FileManager.default.fileExists(atPath: diagnosticOutput.path))
+        #expect((await manifestStore.loadAll()).contains { result in
+            if case .loaded(let manifest) = result { return manifest.id == diagnostic.id }
+            return false
+        })
+        #expect(!FileManager.default.fileExists(atPath: normalOutput.path))
+        #expect(!(await manifestStore.loadAll()).contains { result in
+            if case .loaded(let manifest) = result { return manifest.id == normal.id }
+            return false
+        })
+        queue.stop()
+    }
 }
 
 @MainActor

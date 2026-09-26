@@ -61,6 +61,9 @@ struct SessionJob: Codable, Sendable, Identifiable, Equatable {
     
     // Links job to its finalization transaction. Optional for backward compatibility.
     var finalizationTransactionID: String? = nil
+    // Only cloud-backed QR prints wait for public route verification. Nil on
+    // older queue records preserves their original transaction behavior.
+    var requiresCloudPublicationBeforePrint: Bool? = nil
 }
 
 enum JobExecutionError: LocalizedError, Sendable {
@@ -92,6 +95,9 @@ struct SessionJobRetryPolicy {
 }
 
 enum SessionJobDependencyPolicy {
+    static let printWithheldUntilCloudPublishedError =
+        "Automatic print withheld because the cloud QR route did not publish."
+
     static func prerequisitesSatisfied(for job: SessionJob, in jobs: [SessionJob]) -> Bool {
         func latest(_ kind: SessionJobKind) -> SessionJob? {
             jobs
@@ -104,6 +110,16 @@ enum SessionJobDependencyPolicy {
                 .max { $0.createdAt == $1.createdAt ? $0.id < $1.id : $0.createdAt < $1.createdAt }
         }
 
+        func latestIncludingCancelled(_ kind: SessionJobKind) -> SessionJob? {
+            jobs
+                .filter {
+                    $0.sessionID == job.sessionID
+                        && $0.finalizationTransactionID == job.finalizationTransactionID
+                        && $0.kind == kind
+                }
+                .max { $0.createdAt == $1.createdAt ? $0.id < $1.id : $0.createdAt < $1.createdAt }
+        }
+
         func succeeded(_ kind: SessionJobKind) -> Bool {
             latest(kind)?.status == .succeeded
         }
@@ -111,8 +127,13 @@ enum SessionJobDependencyPolicy {
         switch job.kind {
         case .renderStrip:
             return true
-        case .registerDownload, .updateGallery, .autoPrint:
+        case .registerDownload, .updateGallery:
             return succeeded(.renderStrip)
+        case .autoPrint:
+            guard succeeded(.renderStrip) else { return false }
+            guard job.requiresCloudPublicationBeforePrint == true else { return true }
+            guard let cloudUpload = latestIncludingCancelled(.cloudUpload) else { return false }
+            return cloudUpload.status == .succeeded
         case .renderGIF:
             guard let download = latest(.registerDownload) else { return true }
             return download.status == .succeeded || download.status == .failed || download.status == .cancelled

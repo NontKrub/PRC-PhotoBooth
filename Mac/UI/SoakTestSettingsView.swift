@@ -17,6 +17,9 @@ public struct SoakTestSettingsView: View {
         VStack(alignment: .leading, spacing: 20) {
             headerSection
             Divider()
+            if !coordinator.retainedSoakDiagnostics.isEmpty {
+                retainedDiagnosticsSection
+            }
 
             switch controller.state {
             case .idle:
@@ -31,8 +34,8 @@ public struct SoakTestSettingsView: View {
                         .foregroundStyle(.secondary)
                 }
                 .frame(maxWidth: .infinity, minHeight: 200)
-            case .running(let cycle, let total, let phase):
-                runningProgressView(cycle: cycle, total: total, phase: phase)
+            case .running(let cycle, let total, let phase, let runID):
+                runningProgressView(cycle: cycle, total: total, phase: phase, runID: runID)
             case .stopping(let reason):
                 stoppingView(reason: reason)
             case .completed(let report):
@@ -48,6 +51,9 @@ public struct SoakTestSettingsView: View {
             }
         }
         .padding(.vertical, 8)
+        .task {
+            await coordinator.refreshRetainedSoakDiagnostics()
+        }
         .onAppear {
             usesCustomCycleCount = ![1, 10, 25, 50, 100, 500].contains(controller.config.targetCycles)
             customCycleCountText = String(controller.config.targetCycles)
@@ -85,13 +91,13 @@ public struct SoakTestSettingsView: View {
         case .cameraHardware:
             return "Captures \(controller.config.photosPerSession) images per cycle from the selected physical camera. It does not create sessions or validate finalization, delivery, printing, or iPad compatibility."
         case .productionPipeline:
-            var message = "Runs \(controller.config.targetCycles) real sessions using the active event, camera, production storage, finalization queue, and configured guest delivery. Completed soak sessions are cleaned up when auto-cleanup is enabled."
+            var message = "Runs \(controller.config.targetCycles) real sessions using the active event, camera, production storage, finalization queue, and configured guest delivery. Test sessions stay out of the live gallery and event statistics. Their guest routes are removed after each cycle."
             if controller.config.testCloudUpload {
                 message += "\n\nCloud upload is enabled. Each cycle uses the current production settings but publishes into this run’s temporary cloud namespace."
                 if controller.config.autoCleanupWorkingFiles {
                     message += " Auto-cleanup removes the temporary public alias and remote files after verification."
                 } else {
-                    message += " Auto-cleanup is off, so the remote test files and aliases remain on the server."
+                    message += " Auto-cleanup is off, so remote test files remain in the run-scoped storage for diagnostics; the public alias is still removed after verification."
                 }
             }
             if controller.config.enablePhysicalPrint {
@@ -111,6 +117,47 @@ public struct SoakTestSettingsView: View {
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
         }
+    }
+
+    private var retainedDiagnosticsSection: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Label("Retained soak diagnostics", systemImage: "archivebox")
+                .font(.headline)
+            Text("These test sessions are kept for operator review and excluded from production history and public gallery routes.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            ForEach(Array(coordinator.retainedSoakDiagnostics.prefix(5))) { manifest in
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("\(manifest.eventName) · Run \(manifest.soakRunID ?? "unknown") · Cycle \(manifest.soakCycleIndex.map { String($0) } ?? "unknown")")
+                        .font(.caption.weight(.semibold))
+                    Text("Session \(manifest.id)")
+                        .font(.caption2.monospaced())
+                        .textSelection(.enabled)
+                    if let reason = manifest.lastError, !reason.isEmpty {
+                        Text(reason)
+                            .font(.caption)
+                            .foregroundStyle(.orange)
+                    }
+                    if let warning = manifest.soakCleanupWarning, !warning.isEmpty {
+                        Text("Cleanup: \(warning)")
+                            .font(.caption)
+                            .foregroundStyle(.orange)
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(10)
+                .background(Color.orange.opacity(0.08))
+                .clipShape(RoundedRectangle(cornerRadius: 8))
+            }
+            if coordinator.retainedSoakDiagnostics.count > 5 {
+                Text("Showing the 5 most recent of \(coordinator.retainedSoakDiagnostics.count) retained sessions.")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .padding(12)
+        .background(Color.orange.opacity(0.04))
+        .clipShape(RoundedRectangle(cornerRadius: 10))
     }
 
     private var configurationForm: some View {
@@ -195,7 +242,7 @@ public struct SoakTestSettingsView: View {
                 Toggle("Auto-cleanup test session files", isOn: $controller.config.autoCleanupWorkingFiles)
                     .font(.body)
                 Text(controller.config.mode == .productionPipeline
-                    ? "Removes completed local sessions tagged for this run. Failed sessions keep their local evidence; soak delivery routes are removed when the run ends."
+                    ? "Removes completed local sessions tagged for this run. Failed sessions keep their local evidence. Run-scoped guest routes are depublished after verification."
                     : "Removes this run’s isolated benchmark files when the run finishes.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
@@ -208,7 +255,7 @@ public struct SoakTestSettingsView: View {
                     .disabled(controller.config.mode != .productionPipeline)
                 Text(controller.config.autoCleanupWorkingFiles
                     ? "Each cycle uploads to a temporary run-scoped path. Auto-cleanup removes its public alias and remote files after verification. Review the configured destination and credentials before enabling."
-                    : "Each cycle uploads to a temporary run-scoped path. Turning off auto-cleanup leaves those remote files and aliases in place. Review the configured destination and credentials before enabling.")
+                    : "Each cycle uploads to a temporary run-scoped path. Remote files remain for diagnostics, but the public alias is removed after verification. Review the configured destination and credentials before enabling.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -272,6 +319,8 @@ public struct SoakTestSettingsView: View {
                 } else {
                     Text("Photo count is unavailable until the active event template finishes loading.")
                 }
+                Label("Test sessions are isolated from the live customer gallery and event statistics.", systemImage: "lock.shield")
+                    .foregroundStyle(.secondary)
                 if controller.config.enablePhysicalPrint {
                     let printCount = (cycles + controller.config.physicalPrintEveryCycles - 1)
                         / max(1, controller.config.physicalPrintEveryCycles)
@@ -338,14 +387,23 @@ public struct SoakTestSettingsView: View {
         .padding(.top, 8)
     }
 
-    private func runningProgressView(cycle: Int, total: Int, phase: String) -> some View {
+    private func runningProgressView(cycle: Int, total: Int, phase: String, runID: String?) -> some View {
         VStack(alignment: .leading, spacing: 16) {
             HStack {
                 Text("Soak Test In Progress")
                     .font(.headline)
                 Spacer()
-                Text("Cycle \(cycle) of \(total)")
+                Text(controller.config.mode == .productionPipeline
+                    ? "Session \(cycle) of \(total)"
+                    : "Cycle \(cycle) of \(total)")
                     .font(.subheadline.monospacedDigit().bold())
+                TimelineView(.periodic(from: .now, by: 1)) { context in
+                    let elapsed = max(0, Int(context.date.timeIntervalSince(controller.runStartedAt ?? context.date)))
+                    Text(String(format: "%02d:%02d", elapsed / 60, elapsed % 60))
+                        .font(.caption.monospacedDigit())
+                        .foregroundStyle(.secondary)
+                        .accessibilityLabel("Elapsed time")
+                }
             }
 
             ProgressView(value: Double(cycle), total: Double(total))
@@ -360,6 +418,41 @@ public struct SoakTestSettingsView: View {
             }
 
             Divider()
+
+            if controller.config.mode == .productionPipeline {
+                let photoCount = max(1, coordinator.stateMachine.config.photoCount)
+                let photoIndex = min(coordinator.stateMachine.nextPhotoIndex + 1, photoCount)
+                let captures = coordinator.activeSoakCaptureCounts
+                let queue = coordinator.activeSoakQueueCounts
+                let printerStatus = currentPrinterStatus
+                VStack(alignment: .leading, spacing: 10) {
+                    HStack(spacing: 16) {
+                        Label("Photo \(photoIndex) of \(photoCount)", systemImage: "camera")
+                        Text("Camera shutters: \(captures.succeeded) succeeded / \(captures.attempted) attempted")
+                            .font(.caption.monospacedDigit())
+                    }
+                    LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible()), GridItem(.flexible())], alignment: .leading, spacing: 8) {
+                        readinessCell("Camera", value: coordinator.selectedCaptureSourceReady ? "Ready" : "Unavailable", color: coordinator.selectedCaptureSourceReady ? .green : .red)
+                        readinessCell("iPad", value: coordinator.isAuthenticatedIPadReadyForSoak ? "Authenticated" : "Unavailable", color: coordinator.isAuthenticatedIPadReadyForSoak ? .green : .orange)
+                        readinessCell("Network", value: coordinator.connectionStatus.effectiveNetwork.rawValue, color: coordinator.connectionStatus.effectiveNetwork == .unavailable ? .orange : .primary)
+                        readinessCell("Printer", value: printerStatus.value, color: printerStatus.color)
+                        readinessCell("Cloud", value: controller.config.testCloudUpload ? "Run-scoped" : "Not enabled", color: controller.config.testCloudUpload ? .blue : .secondary)
+                        readinessCell("Queue", value: "\(queue.running) running · \(queue.queued) queued · \(queue.failed) failed", color: queue.failed > 0 ? .red : .primary)
+                        readinessCell("Gallery", value: coordinator.activeExperienceDocument?.gallery.mode == .disabled ? "Not enabled" : "Enabled", color: .primary)
+                    }
+                    if controller.config.testCloudUpload, let runID {
+                        VStack(alignment: .leading, spacing: 3) {
+                            Label("Run-scoped cloud QR route", systemImage: "qrcode")
+                                .font(.caption.weight(.medium))
+                            Text("/s/soak/\(runID)/<sessionID>/")
+                                .font(.system(.caption, design: .monospaced))
+                                .textSelection(.enabled)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                }
+                .padding(.vertical, 2)
+            }
 
             HStack(spacing: 12) {
                 Button("Stop After Current Cycle") {
@@ -376,6 +469,31 @@ public struct SoakTestSettingsView: View {
         .padding(16)
         .background(Color.primary.opacity(0.04))
         .cornerRadius(12)
+    }
+
+    private var currentPrinterStatus: (value: String, color: Color) {
+        if coordinator.printer.lastTestResult?.outcome == .unknown {
+            return ("Verify status", .orange)
+        }
+        if coordinator.printer.isPrinting { return ("Printing", .blue) }
+        switch coordinator.printer.configuredPrinterStatus() {
+        case .systemDefault: return ("Configured · status unknown", .secondary)
+        case .unavailable: return ("Unavailable", .orange)
+        }
+    }
+
+    private func readinessCell(_ title: String, value: String, color: Color) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(title)
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+            Text(value)
+                .font(.caption.weight(.medium))
+                .foregroundStyle(color)
+                .lineLimit(2)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     private func stoppingView(reason: String) -> some View {
@@ -399,6 +517,10 @@ public struct SoakTestSettingsView: View {
             title = "Soak Test Passed"
             symbol = "checkmark.seal.fill"
             tint = .green
+        case .completedWithWarnings:
+            title = "Completed with warnings"
+            symbol = "exclamationmark.triangle.fill"
+            tint = .orange
         case .failed:
             title = "Soak Test Failed"
             symbol = "xmark.octagon.fill"
@@ -429,9 +551,21 @@ public struct SoakTestSettingsView: View {
                 .buttonStyle(.bordered)
             }
 
+            if let runID = report.runID {
+                LabeledContent("Run ID", value: runID)
+                    .font(.caption)
+                    .textSelection(.enabled)
+            }
+            if report.subsystemCoverage["Cloud QR route"]?.hasPrefix("PASS") == true,
+               let runID = report.runID {
+                LabeledContent("Cloud test route", value: "/s/soak/\(runID)/<sessionID>/")
+                    .font(.caption)
+                    .textSelection(.enabled)
+            }
+
             Text(report.summaryVerdict)
                 .font(.subheadline)
-                .foregroundStyle(report.outcome == .failed ? .red : .primary)
+                .foregroundStyle(report.outcome == .failed ? .red : report.outcome == .completedWithWarnings ? .orange : .primary)
 
             if let err = errorMessage {
                 Text(err)
@@ -444,22 +578,47 @@ public struct SoakTestSettingsView: View {
             // Metrics Grid
             LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible()), GridItem(.flexible())], spacing: 16) {
                 metricCell(title: "Cycles Completed", value: "\(report.completedCycles) / \(report.targetCycles)")
+                metricCell(title: "Cycles Failed", value: "\(report.failedCycles)")
+                metricCell(title: "Cycles Stopped / Unrun", value: report.stoppedCycles.map { String($0) } ?? "NOT TESTED")
                 metricCell(title: "Avg Cycle Duration", value: String(format: "%.2f s", report.averageCycleDurationSeconds))
+                if let attempts = report.captureAttemptCount {
+                    metricCell(title: "Capture Attempts", value: String(attempts))
+                    metricCell(title: "Captures Succeeded", value: "\(report.captureSampleCount)")
+                    metricCell(title: "Capture Failures", value: report.captureFailureCount.map { String($0) } ?? "NOT TESTED")
+                    metricCell(title: "Camera Recovery Outcomes", value: report.cameraRecoveryCount.map { String($0) } ?? "NOT TESTED")
+                }
                 if report.captureSampleCount > 0 {
+                    if let p50 = report.p50CaptureLatencySeconds {
+                        metricCell(title: "P50 Capture Latency", value: String(format: "%.3f s", p50))
+                    }
                     metricCell(title: "Avg Capture Latency", value: String(format: "%.3f s", report.avgCaptureLatencySeconds))
                     metricCell(title: "P95 Capture Latency", value: String(format: "%.3f s", report.p95CaptureLatencySeconds))
+                    if let p99 = report.p99CaptureLatencySeconds {
+                        metricCell(title: "P99 Capture Latency", value: String(format: "%.3f s", p99))
+                    }
                 }
                 if let avgR = report.avgRenderLatencySeconds {
                     metricCell(title: "Avg Render Latency", value: String(format: "%.3f s", avgR))
                 }
+                if let p50R = report.p50RenderLatencySeconds {
+                    metricCell(title: "P50 Render Latency", value: String(format: "%.3f s", p50R))
+                }
                 if let p95R = report.p95RenderLatencySeconds {
                     metricCell(title: "P95 Render Latency", value: String(format: "%.3f s", p95R))
+                }
+                if let p99R = report.p99RenderLatencySeconds {
+                    metricCell(title: "P99 Render Latency", value: String(format: "%.3f s", p99R))
                 }
                 metricCell(title: "Peak RSS", value: String(format: "%.1f MB", Double(report.peakMemoryBytes) / (1024 * 1024)))
                 metricCell(title: "Peak RSS Growth", value: rssGrowth(from: report.baselineMemoryBytes, to: report.peakMemoryBytes))
                 metricCell(title: "Final RSS Growth", value: rssGrowth(from: report.baselineMemoryBytes, to: report.finalMemoryBytes))
                 metricCell(title: "Thermal Events", value: "\(report.thermalTransitions)")
                 metricCell(title: "Camera Reconnects", value: report.reconnectCount.map { String($0) } ?? "NOT TESTED")
+                metricCell(title: "iPad Transport Reconnects", value: report.transportReconnectCount.map { String($0) } ?? "NOT TESTED")
+                metricCell(title: "Queue Failures", value: report.queueFailureCount.map { String($0) } ?? "NOT TESTED")
+                metricCell(title: "First Window Duration", value: report.firstWindowAverageCycleDurationSeconds.map { String(format: "%.2f s", $0) } ?? "NOT TESTED")
+                metricCell(title: "Last Window Duration", value: report.lastWindowAverageCycleDurationSeconds.map { String(format: "%.2f s", $0) } ?? "NOT TESTED")
+                metricCell(title: "Cycle Duration Change", value: report.cycleDurationDegradationPercent.map { String(format: "%+.1f%%", $0) } ?? "NOT TESTED")
             }
 
             if !report.subsystemCoverage.isEmpty {
@@ -470,11 +629,31 @@ public struct SoakTestSettingsView: View {
                         HStack(alignment: .top) {
                             Text(subsystem)
                                 .frame(width: 230, alignment: .leading)
-                            Text(report.subsystemCoverage[subsystem] ?? "NOT TESTED")
-                                .foregroundStyle((report.subsystemCoverage[subsystem] ?? "").hasPrefix("FAIL") ? .red : .secondary)
+                            let result = report.subsystemCoverage[subsystem] ?? "NOT TESTED"
+                            Text(result)
+                                .foregroundStyle(result.hasPrefix("FAIL") ? .red : result.hasPrefix("WARNING") ? .orange : result.hasPrefix("PASS") ? .green : .secondary)
                             Spacer(minLength: 0)
                         }
                         .font(.caption)
+                    }
+                }
+            }
+
+            if let environment = report.environmentSnapshot {
+                DisclosureGroup("Environment snapshot") {
+                    ForEach(environment.keys.sorted(), id: \.self) { key in
+                        LabeledContent(key, value: environment[key] ?? "NOT AVAILABLE")
+                            .font(.caption)
+                            .textSelection(.enabled)
+                    }
+                }
+            }
+            if let configuration = report.configurationSnapshot {
+                DisclosureGroup("Configuration snapshot") {
+                    ForEach(configuration.keys.sorted(), id: \.self) { key in
+                        LabeledContent(key, value: configuration[key] ?? "NOT AVAILABLE")
+                            .font(.caption)
+                            .textSelection(.enabled)
                     }
                 }
             }

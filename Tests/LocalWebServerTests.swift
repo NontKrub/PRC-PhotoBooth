@@ -70,6 +70,7 @@ struct LocalWebServerTests {
 
         await server.setGuestRouteExposure(.trustedLocalHTTP)
         await server.registerToken("token", registration: sessionRegistration)
+        await server.registerGuestRoute(path: "/s/soak/run-123/session-456", registration: sessionRegistration)
         await server.replaceGalleryRoutes(["event-token": galleryRoute])
         for path in [
             "/s/token/",
@@ -81,6 +82,8 @@ struct LocalWebServerTests {
         ] {
             #expect(try await statusCode(path) == 200, "Expected guest route \(path) to open")
         }
+        #expect(try await statusCode("/s/soak/run-123/session-456/strip.png") == 200)
+        #expect(try await statusCode("/s/session-456/strip.png") == 404)
 
         await server.setGuestRouteExposure(.disabled)
         #expect(await server.statusSnapshot().registeredTokenCount == 0)
@@ -95,6 +98,86 @@ struct LocalWebServerTests {
             #expect(try await statusCode(path) == 404, "Expected guest route \(path) to be revoked")
         }
         #expect(try await statusCode("/health") == 200)
+    }
+
+    @Test("a hidden soak route cannot be restored by a late job or route refresh")
+    func hiddenSoakRouteCannotBeRestored() async throws {
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try Data("normal guest output".utf8).write(to: directory.appendingPathComponent("strip.png"))
+
+        let registration = SessionRouteRegistration(
+            sessionDirectory: directory,
+            language: .english,
+            eventGalleryPath: nil,
+            gifState: .none
+        )
+        let soakPath = "/s/soak/run-hide/session-hide"
+        let server = LocalWebServer(port: 0)
+        await server.setGuestRouteExposure(.trustedLocalHTTP)
+        await server.registerToken("normal-token", registration: registration)
+        await server.registerGuestRoute(path: soakPath, registration: registration)
+        await server.hideGuestRoute(path: soakPath)
+        await server.registerGuestRoute(path: soakPath, registration: registration)
+        await server.replaceSessionRoutes([
+            "/s/normal-token": registration,
+            soakPath: registration
+        ])
+        try await server.start()
+        defer { Task { await server.stop() } }
+        let status = await server.waitUntilReady(timeout: 2)
+        guard case .ready(let port) = status.state else {
+            Issue.record("Server did not become ready: \(status)")
+            return
+        }
+
+        func statusCode(_ path: String) async throws -> Int {
+            let url = try #require(URL(string: "http://127.0.0.1:\(port)\(path)"))
+            let (_, response) = try await URLSession.shared.data(from: url)
+            return try #require((response as? HTTPURLResponse)?.statusCode)
+        }
+
+        #expect(try await statusCode("/s/normal-token/strip.png") == 200)
+        #expect(try await statusCode("\(soakPath)/strip.png") == 404)
+        #expect(await server.statusSnapshot().registeredTokenCount == 1)
+    }
+
+    @Test("hiding a soak route cancels an in-flight guest transfer")
+    func hidingSoakRouteCancelsInFlightTransfer() async throws {
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let media = Data("soak output being transferred".utf8)
+        try media.write(to: directory.appendingPathComponent("strip.png"))
+
+        let soakPath = "/s/soak/run-transfer/session-transfer"
+        let gate = AsyncTestGate()
+        let server = LocalWebServer(port: 0)
+        await server.setGuestRouteExposure(.trustedLocalHTTP)
+        await server.registerGuestRoute(path: soakPath, registration: SessionRouteRegistration(
+            sessionDirectory: directory,
+            language: .english,
+            eventGalleryPath: nil,
+            gifState: .none
+        ))
+        await server.setBeforeFileResponseForTesting { await gate.pause() }
+        try await server.start()
+        defer { Task { await gate.release(); await server.stop() } }
+        let status = await server.waitUntilReady(timeout: 2)
+        guard case .ready(let port) = status.state else {
+            Issue.record("Server did not become ready: \(status)")
+            return
+        }
+
+        let url = try #require(URL(string: "http://127.0.0.1:\(port)\(soakPath)/strip.png"))
+        let responseTask = Task { try await URLSession.shared.data(from: url) }
+        await gate.waitUntilPaused()
+        await server.hideGuestRoute(path: soakPath)
+        await gate.release()
+
+        if case .success(let (body, response)) = await responseTask.result {
+            let httpResponse = response as? HTTPURLResponse
+            #expect(httpResponse?.statusCode != 200 || body != media)
+        }
     }
 
     @Test("operator routes are closed until explicitly enabled")

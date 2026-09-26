@@ -182,11 +182,26 @@ actor JobQueueStore {
         jobs
     }
 
-    func enqueue(sessionID: String, kind: SessionJobKind, finalizationTransactionID: String? = nil) throws -> SessionJob {
-        try enqueueBatch(sessionID: sessionID, kinds: [kind], finalizationTransactionID: finalizationTransactionID).first!
+    func enqueue(
+        sessionID: String,
+        kind: SessionJobKind,
+        finalizationTransactionID: String? = nil,
+        requiresCloudPublicationBeforePrint: Bool = false
+    ) throws -> SessionJob {
+        try enqueueBatch(
+            sessionID: sessionID,
+            kinds: [kind],
+            finalizationTransactionID: finalizationTransactionID,
+            requiresCloudPublicationBeforePrint: requiresCloudPublicationBeforePrint
+        ).first!
     }
 
-    func enqueueBatch(sessionID: String, kinds: [SessionJobKind], finalizationTransactionID: String? = nil) throws -> [SessionJob] {
+    func enqueueBatch(
+        sessionID: String,
+        kinds: [SessionJobKind],
+        finalizationTransactionID: String? = nil,
+        requiresCloudPublicationBeforePrint: Bool = false
+    ) throws -> [SessionJob] {
         try ensureLoaded()
         guard !cancelledSessionIDs.contains(sessionID) else {
             throw JobQueueStoreError.sessionCancelled(sessionID)
@@ -194,12 +209,18 @@ actor JobQueueStore {
         var result: [SessionJob] = []
         var missingKinds = Set<SessionJobKind>()
         for kind in kinds where missingKinds.insert(kind).inserted {
-            if let existing = jobs.first(where: {
+            if let existingIndex = jobs.firstIndex(where: {
                 $0.sessionID == sessionID
                     && $0.kind == kind
                     && $0.finalizationTransactionID == finalizationTransactionID
             }) {
-                result.append(existing)
+                if kind == .autoPrint,
+                   requiresCloudPublicationBeforePrint,
+                   jobs[existingIndex].status != .succeeded,
+                   jobs[existingIndex].status != .running {
+                    jobs[existingIndex].requiresCloudPublicationBeforePrint = true
+                }
+                result.append(jobs[existingIndex])
                 continue
             }
             let now = Date()
@@ -215,11 +236,13 @@ actor JobQueueStore {
                 attemptCount: 0,
                 lastError: nil,
                 lastFailureDisposition: nil,
-                finalizationTransactionID: finalizationTransactionID
+                finalizationTransactionID: finalizationTransactionID,
+                requiresCloudPublicationBeforePrint: kind == .autoPrint && requiresCloudPublicationBeforePrint
             )
             jobs.append(job)
             result.append(job)
         }
+        reconcileCloudDependentPrints(sessionID: sessionID, transactionID: finalizationTransactionID)
         try persist()
         return result
     }
@@ -242,10 +265,13 @@ actor JobQueueStore {
             throw JobQueueStoreError.missingJob(job.id)
         }
         guard jobs[index].status == .running,
-              !cancelledSessionIDs.contains(job.sessionID) else {
+              (!cancelledSessionIDs.contains(job.sessionID) || job.kind == .autoPrint) else {
             return false
         }
         jobs[index] = job
+        if job.kind == .cloudUpload {
+            reconcileCloudDependentPrints(sessionID: job.sessionID, transactionID: job.finalizationTransactionID)
+        }
         try persist()
         return true
     }
@@ -267,6 +293,9 @@ actor JobQueueStore {
         guard jobs[index].status == .pending
                 || (jobs[index].status == .waitingRetry
                     && (jobs[index].nextAttemptAt.map { $0 <= now } ?? true)) else {
+            return nil
+        }
+        guard SessionJobDependencyPolicy.prerequisitesSatisfied(for: jobs[index], in: jobs) else {
             return nil
         }
 
@@ -370,9 +399,6 @@ actor JobQueueStore {
               jobs[index].lastFailureDisposition == .sideEffectUnknown else {
             return jobs[index]
         }
-        guard !cancelledSessionIDs.contains(jobs[index].sessionID) else {
-            throw JobQueueStoreError.sessionCancelled(jobs[index].sessionID)
-        }
         switch resolution {
         case .printed:
             jobs[index].status = .succeeded
@@ -380,6 +406,15 @@ actor JobQueueStore {
             jobs[index].lastFailureDisposition = nil
             jobs[index].nextAttemptAt = nil
         case .notPrinted:
+            if cancelledSessionIDs.contains(jobs[index].sessionID) {
+                cancelledSessionIDs.remove(jobs[index].sessionID)
+                do {
+                    try persistCancellationBarrier()
+                } catch {
+                    cancelledSessionIDs.insert(jobs[index].sessionID)
+                    throw error
+                }
+            }
             jobs[index].status = .pending
             // The unknown outcome was not a confirmed printer attempt and
             // therefore must not consume an automatic retry budget.
@@ -459,6 +494,8 @@ actor JobQueueStore {
             throw JobQueueStoreError.missingJob(jobID)
         }
         guard jobs[index].status != .succeeded else { return }
+        guard !(jobs[index].kind == .autoPrint && jobs[index].status == .running),
+              jobs[index].lastFailureDisposition != .sideEffectUnknown else { return }
         jobs[index].status = .cancelled
         jobs[index].nextAttemptAt = nil
         jobs[index].updatedAt = Date()
@@ -472,6 +509,8 @@ actor JobQueueStore {
         var changed = false
         for index in jobs.indices where jobs[index].sessionID == sessionID {
             guard jobs[index].status != .succeeded, jobs[index].status != .cancelled else { continue }
+            guard !(jobs[index].kind == .autoPrint
+                && (jobs[index].status == .running || jobs[index].lastFailureDisposition == .sideEffectUnknown)) else { continue }
             jobs[index].status = .cancelled
             jobs[index].lastError = "Session cancelled"
             jobs[index].nextAttemptAt = nil
@@ -489,6 +528,8 @@ actor JobQueueStore {
             && optionalKinds.contains(jobs[index].kind)
             && jobs[index].status != .succeeded
             && jobs[index].status != .cancelled {
+            guard !(jobs[index].kind == .autoPrint
+                && (jobs[index].status == .running || jobs[index].lastFailureDisposition == .sideEffectUnknown)) else { continue }
             jobs[index].status = .cancelled
             jobs[index].nextAttemptAt = nil
             jobs[index].updatedAt = Date()
@@ -518,7 +559,12 @@ actor JobQueueStore {
         if changed { try persist() }
     }
 
-    func migrateLegacyJobs(sessionID: String, transactionID: String, kinds: Set<SessionJobKind>) throws {
+    func migrateLegacyJobs(
+        sessionID: String,
+        transactionID: String,
+        kinds: Set<SessionJobKind>,
+        requiresCloudPublicationBeforePrint: Bool = false
+    ) throws {
         try ensureLoaded()
         var changed = false
         for kind in kinds {
@@ -533,7 +579,21 @@ actor JobQueueStore {
                 continue
             }
             jobs[candidate].finalizationTransactionID = transactionID
+            jobs[candidate].requiresCloudPublicationBeforePrint = kind == .autoPrint && requiresCloudPublicationBeforePrint
             jobs[candidate].updatedAt = Date()
+            changed = true
+        }
+        if requiresCloudPublicationBeforePrint,
+           let printIndex = jobs.firstIndex(where: {
+               $0.sessionID == sessionID
+                   && $0.finalizationTransactionID == transactionID
+                   && $0.kind == .autoPrint
+                   && $0.status != .succeeded
+                   && $0.status != .running
+                   && $0.requiresCloudPublicationBeforePrint != true
+           }) {
+            jobs[printIndex].requiresCloudPublicationBeforePrint = true
+            jobs[printIndex].updatedAt = Date()
             changed = true
         }
         if changed { try persist() }
@@ -559,6 +619,36 @@ actor JobQueueStore {
         let oldCount = jobs.count
         jobs.removeAll { $0.sessionID == sessionID }
         if jobs.count != oldCount { try persist() }
+    }
+
+    private func reconcileCloudDependentPrints(sessionID: String, transactionID: String?) {
+        guard let cloudJob = jobs.first(where: {
+            $0.sessionID == sessionID
+                && $0.finalizationTransactionID == transactionID
+                && $0.kind == .cloudUpload
+        }) else { return }
+        let now = Date()
+        for index in jobs.indices where jobs[index].sessionID == sessionID
+            && jobs[index].finalizationTransactionID == transactionID
+            && jobs[index].kind == .autoPrint
+            && jobs[index].requiresCloudPublicationBeforePrint == true {
+            if cloudJob.status == .failed || cloudJob.status == .cancelled {
+                guard jobs[index].status == .pending || jobs[index].status == .waitingRetry else { continue }
+                jobs[index].status = .cancelled
+                jobs[index].lastError = SessionJobDependencyPolicy.printWithheldUntilCloudPublishedError
+                jobs[index].lastFailureDisposition = nil
+                jobs[index].nextAttemptAt = nil
+                jobs[index].updatedAt = now
+            } else if cloudJob.status == .succeeded,
+                      jobs[index].status == .cancelled,
+                      jobs[index].lastError == SessionJobDependencyPolicy.printWithheldUntilCloudPublishedError {
+                jobs[index].status = .pending
+                jobs[index].lastError = nil
+                jobs[index].lastFailureDisposition = nil
+                jobs[index].nextAttemptAt = now
+                jobs[index].updatedAt = now
+            }
+        }
     }
 
     func forgetCancellationBarrierIfSafe(sessionID: String) throws {
@@ -634,9 +724,23 @@ actor JobQueueStore {
             jobs[index].updatedAt = now
             changed = true
         }
+        // Older versions could persist a cancelled session's uncertain print
+        // as cancelled. Keep the uncertainty operator-visible after restart.
+        for index in jobs.indices where jobs[index].kind == .autoPrint
+            && jobs[index].lastFailureDisposition == .sideEffectUnknown
+            && jobs[index].status == .cancelled {
+            jobs[index].status = .failed
+            jobs[index].lastError = jobs[index].lastError
+                ?? "Print submission outcome is unknown. Verify the printer before resolving this job."
+            jobs[index].nextAttemptAt = nil
+            jobs[index].updatedAt = now
+            changed = true
+        }
         for index in jobs.indices where cancelledSessionIDs.contains(jobs[index].sessionID)
             && jobs[index].status != .succeeded
-            && jobs[index].status != .cancelled {
+            && jobs[index].status != .cancelled
+            && !(jobs[index].kind == .autoPrint
+                && jobs[index].lastFailureDisposition == .sideEffectUnknown) {
             jobs[index].status = .cancelled
             jobs[index].lastError = "Session cancelled"
             jobs[index].nextAttemptAt = nil

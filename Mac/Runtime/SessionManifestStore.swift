@@ -126,6 +126,74 @@ actor SessionManifestStore {
         }
     }
 
+    func recordSoakCleanupResult(
+        sessionID: String,
+        expectedRunID: String,
+        warning: String?,
+        retainedForDiagnostics: Bool? = nil
+    ) throws -> SessionManifest {
+        try validate(sessionID: sessionID)
+        let url = try fileURL(for: sessionID)
+        var manifest = try load(sessionID: sessionID)
+        guard manifest.origin == .soakTest, manifest.soakRunID == expectedRunID else {
+            throw SessionManifestError.soakCleanupNotAllowed(sessionID)
+        }
+        manifest.soakCleanupWarning = warning
+        manifest.soakCleanupLastAttemptAt = Date()
+        if let retainedForDiagnostics {
+            manifest.soakDiagnosticRetained = retainedForDiagnostics
+        }
+        manifest.updatedAt = max(manifest.updatedAt, Date())
+        _ = try write(manifest, to: url)
+        return manifest
+    }
+
+    func prepareOrphanedSoakForCleanup(
+        sessionID: String,
+        expectedRunID: String,
+        retainForDiagnostics: Bool
+    ) throws -> SessionManifest {
+        try validate(sessionID: sessionID)
+        let url = try fileURL(for: sessionID)
+        var manifest = try load(sessionID: sessionID)
+        guard manifest.origin == .soakTest, manifest.soakRunID == expectedRunID else {
+            throw SessionManifestError.soakCleanupNotAllowed(sessionID)
+        }
+        if manifest.status == .capturing || manifest.status == .finalizing {
+            manifest.status = .cancelled
+            manifest.cancelledAt = Date()
+        }
+        if retainForDiagnostics {
+            manifest.soakDiagnosticRetained = true
+            manifest.lastError = manifest.lastError
+                ?? "An interrupted soak session was retained for operator diagnostics."
+        } else if manifest.soakCleanupWarning != nil {
+            // A prior cleanup warning is retried at launch. Let the retry
+            // remove the temporary retained marker if it now succeeds.
+            manifest.soakDiagnosticRetained = false
+        }
+        manifest.updatedAt = max(manifest.updatedAt, Date())
+        return try write(manifest, to: url)
+    }
+
+    func retainSoakFailureDiagnostics(
+        sessionID: String,
+        expectedRunID: String,
+        reason: String
+    ) throws -> SessionManifest {
+        try validate(sessionID: sessionID)
+        let url = try fileURL(for: sessionID)
+        var manifest = try load(sessionID: sessionID)
+        guard manifest.origin == .soakTest, manifest.soakRunID == expectedRunID else {
+            throw SessionManifestError.soakCleanupNotAllowed(sessionID)
+        }
+        manifest.lastError = reason
+        manifest.soakDiagnosticRetained = true
+        manifest.updatedAt = max(manifest.updatedAt, Date())
+        _ = try write(manifest, to: url)
+        return manifest
+    }
+
     func loadAll() -> [SessionManifestLoadResult] {
         do {
             let directory = try sessionsDirectory()

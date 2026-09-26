@@ -59,8 +59,114 @@ struct SoakTests {
         #expect(md.contains("Target Cycles | 3"))
         #expect(md.contains("Completed Cycles | 3"))
         #expect(md.contains("Production workflow | NOT TESTED"))
+        #expect(md.contains("Run ID**: `NOT AVAILABLE`"))
         #expect(!md.localizedCaseInsensitiveContains("no memory leaks"))
         #expect(report.jsonRepresentation() != nil)
+    }
+
+    @Test("complete cycles with cleanup warnings report completed with warnings")
+    func cleanupWarningIsNotReportedAsCleanPass() {
+        let metric = BoothSoakCycleMetric(
+            cycleIndex: 1,
+            durationSeconds: 1,
+            captureLatencies: [],
+            memoryFootprintBytes: 10
+        )
+        let report = BoothSoakTestReport.compute(
+            mode: .productionPipeline,
+            targetCycles: 1,
+            startedAt: Date().addingTimeInterval(-1),
+            finishedAt: Date(),
+            baselineMemory: 10,
+            metrics: [metric],
+            subsystemCoverage: ["Cloud cleanup": "WARNING (remote deletion failed)"],
+            runID: "run-123"
+        )
+
+        #expect(report.outcome == .completedWithWarnings)
+        #expect(report.runID == "run-123")
+        #expect(report.outcome.displayName == "Completed with warnings")
+        #expect(report.summaryVerdict.hasPrefix("COMPLETED WITH WARNINGS"))
+    }
+
+    @Test("subsystem failure cannot coexist with a passed report")
+    func subsystemFailureCannotPass() {
+        let metric = BoothSoakCycleMetric(
+            cycleIndex: 1,
+            durationSeconds: 1,
+            captureLatencies: [],
+            memoryFootprintBytes: 10
+        )
+        let report = BoothSoakTestReport.compute(
+            mode: .productionPipeline,
+            targetCycles: 1,
+            startedAt: Date().addingTimeInterval(-1),
+            finishedAt: Date(),
+            baselineMemory: 10,
+            metrics: [metric],
+            subsystemCoverage: ["Gallery isolation": "FAIL (soak entry was public-visible)"]
+        )
+
+        #expect(report.outcome == .failed)
+        #expect(report.summaryVerdict.hasPrefix("FAILED"))
+    }
+
+    @Test("live shutter count excludes deferred retake and prior-photo recovery records")
+    func physicalCaptureCountExcludesLogicalRecoveryRecords() {
+        let now = Date()
+        let results: [CaptureAttemptResult] = [.success, .transferRecovered, .failed, .retaken, .deferred, .usedPrevious]
+        let records = results.enumerated().map { index, result in
+            CaptureAttemptRecord(
+                id: "attempt-\(index)",
+                photoIndex: 0,
+                startedAt: now,
+                completedAt: now,
+                result: result,
+                reason: nil,
+                receiveDuration: nil
+            )
+        }
+        #expect(BoothSoakCaptureMetrics.physicalCaptureAttemptCount(records) == 3)
+    }
+
+    @Test("report includes event evidence percentiles and first-to-last window degradation")
+    func reportContainsReleaseEvidence() {
+        let metrics = (1...4).map { index in
+            BoothSoakCycleMetric(
+                cycleIndex: index,
+                durationSeconds: Double(index),
+                captureLatencies: [Double(index)],
+                captureAttemptCount: 1,
+                captureFailureCount: 0,
+                cameraRecoveryCount: index == 2 ? 1 : 0,
+                renderLatency: Double(index) / 2,
+                memoryFootprintBytes: UInt64(index * 10)
+            )
+        }
+        let report = BoothSoakTestReport.compute(
+            mode: .productionPipeline,
+            targetCycles: 4,
+            startedAt: Date().addingTimeInterval(-10),
+            finishedAt: Date(),
+            baselineMemory: 8,
+            metrics: metrics,
+            runID: "run-456",
+            environmentSnapshot: ["Camera model": "Sony ZV-E10"],
+            configurationSnapshot: ["Target sessions": "4"]
+        )
+
+        #expect(report.captureAttemptCount == 4)
+        #expect(report.captureSampleCount == 4)
+        #expect(report.captureFailureCount == 0)
+        #expect(report.cameraRecoveryCount == 1)
+        #expect(report.p50CaptureLatencySeconds == 2)
+        #expect(report.p99CaptureLatencySeconds == 4)
+        #expect(report.firstWindowAverageCycleDurationSeconds == 1)
+        #expect(report.lastWindowAverageCycleDurationSeconds == 4)
+        #expect(report.cycleDurationDegradationPercent == 300)
+        #expect(report.environmentSnapshot?["Camera model"] == "Sony ZV-E10")
+        #expect(report.configurationSnapshot?["Target sessions"] == "4")
+        #expect(report.markdownSummary().contains("Cycle Duration Degradation | +300.0%"))
     }
 
     @Test("synthetic benchmark is explicitly scoped and completes its isolated queue")
@@ -134,7 +240,7 @@ struct SoakTests {
             captureService: nil,
             coordinator: nil,
             progressHandler: { state in
-                if case .running(let cycle, _, _) = state, cycle == 1 {
+                if case .running(let cycle, _, _, _) = state, cycle == 1 {
                     await runner.stopGracefully()
                 }
             }
@@ -153,7 +259,7 @@ struct SoakTests {
             captureService: nil,
             coordinator: nil,
             progressHandler: { state in
-                if case .running(let cycle, _, let phase) = state,
+                if case .running(let cycle, _, let phase, _) = state,
                    cycle == 1, phase.hasPrefix("Generating") {
                     await runner.cancel()
                 }

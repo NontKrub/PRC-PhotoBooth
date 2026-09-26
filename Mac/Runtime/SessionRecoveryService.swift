@@ -209,7 +209,7 @@ final class SessionRecoveryService {
         }
 
         var claimedSessionIDs = Set<String>()
-        for manifest in manifests where claimRecoverySession(manifest.id) {
+        for manifest in manifests where manifest.origin != .soakTest && claimRecoverySession(manifest.id) {
             claimedSessionIDs.insert(manifest.id)
         }
         defer {
@@ -320,6 +320,10 @@ final class SessionRecoveryService {
         }
 
         for manifest in manifests where claimedSessionIDs.contains(manifest.id) && manifest.status == .cancelled {
+            if manifest.origin == .soakTest {
+                recoveryErrors.append("Soak cleanup owns this cancelled test session: \(manifest.id)")
+                continue
+            }
             do {
                 let result = try await jobQueue.cancelAndQuiesceJobs(sessionID: manifest.id)
                 guard result == .quiesced else {
@@ -473,6 +477,14 @@ final class SessionFlowOperationRegistry {
         }
         guard entries.values.contains(where: { $0.sessionID == sessionID }) else { return true }
         return await waitForQuiescence(sessionID: sessionID, timeout: timeout)
+    }
+
+    func waitUntilQuiescent(sessionID: String) async -> Bool {
+        guard entries.values.contains(where: { $0.sessionID == sessionID }) else { return true }
+        let waiterID = UUID()
+        return await withCheckedContinuation { continuation in
+            waiters[waiterID] = (sessionID, continuation)
+        }
     }
 
     private func finish(_ id: UUID) {

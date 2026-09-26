@@ -681,7 +681,12 @@ struct OperationsView: View {
                                     .disabled(isRetryingAll || retryingJobIDs.contains(job.id))
                                 }
                             }
-                            if job.kind.isOptional && job.status != .succeeded && job.status != .cancelled {
+                            if job.kind.isOptional
+                                && job.status != .succeeded
+                                && job.status != .cancelled
+                                && !(job.kind == .autoPrint
+                                    && (job.status == .running
+                                        || job.lastFailureDisposition == .sideEffectUnknown)) {
                                 Button("Cancel") { coordinator.jobQueue.cancel(jobID: job.id) }
                             }
                             Button("Open Folder") { openFolder(for: job.sessionID) }

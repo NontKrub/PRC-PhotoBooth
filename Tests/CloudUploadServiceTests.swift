@@ -139,6 +139,70 @@ struct CloudUploadServiceTests {
         #expect(commands[3].arguments.last?.contains("/srv/photos/.soak/run-123/.published") == true)
     }
 
+    @Test("soak QR, publish alias, verifier, and cleanup share one manifest route")
+    func soakQRPublishVerificationAndCleanupShareRoute() async throws {
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try Data([1]).write(to: directory.appendingPathComponent("strip.png"))
+        let runner = TestCloudCommandRunner()
+        let verifier = TestCloudURLVerifier()
+        let service = CloudUploadService(runner: runner, verifier: verifier)
+        var manifest = makeManifest(directory: directory)
+        manifest.id = "session-456"
+        manifest.downloadToken = "token-789"
+        manifest.origin = .soakTest
+        manifest.soakRunID = "run-123"
+        let configuration = CloudUploadConfiguration(
+            sshHost: "booth-host",
+            remoteBasePath: "/srv/photos",
+            publicBaseURL: "https://photos.example"
+        )
+
+        let qrURL = try SessionQRCodePayloadResolver.resolve(
+            manifest: manifest,
+            localBaseURL: "http://192.168.1.10:8585",
+            publicBaseURL: configuration.publicBaseURL,
+            cloudUploadEnabled: true
+        )
+        #expect(qrURL == "https://photos.example/s/soak/run-123/session-456/")
+        let route = try CloudGuestRoute.resolve(for: manifest)
+
+        try await service.upload(manifest: manifest, configuration: configuration)
+        let uploadCommands = await runner.commands
+        #expect(uploadCommands[2].arguments.last?.contains("/srv/photos\(route.relativePath)") == true)
+        #expect((await verifier.urls).first?.absoluteString == qrURL + "strip.png")
+
+        try await service.removeSoakArtifacts(manifest: manifest, configuration: configuration)
+        let cleanupCommand = try #require((await runner.commands).last?.arguments.last)
+        #expect(cleanupCommand.contains("/srv/photos\(route.relativePath)"))
+        #expect(route.relativePath == "/s/soak/run-123/session-456")
+    }
+
+    @Test("depublishes a soak route without deleting retained diagnostic artifacts")
+    func hidesSoakAliasOnly() async throws {
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let runner = TestCloudCommandRunner()
+        let service = CloudUploadService(runner: runner, verifier: TestCloudURLVerifier())
+        var manifest = makeManifest(directory: directory)
+        manifest.origin = .soakTest
+        manifest.soakRunID = "run-123"
+
+        try await service.hideSoakAlias(
+            manifest: manifest,
+            configuration: CloudUploadConfiguration(
+                sshHost: "host",
+                remoteBasePath: "/srv/photos",
+                publicBaseURL: "https://photos.example"
+            )
+        )
+
+        let commands = await runner.commands
+        #expect(commands.count == 1)
+        #expect(commands[0].arguments.last?.contains("/srv/photos/s/soak/run-123/session") == true)
+        #expect(commands[0].arguments.last?.contains("rm -rf") == false)
+    }
+
     @Test("soak cloud cleanup removes only that run and session namespace")
     func removesOnlySoakSessionArtifacts() async throws {
         let directory = try temporaryDirectory()
@@ -157,14 +221,52 @@ struct CloudUploadServiceTests {
                 publicBaseURL: "https://photos.example"
             )
         )
+        try await service.removeSoakArtifacts(
+            manifest: manifest,
+            configuration: CloudUploadConfiguration(
+                sshHost: "booth-host",
+                remoteBasePath: "/srv/photos",
+                publicBaseURL: "https://photos.example"
+            )
+        )
 
-        let command = try #require((await runner.commands).first?.arguments.last)
+        let commands = await runner.commands
+        #expect(commands.count == 2)
+        let command = try #require(commands.first?.arguments.last)
+        let retryCommand = try #require(commands.last?.arguments.last)
         #expect(command.contains("/srv/photos/s/soak/run-123/\(manifest.id)"))
         #expect(command.contains("/srv/photos/.soak/run-123/.staging/\(manifest.id)"))
         #expect(command.contains("/srv/photos/.soak/run-123/.published"))
         #expect(command.contains("-name '\(manifest.id)-*'"))
         #expect(!command.contains("/srv/photos/.published"))
         #expect(!command.contains("/srv/photos/s/\(manifest.downloadToken)"))
+        #expect(retryCommand == command)
+    }
+
+    @Test("cloud cleanup refuses normal customer sessions without issuing a remote command")
+    func refusesNormalSessionCloudCleanup() async throws {
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let runner = TestCloudCommandRunner()
+        let service = CloudUploadService(runner: runner, verifier: TestCloudURLVerifier())
+
+        do {
+            try await service.removeSoakArtifacts(
+                manifest: makeManifest(directory: directory),
+                configuration: CloudUploadConfiguration(
+                    sshHost: "booth-host",
+                    remoteBasePath: "/srv/photos",
+                    publicBaseURL: "https://photos.example"
+                )
+            )
+            Issue.record("Expected cleanup to reject a normal session.")
+        } catch let error as JobExecutionError {
+            guard case .permanent = error else {
+                Issue.record("Expected permanent cleanup authorization failure.")
+                return
+            }
+        }
+        #expect(await runner.commands.isEmpty)
     }
 
     @Test("soak cloud cleanup rejects a session without a safe run identifier")

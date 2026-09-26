@@ -72,6 +72,7 @@ actor BoothSoakTestRunner {
         let baselineCameraReconnectCount = await MainActor.run {
             (config.mode != .syntheticBenchmark) ? coordinator?.cameraReconnectCount : nil
         }
+        let baselineTransportReconnectCount = await coordinator?.soakTransportReconnectCount()
         await progressHandler(.preflight(message: "Preparing \(config.mode.rawValue)…"))
 
         let runID = UUID().uuidString
@@ -118,9 +119,13 @@ actor BoothSoakTestRunner {
                 "Session persistence": "NOT TESTED",
                 "Rendering": "NOT TESTED",
                 "Production job queue": "NOT TESTED",
+                "Queue failures": "NOT TESTED",
                 "Local guest delivery": "NOT TESTED",
                 "Guest delivery": "NOT TESTED",
                 "Cloud upload": config.testCloudUpload ? "NOT TESTED (enabled, no completed cycle yet)" : "NOT TESTED (disabled)",
+                "Cloud QR route": config.testCloudUpload ? "NOT TESTED (enabled, no completed cycle yet)" : "NOT TESTED (disabled)",
+                "Cloud cleanup": config.testCloudUpload ? "NOT TESTED (enabled, no completed cycle yet)" : "NOT TESTED (disabled)",
+                "Soak cleanup": "NOT TESTED",
                 "Physical printing": config.enablePhysicalPrint ? "NOT TESTED (no scheduled print cycle completed yet)" : "NOT TESTED (disabled)",
                 "Gallery update": "NOT TESTED",
                 "iPad hardware": "NOT TESTED (device model compatibility is not inferred from connection readiness)",
@@ -128,12 +133,16 @@ actor BoothSoakTestRunner {
             ]
         }
         var stopAfterProductionFailure = false
+        var queueFailureCount: Int?
 
         for cycle in 1...config.targetCycles {
             if isCancelled || isStoppingGracefully || stopAfterProductionFailure { break }
             let cycleStart = Date()
             var errors: [String] = []
             var captureLatencies: [Double] = []
+            var captureAttemptCount = 0
+            var captureFailureCount = 0
+            var cameraRecoveryCount = 0
             var renderLatency: Double?
             var queueDrainSeconds: Double?
             var cycleResult: BoothAutomatedSoakCycleResult?
@@ -145,7 +154,8 @@ actor BoothSoakTestRunner {
             await progressHandler(.running(
                 cycle: cycle,
                 total: config.targetCycles,
-                phase: "Starting \(config.mode.rawValue.lowercased()) cycle \(cycle)…"
+                phase: "Starting \(config.mode.rawValue.lowercased()) cycle \(cycle)…",
+                runID: runID
             ))
 
             do {
@@ -158,6 +168,7 @@ actor BoothSoakTestRunner {
                         cycle: cycle,
                         config: config,
                         scratchDirectory: scratchDirectory,
+                        runID: runID,
                         progressHandler: progressHandler
                     )
                     renderLatency = result.renderLatency
@@ -170,11 +181,18 @@ actor BoothSoakTestRunner {
                         await progressHandler(.running(
                             cycle: cycle,
                             total: config.targetCycles,
-                            phase: "Capturing physical camera photo \(photoIndex + 1)/\(config.photosPerSession)…"
+                            phase: "Capturing physical camera photo \(photoIndex + 1)/\(config.photosPerSession)…",
+                            runID: runID
                         ))
                         let captureStartedAt = Date()
-                        _ = try await captureService.captureStill(for: photoIndex)
-                        captureLatencies.append(Date().timeIntervalSince(captureStartedAt))
+                        captureAttemptCount += 1
+                        do {
+                            _ = try await captureService.captureStill(for: photoIndex)
+                            captureLatencies.append(Date().timeIntervalSince(captureStartedAt))
+                        } catch {
+                            captureFailureCount += 1
+                            throw error
+                        }
                     }
                     if captureLatencies.count != config.photosPerSession {
                         throw CancellationError()
@@ -185,18 +203,31 @@ actor BoothSoakTestRunner {
                     await progressHandler(.running(
                         cycle: cycle,
                         total: config.targetCycles,
-                        phase: scheduledPrint ? "Running real session with physical print…" : "Running real production session…"
+                        phase: scheduledPrint ? "Running real session with physical print…" : "Running real production session…",
+                        runID: runID
                     ))
                     let result = try await coordinator.runAutomatedSoakCycle(
                         runID: runID,
                         cycleIndex: cycle,
                         config: config,
-                        printEnabled: scheduledPrint
+                        printEnabled: scheduledPrint,
+                        progressHandler: { stage in
+                            await progressHandler(.running(
+                                cycle: cycle,
+                                total: config.targetCycles,
+                                phase: stage,
+                                runID: runID
+                            ))
+                        }
                     )
                     cycleResult = result
                     captureLatencies = result.captureLatencies
+                    captureAttemptCount = result.captureAttemptCount
+                    captureFailureCount = result.captureFailureCount
+                    cameraRecoveryCount = result.cameraRecoveryCount
                     renderLatency = result.renderLatency
                     queueDrainSeconds = result.queueDrainSeconds
+                    queueFailureCount = (queueFailureCount ?? 0) + result.queueFailureCount
                 }
             } catch is CancellationError {
                 cycleWasInterrupted = true
@@ -210,12 +241,31 @@ actor BoothSoakTestRunner {
                 if config.mode == .productionPipeline {
                     stopAfterProductionFailure = true
                     let reason = error.localizedDescription
+                    if let coordinator {
+                        await coordinator.retainFailedSoakDiagnostics(runID: runID, reason: reason)
+                    }
+                    let cycleQueueFailures = await coordinator?.failedSoakQueueJobCount(runID: runID)
+                    if let cycleQueueFailures {
+                        queueFailureCount = cycleQueueFailures
+                        coverage["Queue failures"] = cycleQueueFailures == 0
+                            ? "0 (session failed outside the finalization queue)"
+                            : "FAIL (\(cycleQueueFailures) failed transaction-bound job(s))"
+                        coverage["Production job queue"] = cycleQueueFailures == 0
+                            ? "NOT TESTED (no queue job failure was observed)"
+                            : "FAIL (\(cycleQueueFailures) failed transaction-bound job(s))"
+                    }
                     coverage["Production session"] = "FAIL (cycle \(cycle): \(reason))"
                     coverage["Session persistence"] = "FAIL (production cycle did not complete)"
-                    coverage["Rendering"] = "FAIL (production cycle did not complete)"
-                    coverage["Production job queue"] = "FAIL (production cycle did not complete)"
+                    coverage["Rendering"] = reason.localizedCaseInsensitiveContains("render")
+                        ? "FAIL (\(reason))"
+                        : "NOT TESTED (production cycle did not reach a verified strip render)"
                     if config.testCloudUpload { coverage["Cloud upload"] = "FAIL (production cycle did not verify upload)" }
-                    if scheduledPrint { coverage["Physical printing"] = "FAIL (scheduled print cycle did not complete)" }
+                    if config.testCloudUpload { coverage["Cloud QR route"] = "FAIL (production QR route was not verified)" }
+                    if scheduledPrint {
+                        coverage["Physical printing"] = reason.localizedCaseInsensitiveContains("unknown")
+                            ? "WARNING (print side effect is unknown; operator verification required; no automatic retry)"
+                            : "FAIL (scheduled print cycle did not complete)"
+                    }
                 }
             }
 
@@ -226,6 +276,7 @@ actor BoothSoakTestRunner {
                 coverage["Session persistence"] = "PASS (production manifest and output workspace)"
                 coverage["Rendering"] = "PASS (production strip render)"
                 coverage["Production job queue"] = "PASS (claimed and executed transaction-bound jobs)"
+                coverage["Queue failures"] = "0 (all required and selected optional jobs succeeded)"
                 coverage["Local guest delivery"] = if cycleResult.localDeliveryVerified {
                     "PASS (downloaded production strip verified)"
                 } else if cycleResult.cloudUploadVerified,
@@ -236,12 +287,29 @@ actor BoothSoakTestRunner {
                 } else {
                     "NOT TESTED"
                 }
-                coverage["Guest delivery"] = cycleResult.localDeliveryVerified || cycleResult.cloudUploadVerified
+                coverage["Guest delivery"] = cycleResult.localDeliveryVerified
+                    || (cycleResult.cloudUploadVerified && cycleResult.cloudQRRouteVerified)
                     ? "PASS (configured production delivery path verified)"
-                    : "NOT TESTED"
+                    : (config.testCloudUpload ? "FAIL (the production QR route was not verified)" : "NOT TESTED")
                 coverage["Cloud upload"] = config.testCloudUpload
                     ? (cycleResult.cloudUploadVerified ? "PASS (production cloud job succeeded)" : "FAIL (cloud upload was configured but not verified)")
                     : "NOT TESTED"
+                coverage["Cloud QR route"] = config.testCloudUpload
+                    ? (cycleResult.cloudQRRouteVerified
+                        ? "PASS (production QR resolver matched the run-scoped URL and its strip returned HTTP 200)"
+                        : "FAIL (production QR route did not match the verified cloud route)")
+                    : "NOT TESTED"
+                let remoteCleanupWarnings = cycleResult.cleanupWarnings.filter { $0.hasPrefix("Remote cloud cleanup") }
+                coverage["Cloud cleanup"] = config.testCloudUpload
+                    ? (remoteCleanupWarnings.isEmpty
+                        ? "PASS (run-scoped public alias was removed after verification)"
+                        : "WARNING (remote cleanup needs retry: \(remoteCleanupWarnings.joined(separator: " "))) ")
+                    : "NOT TESTED"
+                coverage["Soak cleanup"] = cycleResult.cleanupWarnings.isEmpty
+                    ? (config.autoCleanupWorkingFiles
+                        ? "PASS (test routes and configured artifacts were removed)"
+                        : "PASS (run-scoped customer routes were depublished; diagnostic artifacts were retained by configuration)")
+                    : "WARNING (\(cycleResult.cleanupWarnings.joined(separator: " ")))"
                 if scheduledPrint {
                     coverage["Physical printing"] = cycleResult.physicalPrintVerified
                         ? "PASS (real print job succeeded in cycle \(cycle))"
@@ -254,6 +322,11 @@ actor BoothSoakTestRunner {
                 coverage["Gallery update"] = cycleResult.galleryUpdateVerified
                     ? "PASS (production gallery job succeeded)"
                     : "NOT TESTED (gallery is disabled for this event)"
+                coverage["Gallery isolation"] = cycleResult.galleryUpdateVerified
+                    ? (cycleResult.galleryIsolationVerified
+                        ? "PASS (soak entry persisted but is excluded from production gallery routes)"
+                        : "FAIL (soak gallery entry was missing or production-visible)")
+                    : "NOT TESTED (gallery job did not run)"
                 coverage["iPad hardware"] = "NOT TESTED (display readiness and workflow messages do not validate every iPad model)"
             }
 
@@ -274,6 +347,9 @@ actor BoothSoakTestRunner {
                 cycleIndex: cycle,
                 durationSeconds: Date().timeIntervalSince(cycleStart),
                 captureLatencies: captureLatencies,
+                captureAttemptCount: captureAttemptCount > 0 ? captureAttemptCount : nil,
+                captureFailureCount: captureAttemptCount > 0 ? captureFailureCount : nil,
+                cameraRecoveryCount: captureAttemptCount > 0 ? cameraRecoveryCount : nil,
                 renderLatency: renderLatency,
                 queueDrainSeconds: queueDrainSeconds,
                 memoryFootprintBytes: Self.currentResidentMemoryBytes(),
@@ -293,7 +369,21 @@ actor BoothSoakTestRunner {
         }
 
         if config.mode == .productionPipeline, let coordinator {
-            await coordinator.endAutomatedSoakRun(runID: runID)
+            let cleanupWarnings = await coordinator.endAutomatedSoakRun(runID: runID)
+            if !cleanupWarnings.isEmpty {
+                coverage["Soak cleanup"] = "WARNING (\(cleanupWarnings.joined(separator: " ")))"
+                let remoteWarnings = cleanupWarnings.filter { $0.hasPrefix("Remote cloud cleanup") }
+                if !remoteWarnings.isEmpty {
+                    coverage["Cloud cleanup"] = "WARNING (\(remoteWarnings.joined(separator: " ")))"
+                }
+            } else if coverage["Soak cleanup"] == "NOT TESTED" {
+                let diagnosticsRetained = metrics.count < config.targetCycles || metrics.contains { !$0.errors.isEmpty }
+                coverage["Soak cleanup"] = diagnosticsRetained
+                    ? "WARNING (run-scoped routes were depublished; failed or incomplete session artifacts were retained for diagnostics)"
+                    : (config.autoCleanupWorkingFiles
+                        ? "PASS (test routes and configured artifacts were removed)"
+                        : "PASS (run-scoped customer routes were depublished; diagnostic artifacts were retained by configuration)")
+            }
             activeProductionCoordinator = nil
             activeProductionRunID = nil
         }
@@ -303,6 +393,40 @@ actor BoothSoakTestRunner {
         }
         coverage["Camera reconnects"] = cameraReconnectCount.map { "OBSERVED (\($0) camera reconnect(s) during this run)" }
             ?? "NOT TESTED"
+        let transportReconnectCount: Int?
+        if let coordinator, let baselineTransportReconnectCount {
+            transportReconnectCount = max(
+                0,
+                await coordinator.soakTransportReconnectCount() - baselineTransportReconnectCount
+            )
+        } else {
+            transportReconnectCount = nil
+        }
+        coverage["iPad transport reconnects"] = transportReconnectCount.map {
+            "OBSERVED (\($0) authenticated transport reconnect(s) during this run)"
+        } ?? "NOT TESTED"
+
+        var environmentSnapshot = [
+            "App version": Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "NOT AVAILABLE",
+            "App build": Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "NOT AVAILABLE",
+            "Git SHA": Bundle.main.object(forInfoDictionaryKey: "GitSHA") as? String ?? "NOT AVAILABLE",
+            "macOS": ProcessInfo.processInfo.operatingSystemVersionString,
+            "Mac model": Self.hardwareModel()
+        ]
+        if let coordinator {
+            let boothSnapshot = await MainActor.run { coordinator.soakEnvironmentSnapshot() }
+            environmentSnapshot.merge(boothSnapshot) { _, new in new }
+        }
+        let configurationSnapshot = [
+            "Mode": config.mode.rawValue,
+            "Target sessions": String(config.targetCycles),
+            "Photos per session": String(config.photosPerSession),
+            "Delay between sessions (seconds)": String(config.delayBetweenCyclesSeconds),
+            "Physical print enabled": String(config.enablePhysicalPrint),
+            "Print every N sessions": String(config.physicalPrintEveryCycles),
+            "Cloud test upload enabled": String(config.testCloudUpload),
+            "Automatic cleanup enabled": String(config.autoCleanupWorkingFiles)
+        ]
 
         let requestedOutcome: BoothSoakTestOutcome? = if metrics.count < config.targetCycles {
             if isCancelled { .cancelled }
@@ -321,11 +445,18 @@ actor BoothSoakTestRunner {
             reconnectCount: cameraReconnectCount,
             invariantViolations: invariantViolations,
             requestedOutcome: requestedOutcome,
-            subsystemCoverage: coverage
+            subsystemCoverage: coverage,
+            runID: runID,
+            transportReconnectCount: transportReconnectCount,
+            queueFailureCount: queueFailureCount,
+            environmentSnapshot: environmentSnapshot,
+            configurationSnapshot: configurationSnapshot
         )
 
         switch report.outcome {
         case .passed:
+            await progressHandler(.completed(report: report))
+        case .completedWithWarnings:
             await progressHandler(.completed(report: report))
         case .failed:
             await progressHandler(.failed(error: report.summaryVerdict, partialReport: report))
@@ -341,6 +472,7 @@ actor BoothSoakTestRunner {
         cycle: Int,
         config: BoothSoakTestConfig,
         scratchDirectory: URL,
+        runID: String,
         progressHandler: @Sendable (BoothSoakTestState) async -> Void
     ) async throws -> (renderLatency: Double, queueDrainSeconds: Double) {
         var images: [Int: CGImage] = [:]
@@ -349,7 +481,8 @@ actor BoothSoakTestRunner {
             await progressHandler(.running(
                 cycle: cycle,
                 total: config.targetCycles,
-                phase: "Generating synthetic benchmark image \(photoIndex + 1)/\(config.photosPerSession)…"
+                phase: "Generating synthetic benchmark image \(photoIndex + 1)/\(config.photosPerSession)…",
+                runID: runID
             ))
             guard let image = Self.syntheticImage(cycle: cycle, photoIndex: photoIndex) else {
                 throw BoothSoakTestError.invalidConfiguration("Could not allocate a synthetic benchmark image.")
@@ -370,7 +503,7 @@ actor BoothSoakTestRunner {
         try compositor.savePNG(stripImage, to: stripURL)
         let renderLatency = Date().timeIntervalSince(renderStartedAt)
 
-        await progressHandler(.running(cycle: cycle, total: config.targetCycles, phase: "Exercising isolated benchmark queue…"))
+        await progressHandler(.running(cycle: cycle, total: config.targetCycles, phase: "Exercising isolated benchmark queue…", runID: runID))
         let queueStartedAt = Date()
         let sessionID = "benchmark-\(UUID().uuidString)"
         let transactionID = UUID().uuidString
@@ -413,5 +546,17 @@ actor BoothSoakTestRunner {
         )
         context.fill(CGRect(x: 0, y: 0, width: width, height: height))
         return context.makeImage()
+    }
+
+    private static func hardwareModel() -> String {
+        var size = 0
+        guard sysctlbyname("hw.model", nil, &size, nil, 0) == 0, size > 1 else {
+            return "NOT AVAILABLE"
+        }
+        var model = [CChar](repeating: 0, count: size)
+        guard sysctlbyname("hw.model", &model, &size, nil, 0) == 0 else {
+            return "NOT AVAILABLE"
+        }
+        return String(cString: model)
     }
 }

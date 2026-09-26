@@ -36,6 +36,167 @@ struct SessionJobQueueTests {
         try await waitUntil { await executor.snapshot().cloudUploadCompleted }
     }
 
+    @Test("cloud QR publication completes before the automatic print starts")
+    @MainActor
+    func cloudPublicationPrecedesAutomaticPrint() async throws {
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let executor = BlockingCloudJobExecutor()
+        let queue = SessionJobQueue(
+            store: JobQueueStore(fileURL: directory.appendingPathComponent("jobs.json")),
+            executor: executor
+        )
+        var manifest = makeManifest()
+        manifest.eventConfig.qrCodeElements = [
+            SharedQRCodeElement(id: "qr-1", normalizedRect: CGRect(x: 0.1, y: 0.1, width: 0.2, height: 0.2))
+        ]
+        manifest.cloudDelivery = SessionCloudDeliverySnapshot(
+            publicBaseURL: "https://photos.example",
+            remoteBasePath: "/gallery",
+            sshHost: "photos.example"
+        )
+        manifest.deliveryIntent?.cloudUploadEnabled = true
+        manifest.deliveryIntent?.automaticPrintEnabled = true
+
+        queue.start()
+        try await queue.enqueueFinalizationJobs(for: manifest)
+        try await waitUntil("cloud upload start") { await executor.snapshot().cloudUploadStarted }
+
+        #expect(await executor.snapshot().kinds.contains(.autoPrint) == false)
+        #expect(await queue.job(sessionID: manifest.id, status: .pending, kind: .autoPrint) != nil)
+
+        await executor.releaseCloudUpload()
+        try await waitUntil("cloud publication and print") {
+            let cloudJob = await queue.job(sessionID: manifest.id, status: .succeeded, kind: .cloudUpload)
+            let printJob = await queue.job(sessionID: manifest.id, status: .succeeded, kind: .autoPrint)
+            return cloudJob != nil && printJob != nil
+        }
+        let kinds = await executor.snapshot().kinds
+        guard let cloudIndex = kinds.firstIndex(of: .cloudUpload),
+              let printIndex = kinds.firstIndex(of: .autoPrint) else {
+            Issue.record("Expected cloud upload and automatic print to execute")
+            return
+        }
+        #expect(cloudIndex < printIndex)
+    }
+
+    @Test("failed cloud publication withholds and cancels the automatic print")
+    @MainActor
+    func failedCloudPublicationWithholdsAutomaticPrint() async throws {
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let executor = TestJobExecutor()
+        executor.fail(.cloudUpload, with: .permanent("Cloud route verification failed"))
+        let queue = SessionJobQueue(
+            store: JobQueueStore(fileURL: directory.appendingPathComponent("jobs.json")),
+            executor: executor
+        )
+        var manifest = makeManifest()
+        manifest.eventConfig.qrCodeElements = [
+            SharedQRCodeElement(id: "qr-1", normalizedRect: CGRect(x: 0.1, y: 0.1, width: 0.2, height: 0.2))
+        ]
+        manifest.cloudDelivery = SessionCloudDeliverySnapshot(
+            publicBaseURL: "https://photos.example",
+            remoteBasePath: "/gallery",
+            sshHost: "photos.example"
+        )
+        manifest.deliveryIntent?.cloudUploadEnabled = true
+        manifest.deliveryIntent?.automaticPrintEnabled = true
+
+        queue.start()
+        try await queue.enqueueFinalizationJobs(for: manifest)
+        try await waitUntil("print withheld") {
+            await queue.job(sessionID: manifest.id, status: .cancelled, kind: .autoPrint) != nil
+        }
+
+        #expect(await executor.snapshot().kinds.contains(.autoPrint) == false)
+        #expect(await queue.job(sessionID: manifest.id, status: .failed, kind: .cloudUpload)?.lastError == "Cloud route verification failed")
+        #expect(await queue.job(sessionID: manifest.id, status: .cancelled, kind: .autoPrint)?.lastError == SessionJobDependencyPolicy.printWithheldUntilCloudPublishedError)
+    }
+
+    @Test("a recovered cloud route releases its withheld first print")
+    @MainActor
+    func recoveredCloudPublicationReleasesPrint() async throws {
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let executor = FailFirstCloudUploadJobExecutor()
+        let queue = SessionJobQueue(
+            store: JobQueueStore(fileURL: directory.appendingPathComponent("jobs.json")),
+            executor: executor
+        )
+        var manifest = makeManifest()
+        manifest.eventConfig.qrCodeElements = [
+            SharedQRCodeElement(id: "qr-1", normalizedRect: CGRect(x: 0.1, y: 0.1, width: 0.2, height: 0.2))
+        ]
+        manifest.cloudDelivery = SessionCloudDeliverySnapshot(
+            publicBaseURL: "https://photos.example",
+            remoteBasePath: "/gallery",
+            sshHost: "photos.example"
+        )
+        manifest.deliveryIntent?.cloudUploadEnabled = true
+        manifest.deliveryIntent?.automaticPrintEnabled = true
+
+        queue.start()
+        try await queue.enqueueFinalizationJobs(for: manifest)
+        try await waitUntil("cloud failure with print withheld") {
+            await queue.job(sessionID: manifest.id, status: .cancelled, kind: .autoPrint) != nil
+        }
+        #expect(try await queue.forceRequeueCloudUpload(
+            sessionID: manifest.id,
+            finalizationTransactionID: manifest.finalizationTransactionID
+        ) == .queued)
+        try await waitUntil("recovered cloud route and first print") {
+            let cloud = await queue.job(sessionID: manifest.id, status: .succeeded, kind: .cloudUpload)
+            let print = await queue.job(sessionID: manifest.id, status: .succeeded, kind: .autoPrint)
+            return cloud != nil && print != nil
+        }
+        #expect(await executor.snapshot().printAttempts == 1)
+    }
+
+    @Test("cloud upload does not delay a print when the strip has no QR code")
+    @MainActor
+    func cloudUploadDoesNotDelayPrintWithoutQR() async throws {
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let executor = BlockingCloudJobExecutor()
+        let queue = SessionJobQueue(
+            store: JobQueueStore(fileURL: directory.appendingPathComponent("jobs.json")),
+            executor: executor
+        )
+        var manifest = makeManifest()
+        manifest.cloudDelivery = SessionCloudDeliverySnapshot(
+            publicBaseURL: "https://photos.example",
+            remoteBasePath: "/gallery",
+            sshHost: "photos.example"
+        )
+        manifest.deliveryIntent?.cloudUploadEnabled = true
+        manifest.deliveryIntent?.automaticPrintEnabled = true
+
+        queue.start()
+        try await queue.enqueueFinalizationJobs(for: manifest)
+        try await waitUntil("cloud upload and print start") {
+            let cloud = await executor.snapshot().cloudUploadStarted
+            let print = await queue.job(sessionID: manifest.id, status: .succeeded, kind: .autoPrint)
+            return cloud && print != nil
+        }
+        #expect(await queue.job(sessionID: manifest.id, status: .running, kind: .cloudUpload) != nil)
+        #expect(await executor.snapshot().kinds.contains(.autoPrint))
+        await executor.releaseCloudUpload()
+    }
+
+    @Test("cloud QR print stays blocked when its required upload job is missing")
+    func cloudPrintRequiresAnUploadJob() {
+        var strip = makeJob(sessionID: "session", kind: .renderStrip, transactionID: "tx")
+        strip.status = .succeeded
+        var print = makeJob(sessionID: "session", kind: .autoPrint, transactionID: "tx")
+        print.requiresCloudPublicationBeforePrint = true
+
+        #expect(!SessionJobDependencyPolicy.prerequisitesSatisfied(
+            for: print,
+            in: [strip, print]
+        ))
+    }
+
     @Test("runs required jobs in priority order and one at a time")
     @MainActor
     func runsRequiredJobsInOrder() async throws {
@@ -253,6 +414,32 @@ struct SessionJobQueueTests {
         try await waitUntil("hung print exit") {
             await queue.job(sessionID: manifest.id, status: .cancelled, kind: .autoPrint) != nil
         }
+    }
+
+    @Test("quiescence wait resumes after the executor result is persisted")
+    @MainActor
+    func quiescenceWaitIncludesDurableJobCompletion() async throws {
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let executor = BlockingCloudJobExecutor()
+        let queue = SessionJobQueue(
+            store: JobQueueStore(fileURL: directory.appendingPathComponent("jobs.json")),
+            executor: executor
+        )
+        let manifest = makeManifest()
+        queue.start()
+        try await queue.enqueueFinalizationJobs(for: manifest)
+        try await queue.enqueueCloudUpload(for: manifest)
+        try await waitUntil("cloud upload start") { await executor.snapshot().cloudUploadStarted }
+
+        let waitTask = Task { @MainActor in
+            await queue.waitUntilQuiescent(sessionID: manifest.id)
+        }
+        await Task.yield()
+        await executor.releaseCloudUpload()
+
+        #expect(await waitTask.value)
+        #expect(await queue.job(sessionID: manifest.id, status: .succeeded, kind: .cloudUpload) != nil)
     }
 
     @Test("retryable waiting jobs retain their automatic retry schedule")
@@ -590,6 +777,32 @@ private final class FailingPrintJobExecutor: SessionJobExecuting {
         if shouldFail {
             shouldFail = false
             throw JobExecutionError.permanent("Printer offline")
+        }
+    }
+
+    func snapshot() -> Snapshot { snapshotValue }
+}
+
+@MainActor
+private final class FailFirstCloudUploadJobExecutor: SessionJobExecuting {
+    struct Snapshot: Sendable {
+        var cloudAttempts = 0
+        var printAttempts = 0
+    }
+
+    private var snapshotValue = Snapshot()
+
+    func execute(_ job: SessionJob) async throws {
+        switch job.kind {
+        case .cloudUpload:
+            snapshotValue.cloudAttempts += 1
+            if snapshotValue.cloudAttempts == 1 {
+                throw JobExecutionError.permanent("Cloud route verification failed")
+            }
+        case .autoPrint:
+            snapshotValue.printAttempts += 1
+        default:
+            break
         }
     }
 

@@ -159,6 +159,7 @@ final class SessionJobExecutor: SessionJobExecuting {
     }
 
     private func registerDownload(_ manifest: SessionManifest) async throws {
+        try Task.checkCancellation()
         let directory = sessionDirectory(for: manifest)
         let strip = directory.appendingPathComponent("strip.png")
         guard FileManager.default.fileExists(atPath: strip.path) else {
@@ -168,8 +169,9 @@ final class SessionJobExecutor: SessionJobExecuting {
         guard case .ready = status.state else {
             throw JobExecutionError.retryable("Local download server is not ready.")
         }
-        await server.registerToken(
-            manifest.downloadToken,
+        try Task.checkCancellation()
+        try await registerGuestRoute(
+            for: manifest,
             registration: SessionRouteRegistration(
                 sessionDirectory: directory,
                 language: manifest.eventConfig.customerLanguage,
@@ -287,8 +289,8 @@ final class SessionJobExecutor: SessionJobExecuting {
             } catch {
                 NSLog("[Jobs] Gallery GIF refresh failed: %@", error.localizedDescription)
             }
-            await server.registerToken(
-                updated.downloadToken,
+            try await registerGuestRoute(
+                for: updated,
                 registration: SessionRouteRegistration(
                     sessionDirectory: directory,
                     language: updated.eventConfig.customerLanguage,
@@ -351,12 +353,25 @@ final class SessionJobExecutor: SessionJobExecuting {
             port: server.port
         ).endpoint?.baseURL ?? ""
         return try SessionQRCodePayloadResolver.resolve(
-            token: manifest.downloadToken,
+            manifest: manifest,
             localBaseURL: localBaseURL,
             publicBaseURL: manifest.cloudDelivery?.publicBaseURL,
             cloudUploadEnabled: cloudUploadEnabled,
             allowTrustedLocalHTTP: allowTrustedLocalHTTP
         )
+    }
+
+    private func registerGuestRoute(
+        for manifest: SessionManifest,
+        registration: SessionRouteRegistration
+    ) async throws {
+        try Task.checkCancellation()
+        let route = try CloudGuestRoute.resolve(for: manifest)
+        if manifest.origin == .soakTest {
+            await server.registerGuestRoute(path: route.relativePath, registration: registration)
+        } else {
+            await server.registerToken(manifest.downloadToken, registration: registration)
+        }
     }
 
     nonisolated private static func savePNGAtomically(_ image: CGImage, compositor: Compositor, to url: URL) throws {

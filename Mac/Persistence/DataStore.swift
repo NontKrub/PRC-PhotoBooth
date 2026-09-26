@@ -96,8 +96,19 @@ final class DataStore {
 
     // MARK: - Sessions
 
-    func startSession(for event: BoothEvent) -> BoothSession {
-        let session = BoothSession(eventID: event.id, photoCount: event.photoCount)
+    func startSession(
+        for event: BoothEvent,
+        origin: SessionOrigin = .normal,
+        soakRunID: String? = nil,
+        soakCycleIndex: Int? = nil
+    ) -> BoothSession {
+        let session = BoothSession(
+            eventID: event.id,
+            photoCount: event.photoCount,
+            origin: origin,
+            soakRunID: soakRunID,
+            soakCycleIndex: soakCycleIndex
+        )
         event.sessions.append(session)
         context.insert(session)
         save()
@@ -118,6 +129,35 @@ final class DataStore {
     func deleteSession(_ session: BoothSession) {
         context.delete(session)
         save()
+    }
+
+    func deleteSessionRecordIfPresent(sessionID: String) throws {
+        guard persistentStorageAvailable else {
+            throw DataStorePersistenceError.unavailable(
+                lastPersistenceError ?? "Persistent SwiftData storage is unavailable."
+            )
+        }
+        if lastPersistenceError != nil {
+            do {
+                try context.save()
+                lastPersistenceError = nil
+            } catch {
+                record(error)
+                throw error
+            }
+        }
+        var descriptor = FetchDescriptor<BoothSession>(predicate: #Predicate { $0.id == sessionID })
+        descriptor.fetchLimit = 1
+        do {
+            if let session = try context.fetch(descriptor).first {
+                context.delete(session)
+                try context.save()
+                lastPersistenceError = nil
+            }
+        } catch {
+            record(error)
+            throw error
+        }
     }
 
     @discardableResult
@@ -193,6 +233,9 @@ final class DataStore {
         session.startedAt = manifest.startedAt
         session.photoCount = manifest.eventConfig.photoCount
         session.downloadToken = manifest.downloadToken
+        session.origin = manifest.origin ?? .normal
+        session.soakRunID = manifest.origin == .soakTest ? manifest.soakRunID : nil
+        session.soakCycleIndex = manifest.origin == .soakTest ? manifest.soakCycleIndex : nil
         for shot in manifest.shots {
             _ = upsertShot(
                 session: session,
@@ -234,4 +277,14 @@ final class DataStore {
         NSLog("[Persistence] SwiftData operation failed: %@", error.localizedDescription)
     }
 
+}
+
+private enum DataStorePersistenceError: LocalizedError {
+    case unavailable(String)
+
+    var errorDescription: String? {
+        switch self {
+        case .unavailable(let message): return message
+        }
+    }
 }

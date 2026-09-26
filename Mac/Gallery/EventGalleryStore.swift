@@ -81,7 +81,10 @@ actor EventGalleryStore {
             filterID: manifest.eventConfig.selectedFilterID,
             customerLanguage: manifest.eventConfig.customerLanguage,
             approvalStatus: status,
-            updatedAt: Date()
+            updatedAt: Date(),
+            originRawValue: (manifest.origin ?? .normal).rawValue,
+            soakRunID: manifest.origin == .soakTest ? manifest.soakRunID : nil,
+            soakCycleIndex: manifest.origin == .soakTest ? manifest.soakCycleIndex : nil
         )
         index.sessions.removeAll { $0.sessionID == manifest.id }
         index.sessions.append(entry)

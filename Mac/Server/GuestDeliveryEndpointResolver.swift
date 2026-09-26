@@ -138,9 +138,18 @@ public enum GuestDeliveryEndpointResolver {
         port: UInt16 = 8585
     ) -> GuestDeliveryResolution {
         let valid = interfaces.filter(isGuestRoutable(interface:))
-        let conflictingNames = Array(Set(valid.compactMap {
+        let allConflictingNames = Array(Set(valid.compactMap {
             $0.interfaceType == .conflicting ? $0.name : nil
         })).sorted()
+        // A named selection is independent of conflicts on other interfaces.
+        // Category and automatic selections keep all conflicts fail-closed:
+        // a conflicting interface could still belong to that category.
+        let conflictingNames: [String]
+        if case .interface(let selectedName) = selection {
+            conflictingNames = allConflictingNames.filter { $0 == selectedName }
+        } else {
+            conflictingNames = allConflictingNames
+        }
         guard conflictingNames.isEmpty else {
             return .ambiguous(interfaceNames: conflictingNames)
         }

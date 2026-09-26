@@ -47,6 +47,12 @@ enum LocalDownloadRoute: Sendable, Equatable {
 }
 
 struct LocalDownloadRouter: Sendable {
+    private struct SessionRouteMatch {
+        var routePath: String
+        var registration: SessionRouteRegistration
+        var resource: String?
+    }
+
     private let sessionRoutes: [String: SessionRouteRegistration]
     private let galleryRoutes: [String: EventGalleryRouteRegistration]
     private let guestRouteExposure: LocalGuestRouteExposure
@@ -66,12 +72,13 @@ struct LocalDownloadRouter: Sendable {
         galleryRoutes: [String: EventGalleryRouteRegistration],
         guestRouteExposure: LocalGuestRouteExposure = .disabled
     ) {
-        self.sessionRoutes = sessionRoutes.mapValues {
-            SessionRouteRegistration(
-                sessionDirectory: $0.sessionDirectory.standardizedFileURL,
-                language: $0.language,
-                eventGalleryPath: $0.eventGalleryPath,
-                gifState: $0.gifState
+        self.sessionRoutes = sessionRoutes.reduce(into: [:]) { routes, entry in
+            guard let route = Self.canonicalSessionRouteKey(entry.key) else { return }
+            routes[route] = SessionRouteRegistration(
+                sessionDirectory: entry.value.sessionDirectory.standardizedFileURL,
+                language: entry.value.language,
+                eventGalleryPath: entry.value.eventGalleryPath,
+                gifState: entry.value.gifState
             )
         }
         self.galleryRoutes = galleryRoutes
@@ -79,7 +86,7 @@ struct LocalDownloadRouter: Sendable {
     }
 
     func response(for requestPath: String) -> LocalDownloadResponse {
-        let path = Self.decodePath(requestPath)
+        let path = Self.normalizedPath(Self.decodePath(requestPath))
         guard !path.contains("\0"),
               !path.split(separator: "/").contains(".."),
               path.hasPrefix("/") else {
@@ -105,7 +112,7 @@ struct LocalDownloadRouter: Sendable {
     }
 
     func route(for requestPath: String) -> LocalDownloadRoute {
-        let path = Self.decodePath(requestPath)
+        let path = Self.normalizedPath(Self.decodePath(requestPath))
         guard !path.contains("\0"),
               !path.split(separator: "/").contains(".."),
               path.hasPrefix("/") else {
@@ -119,46 +126,44 @@ struct LocalDownloadRouter: Sendable {
     }
 
     private func sessionResponse(for path: String) -> LocalDownloadResponse {
-        let components = path.dropFirst().split(separator: "/", omittingEmptySubsequences: true).map(String.init)
-        guard (components.count == 2 || components.count == 3),
-              components[0] == "s",
-              let registration = sessionRoutes[components[1]] else {
+        guard let match = sessionRouteMatch(for: path) else {
             return notFound()
         }
 
-        if components.count == 2 {
-            return page(token: components[1], registration: registration)
+        if match.resource == nil {
+            return page(routePath: match.routePath, registration: match.registration)
         }
-        guard components[2] == "strip.png" || components[2] == "booth.gif" else { return notFound() }
+        guard let resource = match.resource,
+              resource == "strip.png" || resource == "booth.gif" else { return notFound() }
+        let registration = match.registration
         let directory = registration.sessionDirectory.resolvingSymlinksInPath().standardizedFileURL
-        let fileURL = registration.sessionDirectory.appendingPathComponent(components[2])
+        let fileURL = registration.sessionDirectory.appendingPathComponent(resource)
             .resolvingSymlinksInPath()
             .standardizedFileURL
         guard fileURL.path.hasPrefix(directory.path + "/"),
-              components[2] != "booth.gif" || registration.gifState == .ready,
+              resource != "booth.gif" || registration.gifState == .ready,
               let body = try? Data(contentsOf: fileURL) else {
             return notFound()
         }
         return LocalDownloadResponse(
             statusCode: 200,
             reason: "OK",
-            contentType: components[2] == "strip.png" ? "image/png" : "image/gif",
+            contentType: resource == "strip.png" ? "image/png" : "image/gif",
             headers: ["Cache-Control": "no-store"],
             body: body
         )
     }
 
     private func sessionFileResponse(for path: String) -> LocalDownloadFileResponse? {
-        let components = path.dropFirst().split(separator: "/", omittingEmptySubsequences: true).map(String.init)
-        guard components.count == 3,
-              components[0] == "s",
-              components[2] == "strip.png" || components[2] == "booth.gif",
-              let registration = sessionRoutes[components[1]] else {
+        guard let match = sessionRouteMatch(for: path),
+              let resource = match.resource,
+              resource == "strip.png" || resource == "booth.gif" else {
             return nil
         }
-        guard components[2] != "booth.gif" || registration.gifState == .ready else { return nil }
+        let registration = match.registration
+        guard resource != "booth.gif" || registration.gifState == .ready else { return nil }
         let directory = registration.sessionDirectory.resolvingSymlinksInPath().standardizedFileURL
-        let fileURL = registration.sessionDirectory.appendingPathComponent(components[2])
+        let fileURL = registration.sessionDirectory.appendingPathComponent(resource)
             .resolvingSymlinksInPath()
             .standardizedFileURL
         guard fileURL.path.hasPrefix(directory.path + "/"),
@@ -170,11 +175,32 @@ struct LocalDownloadRouter: Sendable {
         return LocalDownloadFileResponse(
             statusCode: 200,
             reason: "OK",
-            contentType: components[2] == "strip.png" ? "image/png" : "image/gif",
+            contentType: resource == "strip.png" ? "image/png" : "image/gif",
             headers: ["Cache-Control": "no-store"],
             fileURL: fileURL,
             contentLength: size.int64Value
         )
+    }
+
+    private func sessionRouteMatch(for path: String) -> SessionRouteMatch? {
+        for routePath in sessionRoutes.keys.sorted(by: { $0.count > $1.count }) {
+            let suffix: String
+            if path == routePath {
+                suffix = ""
+            } else if path.hasPrefix(routePath + "/") {
+                suffix = String(path.dropFirst(routePath.count + 1))
+            } else {
+                continue
+            }
+            guard suffix.isEmpty || (!suffix.contains("/") && suffix != "." && suffix != ".."),
+                  let registration = sessionRoutes[routePath] else { continue }
+            return SessionRouteMatch(
+                routePath: routePath,
+                registration: registration,
+                resource: suffix.isEmpty ? nil : suffix
+            )
+        }
+        return nil
     }
 
     private func galleryResponse(for path: String) -> LocalDownloadResponse? {
@@ -202,7 +228,7 @@ struct LocalDownloadRouter: Sendable {
         )
     }
 
-    private func page(token: String, registration: SessionRouteRegistration) -> LocalDownloadResponse {
+    private func page(routePath: String, registration: SessionRouteRegistration) -> LocalDownloadResponse {
         let directory = registration.sessionDirectory
         let gifURL = directory.appendingPathComponent("booth.gif")
         let isThai = registration.language == .thai
@@ -223,7 +249,7 @@ struct LocalDownloadRouter: Sendable {
             gifButton = "<p id=\"gif-status\">\(isThai ? "กำลังเตรียม GIF…" : "Preparing GIF…")</p><meta http-equiv=\"refresh\" content=\"2\">"
         case .ready:
             gifButton = gifReady
-                ? #"<a class="btn secondary" href="/s/\#(token)/booth.gif" download="photobooth.gif">⬇ \#(gifLabel) · \#(gifSize ?? "")</a>\#(gifWarning)"#
+                ? #"<a class="btn secondary" href="\#(routePath)/booth.gif" download="photobooth.gif">⬇ \#(gifLabel) · \#(gifSize ?? "")</a>\#(gifWarning)"#
                 : "<p id=\"gif-status\">\(isThai ? "GIF ไม่พร้อมใช้งาน รูปภาพของคุณยังดาวน์โหลดได้" : "GIF unavailable. Your photo strip is still ready.")</p>"
         case .failed:
             gifButton = "<p id=\"gif-status\">\(isThai ? "GIF ไม่พร้อมใช้งาน รูปภาพของคุณยังดาวน์โหลดได้" : "GIF unavailable. Your photo strip is still ready.")</p>"
@@ -235,7 +261,7 @@ struct LocalDownloadRouter: Sendable {
         }()
         let title = isThai ? "รูปภาพของคุณ" : "Your photos"
         let stripLabel = isThai ? "ดาวน์โหลดโฟโต้สตริป" : "Download photo strip"
-        let escapedToken = token.htmlEscaped
+        let escapedRoutePath = routePath.htmlEscaped
         let html = """
         <!DOCTYPE html>
         <html lang="\(isThai ? "th" : "en")">
@@ -254,9 +280,9 @@ struct LocalDownloadRouter: Sendable {
         <body>
         <h1>✨ \(title.htmlEscaped)</h1>
         <p>\(isThai ? "ดาวน์โหลดความทรงจำของคุณ" : "Download your memories")</p>
-        <img src="/s/\(escapedToken)/strip.png" alt="\(title.htmlEscaped)">
+        <img src="\(escapedRoutePath)/strip.png" alt="\(title.htmlEscaped)">
         <br>
-        <a class="btn" href="/s/\(escapedToken)/strip.png" download="photobooth-strip.png">⬇ \(stripLabel)</a>
+        <a class="btn" href="\(escapedRoutePath)/strip.png" download="photobooth-strip.png">⬇ \(stripLabel)</a>
         \(gifButton)
         \(galleryButton)
         </body>
@@ -387,6 +413,36 @@ struct LocalDownloadRouter: Sendable {
             decoded = next
         }
         return decoded
+    }
+
+    private static func normalizedPath(_ path: String) -> String {
+        "/" + path.split(separator: "/", omittingEmptySubsequences: true).joined(separator: "/")
+    }
+
+    static func canonicalSessionRouteKey(_ key: String) -> String? {
+        let path = key.hasPrefix("/") ? normalizedPath(key) : "/s/\(key)"
+        let components = path.dropFirst().split(separator: "/", omittingEmptySubsequences: false).map(String.init)
+        guard components.first == "s",
+              (components.count == 2 || components.count == 4),
+              components.allSatisfy({ component in
+                  let allowed = CharacterSet(charactersIn: "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-")
+                  return !component.isEmpty
+                      && component != "."
+                      && component != ".."
+                      && component.unicodeScalars.allSatisfy { allowed.contains($0) }
+              }) else {
+            return nil
+        }
+        return "/" + components.joined(separator: "/")
+    }
+
+    static func canonicalSessionRouteKey(forRequestPath requestPath: String) -> String? {
+        let path = normalizedPath(decodePath(requestPath))
+        let components = path.dropFirst().split(separator: "/", omittingEmptySubsequences: true).map(String.init)
+        guard components.first == "s" else { return nil }
+        let routeComponentCount = components.count >= 4 && components[1] == "soak" ? 4 : 2
+        guard components.count >= routeComponentCount else { return nil }
+        return canonicalSessionRouteKey("/" + components.prefix(routeComponentCount).joined(separator: "/"))
     }
 
     private func isGuestRouteDisabled(_ path: String) -> Bool {

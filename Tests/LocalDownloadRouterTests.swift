@@ -64,6 +64,34 @@ struct LocalDownloadRouterTests {
         #expect(image.body == Data([1, 2, 3]))
     }
 
+    @Test("serves run-scoped soak routes without exposing the normal token route")
+    func servesRunScopedSoakRoute() throws {
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try Data([8, 9, 10]).write(to: directory.appendingPathComponent("strip.png"))
+        let route = "/s/soak/run-123/session-456"
+        let router = LocalDownloadRouter(
+            sessionRoutes: [
+                route: SessionRouteRegistration(
+                    sessionDirectory: directory,
+                    language: .english,
+                    eventGalleryPath: nil,
+                    gifState: .none
+                )
+            ],
+            galleryRoutes: [:],
+            guestRouteExposure: .trustedLocalHTTP
+        )
+
+        let page = router.response(for: route + "/")
+        let strip = router.response(for: route + "/strip.png")
+        #expect(page.statusCode == 200)
+        #expect(String(decoding: page.body, as: UTF8.self).contains(route + "/strip.png"))
+        #expect(strip.statusCode == 200)
+        #expect(strip.body == Data([8, 9, 10]))
+        #expect(router.response(for: "/s/session-456/strip.png").statusCode == 404)
+    }
+
     @Test("shows GIF only when file exists and returns 404 for unknown files")
     func handlesOptionalGIF() throws {
         let directory = try temporaryDirectory()
