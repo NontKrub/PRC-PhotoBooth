@@ -678,6 +678,13 @@ private func waitForSemaphore(
     semaphore.wait(timeout: .now() + timeout) == .success
 }
 
+private func waitForSemaphore(
+    _ semaphore: DispatchSemaphore,
+    until deadline: DispatchTime
+) -> Bool {
+    semaphore.wait(timeout: deadline) == .success
+}
+
 private final class NetworkTestConnectionBox: @unchecked Sendable {
     private let lock = NSLock()
     private var connections = [NWConnection]()
@@ -1427,7 +1434,7 @@ struct NetworkRouteTests {
         let acceptDeadline = DispatchTime.now() + .seconds(5)
         var acceptedConnectionCount = 0
         for _ in clients {
-            guard acceptedConnection.wait(timeout: acceptDeadline) == .success else { break }
+            guard waitForSemaphore(acceptedConnection, until: acceptDeadline) else { break }
             acceptedConnectionCount += 1
         }
         guard acceptedConnectionCount == 100 else {
