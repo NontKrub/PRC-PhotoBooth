@@ -123,17 +123,16 @@ public final class BoothSoakTestController {
 
         state = .preflight(message: "Starting soak test runner...")
 
+        let progressHandler: @Sendable (BoothSoakTestState) async -> Void = { [weak self] newState in
+            await self?.applyRunnerState(newState)
+        }
         runTask = Task { @MainActor in
             do {
                 let report = try await activeRunner.run(
                     config: testConfig,
                     captureService: captureService,
                     coordinator: coordinator,
-                    progressHandler: { [weak self] newState in
-                        await MainActor.run {
-                            self?.state = newState
-                        }
-                    }
+                    progressHandler: progressHandler
                 )
                 self.latestReport = report
                 switch report.outcome {
@@ -152,6 +151,10 @@ public final class BoothSoakTestController {
                 self.state = .failed(error: error.localizedDescription, partialReport: self.latestReport)
             }
         }
+    }
+
+    private func applyRunnerState(_ newState: BoothSoakTestState) {
+        state = newState
     }
 
     public func stopGracefully() {

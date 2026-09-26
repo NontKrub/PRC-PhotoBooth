@@ -430,6 +430,8 @@ public struct BoothPreAuthAdmissionLimiter: Sendable {
     }
 
     public mutating func purgeExpired(now: Date = Date()) {
+        let failureWindow = self.failureWindow
+        let recordExpiry = self.recordExpiry
         globalFailureTimestamps.removeAll { now.timeIntervalSince($0) > failureWindow }
         identityProbeGlobalFailureTimestamps.removeAll { now.timeIntervalSince($0) > failureWindow }
         if let cooldownUntil = identityProbeGlobalCooldownUntil, now >= cooldownUntil {

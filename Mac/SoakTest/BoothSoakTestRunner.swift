@@ -557,6 +557,7 @@ actor BoothSoakTestRunner {
         guard sysctlbyname("hw.model", &model, &size, nil, 0) == 0 else {
             return "NOT AVAILABLE"
         }
-        return String(cString: model)
+        let bytes = model.prefix { $0 != 0 }.map { UInt8(bitPattern: $0) }
+        return String(decoding: bytes, as: UTF8.self)
     }
 }

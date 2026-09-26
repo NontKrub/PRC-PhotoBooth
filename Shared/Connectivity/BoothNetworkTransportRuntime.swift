@@ -945,7 +945,7 @@ final class BoothNetworkTransportRuntime: @unchecked Sendable {
         }
         guard let secret = trustedSecrets[hello.deviceID] else {
             guard candidate.lane == .normal,
-                  let admission = candidate.admission else {
+                  candidate.admission != nil else {
                 rejectTrustedCandidateOnQueue(
                     candidate.connection,
                     generation: candidate.generation,
@@ -1067,7 +1067,7 @@ final class BoothNetworkTransportRuntime: @unchecked Sendable {
     private func finishCoreAuthenticationIfReadyOnQueue(_ candidate: TrustedHandshake) {
         guard candidate.peerProofVerified,
               candidate.peerProofSent,
-              let peer = candidate.peerHello,
+              candidate.peerHello != nil,
               let identity = localIdentity else { return }
         candidate.timeout?.cancel()
         candidate.timeout = nil
