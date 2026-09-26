@@ -441,9 +441,9 @@ struct BoothPreAuthPolicyTests {
     @Test("anonymous probe cooldown does not block a known peer proving its identity")
     func identityProbeGlobalQuotaUsesBoundedCooldown() {
         var limiter = BoothPreAuthAdmissionLimiter(
+            reservedFailureThreshold: 10,
             identityProbeGlobalFailureThreshold: 3,
-            identityProbeGlobalCooldown: 4,
-            reservedFailureThreshold: 10
+            identityProbeGlobalCooldown: 4
         )
         let trustedPeerIDs: Set<String> = ["paired-ipad-a", "paired-ipad-b"]
         let now = Date()

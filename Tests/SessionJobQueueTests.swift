@@ -57,6 +57,7 @@ struct SessionJobQueueTests {
         )
         manifest.deliveryIntent?.cloudUploadEnabled = true
         manifest.deliveryIntent?.automaticPrintEnabled = true
+        let sessionID = manifest.id
 
         queue.start()
         try await queue.enqueueFinalizationJobs(for: manifest)
@@ -67,8 +68,8 @@ struct SessionJobQueueTests {
 
         await executor.releaseCloudUpload()
         try await waitUntil("cloud publication and print") {
-            let cloudJob = await queue.job(sessionID: manifest.id, status: .succeeded, kind: .cloudUpload)
-            let printJob = await queue.job(sessionID: manifest.id, status: .succeeded, kind: .autoPrint)
+            let cloudJob = await queue.job(sessionID: sessionID, status: .succeeded, kind: .cloudUpload)
+            let printJob = await queue.job(sessionID: sessionID, status: .succeeded, kind: .autoPrint)
             return cloudJob != nil && printJob != nil
         }
         let kinds = await executor.snapshot().kinds
@@ -102,11 +103,12 @@ struct SessionJobQueueTests {
         )
         manifest.deliveryIntent?.cloudUploadEnabled = true
         manifest.deliveryIntent?.automaticPrintEnabled = true
+        let sessionID = manifest.id
 
         queue.start()
         try await queue.enqueueFinalizationJobs(for: manifest)
         try await waitUntil("print withheld") {
-            await queue.job(sessionID: manifest.id, status: .cancelled, kind: .autoPrint) != nil
+            await queue.job(sessionID: sessionID, status: .cancelled, kind: .autoPrint) != nil
         }
 
         #expect(await executor.snapshot().kinds.contains(.autoPrint) == false)
@@ -135,19 +137,20 @@ struct SessionJobQueueTests {
         )
         manifest.deliveryIntent?.cloudUploadEnabled = true
         manifest.deliveryIntent?.automaticPrintEnabled = true
+        let sessionID = manifest.id
 
         queue.start()
         try await queue.enqueueFinalizationJobs(for: manifest)
         try await waitUntil("cloud failure with print withheld") {
-            await queue.job(sessionID: manifest.id, status: .cancelled, kind: .autoPrint) != nil
+            await queue.job(sessionID: sessionID, status: .cancelled, kind: .autoPrint) != nil
         }
         #expect(try await queue.forceRequeueCloudUpload(
             sessionID: manifest.id,
             finalizationTransactionID: manifest.finalizationTransactionID
         ) == .queued)
         try await waitUntil("recovered cloud route and first print") {
-            let cloud = await queue.job(sessionID: manifest.id, status: .succeeded, kind: .cloudUpload)
-            let print = await queue.job(sessionID: manifest.id, status: .succeeded, kind: .autoPrint)
+            let cloud = await queue.job(sessionID: sessionID, status: .succeeded, kind: .cloudUpload)
+            let print = await queue.job(sessionID: sessionID, status: .succeeded, kind: .autoPrint)
             return cloud != nil && print != nil
         }
         #expect(await executor.snapshot().printAttempts == 1)
@@ -171,12 +174,13 @@ struct SessionJobQueueTests {
         )
         manifest.deliveryIntent?.cloudUploadEnabled = true
         manifest.deliveryIntent?.automaticPrintEnabled = true
+        let sessionID = manifest.id
 
         queue.start()
         try await queue.enqueueFinalizationJobs(for: manifest)
         try await waitUntil("cloud upload and print start") {
             let cloud = await executor.snapshot().cloudUploadStarted
-            let print = await queue.job(sessionID: manifest.id, status: .succeeded, kind: .autoPrint)
+            let print = await queue.job(sessionID: sessionID, status: .succeeded, kind: .autoPrint)
             return cloud && print != nil
         }
         #expect(await queue.job(sessionID: manifest.id, status: .running, kind: .cloudUpload) != nil)
@@ -186,9 +190,33 @@ struct SessionJobQueueTests {
 
     @Test("cloud QR print stays blocked when its required upload job is missing")
     func cloudPrintRequiresAnUploadJob() {
-        var strip = makeJob(sessionID: "session", kind: .renderStrip, transactionID: "tx")
-        strip.status = .succeeded
-        var print = makeJob(sessionID: "session", kind: .autoPrint, transactionID: "tx")
+        let now = Date()
+        let strip = SessionJob(
+            id: "strip",
+            sessionID: "session",
+            kind: .renderStrip,
+            status: .succeeded,
+            createdAt: now,
+            updatedAt: now,
+            lastAttemptAt: now,
+            nextAttemptAt: nil,
+            attemptCount: 1,
+            lastError: nil,
+            finalizationTransactionID: "tx"
+        )
+        var print = SessionJob(
+            id: "print",
+            sessionID: "session",
+            kind: .autoPrint,
+            status: .pending,
+            createdAt: now,
+            updatedAt: now,
+            lastAttemptAt: nil,
+            nextAttemptAt: nil,
+            attemptCount: 0,
+            lastError: nil,
+            finalizationTransactionID: "tx"
+        )
         print.requiresCloudPublicationBeforePrint = true
 
         #expect(!SessionJobDependencyPolicy.prerequisitesSatisfied(
