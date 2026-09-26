@@ -375,12 +375,12 @@ struct SessionJobQueueTests {
         #expect(await executor.snapshot().printStartCount == 2)
     }
 
-    @Test("cancelling a cooperative print keeps it cancelled and releases the lane")
+    @Test("session cancellation preserves an in-flight print and releases its lane after completion")
     @MainActor
-    func cancellingPrintReleasesLane() async throws {
+    func cancellingInFlightPrintPreservesOutcomeAndReleasesLane() async throws {
         let directory = try temporaryDirectory()
         defer { try? FileManager.default.removeItem(at: directory) }
-        let executor = CancellablePrintJobExecutor()
+        let executor = BlockingPrintJobExecutor()
         let queue = SessionJobQueue(
             store: JobQueueStore(fileURL: directory.appendingPathComponent("jobs.json")),
             executor: executor
@@ -397,21 +397,22 @@ struct SessionJobQueueTests {
             return firstReady && secondReady
         }
         try await queue.enqueueAutoPrint(for: first)
-        try await waitUntil("first print start") { await executor.snapshot().printStartCount == 1 }
-        guard let firstJob = await queue.job(sessionID: first.id, status: .running, kind: .autoPrint) else {
-            Issue.record("Expected first print to be running")
-            return
-        }
-        queue.cancel(jobID: firstJob.id)
-
-        try await waitUntil("cancelled first print") {
-            await queue.job(sessionID: first.id, status: .cancelled, kind: .autoPrint) != nil
-        }
         try await queue.enqueueAutoPrint(for: second)
-        try await waitUntil("successful second print") {
+        try await waitUntil("first print start") { await executor.snapshot().printStartCount == 1 }
+        #expect(try await queue.cancelAndQuiesceJobs(sessionID: first.id) == .cleanupPending)
+        #expect(await queue.job(sessionID: first.id, status: .running, kind: .autoPrint) != nil)
+        #expect(await executor.snapshot().printStartCount == 1)
+
+        await executor.releaseFirstPrint()
+        try await waitUntil("first physical print outcome") {
+            await queue.job(sessionID: first.id, status: .succeeded, kind: .autoPrint) != nil
+        }
+        try await waitUntil("second print after first outcome") {
             await queue.job(sessionID: second.id, status: .succeeded, kind: .autoPrint) != nil
         }
-        #expect(await executor.snapshot().printCancelled)
+        let snapshot = await executor.snapshot()
+        #expect(snapshot.printStartCount == 2)
+        #expect(snapshot.maximumConcurrentPrintExecutions == 1)
     }
 
     @Test("a non-cooperative print keeps cleanup pending until it quiesces")
@@ -436,12 +437,13 @@ struct SessionJobQueueTests {
 
         let result = try await queue.cancelAndQuiesceJobs(sessionID: manifest.id)
         #expect(result == .cleanupPending)
-        #expect(await queue.job(sessionID: manifest.id, status: .cancelled, kind: .autoPrint) != nil)
+        #expect(await queue.job(sessionID: manifest.id, status: .running, kind: .autoPrint) != nil)
 
         await executor.releaseFirstPrint()
-        try await waitUntil("hung print exit") {
-            await queue.job(sessionID: manifest.id, status: .cancelled, kind: .autoPrint) != nil
+        try await waitUntil("physical print outcome") {
+            await queue.job(sessionID: manifest.id, status: .succeeded, kind: .autoPrint) != nil
         }
+        #expect(try await queue.cancelAndQuiesceJobs(sessionID: manifest.id) == .quiesced)
     }
 
     @Test("quiescence wait resumes after the executor result is persisted")
@@ -831,30 +833,6 @@ private final class FailFirstCloudUploadJobExecutor: SessionJobExecuting {
             snapshotValue.printAttempts += 1
         default:
             break
-        }
-    }
-
-    func snapshot() -> Snapshot { snapshotValue }
-}
-
-@MainActor
-private final class CancellablePrintJobExecutor: SessionJobExecuting {
-    struct Snapshot: Sendable {
-        var printStartCount = 0
-        var printCancelled = false
-    }
-
-    private var snapshotValue = Snapshot()
-
-    func execute(_ job: SessionJob) async throws {
-        guard job.kind == .autoPrint else { return }
-        snapshotValue.printStartCount += 1
-        guard snapshotValue.printStartCount == 1 else { return }
-        do {
-            try await Task.sleep(for: .seconds(10))
-        } catch {
-            snapshotValue.printCancelled = Task.isCancelled
-            throw error
         }
     }
 

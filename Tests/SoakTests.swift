@@ -131,17 +131,21 @@ struct SoakTests {
 
     @Test("report includes event evidence percentiles and first-to-last window degradation")
     func reportContainsReleaseEvidence() {
-        let metrics = (1...4).map { index in
-            BoothSoakCycleMetric(
+        var metrics: [BoothSoakCycleMetric] = []
+        for index in 1...4 {
+            let duration = Double(index)
+            let cameraRecoveryCount = index == 2 ? 1 : 0
+            let memoryFootprint = UInt64(index * 10)
+            metrics.append(BoothSoakCycleMetric(
                 cycleIndex: index,
-                durationSeconds: Double(index),
-                captureLatencies: [Double(index)],
+                durationSeconds: duration,
+                captureLatencies: [duration],
                 captureAttemptCount: 1,
                 captureFailureCount: 0,
-                cameraRecoveryCount: index == 2 ? 1 : 0,
-                renderLatency: Double(index) / 2,
-                memoryFootprintBytes: UInt64(index * 10)
-            )
+                cameraRecoveryCount: cameraRecoveryCount,
+                renderLatency: duration / 2,
+                memoryFootprintBytes: memoryFootprint
+            ))
         }
         let report = BoothSoakTestReport.compute(
             mode: .productionPipeline,

@@ -76,6 +76,29 @@ jobs:
             CODE_SIGNING_REQUIRED=NO \
             test
 
+      - name: Run isolated MainActor transport stall tests
+        env:
+          # xcodebuild strips this prefix in the test runner process.
+          TEST_RUNNER_PRC_RUN_MAINACTOR_STALL_TESTS: "1"
+        run: |
+          xcodebuild \
+            -project PRC-PhotoBooth.xcodeproj \
+            -scheme PRC-PhotoBoothTests \
+            -destination "platform=macOS" \
+            -derivedDataPath "$RUNNER_TEMP/PRC-PhotoBooth-DerivedData" \
+            -only-testing:PRC-PhotoBoothTests/NetworkRouteTests/trustedControlHandshakeAndReconnectSurviveMainActorStall \
+            -only-testing:PRC-PhotoBoothTests/NetworkRouteTests/trustedIdentityProbeAuthenticatesAfterAnonymousEndpointFlood \
+            -only-testing:PRC-PhotoBoothTests/NetworkRouteTests/trustedProbeWaitsBehindOccupiedProbeAndAuthenticatesDuringMainActorStall \
+            -only-testing:PRC-PhotoBoothTests/NetworkRouteTests/productionListenerAdmissionIsQueueOwned \
+            -only-testing:PRC-PhotoBoothTests/NetworkRouteTests/productionReconnectStartsSocketOffMainActor \
+            -only-testing:PRC-PhotoBoothTests/NetworkRouteTests/reconnectTimerIsQueueOwned \
+            -only-testing:PRC-PhotoBoothTests/NetworkRouteTests/preAuthWatchdogCancelsConnectionWhileMainActorBlocked \
+            -only-testing:PRC-PhotoBoothTests/NetworkRouteTests/authenticatedControlTrafficSurvivesTwelveSecondMainActorStall \
+            -only-testing:PRC-PhotoBoothTests/NetworkRouteTests/controlFailureDuringMainActorStallSchedulesOneReconnect \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            test
+
       - name: Build macOS app (Release)
         run: |
           xcodebuild \

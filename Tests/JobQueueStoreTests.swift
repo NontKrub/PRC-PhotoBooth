@@ -327,6 +327,10 @@ struct JobQueueStoreTests {
         let file = try temporaryFile()
         defer { try? FileManager.default.removeItem(at: file.deletingLastPathComponent()) }
         let store = JobQueueStore(fileURL: file)
+        let strip = try await store.enqueue(sessionID: "soak-session", kind: .renderStrip)
+        var rendering = try #require(await store.claim(jobID: strip.id))
+        rendering.status = .succeeded
+        #expect(try await store.finish(rendering))
         let pending = try await store.enqueue(sessionID: "soak-session", kind: .autoPrint)
         var running = try #require(await store.claim(jobID: pending.id))
 
@@ -344,6 +348,10 @@ struct JobQueueStoreTests {
         let file = try temporaryFile()
         defer { try? FileManager.default.removeItem(at: file.deletingLastPathComponent()) }
         let store = JobQueueStore(fileURL: file)
+        let strip = try await store.enqueue(sessionID: "soak-session", kind: .renderStrip)
+        var rendering = try #require(await store.claim(jobID: strip.id))
+        rendering.status = .succeeded
+        #expect(try await store.finish(rendering))
         var unknown = try await store.enqueue(sessionID: "soak-session", kind: .autoPrint)
         unknown.status = .cancelled
         unknown.lastFailureDisposition = .sideEffectUnknown
