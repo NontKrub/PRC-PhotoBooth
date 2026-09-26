@@ -34,8 +34,8 @@ Scope: fix the confirmed route crash and remaining software release blockers, ve
   EXPECT: TESTS_PASSED
   EVIDENCE: automatic-evidence=v1; definition-sha256=f7324877838d588c4b34ace05a2de7cbc45c690b97b3ef5da0026524eaa5ca66; exit=0; EXPECT=matched; output-sha256=1dd6495bfc4544022a09bc98a721e653082b1be6c3785bb90894f37b7962d95a; output-bytes=623; shell=/bin/sh; cwd=/Users/nont/my-project/PRC-PhotoBooth; path=8856c3cc55bf/22 entries
 
-- [ ] G7: GitHub Actions build, test, release, and packaging lanes pass for current source
-  EVIDENCE: The latest run for current source SHA bd70663eef7d523eccbc754752da6e7b6fa4e5a0 is [PR App Builds run 36210283877](https://github.com/NontKrub/PRC-PhotoBooth/actions/runs/36210283877), conclusion **failure**. iPad Simulator job passed, including Debug/Release builds, iPad tests, generic-device Release, and packaging. macOS app Debug build passed, but Mac tests failed; macOS Release and packaging were skipped. Stable macOS Release build passed, but stable Mac tests failed. Both failures were the listener-admission timeout test; its wait was increased to 3 seconds without changing the production timeout, and the focused local NetworkRouteTests now pass. The remote run is on the unchanged base SHA, not the uncommitted working tree; no current-code CI run exists.
+- [x] G7: GitHub Actions build, test, release, and packaging lanes pass for current source
+  EVIDENCE: [PR App Builds run 36217889447](https://github.com/NontKrub/PRC-PhotoBooth/actions/runs/36217889447) ran at implementation SHA a4a0e5156428e430f83d2bab1281d555d6b37f86 and completed successfully. Stable macOS Release/tests, macOS Debug/tests/Release/package, and iPad Simulator Debug/Release/tests/generic Release/package all passed. The prior run 36210283877 failed on the listener-admission timeout; the test wait was raised to 3 seconds without changing the production timeout, and this run passed.
 
 - [ ] G8: the production hardware matrix and sustained event soak pass
   EVIDENCE: Pending physical Mac, Sony ZV-E10, Canon SELPHY CP1500, paired iPad, event network, and 4–6 hour run. Simulator and synthetic tests do not satisfy this gate.
