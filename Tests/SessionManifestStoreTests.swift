@@ -249,6 +249,48 @@ struct SessionManifestStoreTests {
         #expect(BoothSoakCleanupPolicy.shouldRetainDiagnostics(manifest: manifest, jobs: []))
     }
 
+    @Test("startup cleanup removes completed auto-cleanup after a crash before the first attempt")
+    func startupCleanupDoesNotRetainCompletedSoakWithoutPriorAttempt() {
+        var manifest = makeManifest()
+        manifest.origin = .soakTest
+        manifest.soakRunID = "run-before-cleanup"
+        manifest.status = .completed
+        manifest.soakAutoCleanupEnabled = true
+        manifest.soakCleanupLastAttemptAt = nil
+        manifest.soakCleanupWarning = nil
+        manifest.soakDiagnosticRetained = false
+
+        #expect(!BoothSoakCleanupPolicy.shouldRetainOrphanedDiagnostics(manifest: manifest, jobs: []))
+
+        manifest.soakCleanupWarning = "Remote deletion failed"
+        manifest.soakDiagnosticRetained = true
+        #expect(!BoothSoakCleanupPolicy.shouldRetainOrphanedDiagnostics(manifest: manifest, jobs: []))
+
+        manifest.soakCleanupWarning = nil
+        manifest.status = .failed
+        #expect(BoothSoakCleanupPolicy.shouldRetainOrphanedDiagnostics(manifest: manifest, jobs: []))
+    }
+
+    @Test("retained soak diagnostics exclude normal sessions with unknown prints")
+    func retainedDiagnosticsExcludeNormalUnknownPrint() {
+        var normal = makeManifest()
+        normal.id = "normal-unknown-print"
+        normal.origin = .normal
+        var soak = makeManifest()
+        soak.id = "soak-unknown-print"
+        soak.origin = .soakTest
+        soak.soakRunID = "run-unknown-print"
+
+        let diagnostics = BoothSoakCleanupPolicy.retainedDiagnosticManifests(
+            [normal, soak],
+            unresolvedSessionIDs: [normal.id]
+        )
+
+        #expect(diagnostics.map(\.id) == [soak.id])
+        #expect(diagnostics.first?.soakDiagnosticRetained == true)
+        #expect(diagnostics.first?.soakCleanupWarning?.contains("Physical print outcome is unknown") == true)
+    }
+
     @Test("status changes require an explicit compare-and-set transition")
     func statusTransitionsAreAuthoritative() async throws {
         let root = try temporaryDirectory()

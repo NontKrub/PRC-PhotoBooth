@@ -21,6 +21,11 @@ enum AdminDashboardHistory {
                 && (eventID == nil || $0.eventID == eventID)
         }
     }
+
+    static func productionJobs(from jobs: [SessionJob], sessions: [BoothSession]) -> [SessionJob] {
+        let sessionIDs = Set(sessions.filter(\.isNormalProductionSession).map(\.id))
+        return jobs.filter { sessionIDs.contains($0.sessionID) }
+    }
 }
 
 struct AdminDashboardView: View {
@@ -234,6 +239,21 @@ struct AdminDashboardView: View {
         let receiveDurations = completedAttempts.compactMap(\.receiveDuration)
         let started = productionHistorySessions.count
         let completionRate = started == 0 ? 0 : Double(filteredSessions.count) / Double(started) * 100
+        let productionJobs = AdminDashboardHistory.productionJobs(
+            from: coordinator.jobQueue.jobs,
+            sessions: productionHistorySessions
+        )
+        let printJobs = productionJobs.filter { $0.kind == .autoPrint }
+        let confirmedPrints = printJobs.filter { $0.status == .succeeded }.count
+        let uncertainPrints = printJobs.filter {
+            $0.status == .running || $0.lastFailureDisposition == .sideEffectUnknown
+        }.count
+        let failedPrints = printJobs.filter {
+            $0.status == .failed && $0.lastFailureDisposition != .sideEffectUnknown
+        }.count
+        let failedCloudJobs = productionJobs.filter {
+            $0.kind == .cloudUpload && $0.status == .failed
+        }.count
         return GroupBox("Reliability") {
             LazyVGrid(columns: [GridItem(.adaptive(minimum: 145))], alignment: .leading, spacing: 12) {
                 ReliabilityMetric(title: "Capture Success", value: percentage(successful, total: successful + failed))
@@ -244,8 +264,8 @@ struct AdminDashboardView: View {
                 ReliabilityMetric(title: "Avg Receive", value: receiveDurations.isEmpty ? "—" : String(format: "%.1fs", receiveDurations.reduce(0, +) / Double(receiveDurations.count)))
                 ReliabilityMetric(title: "Completion Rate", value: String(format: "%.0f%%", completionRate))
                 ReliabilityMetric(title: "Cancelled Sessions", value: String(max(0, started - filteredSessions.count)))
-                ReliabilityMetric(title: "Prints", value: "\(coordinator.printer.printSuccessCount) ok / \(coordinator.printer.printFailureCount) failed")
-                ReliabilityMetric(title: "Cloud Queue", value: "\(coordinator.jobQueue.jobs.filter { $0.kind == .cloudUpload && $0.status == .failed }.count) failed")
+                ReliabilityMetric(title: "Event Prints", value: "\(confirmedPrints) ok / \(failedPrints) failed / \(uncertainPrints) unknown")
+                ReliabilityMetric(title: "Event Cloud Queue", value: "\(failedCloudJobs) failed")
             }
         }
     }

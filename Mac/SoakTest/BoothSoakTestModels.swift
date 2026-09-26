@@ -187,6 +187,32 @@ enum BoothSoakCleanupPolicy {
                 || hasUnresolvedPhysicalPrint(sessionID: manifest.id, jobs: jobs))
     }
 
+    static func shouldRetainOrphanedDiagnostics(manifest: SessionManifest, jobs: [SessionJob]) -> Bool {
+        guard manifest.origin == .soakTest else { return false }
+        let cleanupRetryPending = manifest.soakAutoCleanupEnabled == true
+            && manifest.soakCleanupWarning != nil
+        guard !cleanupRetryPending else { return false }
+        return manifest.soakAutoCleanupEnabled != true
+            || shouldRetainDiagnostics(manifest: manifest, jobs: jobs)
+    }
+
+    static func retainedDiagnosticManifests(
+        _ manifests: [SessionManifest],
+        unresolvedSessionIDs: Set<String>
+    ) -> [SessionManifest] {
+        manifests.compactMap { source in
+            guard source.origin == .soakTest else { return nil }
+            guard source.isRetainedSoakDiagnostic || unresolvedSessionIDs.contains(source.id) else { return nil }
+            var manifest = source
+            if unresolvedSessionIDs.contains(manifest.id) {
+                manifest.soakDiagnosticRetained = true
+                manifest.soakCleanupWarning = manifest.soakCleanupWarning
+                    ?? "Physical print outcome is unknown. Verify the printer before removing these diagnostics."
+            }
+            return manifest
+        }.sorted { $0.updatedAt > $1.updatedAt }
+    }
+
 }
 
 public struct BoothSoakCycleMetric: Codable, Sendable, Equatable {

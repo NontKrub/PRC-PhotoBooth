@@ -248,6 +248,20 @@ final class DataStore {
         return session
     }
 
+    func backfillSessionOrigin(from manifest: SessionManifest) {
+        guard let session = fetchSession(id: manifest.id) else { return }
+        let origin = manifest.origin ?? .normal
+        let runID = origin == .soakTest ? manifest.soakRunID : nil
+        let cycleIndex = origin == .soakTest ? manifest.soakCycleIndex : nil
+        guard session.originRawValue != origin.rawValue
+                || session.soakRunID != runID
+                || session.soakCycleIndex != cycleIndex else { return }
+        session.origin = origin
+        session.soakRunID = runID
+        session.soakCycleIndex = cycleIndex
+        save()
+    }
+
     func fetchSessions(finishedBefore date: Date) -> [BoothSession] {
         let pred = #Predicate<BoothSession> { s in s.finishedAt != nil && s.finishedAt! < date }
         do { return try context.fetch(FetchDescriptor<BoothSession>(predicate: pred)) }

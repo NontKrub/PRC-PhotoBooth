@@ -59,6 +59,15 @@ struct EventExperienceStoreTests {
         #expect(restored.originRawValue == SessionOrigin.soakTest.rawValue)
         #expect(restored.soakRunID == "run-restore")
         #expect(restored.soakCycleIndex == 12)
+
+        restored.originRawValue = nil
+        restored.soakRunID = nil
+        restored.soakCycleIndex = nil
+        #expect(store.saveChanges())
+        store.backfillSessionOrigin(from: manifest)
+        #expect(restored.origin == .soakTest)
+        #expect(restored.soakRunID == "run-restore")
+        #expect(restored.soakCycleIndex == 12)
     }
 
     @Test("dashboard production history excludes soak starts from its shared cohort")
@@ -97,6 +106,44 @@ struct EventExperienceStoreTests {
             excludingSessionIDs: [legacySoak.id]
         )
         #expect(reconciled.map(\.id) == [normal.id])
+    }
+
+    @Test("dashboard event jobs exclude soak print and cloud work")
+    @MainActor
+    func dashboardJobsExcludeSoakActivity() {
+        let now = Date()
+        let normal = BoothSession(eventID: "event-jobs", photoCount: 1)
+        let soak = BoothSession(
+            eventID: "event-jobs",
+            photoCount: 1,
+            origin: .soakTest,
+            soakRunID: "run-jobs",
+            soakCycleIndex: 1
+        )
+        func job(_ session: BoothSession, _ kind: SessionJobKind, _ status: SessionJobStatus) -> SessionJob {
+            SessionJob(
+                id: UUID().uuidString,
+                sessionID: session.id,
+                kind: kind,
+                status: status,
+                createdAt: now,
+                updatedAt: now,
+                lastAttemptAt: nil,
+                nextAttemptAt: nil,
+                attemptCount: 0,
+                lastError: nil
+            )
+        }
+        let jobs = [
+            job(normal, .autoPrint, .succeeded),
+            job(normal, .cloudUpload, .failed),
+            job(soak, .autoPrint, .failed),
+            job(soak, .cloudUpload, .failed)
+        ]
+
+        let productionJobs = AdminDashboardHistory.productionJobs(from: jobs, sessions: [normal, soak])
+        #expect(productionJobs.count == 2)
+        #expect(productionJobs.allSatisfy { $0.sessionID == normal.id })
     }
 
     @Test("cleanup record deletion is safe to retry after the record is absent")

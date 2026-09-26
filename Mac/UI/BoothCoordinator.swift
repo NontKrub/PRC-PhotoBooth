@@ -1501,17 +1501,13 @@ final class BoothCoordinator {
                 ? job.sessionID
                 : nil
         }).union(soakFailureDiagnosticSessionIDs)
-        retainedSoakDiagnostics = results.compactMap { result in
-            guard case .loaded(var manifest) = result else { return nil }
-            guard manifest.isRetainedSoakDiagnostic
-                    || unresolvedPrintSessionIDs.contains(manifest.id) else { return nil }
-            if unresolvedPrintSessionIDs.contains(manifest.id) {
-                manifest.soakDiagnosticRetained = true
-                manifest.soakCleanupWarning = manifest.soakCleanupWarning
-                    ?? "Physical print outcome is unknown. Verify the printer before removing these diagnostics."
-            }
-            return manifest
-        }.sorted { $0.updatedAt > $1.updatedAt }
+        retainedSoakDiagnostics = BoothSoakCleanupPolicy.retainedDiagnosticManifests(
+            results.compactMap { result in
+                guard case .loaded(let manifest) = result else { return nil }
+                return manifest
+            },
+            unresolvedSessionIDs: unresolvedPrintSessionIDs
+        )
     }
 
     func soakEnvironmentSnapshot() -> [String: String] {
@@ -4862,20 +4858,15 @@ final class BoothCoordinator {
         for result in await manifestStore.loadAll() {
             guard case .loaded(let original) = result,
                   original.origin == .soakTest else { continue }
+            store.backfillSessionOrigin(from: original)
             guard let runID = original.soakRunID else {
                 recoveryService.recordError("Soak cleanup \(original.id): test route has no run identifier.")
                 continue
             }
-            let interrupted = original.status != .completed && original.status != .cancelled
-            let cleanupRetryPending = original.soakCleanupWarning != nil
-                && original.soakAutoCleanupEnabled == true
-            let retainDiagnostics = !cleanupRetryPending && (
-                original.isRetainedSoakDiagnostic
-                    || original.status == .failed
-                    || interrupted
-                    || original.soakAutoCleanupEnabled != true
-                    || original.soakCleanupLastAttemptAt == nil
-            )
+            let durableJobs = try? await jobQueue.loadJobsForCleanup(sessionID: original.id)
+            let retainDiagnostics = durableJobs.map {
+                BoothSoakCleanupPolicy.shouldRetainOrphanedDiagnostics(manifest: original, jobs: $0)
+            } ?? true
             let manifest: SessionManifest
             do {
                 manifest = try await manifestStore.prepareOrphanedSoakForCleanup(
