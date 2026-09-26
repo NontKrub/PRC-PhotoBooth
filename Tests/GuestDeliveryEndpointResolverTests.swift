@@ -180,7 +180,7 @@ struct GuestDeliveryEndpointResolverTests {
 
         let resolution = GuestDeliveryEndpointResolver.resolve(
             from: [wifi, conflictingEthernet],
-            selection: .interface("en0")
+            selection: .interface(name: "en0")
         )
         let endpoint = try #require(resolution.endpoint)
         #expect(endpoint.interfaceName == "en0")
