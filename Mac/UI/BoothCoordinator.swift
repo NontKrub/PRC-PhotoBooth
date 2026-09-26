@@ -4850,8 +4850,11 @@ final class BoothCoordinator {
     }
 
     private func restoreDownloadTokens() async {
-        await depublishOrphanedSoakRoutes()
+        // Restore production routes before retrying remote cleanup for retained
+        // soak runs. Soak sessions are excluded by refreshServerRoutes, and a
+        // remote timeout must not hold live guest downloads offline at launch.
         await refreshServerRoutes()
+        await depublishOrphanedSoakRoutes()
     }
 
     private func depublishOrphanedSoakRoutes() async {

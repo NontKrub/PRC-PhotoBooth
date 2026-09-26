@@ -596,8 +596,7 @@ struct CloudUploadServiceTests {
                 timeout: 20
             )
         }
-        try await waitForFile(pidFile)
-        let childPID = try #require(Int32(try String(contentsOf: pidFile, encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines)))
+        let childPID = try await waitForProcessID(pidFile)
         task.cancel()
         _ = try? await task.value
 
@@ -610,7 +609,7 @@ struct CloudUploadServiceTests {
     @Test("cancelling after the shell exits still kills its process-group child")
     func processRunnerKillsChildAfterParentExits() async throws {
         let pidFile = FileManager.default.temporaryDirectory
-            .appendingPathComponent("PRC-Cloud-parent-exit-child-(UUID().uuidString).txt")
+            .appendingPathComponent("PRC-Cloud-parent-exit-child-\(UUID().uuidString).txt")
         defer { try? FileManager.default.removeItem(at: pidFile) }
         let quotedPIDFile = "'\(pidFile.path)'"
 
@@ -621,8 +620,7 @@ struct CloudUploadServiceTests {
                 timeout: 20
             )
         }
-        try await waitForFile(pidFile)
-        let childPID = try #require(Int32(try String(contentsOf: pidFile, encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines)))
+        let childPID = try await waitForProcessID(pidFile)
         try await Task.sleep(for: .milliseconds(100))
         task.cancel()
 
@@ -723,9 +721,12 @@ private func temporaryDirectory() throws -> URL {
     return directory
 }
 
-private func waitForFile(_ url: URL) async throws {
+private func waitForProcessID(_ url: URL) async throws -> Int32 {
     for _ in 0..<40 {
-        if FileManager.default.fileExists(atPath: url.path) { return }
+        if let contents = try? String(contentsOf: url, encoding: .utf8),
+           let processID = Int32(contents.trimmingCharacters(in: .whitespacesAndNewlines)) {
+            return processID
+        }
         try await Task.sleep(for: .milliseconds(25))
     }
     throw CocoaError(.fileNoSuchFile)

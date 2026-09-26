@@ -59,6 +59,7 @@ struct FinalizationPlan: Sendable, Equatable {
 
     var transactionID: String
     var jobKinds: [SessionJobKind]
+    var requiresCloudPublicationForGuestQR: Bool
     var requiresCloudPublicationBeforePrint: Bool
 
     static func make(from manifest: SessionManifest) -> FinalizationPlan? {
@@ -73,12 +74,13 @@ struct FinalizationPlan: Sendable, Equatable {
         let cloudEnabled = intent?.cloudUploadEnabled
             ?? (manifest.cloudDelivery != nil)
         let printEnabled = intent?.automaticPrintEnabled ?? false
-        let printQRUsesPublicCloudRoute = printEnabled
-            && cloudEnabled
+        let guestQRUsesPublicCloudRoute = cloudEnabled
             && !manifest.eventConfig.qrCodeElements.isEmpty
             && manifest.cloudDelivery.flatMap {
                 ValidatedPublicGuestBaseURL(string: $0.publicBaseURL)
             } != nil
+        let printQRUsesPublicCloudRoute = printEnabled
+            && guestQRUsesPublicCloudRoute
 
         var kinds = requiredJobKinds
         if galleryEnabled { kinds.append(.updateGallery) }
@@ -88,6 +90,7 @@ struct FinalizationPlan: Sendable, Equatable {
         return FinalizationPlan(
             transactionID: transactionID,
             jobKinds: kinds,
+            requiresCloudPublicationForGuestQR: guestQRUsesPublicCloudRoute,
             requiresCloudPublicationBeforePrint: printQRUsesPublicCloudRoute
         )
     }
@@ -100,7 +103,7 @@ struct FinalizationPlan: Sendable, Equatable {
     }
 
     func cloudPublicationReadiness(in jobs: [SessionJob], for manifest: SessionManifest) -> CloudPublicationReadiness {
-        guard jobKinds.contains(.cloudUpload) else { return .notRequired }
+        guard requiresCloudPublicationForGuestQR else { return .notRequired }
         let uploadJobs = jobs.filter { $0.kind == .cloudUpload && authorizes($0, for: manifest) }
         guard uploadJobs.count == 1, let job = uploadJobs.first else { return .pending }
         switch job.status {

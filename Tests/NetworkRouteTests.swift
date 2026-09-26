@@ -818,6 +818,85 @@ private final class TrustedCoreTestObserver: @unchecked Sendable {
     }
 }
 
+private final class ListenerLifecycleTestObserver: @unchecked Sendable {
+    private let lock = NSLock()
+    private let listenerReady = DispatchSemaphore(value: 0)
+    private let listenerFailed = DispatchSemaphore(value: 0)
+    private var readyEvents: [(generation: Int, port: NWEndpoint.Port?)] = []
+    private var failedGenerations: [Int] = []
+
+    func receive(_ event: BoothNetworkTransportRuntime.ControlCoreEvent) {
+        lock.lock()
+        switch event {
+        case .listenerReady(let generation, let port):
+            readyEvents.append((generation, port))
+            lock.unlock()
+            listenerReady.signal()
+        case .listenerFailed(let generation, _):
+            failedGenerations.append(generation)
+            lock.unlock()
+            listenerFailed.signal()
+        default:
+            lock.unlock()
+        }
+    }
+
+    func waitForReadyCount(_ count: Int, timeout: TimeInterval = 3) -> Bool {
+        let deadline = DispatchTime.now() + timeout
+        while readyCount < count {
+            guard listenerReady.wait(timeout: deadline) == .success else { return false }
+        }
+        return true
+    }
+
+    func waitForFailureCount(_ count: Int, timeout: TimeInterval = 3) -> Bool {
+        let deadline = DispatchTime.now() + timeout
+        while failureCount < count {
+            guard listenerFailed.wait(timeout: deadline) == .success else { return false }
+        }
+        return true
+    }
+
+    var readyCount: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return readyEvents.count
+    }
+
+    var failureCount: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return failedGenerations.count
+    }
+
+    var lastReadyEvent: (generation: Int, port: NWEndpoint.Port?)? {
+        lock.lock()
+        defer { lock.unlock() }
+        return readyEvents.last
+    }
+}
+
+private final class ListenerFactoryFailureBudget: @unchecked Sendable {
+    private let lock = NSLock()
+    private var remainingFailures: Int
+
+    init(_ remainingFailures: Int) {
+        self.remainingFailures = remainingFailures
+    }
+
+    func consumeFailure() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        guard remainingFailures > 0 else { return false }
+        remainingFailures -= 1
+        return true
+    }
+}
+
+private struct ForcedControlListenerFailure: Error, LocalizedError {
+    var errorDescription: String? { "Injected control-listener construction failure." }
+}
+
 /// A test socket whose callback state is serialized by its queue and lock.
 private final class HostileLoopbackClient: @unchecked Sendable {
     private enum SendState: Equatable {
@@ -910,6 +989,94 @@ private final class HostileLoopbackClient: @unchecked Sendable {
 
 @Suite("Network route policy", .serialized)
 struct NetworkRouteTests {
+    @Test("duplicate control-listener start keeps the runtime generation")
+    func duplicateControlListenerStartKeepsCanonicalGeneration() throws {
+        let queue = DispatchQueue(label: "PRC-PhotoBooth.Tests.ControlListenerGeneration")
+        let runtime = BoothNetworkTransportRuntime(queue: queue)
+        let identity = BoothDeviceIdentity(id: UUID().uuidString, displayName: "Listener Mac", role: .mac)
+        let secureChannel = BoothSecureChannel()
+        let writer = BoothControlWritePump(queue: queue, secureChannel: secureChannel)
+        let events = ListenerLifecycleTestObserver()
+        runtime.configureControlCore(
+            localIdentity: identity,
+            networkPreference: .wifi,
+            trustedSecrets: [:],
+            selectedPeerID: nil,
+            secureChannel: secureChannel,
+            writer: writer
+        ) { [weak events] event in events?.receive(event) }
+        defer {
+            runtime.stopControlCore()
+            writer.invalidate(generation: Int.max)
+        }
+
+        let service = NWListener.Service(
+            name: BoothBonjourServiceIdentity.serviceName(channel: .control, deviceID: identity.id),
+            type: "_prc-control._tcp",
+            txtRecord: NWTXTRecord(["deviceID": identity.id])
+        )
+        let firstGeneration = runtime.startControlListener(using: .tcp, port: nil, service: service)
+        #expect(events.waitForReadyCount(1))
+
+        let duplicateGeneration = runtime.startControlListener(using: .tcp, port: nil, service: service)
+        #expect(duplicateGeneration == firstGeneration)
+        #expect(events.readyCount == 1)
+        #expect(events.lastReadyEvent?.generation == firstGeneration)
+    }
+
+    @Test("control-listener retry recovers during MainActor stall")
+    func controlListenerRetryRecoversDuringMainActorStall() throws {
+        let queue = DispatchQueue(label: "PRC-PhotoBooth.Tests.ControlListenerRetry")
+        let failureBudget = ListenerFactoryFailureBudget(1)
+        let runtime = BoothNetworkTransportRuntime(
+            queue: queue,
+            controlListenerFactory: { parameters, port in
+                if failureBudget.consumeFailure() { throw ForcedControlListenerFailure() }
+                if let port { return try NWListener(using: parameters, on: port) }
+                return try NWListener(using: parameters)
+            }
+        )
+        let identity = BoothDeviceIdentity(id: UUID().uuidString, displayName: "Listener Mac", role: .mac)
+        let secureChannel = BoothSecureChannel()
+        let writer = BoothControlWritePump(queue: queue, secureChannel: secureChannel)
+        let events = ListenerLifecycleTestObserver()
+        runtime.configureControlCore(
+            localIdentity: identity,
+            networkPreference: .wifi,
+            trustedSecrets: [:],
+            selectedPeerID: nil,
+            secureChannel: secureChannel,
+            writer: writer
+        ) { [weak events] event in events?.receive(event) }
+
+        let mainEntered = DispatchSemaphore(value: 0)
+        let releaseMain = DispatchSemaphore(value: 0)
+        DispatchQueue.main.async {
+            mainEntered.signal()
+            releaseMain.wait()
+        }
+        defer {
+            releaseMain.signal()
+            runtime.stopControlCore()
+            writer.invalidate(generation: Int.max)
+        }
+        #expect(waitForSemaphore(mainEntered))
+
+        let generation = runtime.startControlListener(
+            using: .tcp,
+            port: nil,
+            service: NWListener.Service(
+                name: BoothBonjourServiceIdentity.serviceName(channel: .control, deviceID: identity.id),
+                type: "_prc-control._tcp",
+                txtRecord: NWTXTRecord(["deviceID": identity.id])
+            )
+        )
+        #expect(events.waitForFailureCount(1))
+        #expect(events.waitForReadyCount(1))
+        #expect(events.lastReadyEvent?.generation == generation)
+        #expect(events.lastReadyEvent?.port != nil)
+    }
+
     @Test(
         "stored-secret Hello and secure reconnect finish during MainActor stall over loopback",
         .disabled(if: !runMainActorStallTests)
@@ -961,8 +1128,7 @@ struct NetworkRouteTests {
                     "role": DeviceRole.mac.rawValue,
                     "protocolVersion": String(BoothTransportHello.currentProtocolVersion)
                 ])
-            ),
-            generation: 771
+            )
         )
         let port = try #require(macEvents.waitForListener())
         let mainEntered = DispatchSemaphore(value: 0)
@@ -1065,8 +1231,7 @@ struct NetworkRouteTests {
                     "role": DeviceRole.mac.rawValue,
                     "protocolVersion": String(BoothTransportHello.currentProtocolVersion)
                 ])
-            ),
-            generation: 992
+            )
         )
         let port = try #require(macEvents.waitForListener())
         let mainEntered = DispatchSemaphore(value: 0)
@@ -1171,8 +1336,7 @@ struct NetworkRouteTests {
                 name: BoothBonjourServiceIdentity.serviceName(channel: .control, deviceID: macIdentity.id),
                 type: "_prc-control._tcp",
                 txtRecord: NWTXTRecord(["deviceID": macIdentity.id])
-            ),
-            generation: 1501
+            )
         )
         let port = try #require(macEvents.waitForListener())
         defer {
@@ -1350,8 +1514,7 @@ struct NetworkRouteTests {
                 name: BoothBonjourServiceIdentity.serviceName(channel: .control, deviceID: macIdentity.id),
                 type: "_prc-control._tcp",
                 txtRecord: NWTXTRecord(["deviceID": macIdentity.id])
-            ),
-            generation: 1401
+            )
         )
         let port = try #require(macEvents.waitForListener())
         defer {

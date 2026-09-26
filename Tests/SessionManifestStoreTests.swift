@@ -238,6 +238,7 @@ struct SessionManifestStoreTests {
         var manifest = makeManifest()
         manifest.origin = .soakTest
         manifest.soakRunID = "run-123"
+        manifest.status = .completed
         manifest.soakAutoCleanupEnabled = true
         manifest.soakCleanupWarning = "Remote cloud cleanup failed."
         manifest.soakDiagnosticRetained = true

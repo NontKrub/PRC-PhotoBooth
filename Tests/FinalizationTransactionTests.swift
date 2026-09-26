@@ -1,5 +1,6 @@
 import Testing
 import Foundation
+import CoreGraphics
 
 @testable import PRC_PhotoBooth_Mac
 
@@ -39,7 +40,16 @@ struct FinalizationTransactionTests {
             updateGalleryEnabled: false,
             renderGIFEnabled: false
         )
+        manifest.eventConfig.qrCodeElements = [
+            SharedQRCodeElement(id: "qr-1", normalizedRect: CGRect(x: 0.1, y: 0.1, width: 0.2, height: 0.2))
+        ]
+        manifest.cloudDelivery = SessionCloudDeliverySnapshot(
+            publicBaseURL: "https://photos.example/base",
+            remoteBasePath: "/srv/www/photos",
+            sshHost: "photos.example"
+        )
         let plan = try #require(FinalizationPlan.make(from: manifest))
+        #expect(plan.requiresCloudPublicationForGuestQR)
         var staleUpload = makeJob(sessionID: manifest.id, kind: .cloudUpload, transactionID: "tx-old")
         staleUpload.status = .succeeded
         #expect(plan.cloudPublicationReadiness(in: [staleUpload], for: manifest) == .pending)
@@ -50,6 +60,44 @@ struct FinalizationTransactionTests {
         #expect(plan.cloudPublicationReadiness(in: [currentUpload], for: manifest) == .failed)
         currentUpload.status = .succeeded
         #expect(plan.cloudPublicationReadiness(in: [currentUpload], for: manifest) == .published)
+    }
+
+    @Test("blank cloud URL keeps a valid local QR deliverable when optional upload fails")
+    func blankCloudURLDoesNotBlockLocalGuestQR() throws {
+        var manifest = makeManifest(id: "session-local-qr", root: FileManager.default.temporaryDirectory)
+        manifest.status = .finalizing
+        manifest.finalizationTransactionID = "tx-current"
+        manifest.deliveryIntent = SessionDeliveryIntentSnapshot(
+            cloudUploadEnabled: true,
+            automaticPrintEnabled: true,
+            updateGalleryEnabled: false,
+            renderGIFEnabled: false
+        )
+        manifest.eventConfig.qrCodeElements = [
+            SharedQRCodeElement(id: "qr-1", normalizedRect: CGRect(x: 0.1, y: 0.1, width: 0.2, height: 0.2))
+        ]
+        manifest.cloudDelivery = SessionCloudDeliverySnapshot(
+            publicBaseURL: "",
+            remoteBasePath: "/srv/www/photos",
+            sshHost: "photos.example"
+        )
+
+        let plan = try #require(FinalizationPlan.make(from: manifest))
+        #expect(!plan.requiresCloudPublicationForGuestQR)
+        #expect(!plan.requiresCloudPublicationBeforePrint)
+
+        var failedUpload = makeJob(sessionID: manifest.id, kind: .cloudUpload, transactionID: "tx-current")
+        failedUpload.status = .failed
+        #expect(plan.cloudPublicationReadiness(in: [failedUpload], for: manifest) == .notRequired)
+
+        let qr = try SessionQRCodePayloadResolver.resolve(
+            manifest: manifest,
+            localBaseURL: "http://192.168.1.50:8080",
+            publicBaseURL: manifest.cloudDelivery?.publicBaseURL,
+            cloudUploadEnabled: true,
+            allowTrustedLocalHTTP: true
+        )
+        #expect(qr == "http://192.168.1.50:8080/s/token-session-local-qr/")
     }
 
     @Test("finalizeSession flow does not roll back on failure, job queue handles finalizationTransactionID")

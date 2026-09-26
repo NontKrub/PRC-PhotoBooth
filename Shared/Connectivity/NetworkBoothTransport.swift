@@ -581,8 +581,6 @@ public final class NetworkBoothTransport: BoothTransport {
             lastNetworkError = reason
             if activeInterface == .wiredEthernet {
                 handleLANHandshakeFailure(reason: reason, retainManualListener: false)
-            } else if shouldReconnect {
-                scheduleReconnect()
             }
         case .listenerReady:
             break
@@ -2402,8 +2400,7 @@ public final class NetworkBoothTransport: BoothTransport {
         invalidateReceiveToken(for: .control)
         invalidateReceiveToken(for: .preview)
         invalidateReceiveToken(for: .asset)
-        coreControlListenerGeneration &+= 1
-        transportRuntime.stopControlCore()
+        coreControlListenerGeneration = transportRuntime.stopControlCore()
         transportRuntime.invalidateControlConnection(generation: controlConnectionGeneration)
         controlConnectionGeneration &+= 1
         coreOwnedControlGeneration = nil
@@ -2646,12 +2643,10 @@ public final class NetworkBoothTransport: BoothTransport {
             let port: NWEndpoint.Port? = activeInterface == .wiredEthernet
                 ? Self.directLANControlPort
                 : nil
-            coreControlListenerGeneration &+= 1
-            transportRuntime.startControlListener(
+            coreControlListenerGeneration = transportRuntime.startControlListener(
                 using: makeParameters(for: activeInterface),
                 port: port,
-                service: advertisedService(for: .control),
-                generation: coreControlListenerGeneration
+                service: advertisedService(for: .control)
             )
             return
         }

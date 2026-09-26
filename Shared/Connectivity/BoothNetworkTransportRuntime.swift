@@ -7,6 +7,8 @@ import Network
 /// `@unchecked Sendable` conformance is limited to this explicit serialization
 /// boundary. MainActor consumes immutable events and owns presentation only.
 final class BoothNetworkTransportRuntime: @unchecked Sendable {
+    typealias ControlListenerFactory = (NWParameters, NWEndpoint.Port?) throws -> NWListener
+
     /// Trusted connection events carry a generation and values only. The
     /// pairingCandidate case is a separate legacy handoff for an untrusted
     /// pairing flow; that socket/decoder transfer remains a migration gap.
@@ -140,7 +142,17 @@ final class BoothNetworkTransportRuntime: @unchecked Sendable {
         let generation: Int
     }
 
+    private struct ControlListenerConfiguration {
+        let parameters: NWParameters
+        let port: NWEndpoint.Port?
+        var service: NWListener.Service
+        let generation: Int
+    }
+
+    private static let controlListenerRetryDelays: [TimeInterval] = [0.25, 0.5, 1, 2, 4, 8]
+
     private let queue: DispatchQueue
+    private let controlListenerFactory: ControlListenerFactory
     private let queueKey = DispatchSpecificKey<Void>()
     private let heartbeatState = BoothTransportHeartbeatState()
     private var heartbeatSource: DispatchSourceTimer?
@@ -186,6 +198,9 @@ final class BoothNetworkTransportRuntime: @unchecked Sendable {
     private var identityProbeConnection: NWConnection?
     private var coreControlListener: NWListener?
     private var coreControlListenerGeneration = 0
+    private var coreControlListenerConfiguration: ControlListenerConfiguration?
+    private var coreControlListenerRetrySource: DispatchSourceTimer?
+    private var coreControlListenerRetryAttempt = 0
     private var coreRouteBrowsers: [String: NWBrowser] = [:]
     private var coreRouteGeneration = 0
     private var coreRouteSelection = BoothRouteDiscoverySelection()
@@ -237,10 +252,17 @@ final class BoothNetworkTransportRuntime: @unchecked Sendable {
 
     init(
         queue: DispatchQueue,
-        admissionLimiter: BoothPreAuthAdmissionLimiter = BoothPreAuthAdmissionLimiter()
+        admissionLimiter: BoothPreAuthAdmissionLimiter = BoothPreAuthAdmissionLimiter(),
+        controlListenerFactory: @escaping ControlListenerFactory = { parameters, port in
+            if let port {
+                return try NWListener(using: parameters, on: port)
+            }
+            return try NWListener(using: parameters)
+        }
     ) {
         self.queue = queue
         self.admissionLimiter = admissionLimiter
+        self.controlListenerFactory = controlListenerFactory
         queue.setSpecific(key: queueKey, value: ())
     }
 
@@ -280,67 +302,55 @@ final class BoothNetworkTransportRuntime: @unchecked Sendable {
         }
     }
 
+    /// Starts one logical listener lifecycle. Repeated calls refresh its
+    /// advertised service and return its generation; changing listener
+    /// parameters requires stopping the control core first.
     func startControlListener(
         using parameters: NWParameters,
         port: NWEndpoint.Port?,
-        service: NWListener.Service,
-        generation: Int
-    ) {
+        service: NWListener.Service
+    ) -> Int {
         onQueue {
-            guard self.coreControlListener == nil else { return }
-            self.coreControlListenerGeneration = generation
-            let listener: NWListener
-            do {
-                if let port {
-                    listener = try NWListener(using: parameters, on: port)
-                } else {
-                    listener = try NWListener(using: parameters)
+            if var configuration = self.coreControlListenerConfiguration {
+                configuration.service = service
+                self.coreControlListenerConfiguration = configuration
+                self.coreControlListener?.service = service
+                if self.coreControlListener == nil,
+                   self.coreControlListenerRetrySource == nil {
+                    self.scheduleControlListenerRetryOnQueue(generation: configuration.generation, immediate: true)
                 }
-            } catch {
-                self.controlCoreEvent?(.listenerFailed(generation: generation, reason: error.localizedDescription))
-                return
+                return configuration.generation
             }
-            listener.service = service
-            listener.stateUpdateHandler = { [weak self, weak listener] state in
-                guard let self, let listener else { return }
-                switch state {
-                case .ready:
-                    self.onQueue {
-                        guard self.coreControlListener === listener,
-                              self.coreControlListenerGeneration == generation else { return }
-                        self.controlCoreEvent?(.listenerReady(generation: generation, port: listener.port))
-                    }
-                case .failed(let error):
-                    self.onQueue {
-                        guard self.coreControlListener === listener,
-                              self.coreControlListenerGeneration == generation else { return }
-                        self.coreControlListener = nil
-                        self.controlCoreEvent?(.listenerFailed(generation: generation, reason: error.localizedDescription))
-                    }
-                case .cancelled:
-                    self.onQueue {
-                        if self.coreControlListener === listener { self.coreControlListener = nil }
-                    }
-                default:
-                    break
-                }
-            }
-            listener.newConnectionHandler = { [weak self] connection in
-                guard let self else { connection.cancel(); return }
-                _ = self.startInboundControlConnection(connection)
-            }
-            self.coreControlListener = listener
-            listener.start(queue: self.queue)
+
+            self.coreControlListenerGeneration &+= 1
+            let generation = self.coreControlListenerGeneration
+            self.coreControlListenerConfiguration = ControlListenerConfiguration(
+                parameters: parameters,
+                port: port,
+                service: service,
+                generation: generation
+            )
+            self.coreControlListenerRetryAttempt = 0
+            self.startControlListenerOnQueue(generation: generation)
+            return generation
         }
     }
 
     func updateControlListenerService(_ service: NWListener.Service) {
-        onQueue { self.coreControlListener?.service = service }
+        onQueue {
+            if var configuration = self.coreControlListenerConfiguration {
+                configuration.service = service
+                self.coreControlListenerConfiguration = configuration
+            }
+            self.coreControlListener?.service = service
+        }
     }
 
     func stopControlListener() {
         onQueue {
             self.coreControlListenerGeneration &+= 1
+            self.coreControlListenerConfiguration = nil
+            self.cancelControlListenerRetryOnQueue()
             self.coreControlListener?.cancel()
             self.coreControlListener = nil
         }
@@ -348,12 +358,15 @@ final class BoothNetworkTransportRuntime: @unchecked Sendable {
 
     /// Invalidates every core-owned callback before releasing sockets, so a
     /// stale listener or reconnect cannot affect a later route generation.
-    func stopControlCore() {
+    @discardableResult
+    func stopControlCore() -> Int {
         onQueue {
             self.nextControlGeneration &+= 1
             self.coreRouteGeneration &+= 1
             self.stopTrustedRouteDiscoveryOnQueue()
             self.coreControlListenerGeneration &+= 1
+            self.coreControlListenerConfiguration = nil
+            self.cancelControlListenerRetryOnQueue()
             self.coreControlListener?.cancel()
             self.coreControlListener = nil
             self.cancelReconnectOnQueue()
@@ -379,7 +392,116 @@ final class BoothNetworkTransportRuntime: @unchecked Sendable {
             self.stopHeartbeatOnQueue()
             self.stopPreAuthWatchdogOnQueue()
             self.sharedSecureChannel?.reset()
+            return self.coreControlListenerGeneration
         }
+    }
+
+    private func startControlListenerOnQueue(generation: Int) {
+        guard let configuration = coreControlListenerConfiguration,
+              configuration.generation == generation,
+              coreControlListener == nil else { return }
+
+        let listener: NWListener
+        do {
+            listener = try controlListenerFactory(configuration.parameters, configuration.port)
+        } catch {
+            reportControlListenerFailureOnQueue(
+                error.localizedDescription,
+                generation: generation,
+                listener: nil
+            )
+            return
+        }
+
+        listener.service = configuration.service
+        listener.stateUpdateHandler = { [weak self, weak listener] state in
+            guard let self, let listener else { return }
+            switch state {
+            case .ready:
+                self.onQueue {
+                    guard self.coreControlListener === listener,
+                          self.coreControlListenerGeneration == generation,
+                          self.coreControlListenerConfiguration?.generation == generation else { return }
+                    self.coreControlListenerRetryAttempt = 0
+                    self.controlCoreEvent?(.listenerReady(generation: generation, port: listener.port))
+                }
+            case .failed(let error):
+                self.onQueue {
+                    self.reportControlListenerFailureOnQueue(
+                        error.localizedDescription,
+                        generation: generation,
+                        listener: listener
+                    )
+                }
+            case .cancelled:
+                self.onQueue {
+                    guard self.coreControlListener === listener else { return }
+                    self.reportControlListenerFailureOnQueue(
+                        "The control listener was cancelled unexpectedly.",
+                        generation: generation,
+                        listener: listener
+                    )
+                }
+            default:
+                break
+            }
+        }
+        listener.newConnectionHandler = { [weak self] connection in
+            guard let self else { connection.cancel(); return }
+            _ = self.startInboundControlConnection(connection)
+        }
+        coreControlListener = listener
+        listener.start(queue: queue)
+    }
+
+    private func reportControlListenerFailureOnQueue(
+        _ reason: String,
+        generation: Int,
+        listener: NWListener?
+    ) {
+        guard coreControlListenerGeneration == generation,
+              coreControlListenerConfiguration?.generation == generation else { return }
+        if let listener {
+            guard coreControlListener === listener else { return }
+            coreControlListener = nil
+            listener.cancel()
+        } else {
+            guard coreControlListener == nil else { return }
+        }
+        controlCoreEvent?(.listenerFailed(generation: generation, reason: reason))
+        scheduleControlListenerRetryOnQueue(generation: generation)
+    }
+
+    private func scheduleControlListenerRetryOnQueue(generation: Int, immediate: Bool = false) {
+        guard coreControlListenerRetrySource == nil,
+              coreControlListener == nil,
+              coreControlListenerConfiguration?.generation == generation else { return }
+        let attempt = coreControlListenerRetryAttempt
+        coreControlListenerRetryAttempt += 1
+        let delay = immediate ? 0 : Self.controlListenerRetryDelays[
+            min(attempt, Self.controlListenerRetryDelays.count - 1)
+        ]
+        let source = DispatchSource.makeTimerSource(queue: queue)
+        source.schedule(deadline: .now() + delay)
+        source.setEventHandler { [weak self] in
+            guard let self else { return }
+            guard self.coreControlListenerConfiguration?.generation == generation,
+                  self.coreControlListenerGeneration == generation,
+                  self.coreControlListener == nil else {
+                self.cancelControlListenerRetryOnQueue()
+                return
+            }
+            self.coreControlListenerRetrySource?.cancel()
+            self.coreControlListenerRetrySource = nil
+            self.startControlListenerOnQueue(generation: generation)
+        }
+        coreControlListenerRetrySource = source
+        source.resume()
+    }
+
+    private func cancelControlListenerRetryOnQueue() {
+        coreControlListenerRetrySource?.cancel()
+        coreControlListenerRetrySource = nil
     }
 
     func startTrustedRouteDiscovery(
@@ -1645,6 +1767,9 @@ final class BoothNetworkTransportRuntime: @unchecked Sendable {
                 endpointKey: key,
                 isPreferredCandidate: isPreferred
             )
+            // Cooldown rejects must fall through the separately bounded
+            // proof lane so a trusted device is never identified by IP alone.
+            let requiresIdentityProbe = !check.admitted
             if let active = activeControlConnection {
                 switch active.state {
                 case .cancelled, .failed:
@@ -1662,13 +1787,6 @@ final class BoothNetworkTransportRuntime: @unchecked Sendable {
                         active.cancel()
                         clearControlSlotOnQueue(connection: active)
                     } else {
-                        guard check.admitted || check.globalLimitReached else {
-                            connection.cancel()
-                            return InboundControlAdmissionResult(
-                                admission: nil,
-                                rejectionReason: check.reason ?? "Pre-authentication candidate was throttled."
-                            )
-                        }
                         return makeInboundAdmissionOnQueue(
                             connection,
                             endpointKey: key,
@@ -1679,11 +1797,11 @@ final class BoothNetworkTransportRuntime: @unchecked Sendable {
                     }
                 }
             }
-            let isIdentityProbe = !check.admitted && !isPreferred && check.globalLimitReached
-            guard check.admitted || isIdentityProbe else {
-                connection.cancel()
-                return InboundControlAdmissionResult(admission: nil, rejectionReason: check.reason)
-            }
+            // A source or claimed-endpoint cooldown must not close the only
+            // path for a trusted device whose DHCP address is new to this
+            // process. Keep it in the bounded probe lane, where the stored
+            // secret HMAC remains the only authority that can grant trust.
+            let isIdentityProbe = requiresIdentityProbe
             return makeInboundAdmissionOnQueue(
                 connection,
                 endpointKey: key,
