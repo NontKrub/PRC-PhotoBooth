@@ -438,6 +438,18 @@ final class DSLRCameraSource: NSObject, CameraSource {
         let requestedAt = Date()
         let baselineFiles = Set((cam.mediaFiles ?? []).compactMap { ($0 as? ICCameraFile)?.name })
         let baselineHandles = await fetchPTPObjectHandles(cam)
+        let baselineSucceeded: Bool
+        if case .success = baselineHandles {
+            baselineSucceeded = true
+        } else {
+            baselineSucceeded = false
+        }
+        captureAttemptContexts.clearPTPHandleQuarantineAfterFreshBaseline(
+            cameraIdentifier: cameraIdentifier,
+            baselineSucceeded: baselineSucceeded
+        )
+        let cameraTimeOffset = cam.capabilities.contains(ICDeviceCapability.cameraDeviceCanSyncClock.rawValue)
+            && cam.timeOffset.isFinite ? cam.timeOffset : nil
         
         return try await withCheckedThrowingContinuation { [weak self] cont in
             guard let self else { cont.resume(throwing: DSLRError.noCamera); return }
@@ -453,7 +465,8 @@ final class DSLRCameraSource: NSObject, CameraSource {
                 requestedAt: requestedAt,
                 baselineFileNames: baselineFiles,
                 baselineObjectHandles: baselineHandles,
-                expectedCameraIdentifier: cameraIdentifier
+                expectedCameraIdentifier: cameraIdentifier,
+                cameraTimeOffset: cameraTimeOffset
             )
             captureAttemptContexts.beginCapture(context)
 
@@ -1787,6 +1800,10 @@ extension DSLRCameraSource: @preconcurrency ICCameraDeviceDelegate {
     }
     func deviceDidBecomeReady(withCompleteContentCatalog device: ICCameraDevice) {
         NSLog("[DSLR] catalog complete — %@, %d items on card", device.name ?? "?", device.mediaFiles?.count ?? 0)
+        guard connectedCamera === device else { return }
+        captureAttemptContexts.cameraCatalogDidComplete(
+            identifier: stableCameraIdentifier(for: device)
+        )
     }
     func cameraDeviceDidRemoveAccessRestriction(_ device: ICDevice) { }
     func cameraDeviceDidEnableAccessRestriction(_ device: ICDevice) { }
@@ -1808,6 +1825,10 @@ extension DSLRCameraSource: @preconcurrency ICCameraDeviceDelegate {
             return
         }
         guard let cam = device as? ICCameraDevice else { isConnecting = false; return }
+        guard connectedCamera === cam else { return }
+        captureAttemptContexts.cameraSessionDidOpen(
+            identifier: stableCameraIdentifier(for: cam)
+        )
         // isConnecting stays true through the full Sony handshake so the UI's "Connecting…"
         // state covers it, not just the IC session-open call.
         Task { @MainActor [weak self] in
@@ -1825,6 +1846,11 @@ extension DSLRCameraSource: @preconcurrency ICCameraDeviceDelegate {
     }
 
     func device(_ device: ICDevice, didCloseSessionWithError error: Error?) {
+        if let cam = device as? ICCameraDevice {
+            captureAttemptContexts.cameraDidDisconnect(
+                identifier: stableCameraIdentifier(for: cam)
+            )
+        }
         if let attemptID = activeCaptureAttemptID {
             finishCaptureAttempt(
                 attemptID: attemptID,
@@ -1849,6 +1875,9 @@ extension DSLRCameraSource: @preconcurrency ICCameraDeviceDelegate {
     }
     func didRemove(_ device: ICDevice) {
         guard let cam = device as? ICCameraDevice, connectedCamera === cam else { return }
+        captureAttemptContexts.cameraDidDisconnect(
+            identifier: stableCameraIdentifier(for: cam)
+        )
         if let attemptID = activeCaptureAttemptID {
             finishCaptureAttempt(
                 attemptID: attemptID,

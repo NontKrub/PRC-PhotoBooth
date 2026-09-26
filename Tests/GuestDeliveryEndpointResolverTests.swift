@@ -128,6 +128,97 @@ struct GuestDeliveryEndpointResolverTests {
         #expect(endpoint.interfaceType == .wifi)
     }
 
+    @Test("duplicate path entries with the same type merge without trapping")
+    func duplicatePathEntriesMergeSameType() {
+        let map = GuestDeliveryPathInterfaceTypeMap(interfaces: [
+            GuestDeliveryPathInterface(name: "en0", index: 4, type: .wifi),
+            GuestDeliveryPathInterface(name: "en0", index: 4, type: .wifi)
+        ])
+        #expect(map.interfaceType(name: "en0", index: 4) == .wifi)
+    }
+
+    @Test("generic and concrete path types merge in either order")
+    func genericAndConcretePathTypesMergeDeterministically() {
+        let otherThenWiFi = GuestDeliveryPathInterfaceTypeMap(interfaces: [
+            GuestDeliveryPathInterface(name: "en0", index: 4, type: .other),
+            GuestDeliveryPathInterface(name: "en0", index: 4, type: .wifi)
+        ])
+        let wifiThenOther = GuestDeliveryPathInterfaceTypeMap(interfaces: [
+            GuestDeliveryPathInterface(name: "en0", index: 4, type: .wifi),
+            GuestDeliveryPathInterface(name: "en0", index: 4, type: .other)
+        ])
+
+        #expect(otherThenWiFi.interfaceType(name: "en0", index: 4) == .wifi)
+        #expect(wifiThenOther.interfaceType(name: "en0", index: 4) == .wifi)
+    }
+
+    @Test("conflicting concrete path types fail guest delivery closed")
+    func conflictingConcretePathTypesAreAmbiguous() {
+        let map = GuestDeliveryPathInterfaceTypeMap(interfaces: [
+            GuestDeliveryPathInterface(name: "en0", index: 4, type: .wifi),
+            GuestDeliveryPathInterface(name: "en0", index: 4, type: .ethernet)
+        ])
+        let type = map.interfaceType(name: "en0", index: 4)
+        let en0 = NetworkInterfaceSnapshot(
+            name: "en0", flags: activeFlags, address: "10.10.0.5", interfaceType: type
+        )
+
+        #expect(type == .conflicting)
+        #expect(GuestDeliveryEndpointResolver.resolve(from: [en0], selection: .automatic)
+            == .ambiguous(interfaceNames: ["en0"]))
+        #expect(GuestDeliveryEndpointResolver.resolveBestGuestDeliveryIP(from: [en0]) == nil)
+    }
+
+    @Test("separate interfaces retain their own classifications")
+    func multiplePathInterfacesKeepIndependentTypes() {
+        let map = GuestDeliveryPathInterfaceTypeMap(interfaces: [
+            GuestDeliveryPathInterface(name: "en0", index: 4, type: .wifi),
+            GuestDeliveryPathInterface(name: "en0", index: 4, type: .wifi),
+            GuestDeliveryPathInterface(name: "en5", index: 9, type: .ethernet)
+        ])
+
+        #expect(map.interfaceType(name: "en0", index: 4) == .wifi)
+        #expect(map.interfaceType(name: "en5", index: 9) == .ethernet)
+    }
+
+    @Test("replacing path snapshots clears stale and conflicting classifications")
+    func repeatedPathUpdatesReplaceTheCache() {
+        let wifi = GuestDeliveryPathInterface(name: "en0", index: 4, type: .wifi)
+        let ethernet = GuestDeliveryPathInterface(name: "en0", index: 4, type: .ethernet)
+
+        var map = GuestDeliveryPathInterfaceTypeMap(interfaces: [wifi])
+        #expect(map.interfaceType(name: "en0", index: 4) == .wifi)
+        map = GuestDeliveryPathInterfaceTypeMap(interfaces: [wifi, wifi])
+        #expect(map.interfaceType(name: "en0", index: 4) == .wifi)
+        map = GuestDeliveryPathInterfaceTypeMap(interfaces: [wifi, ethernet])
+        #expect(map.interfaceType(name: "en0", index: 4) == .conflicting)
+        map = GuestDeliveryPathInterfaceTypeMap(interfaces: [ethernet])
+        #expect(map.interfaceType(name: "en0", index: 4) == .ethernet)
+        map = GuestDeliveryPathInterfaceTypeMap(interfaces: [wifi])
+        #expect(map.interfaceType(name: "en0", index: 4) == .wifi)
+    }
+
+    @Test("known Wi-Fi at a configured direct-LAN address is never selected as Ethernet")
+    func knownWiFiCannotBeReclassifiedByAddress() {
+        let wifi = NetworkInterfaceSnapshot(
+            name: "en0", flags: activeFlags, address: "10.0.0.1", interfaceType: .wifi
+        )
+
+        #expect(GuestDeliveryEndpointResolver.resolve(from: [wifi], selection: .ethernet) == .unavailable)
+        #expect(GuestDeliveryEndpointResolver.resolve(from: [wifi], selection: .wifi).endpoint?.interfaceType == .wifi)
+    }
+
+    @Test("configured direct-LAN address selects only an unclassified interface")
+    func directLANAddressFallbackRequiresUnknownInterfaceType() throws {
+        let unknown = NetworkInterfaceSnapshot(
+            name: "en5", flags: activeFlags, address: "192.168.4.1", interfaceType: .unknown
+        )
+        let endpoint = try #require(GuestDeliveryEndpointResolver.resolve(
+            from: [unknown], selection: .ethernet
+        ).endpoint)
+        #expect(endpoint.interfaceType == .ethernet)
+    }
+
     @Test("multiple matching interfaces remain ambiguous")
     func matchingInterfacesRemainAmbiguous() {
         let first = NetworkInterfaceSnapshot(

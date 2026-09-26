@@ -10,6 +10,7 @@ final class BoothNetworkTransportRuntime: @unchecked Sendable {
         let generation: Int
         let endpointKey: String
         let isPreferredCandidate: Bool
+        let isIdentityProbe: Bool
     }
 
     struct InboundControlAdmissionResult: Sendable {
@@ -55,6 +56,8 @@ final class BoothNetworkTransportRuntime: @unchecked Sendable {
     private var activeControlConnection: NWConnection?
     private var activeControlGeneration = 0
     private var activeControlAuthenticated = false
+    private var activeControlIsIdentityProbe = false
+    private var activeIdentityProbePeerID: String?
 
     var onHeartbeatTimeout: (@Sendable (NWConnection, Int) -> Void)?
     var onReconnectDue: (@Sendable (Int, Int) -> Void)?
@@ -225,6 +228,30 @@ final class BoothNetworkTransportRuntime: @unchecked Sendable {
             endpoints.insert(key)
             authenticatedEndpointsByPeerID[peerID] = Set(endpoints.sorted().suffix(8))
             admissionLimiter.recordSuccess(endpointKey: key)
+            admissionLimiter.recordIdentityProbeSuccess(peerID: peerID)
+            if activeControlConnection?.endpoint == endpoint {
+                activeControlIsIdentityProbe = false
+                activeIdentityProbePeerID = nil
+            }
+        }
+    }
+
+    func acceptIdentityProbeClaim(
+        _ peerID: String,
+        connection: NWConnection,
+        generation: Int
+    ) -> Bool {
+        onQueue {
+            guard activeControlConnection === connection,
+                  activeControlGeneration == generation else { return false }
+            guard activeControlIsIdentityProbe else { return true }
+            // The claimed ID only selects its own retry budget. The transport
+            // still requires the existing stored-secret HMAC before trust.
+            activeIdentityProbePeerID = peerID
+            return admissionLimiter.shouldAdmitIdentityProbe(
+                peerID: peerID,
+                trustedPeerIDs: trustedPeerIDs
+            ).admitted
         }
     }
 
@@ -240,7 +267,8 @@ final class BoothNetworkTransportRuntime: @unchecked Sendable {
                 endpointKey: key,
                 isPreferredCandidate: isPreferred
             )
-            guard check.admitted else {
+            let isIdentityProbe = !check.admitted && !isPreferred && check.globalLimitReached
+            guard check.admitted || isIdentityProbe else {
                 connection.cancel()
                 return InboundControlAdmissionResult(admission: nil, rejectionReason: check.reason)
             }
@@ -269,12 +297,15 @@ final class BoothNetworkTransportRuntime: @unchecked Sendable {
                 token: UUID(),
                 generation: nextInboundAdmissionGeneration,
                 endpointKey: key,
-                isPreferredCandidate: isPreferred
+                isPreferredCandidate: isPreferred,
+                isIdentityProbe: isIdentityProbe
             )
             inboundAdmission = admission
             activeControlConnection = connection
             activeControlGeneration = admission.generation
             activeControlAuthenticated = false
+            activeControlIsIdentityProbe = isIdentityProbe
+            activeIdentityProbePeerID = nil
             startInboundAdmissionTimeoutOnQueue(
                 connection: connection,
                 admission: admission,
@@ -414,6 +445,7 @@ final class BoothNetworkTransportRuntime: @unchecked Sendable {
 
     private func clearControlSlotOnQueue(connection: NWConnection) {
         guard activeControlConnection === connection else { return }
+        recordIdentityProbeFailureOnQueue()
         stopInboundAdmissionTimeoutOnQueue()
         if inboundAdmission?.token != nil,
            inboundAdmission?.generation == activeControlGeneration {
@@ -421,11 +453,22 @@ final class BoothNetworkTransportRuntime: @unchecked Sendable {
         }
         activeControlConnection = nil
         activeControlAuthenticated = false
+        activeControlIsIdentityProbe = false
+        activeIdentityProbePeerID = nil
         stopPreAuthWatchdogOnQueue()
         if pendingReconnectConnection === connection {
             pendingReconnectConnection = nil
             stopPendingReconnectTimeoutOnQueue()
         }
+    }
+
+    private func recordIdentityProbeFailureOnQueue() {
+        guard !activeControlAuthenticated,
+              let peerID = activeIdentityProbePeerID else { return }
+        admissionLimiter.recordIdentityProbeFailure(
+            peerID: peerID,
+            trustedPeerIDs: trustedPeerIDs
+        )
     }
 
     private func recordAdmissionFailureOnQueue(_ endpoint: NWEndpoint) {
@@ -570,6 +613,10 @@ final class BoothNetworkTransportRuntime: @unchecked Sendable {
                 pendingReconnectConnection = nil
                 stopPendingReconnectTimeoutOnQueue()
             }
+            if activeControlConnection !== connection {
+                activeControlIsIdentityProbe = false
+                activeIdentityProbePeerID = nil
+            }
             activeControlConnection = connection
             activeControlGeneration = generation
             activeControlAuthenticated = authenticated
@@ -579,8 +626,11 @@ final class BoothNetworkTransportRuntime: @unchecked Sendable {
     func invalidateControlConnection(generation: Int) {
         onQueue {
             if activeControlGeneration == generation {
+                recordIdentityProbeFailureOnQueue()
                 activeControlConnection = nil
                 activeControlAuthenticated = false
+                activeControlIsIdentityProbe = false
+                activeIdentityProbePeerID = nil
                 stopInboundAdmissionTimeoutOnQueue()
                 inboundAdmission = nil
                 stopPreAuthWatchdogOnQueue()

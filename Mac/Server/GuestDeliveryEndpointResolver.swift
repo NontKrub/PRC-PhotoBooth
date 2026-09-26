@@ -9,6 +9,7 @@ public enum GuestDeliveryInterfaceType: String, Codable, Sendable, Equatable {
     case ethernet
     case other
     case unknown
+    case conflicting
 }
 
 public enum GuestDeliveryInterfaceSelection: Sendable, Equatable {
@@ -58,6 +59,7 @@ public struct GuestDeliveryEndpoint: Sendable, Equatable {
         case .ethernet: "Ethernet"
         case .other: "Other"
         case .unknown: "Unknown interface type"
+        case .conflicting: "Conflicting interface type"
         }
         return "\(type) · \(interfaceName) · \(address):\(port)"
     }
@@ -136,6 +138,13 @@ public enum GuestDeliveryEndpointResolver {
         port: UInt16 = 8585
     ) -> GuestDeliveryResolution {
         let valid = interfaces.filter(isGuestRoutable(interface:))
+        let conflictingNames = Array(Set(valid.compactMap {
+            $0.interfaceType == .conflicting ? $0.name : nil
+        })).sorted()
+        guard conflictingNames.isEmpty else {
+            return .ambiguous(interfaceNames: conflictingNames)
+        }
+
         let candidates: [NetworkInterfaceSnapshot]
         switch selection {
         case .automatic:
@@ -144,7 +153,9 @@ public enum GuestDeliveryEndpointResolver {
             candidates = valid.filter { $0.interfaceType == .wifi }
         case .ethernet:
             candidates = valid.filter {
-                $0.interfaceType == .ethernet || configuredDirectEthernetAddresses.contains($0.address)
+                $0.interfaceType == .ethernet
+                    || (($0.interfaceType == nil || $0.interfaceType == .unknown)
+                        && configuredDirectEthernetAddresses.contains($0.address))
             }
         case .interface(let name):
             candidates = valid.filter { $0.name == name }
@@ -155,8 +166,12 @@ public enum GuestDeliveryEndpointResolver {
             return .ambiguous(interfaceNames: Array(Set(candidates.map(\.name))).sorted())
         }
 
-        let type = candidate.interfaceType
-            ?? (configuredDirectEthernetAddresses.contains(candidate.address) ? .ethernet : .unknown)
+        let type: GuestDeliveryInterfaceType
+        if let interfaceType = candidate.interfaceType, interfaceType != .unknown {
+            type = interfaceType
+        } else {
+            type = configuredDirectEthernetAddresses.contains(candidate.address) ? .ethernet : .unknown
+        }
         return .ready(GuestDeliveryEndpoint(
             interfaceName: candidate.name,
             interfaceIndex: candidate.interfaceIndex,
@@ -194,6 +209,8 @@ public enum GuestDeliveryEndpointResolver {
             guard let addr = current.pointee.ifa_addr,
                   Int32(addr.pointee.sa_family) == AF_INET else { continue }
             let name = String(cString: current.pointee.ifa_name)
+            let rawInterfaceIndex = name.withCString { if_nametoindex($0) }
+            let interfaceIndex = rawInterfaceIndex == 0 ? nil : rawInterfaceIndex
             var hostname = [CChar](repeating: 0, count: Int(NI_MAXHOST))
             let result = getnameinfo(
                 addr,
@@ -208,46 +225,93 @@ public enum GuestDeliveryEndpointResolver {
             let ip = hostname.withUnsafeBufferPointer { buffer in
                 String(decoding: buffer.prefix(while: { $0 != 0 }).map(UInt8.init), as: UTF8.self)
             }
-            let interfaceIndex = name.withCString { if_nametoindex($0) }
             snapshots.append(NetworkInterfaceSnapshot(
                 name: name,
                 flags: current.pointee.ifa_flags,
                 address: ip,
-                interfaceIndex: interfaceIndex == 0 ? nil : interfaceIndex,
-                interfaceType: pathTypes[name]
+                interfaceIndex: interfaceIndex,
+                interfaceType: pathTypes.interfaceType(name: name, index: interfaceIndex)
             ))
         }
         return snapshots
     }
 }
 
-private final class GuestDeliveryPathInterfaceTypes: @unchecked Sendable {
+struct GuestDeliveryPathInterface: Sendable {
+    let name: String
+    let index: UInt32?
+    let type: GuestDeliveryInterfaceType
+}
+
+struct GuestDeliveryPathInterfaceTypeMap: Sendable, Equatable {
+    private(set) var byName: [String: GuestDeliveryInterfaceType] = [:]
+    private(set) var byIndex: [UInt32: GuestDeliveryInterfaceType] = [:]
+
+    init(interfaces: [GuestDeliveryPathInterface] = []) {
+        for interface in interfaces {
+            byName[interface.name] = Self.merging(byName[interface.name], interface.type)
+            if let index = interface.index {
+                byIndex[index] = Self.merging(byIndex[index], interface.type)
+            }
+        }
+    }
+
+    func interfaceType(name: String, index: UInt32?) -> GuestDeliveryInterfaceType? {
+        guard let byNameType = byName[name] else { return index.flatMap { byIndex[$0] } }
+        guard let index, let byIndexType = byIndex[index] else { return byNameType }
+        return Self.merging(byNameType, byIndexType)
+    }
+
+    private static func merging(
+        _ current: GuestDeliveryInterfaceType?,
+        _ incoming: GuestDeliveryInterfaceType
+    ) -> GuestDeliveryInterfaceType {
+        guard let current else { return incoming }
+        if current == incoming { return current }
+        if current == .conflicting || incoming == .conflicting { return .conflicting }
+
+        let currentIsGeneric = current == .other || current == .unknown
+        let incomingIsGeneric = incoming == .other || incoming == .unknown
+        if currentIsGeneric && incomingIsGeneric { return .other }
+        if currentIsGeneric { return incoming }
+        if incomingIsGeneric { return current }
+        return .conflicting
+    }
+}
+
+final class GuestDeliveryPathInterfaceTypes: @unchecked Sendable {
     static let shared = GuestDeliveryPathInterfaceTypes()
 
+    // NSLock protects replacement and copying of this immutable snapshot.
     private let lock = NSLock()
-    private var types: [String: GuestDeliveryInterfaceType] = [:]
+    private var types = GuestDeliveryPathInterfaceTypeMap()
     private let monitor = NWPathMonitor()
     private let queue = DispatchQueue(label: "PRC-PhotoBooth.GuestDeliveryPath", qos: .utility)
 
     private init() {
         monitor.pathUpdateHandler = { [weak self] path in
-            let updated = Dictionary(uniqueKeysWithValues: path.availableInterfaces.map { interface in
+            let updated = path.availableInterfaces.map { interface in
                 let type: GuestDeliveryInterfaceType = switch interface.type {
                 case .wifi: .wifi
                 case .wiredEthernet: .ethernet
                 default: .other
                 }
-                return (interface.name, type)
-            })
+                return GuestDeliveryPathInterface(
+                    name: interface.name,
+                    index: UInt32(exactly: interface.index),
+                    type: type
+                )
+            }
             guard let self else { return }
+            let snapshot = GuestDeliveryPathInterfaceTypeMap(interfaces: updated)
             self.lock.lock()
-            self.types = updated
+            self.types = snapshot
             self.lock.unlock()
         }
         monitor.start(queue: queue)
     }
 
-    func snapshot() -> [String: GuestDeliveryInterfaceType] {
+    func snapshot() -> GuestDeliveryPathInterfaceTypeMap {
         lock.lock()
         defer { lock.unlock() }
         return types

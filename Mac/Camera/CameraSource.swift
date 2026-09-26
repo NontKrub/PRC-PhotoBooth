@@ -18,6 +18,7 @@ struct DSLRCaptureAttemptContext: Sendable {
     let baselineFileNames: Set<String>
     let baselineObjectHandles: PTPHandleBaselineResult
     let expectedCameraIdentifier: String?
+    let cameraTimeOffset: TimeInterval?
     let allowsPTPHandleCandidates: Bool
     let shutterIssuedAt: Date?
     let shutterCommandGeneration: UInt64?
@@ -30,6 +31,7 @@ struct DSLRCaptureAttemptContext: Sendable {
         baselineFileNames: Set<String>,
         baselineObjectHandles: PTPHandleBaselineResult,
         expectedCameraIdentifier: String?,
+        cameraTimeOffset: TimeInterval? = nil,
         allowsPTPHandleCandidates: Bool = true,
         shutterIssuedAt: Date? = nil,
         shutterCommandGeneration: UInt64? = nil,
@@ -41,6 +43,7 @@ struct DSLRCaptureAttemptContext: Sendable {
         self.baselineFileNames = baselineFileNames
         self.baselineObjectHandles = baselineObjectHandles
         self.expectedCameraIdentifier = expectedCameraIdentifier
+        self.cameraTimeOffset = cameraTimeOffset.flatMap { $0.isFinite ? $0 : nil }
         self.allowsPTPHandleCandidates = allowsPTPHandleCandidates
         self.shutterIssuedAt = shutterIssuedAt
         self.shutterCommandGeneration = shutterCommandGeneration
@@ -55,6 +58,7 @@ struct DSLRCaptureAttemptContext: Sendable {
             baselineFileNames: baselineFileNames,
             baselineObjectHandles: baselineObjectHandles,
             expectedCameraIdentifier: expectedCameraIdentifier,
+            cameraTimeOffset: cameraTimeOffset,
             allowsPTPHandleCandidates: allowsPTPHandleCandidates,
             shutterIssuedAt: date,
             shutterCommandGeneration: generation,
@@ -70,6 +74,7 @@ struct DSLRCaptureAttemptContext: Sendable {
             baselineFileNames: baselineFileNames,
             baselineObjectHandles: baselineObjectHandles,
             expectedCameraIdentifier: expectedCameraIdentifier,
+            cameraTimeOffset: cameraTimeOffset,
             allowsPTPHandleCandidates: allowsPTPHandleCandidates,
             shutterIssuedAt: shutterIssuedAt,
             shutterCommandGeneration: shutterCommandGeneration,
@@ -88,6 +93,7 @@ struct DSLRCaptureAttemptContext: Sendable {
             baselineFileNames: baselineFileNames,
             baselineObjectHandles: baselineObjectHandles,
             expectedCameraIdentifier: expectedCameraIdentifier,
+            cameraTimeOffset: cameraTimeOffset,
             allowsPTPHandleCandidates: allowsPTPHandleCandidates,
             shutterIssuedAt: shutterIssuedAt,
             shutterCommandGeneration: shutterCommandGeneration,
@@ -100,6 +106,11 @@ struct DSLRCaptureAttemptContext: Sendable {
         shutterIssuedAt != nil && expectedCameraIdentifier != nil
     }
 
+    func normalizedCameraDate(_ date: Date) -> Date? {
+        guard let cameraTimeOffset, cameraTimeOffset.isFinite else { return nil }
+        return date.addingTimeInterval(-cameraTimeOffset)
+    }
+
     func disablingPTPHandleCandidates() -> Self {
         Self(
             id: id,
@@ -107,6 +118,7 @@ struct DSLRCaptureAttemptContext: Sendable {
             baselineFileNames: baselineFileNames,
             baselineObjectHandles: baselineObjectHandles,
             expectedCameraIdentifier: expectedCameraIdentifier,
+            cameraTimeOffset: cameraTimeOffset,
             allowsPTPHandleCandidates: false,
             shutterIssuedAt: shutterIssuedAt,
             shutterCommandGeneration: shutterCommandGeneration,
@@ -137,6 +149,9 @@ struct DSLRCaptureAttemptContextStore: Sendable {
     private(set) var recoverable: DSLRCaptureAttemptContext?
     private(set) var operation: Operation?
     private var ptpHandleQuarantine: Set<String> = []
+    private var disconnectedAfterQuarantine: Set<String> = []
+    private var reopenedAfterQuarantine: Set<String> = []
+    private var cataloguedAfterQuarantine: Set<String> = []
 
     mutating func beginCapture(_ context: DSLRCaptureAttemptContext) {
         if let cameraIdentifier = context.expectedCameraIdentifier,
@@ -177,6 +192,9 @@ struct DSLRCaptureAttemptContextStore: Sendable {
                context.canRecover,
                let cameraIdentifier = context.expectedCameraIdentifier {
                 ptpHandleQuarantine.insert(cameraIdentifier)
+                disconnectedAfterQuarantine.remove(cameraIdentifier)
+                reopenedAfterQuarantine.remove(cameraIdentifier)
+                cataloguedAfterQuarantine.remove(cameraIdentifier)
             }
         case .recovery:
             if succeeded { recoverable = nil }
@@ -191,6 +209,51 @@ struct DSLRCaptureAttemptContextStore: Sendable {
         active = nil
         recoverable = nil
         operation = nil
+    }
+
+    func isPTPHandleQuarantined(cameraIdentifier: String?) -> Bool {
+        guard let cameraIdentifier else { return false }
+        return ptpHandleQuarantine.contains(cameraIdentifier)
+    }
+
+    mutating func cameraDidDisconnect(identifier: String?) {
+        guard let identifier, ptpHandleQuarantine.contains(identifier) else { return }
+        disconnectedAfterQuarantine.insert(identifier)
+        reopenedAfterQuarantine.remove(identifier)
+        cataloguedAfterQuarantine.remove(identifier)
+    }
+
+    mutating func cameraSessionDidOpen(identifier: String?) {
+        guard let identifier,
+              ptpHandleQuarantine.contains(identifier),
+              disconnectedAfterQuarantine.contains(identifier) else { return }
+        reopenedAfterQuarantine.insert(identifier)
+    }
+
+    mutating func cameraCatalogDidComplete(identifier: String?) {
+        guard let identifier,
+              ptpHandleQuarantine.contains(identifier),
+              disconnectedAfterQuarantine.contains(identifier),
+              reopenedAfterQuarantine.contains(identifier) else { return }
+        cataloguedAfterQuarantine.insert(identifier)
+    }
+
+    mutating func clearPTPHandleQuarantineAfterFreshBaseline(
+        cameraIdentifier: String?,
+        baselineSucceeded: Bool
+    ) {
+        guard let cameraIdentifier,
+              baselineSucceeded,
+              ptpHandleQuarantine.contains(cameraIdentifier),
+              disconnectedAfterQuarantine.contains(cameraIdentifier),
+              reopenedAfterQuarantine.contains(cameraIdentifier),
+              cataloguedAfterQuarantine.contains(cameraIdentifier),
+              active == nil,
+              operation != .recovery else { return }
+        ptpHandleQuarantine.remove(cameraIdentifier)
+        disconnectedAfterQuarantine.remove(cameraIdentifier)
+        reopenedAfterQuarantine.remove(cameraIdentifier)
+        cataloguedAfterQuarantine.remove(cameraIdentifier)
     }
 }
 

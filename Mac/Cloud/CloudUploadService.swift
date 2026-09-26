@@ -399,10 +399,26 @@ actor CloudUploadService {
         let publicURL = validatedPublicBase.url
 
         let remoteRoot = "/\(remoteBase)"
-        let stagingDirectory = "\(remoteRoot)/.staging/\(manifest.id)"
-        let publishedRoot = "\(remoteRoot)/.published"
+        let soakRunID: String?
+        if manifest.origin == .soakTest {
+            guard let runID = manifest.soakRunID, isSafeComponent(runID) else {
+                throw JobExecutionError.permanent("Soak cloud upload is missing a safe run identifier.")
+            }
+            soakRunID = runID
+        } else {
+            soakRunID = nil
+        }
+        let stagingDirectory = soakRunID.map {
+            "\(remoteRoot)/.soak/\($0)/.staging/\(manifest.id)"
+        } ?? "\(remoteRoot)/.staging/\(manifest.id)"
+        let publishedRoot = soakRunID.map {
+            "\(remoteRoot)/.soak/\($0)/.published"
+        } ?? "\(remoteRoot)/.published"
         let publishedDirectory = "\(publishedRoot)/\(manifest.id)-\(UUID().uuidString)"
-        let remoteSessions = "\(remoteRoot)/s"
+        let remoteSessions = soakRunID.map {
+            "\(remoteRoot)/s/soak/\($0)"
+        } ?? "\(remoteRoot)/s"
+        let publicAlias = "\(remoteSessions)/\(soakRunID == nil ? manifest.downloadToken : manifest.id)"
         let page = cloudDownloadPageHTML(
             hasGIF: manifest.gifFileName != nil
         )
@@ -452,7 +468,7 @@ actor CloudUploadService {
         }
         let publishCommand = (remoteChecks + (gifCheck.map { [$0] } ?? []) + [
             "mv \(Self.shellQuoted(stagingDirectory)) \(Self.shellQuoted(publishedDirectory))",
-            "ln -sfn \(Self.shellQuoted(publishedDirectory)) \(Self.shellQuoted("\(remoteSessions)/\(manifest.downloadToken)"))"
+            "ln -sfn \(Self.shellQuoted(publishedDirectory)) \(Self.shellQuoted(publicAlias))"
         ]).joined(separator: " && ")
         try await run(
             label: "ssh publish download link",
@@ -461,10 +477,20 @@ actor CloudUploadService {
             timeout: Timeout.ssh
         )
 
-        let verificationURL = publicURL
-            .appendingPathComponent("s")
-            .appendingPathComponent(manifest.downloadToken)
-            .appendingPathComponent(stripFileName)
+        let verificationURL: URL
+        if let soakRunID {
+            verificationURL = publicURL
+                .appendingPathComponent("s")
+                .appendingPathComponent("soak")
+                .appendingPathComponent(soakRunID)
+                .appendingPathComponent(manifest.id)
+                .appendingPathComponent(stripFileName)
+        } else {
+            verificationURL = publicURL
+                .appendingPathComponent("s")
+                .appendingPathComponent(manifest.downloadToken)
+                .appendingPathComponent(stripFileName)
+        }
         do {
             let verification = try await verifier.verify(url: verificationURL, timeout: Timeout.verification)
             guard verification.statusCode == 200, verification.contentLength > 0 else {
@@ -484,12 +510,11 @@ actor CloudUploadService {
         }
         try Task.checkCancellation()
 
-        let cleanupCommand = [
-            "find \(Self.shellQuoted(publishedRoot)) -maxdepth 1 -mindepth 1 -type d",
-            "-name \(Self.shellQuoted("\(manifest.id)-*"))",
-            "! -path \(Self.shellQuoted(publishedDirectory))",
-            "-exec rm -rf -- {} +"
-        ].joined(separator: " ")
+        let cleanupCommand = cleanupPublishedVersionsCommand(
+            publishedRoot: publishedRoot,
+            sessionID: manifest.id,
+            keeping: publishedDirectory
+        )
         do {
             try await run(
                 label: "clean stale published versions",
@@ -501,6 +526,39 @@ actor CloudUploadService {
             if Task.isCancelled { throw error }
             NSLog("[Cloud] Cloud upload succeeded, but stale remote versions could not be cleaned: \(error.localizedDescription)")
         }
+    }
+
+    func removeSoakArtifacts(
+        manifest: SessionManifest,
+        configuration: CloudUploadConfiguration
+    ) async throws {
+        let remoteBase = configuration.remoteBasePath.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        guard manifest.origin == .soakTest,
+              let runID = manifest.soakRunID,
+              isSafeComponent(runID),
+              isSafeComponent(manifest.id),
+              isSafeHost(configuration.sshHost),
+              isSafeRemotePath(remoteBase),
+              !remoteBase.isEmpty,
+              !remoteBase.split(separator: "/").contains("..") else {
+            throw JobExecutionError.permanent("Refusing cloud cleanup for an invalid soak session path.")
+        }
+
+        let remoteRoot = "/\(remoteBase)"
+        let stagingDirectory = "\(remoteRoot)/.soak/\(runID)/.staging/\(manifest.id)"
+        let publishedRoot = "\(remoteRoot)/.soak/\(runID)/.published"
+        let publicAlias = "\(remoteRoot)/s/soak/\(runID)/\(manifest.id)"
+        let command = [
+            "if [ -e \(Self.shellQuoted(publicAlias)) ] || [ -L \(Self.shellQuoted(publicAlias)) ]; then rm -f -- \(Self.shellQuoted(publicAlias)); fi",
+            "rm -rf -- \(Self.shellQuoted(stagingDirectory))",
+            cleanupPublishedVersionsCommand(publishedRoot: publishedRoot, sessionID: manifest.id)
+        ].joined(separator: " && ")
+        try await run(
+            label: "clean isolated soak cloud artifacts",
+            executable: "/usr/bin/ssh",
+            arguments: Self.sshArguments(host: configuration.sshHost, command: command),
+            timeout: Timeout.ssh
+        )
     }
 
     private func requiredFile(_ fileName: String, in directory: URL, message: String) throws -> URL {
@@ -571,6 +629,22 @@ actor CloudUploadService {
             && value != "."
             && value != ".."
             && value.unicodeScalars.allSatisfy { allowed.contains($0) }
+    }
+
+    private func cleanupPublishedVersionsCommand(
+        publishedRoot: String,
+        sessionID: String,
+        keeping publishedDirectory: String? = nil
+    ) -> String {
+        var parts = [
+            "find \(Self.shellQuoted(publishedRoot)) -maxdepth 1 -mindepth 1 -type d",
+            "-name \(Self.shellQuoted("\(sessionID)-*"))"
+        ]
+        if let publishedDirectory {
+            parts.append("! -path \(Self.shellQuoted(publishedDirectory))")
+        }
+        parts.append("-exec rm -rf -- {} +")
+        return "if [ -d \(Self.shellQuoted(publishedRoot)) ]; then \(parts.joined(separator: " ")); fi"
     }
 
     static func shellQuoted(_ value: String) -> String {

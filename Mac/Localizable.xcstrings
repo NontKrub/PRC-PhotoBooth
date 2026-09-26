@@ -7414,6 +7414,292 @@
         }
       }
     },
+    "%@%%" : {
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%@%%"
+          }
+        }
+      }
+    },
+    "10 (Quick Smoke)" : {
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "10 (ทดสอบสั้น)"
+          }
+        }
+      }
+    },
+    "100 (Stress Test)" : {
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "100 (ทดสอบความทนทาน)"
+          }
+        }
+      }
+    },
+    "25 (Short Benchmark)" : {
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "25 (ทดสอบระยะสั้น)"
+          }
+        }
+      }
+    },
+    "50 (Standard Soak)" : {
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "50 (ทดสอบมาตรฐาน)"
+          }
+        }
+      }
+    },
+    "500 (Full Event Soak)" : {
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "500 (ทดสอบงานเต็มรูปแบบ)"
+          }
+        }
+      }
+    },
+    "Choose a synthetic benchmark, physical camera check, or production session soak. Only Production Pipeline exercises the live booth workflow." : {
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "เลือกการทดสอบสังเคราะห์ การตรวจสอบกล้องจริง หรือการทดสอบเซสชันการทำงานจริง เฉพาะ Production Pipeline เท่านั้นที่ทดสอบเวิร์กโฟลว์ของบูธจริง"
+          }
+        }
+      }
+    },
+    "Cycle %@ of %@" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Cycle %1$@ of %2$@"
+          }
+        },
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "รอบที่ %@ จาก %@"
+          }
+        }
+      }
+    },
+    "DANGEROUS" : {
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "อันตราย"
+          }
+        }
+      }
+    },
+    "Delay Between Cycles:" : {
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "หน่วงเวลาระหว่างรอบ:"
+          }
+        }
+      }
+    },
+    "Each production cycle performs a real upload. Review the configured destination and credentials before enabling." : {
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "แต่ละรอบการทำงานจริงจะอัปโหลดไฟล์จริง โปรดตรวจสอบปลายทางและข้อมูลรับรองที่ตั้งค่าไว้ก่อนเปิดใช้"
+          }
+        }
+      }
+    },
+    "Enable Physical Printing" : {
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "เปิดใช้การพิมพ์จริง"
+          }
+        }
+      }
+    },
+    "Enable public HTTPS or trusted LAN HTTP in Global booth guest-delivery settings." : {
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "เปิดใช้ HTTPS สาธารณะหรือ HTTP บน LAN ที่เชื่อถือได้ในการตั้งค่าการส่งมอบรูปภาพลูกค้าส่วนกลางของบูธ"
+          }
+        }
+      }
+    },
+    "Global booth guest-delivery setting" : {
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "การตั้งค่าการส่งมอบรูปภาพลูกค้าส่วนกลางของบูธ"
+          }
+        }
+      }
+    },
+    "Guest photos and download links are unencrypted on the local network. Use only on an isolated, operator-controlled network." : {
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "รูปภาพและลิงก์ดาวน์โหลดของลูกค้าไม่มีการเข้ารหัสบนเครือข่ายภายใน ใช้เฉพาะบนเครือข่ายแยกที่ผู้ดูแลควบคุมเท่านั้น"
+          }
+        }
+      }
+    },
+    "Issues & Warnings" : {
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ปัญหาและคำเตือน"
+          }
+        }
+      }
+    },
+    "Opt-in sends real print jobs to the configured printer. The cadence limits paper and ribbon use." : {
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "เมื่อเปิดใช้ ระบบจะส่งงานพิมพ์จริงไปยังเครื่องพิมพ์ที่ตั้งค่าไว้ ความถี่ช่วยจำกัดการใช้กระดาษและริบบอน"
+          }
+        }
+      }
+    },
+    "Preflight Diagnostics" : {
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "การวินิจฉัยก่อนเริ่ม"
+          }
+        }
+      }
+    },
+    "Public guest URLs must use HTTPS. Session pages use this URL after cloud upload succeeds." : {
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "URL สาธารณะสำหรับลูกค้าต้องใช้ HTTPS หน้าของเซสชันจะใช้ URL นี้เมื่ออัปโหลดขึ้นคลาวด์สำเร็จ"
+          }
+        }
+      }
+    },
+    "QR codes use this URL when cloud upload is enabled. Example: https://photos.yourdomain.com" : {
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "QR code จะใช้ URL นี้เมื่อเปิดการอัปโหลดขึ้นคลาวด์ ตัวอย่าง: https://photos.yourdomain.com"
+          }
+        }
+      }
+    },
+    "Soak Test Failed" : {
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "การทดสอบความทนทานล้มเหลว"
+          }
+        }
+      }
+    },
+    "Soak Test In Progress" : {
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "กำลังทดสอบความทนทาน"
+          }
+        }
+      }
+    },
+    "Stopping Soak Test..." : {
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "กำลังหยุดการทดสอบความทนทาน..."
+          }
+        }
+      }
+    },
+    "Subsystem Coverage" : {
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ความครอบคลุมของระบบย่อย"
+          }
+        }
+      }
+    },
+    "Target Cycles:" : {
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "จำนวนรอบเป้าหมาย:"
+          }
+        }
+      }
+    },
+    "Test Configuration" : {
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "การกำหนดค่าการทดสอบ"
+          }
+        }
+      }
+    },
+    "The public guest URL is invalid. Cloud delivery requires HTTPS." : {
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "URL สาธารณะสำหรับลูกค้าไม่ถูกต้อง การส่งมอบผ่านคลาวด์ต้องใช้ HTTPS"
+          }
+        }
+      }
+    },
+    "• %@" : {
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "• %@"
+          }
+        }
+      }
+    },
     "ไทย" : {
       "localizations" : {
         "th" : {

@@ -748,7 +748,7 @@ struct NetworkRouteTests {
         }
         first.start(queue: clientQueue)
         #expect(waitForSemaphore(accepted))
-        #expect(waitForSemaphore(preAuthTimeout))
+        #expect(waitForSemaphore(preAuthTimeout, timeout: 3))
         #expect(runtime.isControlSlotAvailable())
 
         second.start(queue: clientQueue)
@@ -786,14 +786,117 @@ struct NetworkRouteTests {
             using: .tcp
         )
         let anonymousResult = runtime.admitInboundControlConnection(anonymous)
-        #expect(anonymousResult.admission == nil)
+        #expect(anonymousResult.admission?.isIdentityProbe == true)
+        if let admission = anonymousResult.admission {
+            runtime.abandonInboundControlAdmission(admission, connection: anonymous)
+        }
 
         let trusted = NWConnection(to: trustedEndpoint, using: .tcp)
         let trustedResult = runtime.admitInboundControlConnection(trusted)
+        #expect(trustedResult.admission?.isIdentityProbe == false)
         #expect(trustedResult.admission?.isPreferredCandidate == true)
         if let admission = trustedResult.admission {
             runtime.abandonInboundControlAdmission(admission, connection: trusted)
         }
+    }
+
+    @Test("trusted identity probe works with empty endpoint history and a changed DHCP address")
+    func identityProbeWorksWithChangedAddressAndEmptyHistory() {
+        let runtime = BoothNetworkTransportRuntime(
+            queue: DispatchQueue(label: "PRC-PhotoBooth.Tests.IdentityProbe")
+        )
+        runtime.updateTrustedPeerIDs(["paired-ipad"])
+
+        for index in 1...100 {
+            let connection = NWConnection(
+                to: .hostPort(
+                    host: NWEndpoint.Host(String(format: "192.0.2.%d", (index % 250) + 1)),
+                    port: NWEndpoint.Port(rawValue: 54_321)!
+                ),
+                using: .tcp
+            )
+            let result = runtime.admitInboundControlConnection(connection)
+            guard let admission = result.admission else {
+                #expect(Bool(false), "The bounded probe lane should stay available after anonymous throttling.")
+                continue
+            }
+            runtime.abandonInboundControlAdmission(admission, connection: connection)
+        }
+
+        let newDHCPAddress = NWConnection(
+            to: .hostPort(host: "192.168.1.99", port: NWEndpoint.Port(rawValue: 54_321)!),
+            using: .tcp
+        )
+        let result = runtime.admitInboundControlConnection(newDHCPAddress)
+        #expect(result.admission?.isIdentityProbe == true)
+        if let admission = result.admission {
+            #expect(runtime.acceptIdentityProbeClaim(
+                "paired-ipad",
+                connection: newDHCPAddress,
+                generation: admission.generation
+            ))
+            runtime.abandonInboundControlAdmission(admission, connection: newDHCPAddress)
+        }
+    }
+
+    @Test("spoofed trusted IDs exhaust only their identity-probe retry budget")
+    func identityProbeThrottlesSpoofedTrustedID() {
+        let runtime = BoothNetworkTransportRuntime(
+            queue: DispatchQueue(label: "PRC-PhotoBooth.Tests.IdentityProbeSpoof")
+        )
+        runtime.updateTrustedPeerIDs(["paired-ipad"])
+
+        for index in 1...BoothPreAuthAdmissionLimiter.defaultGlobalFailureThreshold {
+            let connection = NWConnection(
+                to: .hostPort(
+                    host: NWEndpoint.Host(String(format: "192.0.2.%d", index)),
+                    port: NWEndpoint.Port(rawValue: 54_321)!
+                ),
+                using: .tcp
+            )
+            guard let admission = runtime.admitInboundControlConnection(connection).admission else {
+                #expect(Bool(false), "The anonymous ceiling should be reached after this request.")
+                continue
+            }
+            runtime.abandonInboundControlAdmission(admission, connection: connection)
+        }
+
+        for attempt in 0..<BoothPreAuthAdmissionLimiter.defaultReservedFailureThreshold {
+            let connection = NWConnection(
+                to: .hostPort(
+                    host: NWEndpoint.Host(String(format: "198.51.100.%d", attempt + 1)),
+                    port: NWEndpoint.Port(rawValue: 54_321)!
+                ),
+                using: .tcp
+            )
+            guard let admission = runtime.admitInboundControlConnection(connection).admission else {
+                #expect(Bool(false), "The single identity-probe lane should admit one candidate at a time.")
+                continue
+            }
+            #expect(admission.isIdentityProbe)
+            #expect(runtime.acceptIdentityProbeClaim(
+                "paired-ipad",
+                connection: connection,
+                generation: admission.generation
+            ))
+            runtime.abandonInboundControlAdmission(admission, connection: connection)
+        }
+
+        let spoofed = NWConnection(
+            to: .hostPort(host: "203.0.113.99", port: NWEndpoint.Port(rawValue: 54_321)!),
+            using: .tcp
+        )
+        guard let admission = runtime.admitInboundControlConnection(spoofed).admission else {
+            #expect(Bool(false), "A throttled claimed ID should be rejected after the hello probe.")
+            return
+        }
+        #expect(admission.isIdentityProbe)
+        #expect(!runtime.acceptIdentityProbeClaim(
+            "paired-ipad",
+            connection: spoofed,
+            generation: admission.generation
+        ))
+        runtime.abandonInboundControlAdmission(admission, connection: spoofed)
     }
 
     @Test("production cached reconnect starts a replacement socket while MainActor is blocked")

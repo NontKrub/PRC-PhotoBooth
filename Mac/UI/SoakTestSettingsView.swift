@@ -8,6 +8,8 @@ public struct SoakTestSettingsView: View {
     @State private var showStartConfirmation = false
     @State private var exportErrorMessage: String?
     @State private var showExportSuccess = false
+    @State private var usesCustomCycleCount = false
+    @State private var customCycleCountText = ""
 
     public init() {}
 
@@ -47,9 +49,14 @@ public struct SoakTestSettingsView: View {
         }
         .padding(.vertical, 8)
         .onAppear {
+            usesCustomCycleCount = ![1, 10, 25, 50, 100, 500].contains(controller.config.targetCycles)
+            customCycleCountText = String(controller.config.targetCycles)
             controller.validatePreflight(coordinator: coordinator)
         }
         .onChange(of: controller.config) { _, _ in
+            controller.validatePreflight(coordinator: coordinator)
+        }
+        .onChange(of: coordinator.productionSoakPhotoCount) { _, _ in
             controller.validatePreflight(coordinator: coordinator)
         }
         .onChange(of: controller.config.mode) { oldMode, newMode in
@@ -80,7 +87,12 @@ public struct SoakTestSettingsView: View {
         case .productionPipeline:
             var message = "Runs \(controller.config.targetCycles) real sessions using the active event, camera, production storage, finalization queue, and configured guest delivery. Completed soak sessions are cleaned up when auto-cleanup is enabled."
             if controller.config.testCloudUpload {
-                message += "\n\nCloud upload is enabled. Each cycle will perform a real upload using the current production configuration."
+                message += "\n\nCloud upload is enabled. Each cycle uses the current production settings but publishes into this run’s temporary cloud namespace."
+                if controller.config.autoCleanupWorkingFiles {
+                    message += " Auto-cleanup removes the temporary public alias and remote files after verification."
+                } else {
+                    message += " Auto-cleanup is off, so the remote test files and aliases remain on the server."
+                }
             }
             if controller.config.enablePhysicalPrint {
                 let count = (controller.config.targetCycles + controller.config.physicalPrintEveryCycles - 1) / controller.config.physicalPrintEveryCycles
@@ -129,19 +141,46 @@ public struct SoakTestSettingsView: View {
                     .foregroundStyle(.secondary)
             }
 
-            HStack {
-                Text("Target Cycles:")
-                    .frame(width: 140, alignment: .leading)
-                Picker("", selection: $controller.config.targetCycles) {
+            HStack(spacing: 10) {
+                Picker("Target cycles", selection: Binding(
+                    get: { usesCustomCycleCount ? 0 : controller.config.targetCycles },
+                    set: { selected in
+                        if selected == 0 {
+                            usesCustomCycleCount = true
+                            customCycleCountText = ""
+                            controller.config.targetCycles = 0
+                        } else {
+                            usesCustomCycleCount = false
+                            customCycleCountText = String(selected)
+                            controller.config.targetCycles = selected
+                        }
+                    }
+                )) {
+                    Text("1 (Single-cycle check)").tag(1)
                     Text("10 (Quick Smoke)").tag(10)
                     Text("25 (Short Benchmark)").tag(25)
                     Text("50 (Standard Soak)").tag(50)
                     Text("100 (Stress Test)").tag(100)
                     Text("500 (Full Event Soak)").tag(500)
+                    Text("Custom…").tag(0)
                 }
-                .labelsHidden()
-                .frame(width: 200)
+                .frame(width: 260)
+
+                if usesCustomCycleCount {
+                    TextField("1–500", text: $customCycleCountText)
+                        .textFieldStyle(.roundedBorder)
+                        .frame(width: 80)
+                        .accessibilityLabel("Custom target cycles")
+                        .onChange(of: customCycleCountText) { _, value in
+                            let parsed = Int(value.trimmingCharacters(in: .whitespacesAndNewlines))
+                            controller.config.targetCycles = parsed.flatMap { (1...500).contains($0) ? $0 : nil } ?? 0
+                        }
+                    Text("cycles")
+                        .foregroundStyle(.secondary)
+                }
             }
+
+            workloadSummary
 
             HStack {
                 Text("Delay Between Cycles:")
@@ -156,7 +195,7 @@ public struct SoakTestSettingsView: View {
                 Toggle("Auto-cleanup test session files", isOn: $controller.config.autoCleanupWorkingFiles)
                     .font(.body)
                 Text(controller.config.mode == .productionPipeline
-                    ? "Removes only completed sessions tagged as this soak run. Failed production sessions remain available for diagnosis."
+                    ? "Removes completed local sessions tagged for this run. Failed sessions keep their local evidence; soak delivery routes are removed when the run ends."
                     : "Removes this run’s isolated benchmark files when the run finishes.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
@@ -167,7 +206,9 @@ public struct SoakTestSettingsView: View {
             VStack(alignment: .leading, spacing: 8) {
                 Toggle("Test cloud upload using current production settings", isOn: $controller.config.testCloudUpload)
                     .disabled(controller.config.mode != .productionPipeline)
-                Text("Each production cycle performs a real upload. Review the configured destination and credentials before enabling.")
+                Text(controller.config.autoCleanupWorkingFiles
+                    ? "Each cycle uploads to a temporary run-scoped path. Auto-cleanup removes its public alias and remote files after verification. Review the configured destination and credentials before enabling."
+                    : "Each cycle uploads to a temporary run-scoped path. Turning off auto-cleanup leaves those remote files and aliases in place. Review the configured destination and credentials before enabling.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -207,6 +248,49 @@ public struct SoakTestSettingsView: View {
             .background(controller.config.enablePhysicalPrint ? Color.red.opacity(0.08) : Color.primary.opacity(0.03))
             .cornerRadius(8)
         }
+    }
+
+    private var workloadSummary: some View {
+        let cycles = max(0, controller.config.targetCycles)
+        let productionPhotos = coordinator.productionSoakPhotoCount
+        let captureCount: Int? = switch controller.config.mode {
+        case .productionPipeline: productionPhotos.map { cycles * $0 }
+        case .cameraHardware: cycles * controller.config.photosPerSession
+        case .syntheticBenchmark: nil
+        }
+        let estimateBytes = productionPhotos.map { Int64(cycles * ($0 * 10 + 10)) * 1_048_576 }
+
+        return VStack(alignment: .leading, spacing: 4) {
+            Text("Expected workload")
+                .font(.subheadline.weight(.medium))
+            if controller.config.mode == .productionPipeline {
+                if let productionPhotos, let captureCount {
+                    Text("\(cycles) sessions × \(productionPhotos) photos = \(captureCount) camera captures.")
+                    if let estimateBytes {
+                        Text("Estimated new output: about \(Self.formatBytes(estimateBytes)); estimate uses 10 MiB per photo plus 10 MiB per session.")
+                    }
+                } else {
+                    Text("Photo count is unavailable until the active event template finishes loading.")
+                }
+                if controller.config.enablePhysicalPrint {
+                    let printCount = (cycles + controller.config.physicalPrintEveryCycles - 1)
+                        / max(1, controller.config.physicalPrintEveryCycles)
+                    Text("Physical print jobs: up to \(printCount).")
+                        .foregroundStyle(.red)
+                }
+            } else if controller.config.mode == .cameraHardware, let captureCount {
+                Text("\(cycles) cycles × \(controller.config.photosPerSession) photos = \(captureCount) camera captures.")
+            } else {
+                Text("\(cycles) synthetic benchmark cycles; no camera captures.")
+            }
+        }
+        .font(.caption)
+        .foregroundStyle(.secondary)
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private static func formatBytes(_ bytes: Int64) -> String {
+        ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file)
     }
 
     private var preflightCard: some View {

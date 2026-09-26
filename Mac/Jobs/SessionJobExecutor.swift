@@ -306,34 +306,19 @@ final class SessionJobExecutor: SessionJobExecuting {
     }
 
     private func upload(_ manifest: SessionManifest) async throws {
-        guard let configuration = Self.cloudUploadConfiguration(for: manifest, defaults: defaults) else {
-            throw JobExecutionError.permanent("Cloud upload disabled in Settings")
+        guard let configuration = Self.cloudUploadConfiguration(for: manifest) else {
+            let message = manifest.deliveryIntent?.cloudUploadEnabled == true
+                ? "Saved cloud destination is unavailable for this session."
+                : "Cloud upload is not enabled for this session."
+            throw JobExecutionError.permanent(message)
         }
         try await cloudUpload.upload(manifest: manifest, configuration: configuration)
     }
 
-    static func cloudUploadConfiguration(
-        for manifest: SessionManifest,
-        defaults: UserDefaults
-    ) -> CloudUploadConfiguration? {
-        if let intent = manifest.deliveryIntent {
-            guard intent.cloudUploadEnabled else { return nil }
-            if let snapshot = manifest.cloudDelivery {
-                return CloudUploadConfiguration(snapshot: snapshot)
-            }
-            // Only legacy manifests can reach this path; new finalization plans
-            // persist both the intent and the destination snapshot together.
-        }
-        if let snapshot = manifest.cloudDelivery {
-            return CloudUploadConfiguration(snapshot: snapshot)
-        }
-        guard defaults.bool(forKey: "cloudUploadEnabled") else { return nil }
-        return CloudUploadConfiguration(
-            sshHost: defaults.string(forKey: "cloudSSHHost") ?? "",
-            remoteBasePath: defaults.string(forKey: "cloudRemotePath")
-                ?? CloudUploadConfiguration.defaultRemoteBasePath,
-            publicBaseURL: defaults.string(forKey: "publicBaseURL") ?? ""
-        )
+    static func cloudUploadConfiguration(for manifest: SessionManifest) -> CloudUploadConfiguration? {
+        guard manifest.deliveryIntent?.cloudUploadEnabled ?? (manifest.cloudDelivery != nil),
+              let snapshot = manifest.cloudDelivery else { return nil }
+        return CloudUploadConfiguration(snapshot: snapshot)
     }
 
     private func printStrip(_ manifest: SessionManifest) async throws {
@@ -359,8 +344,7 @@ final class SessionJobExecutor: SessionJobExecuting {
 
     private func qrPayload(for manifest: SessionManifest) throws -> String? {
         guard !manifest.eventConfig.qrCodeElements.isEmpty else { return nil }
-        let cloudUploadEnabled = manifest.deliveryIntent?.cloudUploadEnabled
-            ?? (manifest.cloudDelivery != nil || defaults.bool(forKey: "cloudUploadEnabled"))
+        let cloudUploadEnabled = manifest.deliveryIntent?.cloudUploadEnabled ?? (manifest.cloudDelivery != nil)
         let allowTrustedLocalHTTP = defaults.bool(forKey: "allowTrustedLocalHTTP")
         let localBaseURL = LocalWebServer.guestDeliveryEndpoint(
             selection: guestDeliverySelection(),
@@ -369,7 +353,7 @@ final class SessionJobExecutor: SessionJobExecuting {
         return try SessionQRCodePayloadResolver.resolve(
             token: manifest.downloadToken,
             localBaseURL: localBaseURL,
-            publicBaseURL: manifest.cloudDelivery?.publicBaseURL ?? defaults.string(forKey: "publicBaseURL"),
+            publicBaseURL: manifest.cloudDelivery?.publicBaseURL,
             cloudUploadEnabled: cloudUploadEnabled,
             allowTrustedLocalHTTP: allowTrustedLocalHTTP
         )

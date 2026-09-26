@@ -117,7 +117,7 @@ struct SessionManifest: Codable, Sendable, Identifiable, Equatable {
 
     var downloadToken: String
     var shots: [RuntimeShotRecord]
-    // Optional keeps older manifests recoverable with current Settings as a fallback.
+    // Optional for old manifests; recovery never redirects them to current Settings.
     var cloudDelivery: SessionCloudDeliverySnapshot?
     // Optional keeps manifests written before v1.4.3 recoverable.
     var deliveryIntent: SessionDeliveryIntentSnapshot? = nil
@@ -134,6 +134,12 @@ struct SessionManifest: Codable, Sendable, Identifiable, Equatable {
 
     var lastError: String?
     var updatedAt: Date
+
+    func isEligibleForGuestPublication(activeSoakRunID: String?) -> Bool {
+        guard origin == .soakTest else { return true }
+        guard let activeSoakRunID else { return false }
+        return soakRunID == activeSoakRunID
+    }
 }
 
 public enum SessionOrigin: String, Codable, Sendable, Equatable {

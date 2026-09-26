@@ -3186,6 +3186,17 @@ public final class NetworkBoothTransport: BoothTransport {
             rejectControlConnection("Invalid device identity.")
             return
         }
+        if role == .mac {
+            guard let connection = controlConnection,
+                  transportRuntime.acceptIdentityProbeClaim(
+                    hello.deviceID,
+                    connection: connection,
+                    generation: controlConnectionGeneration
+                  ) else {
+                rejectControlConnection("Trusted identity probe was rejected or throttled.")
+                return
+            }
+        }
         guard hello.protocolVersion == BoothTransportHello.currentProtocolVersion else {
             rejectControlConnection(BoothPairingError.incompatibleProtocol.localizedDescription)
             return

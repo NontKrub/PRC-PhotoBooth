@@ -201,6 +201,7 @@ final class BoothCoordinator {
     private var currentManifest: SessionManifest?
     private var currentManifestID: String?
     private var activeSoakRunID: String?
+    private var soakAutoCleanupWorkingFiles = true
     private var soakCloudUploadOverride: Bool?
     private var soakAutomaticPrintOverride: Bool?
     @ObservationIgnored private var recoveryInFlightSessionIDs: Set<String> = []
@@ -816,22 +817,22 @@ final class BoothCoordinator {
                 errorMessage = "No cloud upload job exists for the active finalization transaction."
                 return
             }
-            let snapshot = manifest.cloudDelivery
-            let cloudEnabled = manifest.deliveryIntent?.cloudUploadEnabled
-                ?? (snapshot != nil || UserDefaults.standard.bool(forKey: "cloudUploadEnabled"))
+            guard let snapshot = manifest.cloudDelivery else {
+                errorMessage = "This session has no saved cloud destination. Current Settings cannot redirect it."
+                return
+            }
+            let cloudEnabled = manifest.deliveryIntent?.cloudUploadEnabled ?? true
             if !cloudEnabled {
                 errorMessage = "Cloud upload is disabled."
                 return
             }
 
-            let sshHost = (snapshot?.sshHost ?? UserDefaults.standard.string(forKey: "cloudSSHHost") ?? "")
-                .trimmingCharacters(in: .whitespacesAndNewlines)
+            let sshHost = snapshot.sshHost.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !sshHost.isEmpty else {
                 errorMessage = "Cloud upload is not configured: SSH host is missing."
                 return
             }
-            let publicBase = (snapshot?.publicBaseURL ?? UserDefaults.standard.string(forKey: "publicBaseURL") ?? "")
-                .trimmingCharacters(in: .whitespacesAndNewlines)
+            let publicBase = snapshot.publicBaseURL.trimmingCharacters(in: .whitespacesAndNewlines)
             guard ValidatedPublicGuestBaseURL(string: publicBase) != nil else {
                 errorMessage = "Cloud upload is not configured: public URL is missing or invalid."
                 return
@@ -2356,9 +2357,17 @@ final class BoothCoordinator {
         }
     }
 
+    var productionSoakPhotoCount: Int? {
+        guard let document = activeExperienceDocument else { return nil }
+        return document.templates.first(where: { $0.id == document.defaultTemplateID })?.photoCount
+    }
+
     func productionSoakReadinessIssues(config: BoothSoakTestConfig) -> [String] {
         var issues: [String] = []
         if activeEvent == nil { issues.append("An active event is required.") }
+        if activeEvent != nil, productionSoakPhotoCount == nil {
+            issues.append("The active event’s default photo template is not ready.")
+        }
         if !selectedCaptureSourceReady { issues.append("The selected physical camera is not ready.") }
         if !isCustomerDisplayReady { issues.append("Connect the paired iPad or activate the external customer display.") }
         if currentSession != nil || currentManifest != nil || activeSessionStart != nil
@@ -2435,6 +2444,7 @@ final class BoothCoordinator {
             throw BoothSoakTestError.productionRunUnavailable(issues.joined(separator: " "))
         }
         activeSoakRunID = runID
+        soakAutoCleanupWorkingFiles = config.autoCleanupWorkingFiles
     }
 
     func runAutomatedSoakCycle(
@@ -2512,6 +2522,14 @@ final class BoothCoordinator {
                     }
                     if isTerminal {
                         guard matching.allSatisfy({ $0.status == .succeeded }) else {
+                            if matching.contains(where: {
+                                $0.kind == .autoPrint
+                                    && $0.lastFailureDisposition == .sideEffectUnknown
+                            }) {
+                                throw BoothSoakTestError.productionRunUnavailable(
+                                    "Physical Print: UNKNOWN — operator verification required. The print job will not be retried automatically."
+                                )
+                            }
                             let failures = matching.filter { $0.status != .succeeded }
                                 .map { "\($0.kind.rawValue): \($0.lastError ?? $0.status.rawValue)" }
                             throw BoothSoakTestError.productionRunUnavailable(failures.joined(separator: "; "))
@@ -2610,12 +2628,58 @@ final class BoothCoordinator {
            manifest.origin == .soakTest,
            manifest.soakRunID == runID,
            (manifest.status == .capturing || manifest.status == .finalizing || manifest.status == .failed) {
-            await cancelCurrentSession()
+            await cancelCurrentSession(preservingDiagnosticFiles: manifest.status == .failed)
         }
         activeSoakRunID = nil
         soakCloudUploadOverride = nil
         soakAutomaticPrintOverride = nil
+        for result in await manifestStore.loadAll() {
+            guard case .loaded(let manifest) = result,
+                  manifest.origin == .soakTest,
+                  manifest.soakRunID == runID else { continue }
+
+            let activeJobs = jobQueue.jobs.filter {
+                $0.sessionID == manifest.id
+                    && ($0.status == .pending || $0.status == .running || $0.status == .waitingRetry)
+            }
+            var jobsQuiesced = true
+            if !activeJobs.isEmpty {
+                do {
+                    jobsQuiesced = try await jobQueue.cancelAndQuiesceJobs(sessionID: manifest.id) == .quiesced
+                } catch {
+                    jobsQuiesced = false
+                    recoveryService.recordError("Soak jobs could not be quiesced for \(manifest.id): \(error.localizedDescription)")
+                }
+                if !jobsQuiesced {
+                    recoveryService.markCleanupPending(sessionID: manifest.id)
+                }
+            }
+
+            if manifest.deliveryIntent?.updateGalleryEnabled == true {
+                do {
+                    try await galleryStore.removeSession(eventID: manifest.eventID, sessionID: manifest.id)
+                } catch {
+                    recoveryService.recordError("Soak gallery entry could not be removed for \(manifest.id): \(error.localizedDescription)")
+                }
+            }
+            await server.unregisterToken(manifest.downloadToken)
+
+            if soakAutoCleanupWorkingFiles,
+               jobsQuiesced,
+               manifest.deliveryIntent?.cloudUploadEnabled == true,
+               let snapshot = manifest.cloudDelivery {
+                do {
+                    try await cloudUpload.removeSoakArtifacts(
+                        manifest: manifest,
+                        configuration: CloudUploadConfiguration(snapshot: snapshot)
+                    )
+                } catch {
+                    recoveryService.recordError("Isolated soak cloud files could not be removed for \(manifest.id): \(error.localizedDescription)")
+                }
+            }
+        }
         if stateMachine.phase.isFinished { resetToIdleAfterCompletion() }
+        await refreshServerRoutes()
     }
 
     func cancelAutomatedSoakCycle(runID: String) async {
@@ -2637,6 +2701,13 @@ final class BoothCoordinator {
               activeSoakRunID == runID,
               manifest.status == .completed else {
             throw BoothSoakTestError.productionRunUnavailable("refusing cleanup for a non-soak or incomplete session")
+        }
+        if manifest.deliveryIntent?.cloudUploadEnabled == true,
+           let snapshot = manifest.cloudDelivery {
+            try await cloudUpload.removeSoakArtifacts(
+                manifest: manifest,
+                configuration: CloudUploadConfiguration(snapshot: snapshot)
+            )
         }
         if manifest.deliveryIntent?.updateGalleryEnabled == true {
             try await galleryStore.removeSession(eventID: manifest.eventID, sessionID: manifest.id)
@@ -2937,16 +3008,14 @@ final class BoothCoordinator {
         }
         let images = currentFilteredReviewImages
         let compositor = Compositor(config: config, framePNG: framePNG)
-        let cloudUploadEnabled = manifest.deliveryIntent?.cloudUploadEnabled
-            ?? (manifest.cloudDelivery != nil || UserDefaults.standard.bool(forKey: "cloudUploadEnabled"))
+        let cloudUploadEnabled = manifest.deliveryIntent?.cloudUploadEnabled ?? (manifest.cloudDelivery != nil)
         let allowTrustedLocalHTTP = UserDefaults.standard.bool(forKey: "allowTrustedLocalHTTP")
         let localBaseURL = LocalWebServer.guestDeliveryEndpoint(selection: guestDeliveryInterfaceSelection)
             .endpoint?.baseURL ?? ""
         let qrPayload = config.qrCodeElements.isEmpty ? nil : try? SessionQRCodePayloadResolver.resolve(
             token: manifest.downloadToken,
             localBaseURL: localBaseURL,
-            publicBaseURL: manifest.cloudDelivery?.publicBaseURL
-                ?? UserDefaults.standard.string(forKey: "publicBaseURL"),
+            publicBaseURL: manifest.cloudDelivery?.publicBaseURL,
             cloudUploadEnabled: cloudUploadEnabled,
             allowTrustedLocalHTTP: allowTrustedLocalHTTP
         )
@@ -3683,7 +3752,7 @@ final class BoothCoordinator {
         }
     }
 
-    private func cancelCurrentSession() async {
+    private func cancelCurrentSession(preservingDiagnosticFiles: Bool = false) async {
         guard sessionLifecycleOperation.allowsCancellation else { return }
         capture.invalidateCaptureRecovery()
         guard let session = currentSession, let manifest = currentManifest else {
@@ -3728,7 +3797,7 @@ final class BoothCoordinator {
             ) { durable in
                 durable.status = .cancelled
                 durable.cancelledAt = Date()
-                durable.lastError = nil
+                if !preservingDiagnosticFiles { durable.lastError = nil }
             }
         } catch {
             sessionLifecycleOperation = .idle
@@ -3760,10 +3829,12 @@ final class BoothCoordinator {
                 errorMessage = "Session cancellation was saved; its files were retained while background work stops."
             } else {
                 recordOperation(.sessionCancelled, sessionID: manifest.id)
-                do {
-                    try workspace.removeEntireSession(manifest: cancelledManifest)
-                } catch {
-                    recoveryService.recordError("Cancelled session files could not be removed: \(error.localizedDescription)")
+                if !preservingDiagnosticFiles {
+                    do {
+                        try workspace.removeEntireSession(manifest: cancelledManifest)
+                    } catch {
+                        recoveryService.recordError("Cancelled session files could not be removed: \(error.localizedDescription)")
+                    }
                 }
             }
         } catch {
@@ -4317,11 +4388,9 @@ final class BoothCoordinator {
 
         let directory = URL(fileURLWithPath: manifest.absoluteDirectoryPath, isDirectory: true)
         let token = manifest.downloadToken
-        let publicBase = (manifest.cloudDelivery?.publicBaseURL
-            ?? UserDefaults.standard.string(forKey: "publicBaseURL"))?
+        let publicBase = manifest.cloudDelivery?.publicBaseURL
             .trimmingCharacters(in: CharacterSet(charactersIn: "/ "))
-        let cloudUploadEnabled = manifest.deliveryIntent?.cloudUploadEnabled
-            ?? (manifest.cloudDelivery != nil || UserDefaults.standard.bool(forKey: "cloudUploadEnabled"))
+        let cloudUploadEnabled = manifest.deliveryIntent?.cloudUploadEnabled ?? (manifest.cloudDelivery != nil)
         let localBaseURL = LocalWebServer.guestDeliveryEndpoint(selection: guestDeliveryInterfaceSelection)
             .endpoint?.baseURL ?? ""
         let allowTrustedLocalHTTP = UserDefaults.standard.bool(forKey: "allowTrustedLocalHTTP")
@@ -4395,6 +4464,16 @@ final class BoothCoordinator {
         ) ? .trustedLocalHTTP : .disabled
         await server.setGuestRouteExposure(exposure)
 
+        let manifests = (await manifestStore.loadAll()).compactMap { result -> SessionManifest? in
+            guard case .loaded(let manifest) = result else { return nil }
+            return manifest
+        }
+        let hiddenSoakSessionIDs = Set(manifests.compactMap { manifest -> String? in
+            manifest.isEligibleForGuestPublication(activeSoakRunID: activeSoakRunID)
+                ? nil
+                : manifest.id
+        })
+
         var galleryMappings: [String: EventGalleryRouteRegistration] = [:]
         for result in await galleryStore.loadAll() {
             guard case .loaded(let index) = result else { continue }
@@ -4403,7 +4482,10 @@ final class BoothCoordinator {
                 continue
             }
             let approved = index.sessions
-                .filter { $0.approvalStatus == .approved }
+                .filter {
+                    $0.approvalStatus == .approved
+                        && !hiddenSoakSessionIDs.contains($0.sessionID)
+                }
                 .map { entry in
                     GalleryRouteSession(
                         sessionID: entry.sessionID,
@@ -4427,9 +4509,9 @@ final class BoothCoordinator {
         }
 
         var sessionMappings: [String: SessionRouteRegistration] = [:]
-        for result in await manifestStore.loadAll() {
-            guard case .loaded(let manifest) = result,
-                  manifest.status == .completed || manifest.status == .finalizing else { continue }
+        for manifest in manifests {
+            guard manifest.status == .completed || manifest.status == .finalizing,
+                  !hiddenSoakSessionIDs.contains(manifest.id) else { continue }
             let directory = URL(fileURLWithPath: manifest.absoluteDirectoryPath, isDirectory: true)
             let strip = directory.appendingPathComponent(manifest.stripFileName ?? "strip.png")
             guard FileManager.default.fileExists(atPath: directory.path),

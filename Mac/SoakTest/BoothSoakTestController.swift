@@ -47,7 +47,11 @@ public final class BoothSoakTestController {
             preflightErrors.append("The production session output volume is unavailable.")
         }
         let tempDir = storageURL ?? FileManager.default.temporaryDirectory
-        if let values = try? tempDir.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey, .volumeAvailableCapacityKey]),
+        let capacityValues = try? tempDir.resourceValues(forKeys: [
+            .volumeAvailableCapacityForImportantUsageKey,
+            .volumeAvailableCapacityKey
+        ])
+        if let values = capacityValues,
            let bytes = values.volumeAvailableCapacityForImportantUsage ?? values.volumeAvailableCapacity.map(Int64.init) {
             let freeGB = Double(bytes) / (1024 * 1024 * 1024)
             if freeGB < 2.0 {
@@ -55,6 +59,23 @@ public final class BoothSoakTestController {
             } else if freeGB < 3.0 {
                 preflightWarnings.append("Low disk space: \(String(format: "%.1f", freeGB)) GB available.")
             }
+
+            if config.mode == .productionPipeline,
+               (1...500).contains(config.targetCycles),
+               let photoCount = coordinator?.productionSoakPhotoCount {
+                let megabytesPerSession = photoCount * 10 + 10
+                let estimatedBytes = Int64(config.targetCycles * megabytesPerSession) * 1_048_576
+                let reserveBytes: Int64 = 1_073_741_824
+                if bytes < estimatedBytes + reserveBytes {
+                    let estimateGB = Double(estimatedBytes) / (1024 * 1024 * 1024)
+                    let requiredGB = Double(estimatedBytes + reserveBytes) / (1024 * 1024 * 1024)
+                    preflightErrors.append(
+                        "Estimated soak output is \(String(format: "%.1f", estimateGB)) GB; keep a 1.0 GB reserve, so \(String(format: "%.1f", requiredGB)) GB is required."
+                    )
+                }
+            }
+        } else if config.mode == .productionPipeline {
+            preflightErrors.append("Available storage could not be read, so disk capacity cannot be verified.")
         }
 
         // 2. Camera check

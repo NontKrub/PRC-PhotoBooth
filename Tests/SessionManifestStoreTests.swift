@@ -229,7 +229,9 @@ struct SessionManifestStoreTests {
     @Test("session cloud snapshot takes precedence over changed Settings")
     @MainActor
     func cloudSnapshotTakesPrecedence() throws {
-        let defaults = try #require(UserDefaults(suiteName: "PRC-Cloud-(UUID().uuidString)"))
+        let suiteName = "PRC-Cloud-\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
         var manifest = makeManifest()
         manifest.cloudDelivery = SessionCloudDeliverySnapshot(
             publicBaseURL: "https://old.example",
@@ -240,18 +242,54 @@ struct SessionManifestStoreTests {
             cloudUploadEnabled: false,
             automaticPrintEnabled: false
         )
-        defaults.set(false, forKey: "cloudUploadEnabled")
+        defaults.set(true, forKey: "cloudUploadEnabled")
         defaults.set("https://new.example", forKey: "publicBaseURL")
         defaults.set("/srv/new-photos", forKey: "cloudRemotePath")
         defaults.set("new-host", forKey: "cloudSSHHost")
 
-        #expect(SessionJobExecutor.cloudUploadConfiguration(for: manifest, defaults: defaults) == nil)
+        // The historical manifest resolver has no current-Settings input.
+        #expect(SessionJobExecutor.cloudUploadConfiguration(for: manifest) == nil)
 
         manifest.deliveryIntent?.cloudUploadEnabled = true
-        let configuration = try #require(SessionJobExecutor.cloudUploadConfiguration(for: manifest, defaults: defaults))
+        let configuration = try #require(SessionJobExecutor.cloudUploadConfiguration(for: manifest))
         #expect(configuration.publicBaseURL == "https://old.example")
         #expect(configuration.remoteBasePath == "/srv/old-photos")
         #expect(configuration.sshHost == "old-host")
+    }
+
+    @Test("current cloud Settings do not create a legacy upload destination")
+    @MainActor
+    func legacyCloudUploadNeedsHistoricalDestination() throws {
+        let suiteName = "PRC-Cloud-Legacy-\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        defaults.set(true, forKey: "cloudUploadEnabled")
+        defaults.set("https://new.example", forKey: "publicBaseURL")
+        defaults.set("/srv/new-photos", forKey: "cloudRemotePath")
+        defaults.set("new-host", forKey: "cloudSSHHost")
+
+        var legacy = makeManifest()
+        legacy.cloudDelivery = nil
+        legacy.deliveryIntent = nil
+        // Today's enabled flag and destination cannot fill missing session history.
+        #expect(SessionJobExecutor.cloudUploadConfiguration(for: legacy) == nil)
+    }
+
+    @Test("soak guest routes are visible only while their run owns the booth")
+    func soakGuestPublicationEndsWithRun() {
+        let normal = makeManifest()
+        var soak = normal
+        soak.id = "soak-session"
+        soak.origin = .soakTest
+        soak.soakRunID = "run-123"
+
+        #expect(normal.isEligibleForGuestPublication(activeSoakRunID: nil))
+        #expect(soak.isEligibleForGuestPublication(activeSoakRunID: "run-123"))
+        #expect(!soak.isEligibleForGuestPublication(activeSoakRunID: nil))
+        #expect(!soak.isEligibleForGuestPublication(activeSoakRunID: "different-run"))
+
+        soak.soakRunID = nil
+        #expect(!soak.isEligibleForGuestPublication(activeSoakRunID: nil))
     }
 }
 

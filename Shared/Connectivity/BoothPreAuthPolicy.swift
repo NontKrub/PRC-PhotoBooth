@@ -301,12 +301,12 @@ public struct BoothPreAuthAdmissionLimiter: Sendable {
         endpointKey: String,
         isPreferredCandidate: Bool = false,
         now: Date = Date()
-    ) -> (admitted: Bool, reason: String?) {
+    ) -> (admitted: Bool, reason: String?, globalLimitReached: Bool) {
         if let record = records[endpointKey],
            let cooldownUntil = record.cooldownUntil,
            now < cooldownUntil {
             let remaining = Int(ceil(cooldownUntil.timeIntervalSince(now)))
-            return (false, "Pre-authentication throttled due to repeated failures. Cooldown: \(remaining)s remaining.")
+            return (false, "Pre-authentication throttled due to repeated failures. Cooldown: \(remaining)s remaining.", false)
         }
 
         if isPreferredCandidate {
@@ -314,19 +314,54 @@ public struct BoothPreAuthAdmissionLimiter: Sendable {
             if let record = records[endpointKey] {
                 let recentFailures = record.failureTimestamps.filter { now.timeIntervalSince($0) <= failureWindow }
                 if recentFailures.count >= reservedFailureThreshold {
-                    return (false, "Reserved candidate pre-authentication throttled due to repeated failures.")
+                    return (false, "Reserved candidate pre-authentication throttled due to repeated failures.", false)
                 }
             }
-            return (true, nil)
+            return (true, nil, false)
         }
 
         // Check global abuse threshold for anonymous endpoints
         let recentGlobal = globalFailureTimestamps.filter { now.timeIntervalSince($0) <= failureWindow }
         if recentGlobal.count >= globalFailureThreshold {
-            return (false, "Global pre-auth failure rate limit exceeded.")
+            return (false, "Global pre-auth failure rate limit exceeded.", true)
         }
 
-        return (true, nil)
+        return (true, nil, false)
+    }
+
+    public func shouldAdmitIdentityProbe(
+        peerID: String,
+        trustedPeerIDs: Set<String>,
+        now: Date = Date()
+    ) -> (admitted: Bool, reason: String?) {
+        guard !peerID.isEmpty, trustedPeerIDs.contains(peerID) else {
+            return (false, "Identity probe did not claim a trusted peer.")
+        }
+        let key = Self.identityProbeKey(for: peerID)
+        if let record = records[key],
+           let cooldownUntil = record.cooldownUntil,
+           now >= cooldownUntil {
+            return (true, nil)
+        }
+        let decision = shouldAdmit(endpointKey: key, isPreferredCandidate: true, now: now)
+        return (decision.admitted, decision.reason)
+    }
+
+    public mutating func recordIdentityProbeFailure(
+        peerID: String,
+        trustedPeerIDs: Set<String>,
+        now: Date = Date()
+    ) {
+        guard !peerID.isEmpty, trustedPeerIDs.contains(peerID) else { return }
+        recordFailure(
+            endpointKey: Self.identityProbeKey(for: peerID),
+            isPreferredCandidate: true,
+            now: now
+        )
+    }
+
+    public mutating func recordIdentityProbeSuccess(peerID: String) {
+        records.removeValue(forKey: Self.identityProbeKey(for: peerID))
     }
 
     public mutating func recordFailure(
@@ -376,5 +411,8 @@ public struct BoothPreAuthAdmissionLimiter: Sendable {
             return now.timeIntervalSince(last) <= recordExpiry
         }
     }
-}
 
+    private static func identityProbeKey(for peerID: String) -> String {
+        "identity-probe:\(peerID)"
+    }
+}

@@ -109,6 +109,93 @@ struct CloudUploadServiceTests {
         #expect((await runner.commands).count == 4)
     }
 
+    @Test("soak uploads use a per-run namespace and a temporary public alias")
+    func soakUploadUsesIsolatedNamespace() async throws {
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try Data([1]).write(to: directory.appendingPathComponent("strip.png"))
+        let runner = TestCloudCommandRunner()
+        let verifier = TestCloudURLVerifier()
+        let service = CloudUploadService(runner: runner, verifier: verifier)
+        var manifest = makeManifest(directory: directory)
+        manifest.origin = .soakTest
+        manifest.soakRunID = "run-123"
+
+        try await service.upload(
+            manifest: manifest,
+            configuration: CloudUploadConfiguration(
+                sshHost: "booth-host",
+                remoteBasePath: "/srv/photos",
+                publicBaseURL: "https://photos.example"
+            )
+        )
+
+        let commands = await runner.commands
+        #expect(commands.count == 4)
+        #expect(commands[0].arguments.last?.contains("/srv/photos/.soak/run-123/.staging/") == true)
+        #expect(commands[1].arguments.last?.contains("/srv/photos/.soak/run-123/.staging/") == true)
+        #expect(commands[2].arguments.last?.contains("/srv/photos/s/soak/run-123/") == true)
+        #expect((await verifier.urls).first?.path.contains("/s/soak/run-123/") == true)
+        #expect(commands[3].arguments.last?.contains("/srv/photos/.soak/run-123/.published") == true)
+    }
+
+    @Test("soak cloud cleanup removes only that run and session namespace")
+    func removesOnlySoakSessionArtifacts() async throws {
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let runner = TestCloudCommandRunner()
+        let service = CloudUploadService(runner: runner, verifier: TestCloudURLVerifier())
+        var manifest = makeManifest(directory: directory)
+        manifest.origin = .soakTest
+        manifest.soakRunID = "run-123"
+
+        try await service.removeSoakArtifacts(
+            manifest: manifest,
+            configuration: CloudUploadConfiguration(
+                sshHost: "booth-host",
+                remoteBasePath: "/srv/photos",
+                publicBaseURL: "https://photos.example"
+            )
+        )
+
+        let command = try #require((await runner.commands).first?.arguments.last)
+        #expect(command.contains("/srv/photos/s/soak/run-123/\(manifest.id)"))
+        #expect(command.contains("/srv/photos/.soak/run-123/.staging/\(manifest.id)"))
+        #expect(command.contains("/srv/photos/.soak/run-123/.published"))
+        #expect(command.contains("-name '\(manifest.id)-*'"))
+        #expect(!command.contains("/srv/photos/.published"))
+        #expect(!command.contains("/srv/photos/s/\(manifest.downloadToken)"))
+    }
+
+    @Test("soak cloud cleanup rejects a session without a safe run identifier")
+    func rejectsUnsafeSoakCleanupIdentity() async throws {
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let runner = TestCloudCommandRunner()
+        let service = CloudUploadService(runner: runner, verifier: TestCloudURLVerifier())
+        var manifest = makeManifest(directory: directory)
+        manifest.origin = .soakTest
+        manifest.soakRunID = "../other-run"
+
+        do {
+            try await service.removeSoakArtifacts(
+                manifest: manifest,
+                configuration: CloudUploadConfiguration(
+                    sshHost: "booth-host",
+                    remoteBasePath: "/srv/photos",
+                    publicBaseURL: "https://photos.example"
+                )
+            )
+            Issue.record("Expected unsafe soak run identifier to be rejected")
+        } catch let error as JobExecutionError {
+            guard case .permanent = error else {
+                Issue.record("Expected permanent path validation failure")
+                return
+            }
+        }
+        #expect(await runner.commands.isEmpty)
+    }
+
     @Test("returns command, exit status, and output on failure")
     func reportsStructuredCommandFailure() async throws {
         let directory = try temporaryDirectory()

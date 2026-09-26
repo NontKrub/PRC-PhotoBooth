@@ -394,5 +394,47 @@ struct BoothPreAuthPolicyTests {
         #expect(!throttledCheck.admitted)
         #expect(throttledCheck.reason?.contains("throttled") == true)
     }
-}
 
+    @Test("spoofed trusted identity probe is throttled by claimed peer ID")
+    func spoofedIdentityProbeIsThrottledByPeerID() {
+        var limiter = BoothPreAuthAdmissionLimiter(
+            baseCooldown: 2,
+            maxCooldown: 10,
+            reservedFailureThreshold: 3
+        )
+        let trustedPeerIDs: Set<String> = ["paired-ipad"]
+        let now = Date()
+
+        for attempt in 0..<3 {
+            let timestamp = now.addingTimeInterval(Double(attempt))
+            #expect(limiter.shouldAdmitIdentityProbe(
+                peerID: "paired-ipad",
+                trustedPeerIDs: trustedPeerIDs,
+                now: timestamp
+            ).admitted)
+            limiter.recordIdentityProbeFailure(
+                peerID: "paired-ipad",
+                trustedPeerIDs: trustedPeerIDs,
+                now: timestamp
+            )
+        }
+
+        let throttled = limiter.shouldAdmitIdentityProbe(
+            peerID: "paired-ipad",
+            trustedPeerIDs: trustedPeerIDs,
+            now: now.addingTimeInterval(3.5)
+        )
+        #expect(!throttled.admitted)
+        #expect(throttled.reason?.contains("throttled") == true)
+        #expect(!limiter.shouldAdmitIdentityProbe(
+            peerID: "untrusted-id",
+            trustedPeerIDs: trustedPeerIDs,
+            now: now.addingTimeInterval(4)
+        ).admitted)
+        #expect(limiter.shouldAdmitIdentityProbe(
+            peerID: "paired-ipad",
+            trustedPeerIDs: trustedPeerIDs,
+            now: now.addingTimeInterval(6)
+        ).admitted)
+    }
+}

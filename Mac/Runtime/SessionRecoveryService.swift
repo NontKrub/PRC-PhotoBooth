@@ -68,7 +68,6 @@ final class SessionRecoveryService {
     private let manifestStore: SessionManifestStore
     private let workspace: SessionWorkspace
     private let jobQueue: SessionJobQueue
-    private let defaults: UserDefaults
     private var activeResumeID: String?
     private var scanInProgress = false
     private var locallyClaimedRecoverySessionIDs: Set<String> = []
@@ -93,13 +92,11 @@ final class SessionRecoveryService {
     init(
         manifestStore: SessionManifestStore,
         workspace: SessionWorkspace,
-        jobQueue: SessionJobQueue,
-        defaults: UserDefaults = .standard
+        jobQueue: SessionJobQueue
     ) {
         self.manifestStore = manifestStore
         self.workspace = workspace
         self.jobQueue = jobQueue
-        self.defaults = defaults
     }
 
     func recordError(_ message: String) {
@@ -351,19 +348,17 @@ final class SessionRecoveryService {
             return manifest
         }
         let knownJobs = try await jobQueue.reloadJobsForRecovery()
-        let legacyJobs = knownJobs.filter {
-            $0.sessionID == manifest.id && $0.finalizationTransactionID == nil
-        }
         let existingIntent = manifest.deliveryIntent
         let transactionID = manifest.finalizationTransactionID.flatMap { $0.isEmpty ? nil : $0 }
             ?? "legacy-\(manifest.id)"
+        let sessionJobs = knownJobs.filter { $0.sessionID == manifest.id }
+        let hasHistoricalCloudEvidence = manifest.cloudDelivery != nil
+            || sessionJobs.contains { $0.kind == .cloudUpload }
+        let hasHistoricalPrintEvidence = sessionJobs.contains { $0.kind == .autoPrint }
         let cloudEnabled = existingIntent?.cloudUploadEnabled
-            ?? (manifest.cloudDelivery != nil
-                || legacyJobs.contains { $0.kind == .cloudUpload }
-                || defaults.bool(forKey: "cloudUploadEnabled"))
+            ?? hasHistoricalCloudEvidence
         let printEnabled = existingIntent?.automaticPrintEnabled
-            ?? (legacyJobs.contains { $0.kind == .autoPrint }
-                || defaults.bool(forKey: "selphyAutoPrintAfterSession"))
+            ?? hasHistoricalPrintEvidence
         let deliveryIntent = SessionDeliveryIntentSnapshot(
             cloudUploadEnabled: cloudEnabled,
             automaticPrintEnabled: printEnabled,
@@ -372,16 +367,7 @@ final class SessionRecoveryService {
             renderGIFEnabled: existingIntent?.renderGIFEnabled
                 ?? manifest.shots.contains { !$0.gifFrameFileNames.isEmpty }
         )
-        var cloudDelivery = manifest.cloudDelivery
-        if cloudEnabled, cloudDelivery == nil, defaults.bool(forKey: "cloudUploadEnabled") {
-            cloudDelivery = SessionCloudDeliverySnapshot(
-                publicBaseURL: defaults.string(forKey: "publicBaseURL") ?? "",
-                remoteBasePath: defaults.string(forKey: "cloudRemotePath")
-                    ?? CloudUploadConfiguration.defaultRemoteBasePath,
-                sshHost: defaults.string(forKey: "cloudSSHHost") ?? ""
-            )
-        }
-        let persistedCloudDelivery = cloudDelivery
+        let persistedCloudDelivery = manifest.cloudDelivery
 
         let needsPersistence = manifest.finalizationTransactionID != transactionID
             || manifest.deliveryIntent != deliveryIntent
@@ -399,6 +385,16 @@ final class SessionRecoveryService {
         }
 
         try await jobQueue.migrateLegacyFinalizationJobs(for: durableManifest)
+        if existingIntent == nil {
+            var unknownEffects: [String] = []
+            if !hasHistoricalPrintEvidence { unknownEffects.append("printing") }
+            if !hasHistoricalCloudEvidence { unknownEffects.append("cloud upload") }
+            if !unknownEffects.isEmpty {
+                recordError(
+                    "Legacy session \(manifest.id) had no historical evidence for \(unknownEffects.joined(separator: " or ")); recovery did not schedule those side effects."
+                )
+            }
+        }
         return durableManifest
     }
 

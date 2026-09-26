@@ -17,8 +17,9 @@ struct DSLRCaptureAttemptValidator: Sendable {
                   !name.isEmpty,
                   !context.baselineFileNames.contains(name),
                   let creationDate,
-                  let shutterIssuedAt = context.shutterIssuedAt else { return false }
-            return creationDate >= shutterIssuedAt
+                  let shutterIssuedAt = context.shutterIssuedAt,
+                  let normalizedDate = context.normalizedCameraDate(creationDate) else { return false }
+            return normalizedDate >= shutterIssuedAt
 
         case .ptpObjectHandle(let handle):
             guard handle != 0,
@@ -46,8 +47,9 @@ struct DSLRCaptureAttemptValidator: Sendable {
               !name.isEmpty,
               !context.baselineFileNames.contains(name),
               let creationDate,
-              let shutterIssuedAt = context.shutterIssuedAt else { return false }
-        return creationDate >= shutterIssuedAt
+              let shutterIssuedAt = context.shutterIssuedAt,
+              let normalizedDate = context.normalizedCameraDate(creationDate) else { return false }
+        return normalizedDate >= shutterIssuedAt
     }
 
     static func isNewObjectHandle(

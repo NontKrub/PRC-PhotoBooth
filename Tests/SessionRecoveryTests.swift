@@ -108,11 +108,6 @@ struct SessionRecoveryTests {
     func migratesLegacyFinalizationAndUnknownPrint() async throws {
         let root = try temporaryDirectory()
         defer { try? FileManager.default.removeItem(at: root) }
-        let defaultsName = "PRC-Recovery-Legacy-\(UUID().uuidString)"
-        let defaults = try #require(UserDefaults(suiteName: defaultsName))
-        defer { defaults.removePersistentDomain(forName: defaultsName) }
-        defaults.set(false, forKey: "cloudUploadEnabled")
-        defaults.set(false, forKey: "selphyAutoPrintAfterSession")
 
         let manifestStore = SessionManifestStore(baseDirectory: root.appendingPathComponent("Runtime"))
         let manifest = makeManifest(
@@ -137,8 +132,7 @@ struct SessionRecoveryTests {
         let service = SessionRecoveryService(
             manifestStore: manifestStore,
             workspace: SessionWorkspace(),
-            jobQueue: queue,
-            defaults: defaults
+            jobQueue: queue
         )
 
         await service.scanNow()
@@ -160,6 +154,108 @@ struct SessionRecoveryTests {
         #expect(rescanned.finalizationTransactionID == migrated.finalizationTransactionID)
         #expect(rescannedJobs.filter { $0.kind == .autoPrint }.count == 1)
         queue.stop()
+    }
+
+    @Test("legacy finalization with no historical print or cloud evidence creates neither job")
+    @MainActor
+    func doesNotInventLegacyPrintOrCloudIntent() async throws {
+        let root = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let manifestStore = SessionManifestStore(baseDirectory: root.appendingPathComponent("Runtime"))
+        let manifest = makeManifest(
+            id: "legacy-no-delivery-evidence",
+            status: .finalizing,
+            startedAt: Date(),
+            directory: root
+        )
+        try await manifestStore.create(manifest)
+
+        let queue = makeQueue(root: root)
+        let service = SessionRecoveryService(
+            manifestStore: manifestStore,
+            workspace: SessionWorkspace(),
+            jobQueue: queue
+        )
+        let migrated = try await service.prepareFinalizationPlanForRecovery(for: manifest)
+        let plan = try #require(FinalizationPlan.make(from: migrated))
+        let jobs = await queue.snapshotForTesting().filter { $0.sessionID == manifest.id }
+
+        #expect(migrated.deliveryIntent?.automaticPrintEnabled == false)
+        #expect(migrated.deliveryIntent?.cloudUploadEnabled == false)
+        #expect(!plan.jobKinds.contains(.autoPrint))
+        #expect(!plan.jobKinds.contains(.cloudUpload))
+        #expect(!jobs.contains { $0.kind == .autoPrint || $0.kind == .cloudUpload })
+        #expect(service.recoveryErrors.contains { $0.contains("no historical evidence") })
+    }
+
+    @Test("legacy cloud job preserves its saved destination after current settings change")
+    @MainActor
+    func preservesLegacyCloudDestination() async throws {
+        let root = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let manifestStore = SessionManifestStore(baseDirectory: root.appendingPathComponent("Runtime"))
+        var manifest = makeManifest(
+            id: "legacy-cloud-snapshot",
+            status: .finalizing,
+            startedAt: Date(),
+            directory: root
+        )
+        let oldSnapshot = SessionCloudDeliverySnapshot(
+            publicBaseURL: "https://old.example",
+            remoteBasePath: "/srv/old-photos",
+            sshHost: "old-host"
+        )
+        manifest.cloudDelivery = oldSnapshot
+        try await manifestStore.create(manifest)
+
+        let queueStore = JobQueueStore(fileURL: root.appendingPathComponent("jobs.json"))
+        _ = try await queueStore.enqueueBatch(sessionID: manifest.id, kinds: [.cloudUpload])
+        let queue = SessionJobQueue(store: queueStore, executor: RecoveryTestExecutor())
+        queue.pauseWorkersForRecovery()
+        let service = SessionRecoveryService(
+            manifestStore: manifestStore,
+            workspace: SessionWorkspace(),
+            jobQueue: queue
+        )
+        let migrated = try await service.prepareFinalizationPlanForRecovery(for: manifest)
+
+        #expect(migrated.deliveryIntent?.cloudUploadEnabled == true)
+        #expect(migrated.cloudDelivery == oldSnapshot)
+        let configuration = try #require(SessionJobExecutor.cloudUploadConfiguration(for: migrated))
+        #expect(configuration.publicBaseURL == oldSnapshot.publicBaseURL)
+        #expect(configuration.remoteBasePath == oldSnapshot.remoteBasePath)
+        #expect(configuration.sshHost == oldSnapshot.sshHost)
+    }
+
+    @Test("legacy cloud job intent survives without inventing a current destination")
+    @MainActor
+    func legacyCloudIntentWithoutSnapshotFailsClosed() async throws {
+        let root = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let manifestStore = SessionManifestStore(baseDirectory: root.appendingPathComponent("Runtime"))
+        let manifest = makeManifest(
+            id: "legacy-cloud-without-snapshot",
+            status: .finalizing,
+            startedAt: Date(),
+            directory: root
+        )
+        try await manifestStore.create(manifest)
+
+        let queueStore = JobQueueStore(fileURL: root.appendingPathComponent("jobs.json"))
+        _ = try await queueStore.enqueueBatch(sessionID: manifest.id, kinds: [.cloudUpload])
+        let queue = SessionJobQueue(store: queueStore, executor: RecoveryTestExecutor())
+        let service = SessionRecoveryService(
+            manifestStore: manifestStore,
+            workspace: SessionWorkspace(),
+            jobQueue: queue
+        )
+        let migrated = try await service.prepareFinalizationPlanForRecovery(for: manifest)
+        let plan = try #require(FinalizationPlan.make(from: migrated))
+
+        #expect(migrated.deliveryIntent?.cloudUploadEnabled == true)
+        #expect(migrated.cloudDelivery == nil)
+        #expect(plan.jobKinds.contains(.cloudUpload))
+        #expect(SessionJobExecutor.cloudUploadConfiguration(for: migrated) == nil)
     }
 
     @Test("startup removes abandoned temporary GIF files")

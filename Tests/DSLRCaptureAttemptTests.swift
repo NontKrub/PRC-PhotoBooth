@@ -11,6 +11,7 @@ struct DSLRCaptureAttemptTests {
         files: Set<String> = [],
         handles: PTPHandleBaselineResult = .success([]),
         camera: String? = "uuid:sony-zv-e10",
+        cameraTimeOffset: TimeInterval? = 0,
         shutterAt: Date? = nil,
         memoryBaseline: UInt16? = nil,
         memoryTransition: Bool = false
@@ -21,6 +22,7 @@ struct DSLRCaptureAttemptTests {
             baselineFileNames: files,
             baselineObjectHandles: handles,
             expectedCameraIdentifier: camera,
+            cameraTimeOffset: cameraTimeOffset,
             shutterIssuedAt: shutterAt,
             shutterCommandGeneration: shutterAt == nil ? nil : 1,
             baselineObjectInMemoryValue: memoryBaseline,
@@ -81,6 +83,99 @@ struct DSLRCaptureAttemptTests {
             context: context,
             cameraIdentifier: cameraID
         ))
+    }
+
+    @Test("Camera file freshness is normalized using a validated camera clock offset")
+    func cameraClockOffsetNormalizesCreationDate() {
+        let shutterAt = Date(timeIntervalSince1970: 1_800_000_001)
+        let cameraAhead = fired(context(cameraTimeOffset: 10), at: shutterAt)
+        #expect(DSLRCaptureAttemptValidator.isNewMediaFile(
+            name: "IMG_NEW.JPG",
+            creationDate: shutterAt.addingTimeInterval(11),
+            context: cameraAhead
+        ))
+        #expect(!DSLRCaptureAttemptValidator.isNewMediaFile(
+            name: "IMG_NEW.JPG",
+            creationDate: shutterAt.addingTimeInterval(9),
+            context: cameraAhead
+        ))
+        #expect(DSLRCaptureAttemptValidator.authorizes(
+            .cameraFile(name: "IMG_NEW.JPG", creationDate: shutterAt.addingTimeInterval(11)),
+            context: cameraAhead,
+            cameraIdentifier: cameraID
+        ))
+
+        let cameraBehind = fired(context(cameraTimeOffset: -10), at: shutterAt)
+        #expect(DSLRCaptureAttemptValidator.isNewMediaFile(
+            name: "IMG_NEW.JPG",
+            creationDate: shutterAt.addingTimeInterval(-9),
+            context: cameraBehind
+        ))
+    }
+
+    @Test("Camera file freshness fails closed without a finite validated clock offset")
+    func missingOrInvalidCameraClockOffsetFailsClosed() {
+        let shutterAt = Date(timeIntervalSince1970: 1_800_000_001)
+        for offset in [nil, TimeInterval.nan, .infinity] {
+            let context = fired(self.context(cameraTimeOffset: offset), at: shutterAt)
+            #expect(!DSLRCaptureAttemptValidator.isNewMediaFile(
+                name: "IMG_NEW.JPG",
+                creationDate: shutterAt.addingTimeInterval(100),
+                context: context
+            ))
+        }
+    }
+
+    @Test("PTP handle quarantine clears only after disconnect, reopen, catalog, and a fresh baseline")
+    func ptpHandleQuarantineRequiresTrustedResetSequence() throws {
+        var store = DSLRCaptureAttemptContextStore()
+        let failed = fired(context())
+        store.beginCapture(failed)
+        store.finish(succeeded: false)
+        #expect(store.isPTPHandleQuarantined(cameraIdentifier: cameraID))
+
+        store.cameraSessionDidOpen(identifier: cameraID)
+        store.cameraCatalogDidComplete(identifier: cameraID)
+        store.clearPTPHandleQuarantineAfterFreshBaseline(
+            cameraIdentifier: cameraID,
+            baselineSucceeded: true
+        )
+        #expect(store.isPTPHandleQuarantined(cameraIdentifier: cameraID))
+
+        store.cameraDidDisconnect(identifier: cameraID)
+        store.cameraSessionDidOpen(identifier: cameraID)
+        store.cameraCatalogDidComplete(identifier: cameraID)
+        store.clearPTPHandleQuarantineAfterFreshBaseline(
+            cameraIdentifier: cameraID,
+            baselineSucceeded: false
+        )
+        #expect(store.isPTPHandleQuarantined(cameraIdentifier: cameraID))
+
+        store.clearPTPHandleQuarantineAfterFreshBaseline(
+            cameraIdentifier: cameraID,
+            baselineSucceeded: true
+        )
+        #expect(!store.isPTPHandleQuarantined(cameraIdentifier: cameraID))
+        store.beginCapture(try #require(store.recoverable ?? failed))
+        #expect(store.active?.allowsPTPHandleCandidates == true)
+    }
+
+    @Test("PTP handle quarantine cannot clear while a recovery is active")
+    func ptpHandleQuarantineCannotClearDuringRecovery() throws {
+        var store = DSLRCaptureAttemptContextStore()
+        let failed = fired(context())
+        store.beginCapture(failed)
+        store.finish(succeeded: false)
+        store.cameraDidDisconnect(identifier: cameraID)
+        store.cameraSessionDidOpen(identifier: cameraID)
+        store.cameraCatalogDidComplete(identifier: cameraID)
+        #expect(store.beginRecovery(cameraIdentifier: cameraID) != nil)
+
+        store.clearPTPHandleQuarantineAfterFreshBaseline(
+            cameraIdentifier: cameraID,
+            baselineSucceeded: true
+        )
+        #expect(store.isPTPHandleQuarantined(cameraIdentifier: cameraID))
     }
 
     @Test("Delayed ObjectAdded from the prior attempt is rejected by the next baseline")
