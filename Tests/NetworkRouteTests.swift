@@ -1531,7 +1531,7 @@ struct NetworkRouteTests {
         }
         replacementListener.start(queue: replacementMacQueue)
         defer { replacementListener.cancel() }
-        #expect(waitForSemaphore(replacementListenerReady))
+        #expect(waitForSemaphore(replacementListenerReady, timeout: 5))
         let replacementPort = try #require(replacementListener.port)
         #expect(
             waitForSemaphore(replacementServiceRegistered, timeout: 5),
