@@ -150,7 +150,6 @@ struct TrustedFloodAuthenticationTests {
         #expect(laneSnapshot.queuedIdentityProbePresent)
 
         #expect(macRuntime.identityProbeCooldownIsActive())
-        hostileClients.forEach { $0.cancel() }
         let floodLanesReleased = await waitForLanes(
             macRuntime,
             expected: .init(
@@ -163,9 +162,9 @@ struct TrustedFloodAuthenticationTests {
         #expect(floodLanesReleased, "Queue-owned deadlines did not release the finite hostile flood slots.")
         #expect(macRuntime.identityProbeCooldownIsActive())
 
-        // The runtime models a Mac restart: its endpoint cache is empty, while
-        // the flood's identity-probe cooldown remains active. The trusted
-        // peer must still prove its stored secret from this new source port.
+        // The Mac runtime has no endpoint history, the finite flood sockets
+        // are still open, and the probe cooldown remains active. The trusted
+        // peer must prove its stored secret from this new source port.
         iPadRuntime.startTrustedControlConnection(
             endpoint: .hostPort(host: "127.0.0.1", port: port),
             parameters: trustedParameters,

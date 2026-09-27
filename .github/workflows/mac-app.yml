@@ -89,7 +89,7 @@ jobs:
             -only-testing:'PRC-PhotoBoothTests/NetworkRouteTests/trustedControlHandshakeAndReconnectSurviveMainActorStall()' \
             -only-testing:'PRC-PhotoBoothTests/NetworkRouteTests/incomingPairingCandidateSurvivesMainActorStall()' \
             -only-testing:'PRC-PhotoBoothTests/NetworkRouteTests/trustedIdentityProbeAuthenticatesAfterAnonymousEndpointFlood()' \
-            -only-testing:'PRC-PhotoBoothTests/TrustedFloodAuthenticationTests/freshRuntimeAuthenticatesAfterFiniteHostileFlood()' \
+            -only-testing:'PRC-PhotoBoothTests/TrustedFloodAuthenticationTests/freshRuntimeAuthenticatesAfterFiniteHostileFloodWithoutEndpointHistory()' \
             -only-testing:'PRC-PhotoBoothTests/NetworkRouteTests/trustedProbeWaitsBehindOccupiedProbeAndAuthenticatesDuringMainActorStall()' \
             -only-testing:'PRC-PhotoBoothTests/NetworkRouteTests/productionListenerAdmissionIsQueueOwned()' \
             -only-testing:'PRC-PhotoBoothTests/NetworkRouteTests/controlListenerRetryRecoversDuringMainActorStall()' \
