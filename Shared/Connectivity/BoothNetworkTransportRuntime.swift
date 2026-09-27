@@ -2132,6 +2132,24 @@ final class BoothNetworkTransportRuntime: @unchecked Sendable {
         source.resume()
     }
 
+    private func shortenAnonymousIdentityProbeHelloDeadlineOnQueueIfCoolingDown() {
+        guard admissionLimiter.isIdentityProbeCoolingDown(),
+              let connection = identityProbeConnection,
+              let candidate = protocolCandidates[ObjectIdentifier(connection)],
+              candidate.peerHello == nil,
+              !candidate.isIdentityProbeCoolingDown else { return }
+
+        // Once a hostile flood trips global cooldown, release an anonymous
+        // no-Hello probe quickly so cached trusted reconnects can use the lane.
+        // Marking the candidate also makes this deadline adjustment one-shot.
+        candidate.isIdentityProbeCoolingDown = true
+        startCoreTimeoutOnQueue(
+            candidate,
+            after: 1,
+            reason: "Bootstrap Hello deadline expired."
+        )
+    }
+
     private func isCurrentCandidateOnQueue(_ connection: NWConnection, generation: Int) -> Bool {
         candidateOnQueue(connection, generation: generation) != nil
     }
@@ -2504,6 +2522,7 @@ final class BoothNetworkTransportRuntime: @unchecked Sendable {
             connection.cancel()
             admissionLimiter.recordFailure(endpointKey: endpointKey)
             admissionLimiter.recordIdentityProbeAttemptFailure()
+            shortenAnonymousIdentityProbeHelloDeadlineOnQueueIfCoolingDown()
             return InboundControlAdmissionResult(
                 admission: nil,
                 rejectionReason: "The trusted-identity probe slot is occupied."

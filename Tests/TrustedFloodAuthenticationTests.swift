@@ -21,7 +21,9 @@ struct TrustedFloodAuthenticationTests {
         let macRuntime = BoothNetworkTransportRuntime(
             queue: macQueue,
             admissionLimiter: BoothPreAuthAdmissionLimiter(
-                identityProbeGlobalFailureThreshold: 5,
+                // One spoofed HMAC failure plus 98 probe-lane rejections from
+                // the 100-socket flood activates cooldown on the final socket.
+                identityProbeGlobalFailureThreshold: 99,
                 identityProbeGlobalCooldown: 60
             )
         )
@@ -133,7 +135,7 @@ struct TrustedFloodAuthenticationTests {
         )
         #expect(
             allHostileConnectionsReachedListener,
-            "The listener did not process all 100 hostile sockets before the trusted peer started."
+            "The listener did not process all 100 hostile sockets."
         )
 
         let saturatedLanes = await waitForLanes(
@@ -148,12 +150,8 @@ struct TrustedFloodAuthenticationTests {
         #expect(saturatedLanes)
         #expect(laneSnapshot.normalCandidatePresent)
         #expect(laneSnapshot.identityProbePresent)
-
         #expect(macRuntime.identityProbeCooldownIsActive())
-        // Retry while the flood's candidates still occupy the normal and probe
-        // lanes. Their queue-owned deadlines must release the probe opportunity
-        // without MainActor help, then the changed-address peer must prove its
-        // stored secret before the hostile clients are closed.
+
         iPadRuntime.startTrustedControlConnection(
             endpoint: .hostPort(host: NWEndpoint.Host(trustedAddress), port: port),
             parameters: trustedParameters,
@@ -168,9 +166,26 @@ struct TrustedFloodAuthenticationTests {
             timeout: 5
         )
         #expect(trustedConnectionReachedListener)
+        #expect(
+            macRuntime.admissionLaneSnapshot().identityProbePresent,
+            "The trusted reconnect did not arrive while the hostile identity-probe candidate occupied its lane."
+        )
+
+        let trustedRetryReachedListener = await waitForInboundConnections(
+            macRuntime,
+            expected: hostileConnectionBaseline + 102,
+            timeout: 8
+        )
+        #expect(
+            trustedRetryReachedListener,
+            "The trusted peer did not retry after the occupied probe lane released."
+        )
         #expect(await iPadEvents.waitForAuthenticationCount(1, timeout: 15))
         #expect(await macEvents.waitForAuthenticationCount(1, timeout: 3))
-        #expect(macEvents.authenticatedEndpointDescriptions.contains { $0.contains(trustedAddress) })
+        #expect(
+            macEvents.authenticatedEndpointDescriptions.contains { $0.contains(trustedAddress) },
+            "Authenticated peer endpoints were: \(macEvents.authenticatedEndpointDescriptions)"
+        )
         hostileClients.forEach { $0.cancel() }
         #expect(spoofEvents.authenticationCount == 0)
         #expect(iPadEvents.authenticationCount == 1)
