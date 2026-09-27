@@ -178,6 +178,26 @@
         }
       }
     },
+    "%@%%" : {
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%@%%"
+          }
+        }
+      }
+    },
+    "• %@" : {
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "• %@"
+          }
+        }
+      }
+    },
     "→" : {
       "localizations" : {
         "th" : {
@@ -219,12 +239,52 @@
         }
       }
     },
+    "10 (Quick Smoke)" : {
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "10 (ทดสอบสั้น)"
+          }
+        }
+      }
+    },
+    "25 (Short Benchmark)" : {
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "25 (ทดสอบระยะสั้น)"
+          }
+        }
+      }
+    },
+    "50 (Standard Soak)" : {
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "50 (ทดสอบมาตรฐาน)"
+          }
+        }
+      }
+    },
     "90° CW" : {
       "localizations" : {
         "th" : {
           "stringUnit" : {
             "state" : "translated",
             "value" : "90° ตามเข็มนาฬิกา"
+          }
+        }
+      }
+    },
+    "100 (Stress Test)" : {
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "100 (ทดสอบความทนทาน)"
           }
         }
       }
@@ -245,6 +305,16 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "270° ตามเข็มนาฬิกา"
+          }
+        }
+      }
+    },
+    "500 (Full Event Soak)" : {
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "500 (ทดสอบงานเต็มรูปแบบ)"
           }
         }
       }
@@ -1178,17 +1248,6 @@
         }
       }
     },
-    "The session is cancelled. Its files remain protected until background work stops." : {
-      "extractionState" : "manual",
-      "localizations" : {
-        "th" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "เซสชันถูกยกเลิกแล้ว ไฟล์จะยังคงได้รับการปกป้องจนกว่างานเบื้องหลังจะหยุดทำงาน"
-          }
-        }
-      }
-    },
     "Canvas" : {
       "localizations" : {
         "th" : {
@@ -1216,17 +1275,6 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "ขนาดผืนงาน"
-          }
-        }
-      }
-    },
-    "Cleanup pending" : {
-      "extractionState" : "manual",
-      "localizations" : {
-        "th" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "รอการล้างข้อมูล"
           }
         }
       }
@@ -1297,6 +1345,16 @@
         }
       }
     },
+    "Choose a synthetic benchmark, physical camera check, or production session soak. Only Production Pipeline exercises the live booth workflow." : {
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "เลือกการทดสอบสังเคราะห์ การตรวจสอบกล้องจริง หรือการทดสอบเซสชันการทำงานจริง เฉพาะ Production Pipeline เท่านั้นที่ทดสอบเวิร์กโฟลว์ของบูธจริง"
+          }
+        }
+      }
+    },
     "Choose Delete to remove the selected events." : {
       "extractionState" : "manual",
       "localizations" : {
@@ -1336,6 +1394,17 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "เลือกรูปแบบของคุณ"
+          }
+        }
+      }
+    },
+    "Cleanup pending" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "รอการล้างข้อมูล"
           }
         }
       }
@@ -1565,6 +1634,28 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "ยืนยัน PIN"
+          }
+        }
+      }
+    },
+    "Confirm printer outcome" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ยืนยันผลลัพธ์การพิมพ์"
+          }
+        }
+      }
+    },
+    "Confirm the physical printer result before releasing this print lane." : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ยืนยันผลลัพธ์จริงของเครื่องพิมพ์ก่อนปล่อยช่องพิมพ์นี้"
           }
         }
       }
@@ -1950,6 +2041,32 @@
         }
       }
     },
+    "Cycle %@ of %@" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Cycle %1$@ of %2$@"
+          }
+        },
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "รอบที่ %@ จาก %@"
+          }
+        }
+      }
+    },
+    "DANGEROUS" : {
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "อันตราย"
+          }
+        }
+      }
+    },
     "Date" : {
       "extractionState" : "manual",
       "localizations" : {
@@ -2000,6 +2117,16 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "ฟิลเตอร์เริ่มต้น"
+          }
+        }
+      }
+    },
+    "Delay Between Cycles:" : {
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "หน่วงเวลาระหว่างรอบ:"
           }
         }
       }
@@ -2061,17 +2188,6 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "ปิดใช้งาน"
-          }
-        }
-      }
-    },
-    "Do not remove these files manually. Cleanup will retry after background work stops." : {
-      "extractionState" : "manual",
-      "localizations" : {
-        "th" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "อย่าลบไฟล์เหล่านี้ด้วยตนเอง ระบบจะลองล้างข้อมูลอีกครั้งหลังงานเบื้องหลังหยุดทำงาน"
           }
         }
       }
@@ -2154,6 +2270,17 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "พื้นที่ดิสก์"
+          }
+        }
+      }
+    },
+    "Do not remove these files manually. Cleanup will retry after background work stops." : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "อย่าลบไฟล์เหล่านี้ด้วยตนเอง ระบบจะลองล้างข้อมูลอีกครั้งหลังงานเบื้องหลังหยุดทำงาน"
           }
         }
       }
@@ -2263,6 +2390,16 @@
         }
       }
     },
+    "Each production cycle performs a real upload. Review the configured destination and credentials before enabling." : {
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "แต่ละรอบการทำงานจริงจะอัปโหลดไฟล์จริง โปรดตรวจสอบปลายทางและข้อมูลรับรองที่ตั้งค่าไว้ก่อนเปิดใช้"
+          }
+        }
+      }
+    },
     "Edit" : {
       "extractionState" : "manual",
       "localizations" : {
@@ -2335,6 +2472,26 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "เปิดใช้งาน"
+          }
+        }
+      }
+    },
+    "Enable Physical Printing" : {
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "เปิดใช้การพิมพ์จริง"
+          }
+        }
+      }
+    },
+    "Enable public HTTPS or trusted LAN HTTP in Global booth guest-delivery settings." : {
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "เปิดใช้ HTTPS สาธารณะหรือ HTTP บน LAN ที่เชื่อถือได้ในการตั้งค่าการส่งมอบรูปภาพลูกค้าส่วนกลางของบูธ"
           }
         }
       }
@@ -2994,6 +3151,17 @@
         }
       }
     },
+    "Gallery update needs attention. Customer strip and download are available." : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "การอัปเดตแกลเลอรีต้องตรวจสอบ แถบรูปและการดาวน์โหลดของลูกค้ายังพร้อมใช้งาน"
+          }
+        }
+      }
+    },
     "Gallery URL unavailable: no LAN address" : {
       "localizations" : {
         "th" : {
@@ -3010,6 +3178,16 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "กำลังประมวลผล GIF"
+          }
+        }
+      }
+    },
+    "Global booth guest-delivery setting" : {
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "การตั้งค่าการส่งมอบรูปภาพลูกค้าส่วนกลางของบูธ"
           }
         }
       }
@@ -3053,6 +3231,16 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "ประสบการณ์ผู้เข้าร่วมเป็นแหล่งข้อมูลหลัก ฟิลด์เลย์เอาต์งานเดิมยังคงเป็นมิเรอร์เพื่อความเข้ากันได้"
+          }
+        }
+      }
+    },
+    "Guest photos and download links are unencrypted on the local network. Use only on an isolated, operator-controlled network." : {
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "รูปภาพและลิงก์ดาวน์โหลดของลูกค้าไม่มีการเข้ารหัสบนเครือข่ายภายใน ใช้เฉพาะบนเครือข่ายแยกที่ผู้ดูแลควบคุมเท่านั้น"
           }
         }
       }
@@ -3367,6 +3555,16 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "ISO"
+          }
+        }
+      }
+    },
+    "Issues & Warnings" : {
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ปัญหาและคำเตือน"
           }
         }
       }
@@ -4247,6 +4445,17 @@
         }
       }
     },
+    "Not printed" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ยังไม่ได้พิมพ์"
+          }
+        }
+      }
+    },
     "Not Ready" : {
       "extractionState" : "manual",
       "localizations" : {
@@ -4459,6 +4668,16 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "operatorLanguage"
+          }
+        }
+      }
+    },
+    "Opt-in sends real print jobs to the configured printer. The cadence limits paper and ribbon use." : {
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "เมื่อเปิดใช้ ระบบจะส่งงานพิมพ์จริงไปยังเครื่องพิมพ์ที่ตั้งค่าไว้ ความถี่ช่วยจำกัดการใช้กระดาษและริบบอน"
           }
         }
       }
@@ -4709,28 +4928,6 @@
         }
       }
     },
-    "Queue Storage Error" : {
-      "extractionState" : "manual",
-      "localizations" : {
-        "th" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "ข้อผิดพลาดของที่เก็บคิว"
-          }
-        }
-      }
-    },
-    "Gallery update needs attention. Customer strip and download are available." : {
-      "extractionState" : "manual",
-      "localizations" : {
-        "th" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "การอัปเดตแกลเลอรีต้องตรวจสอบ แถบรูปและการดาวน์โหลดของลูกค้ายังพร้อมใช้งาน"
-          }
-        }
-      }
-    },
     "Photo %@" : {
       "localizations" : {
         "th" : {
@@ -4898,6 +5095,16 @@
         }
       }
     },
+    "Preflight Diagnostics" : {
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "การวินิจฉัยก่อนเริ่ม"
+          }
+        }
+      }
+    },
     "Preflight Results" : {
       "extractionState" : "manual",
       "localizations" : {
@@ -5045,6 +5252,17 @@
         }
       }
     },
+    "Printed successfully" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "พิมพ์สำเร็จ"
+          }
+        }
+      }
+    },
     "Printer" : {
       "extractionState" : "manual",
       "localizations" : {
@@ -5164,6 +5382,16 @@
         }
       }
     },
+    "Public guest URLs must use HTTPS. Session pages use this URL after cloud upload succeeds." : {
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "URL สาธารณะสำหรับลูกค้าต้องใช้ HTTPS หน้าของเซสชันจะใช้ URL นี้เมื่ออัปโหลดขึ้นคลาวด์สำเร็จ"
+          }
+        }
+      }
+    },
     "Public URL (optional)" : {
       "extractionState" : "manual",
       "localizations" : {
@@ -5234,11 +5462,22 @@
       }
     },
     "QR codes use this URL after cloud upload succeeds; otherwise they use the LAN server.\nExample: https://photos.yourdomain.com" : {
+      "extractionState" : "stale",
       "localizations" : {
         "th" : {
           "stringUnit" : {
             "state" : "translated",
             "value" : "คิวอาร์โค้ดจะใช้ URL นี้หลังอัปโหลดขึ้นคลาวด์สำเร็จ มิฉะนั้นจะใช้เซิร์ฟเวอร์ LAN\nตัวอย่าง: https://photos.yourdomain.com"
+          }
+        }
+      }
+    },
+    "QR codes use this URL when cloud upload is enabled. Example: https://photos.yourdomain.com" : {
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "QR code จะใช้ URL นี้เมื่อเปิดการอัปโหลดขึ้นคลาวด์ ตัวอย่าง: https://photos.yourdomain.com"
           }
         }
       }
@@ -5265,6 +5504,17 @@
         }
       }
     },
+    "Queue Storage Error" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ข้อผิดพลาดของที่เก็บคิว"
+          }
+        }
+      }
+    },
     "Quit %@" : {
       "extractionState" : "manual",
       "localizations" : {
@@ -5272,6 +5522,17 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "ปิด %@"
+          }
+        }
+      }
+    },
+    "Re-read durable queue files and resume workers when storage is available." : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "อ่านไฟล์คิวถาวรใหม่และทำงานต่อเมื่อที่เก็บข้อมูลพร้อมใช้งาน"
           }
         }
       }
@@ -5326,17 +5587,6 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "พร้อมหรือยัง?"
-          }
-        }
-      }
-    },
-    "Re-read durable queue files and resume workers when storage is available." : {
-      "extractionState" : "manual",
-      "localizations" : {
-        "th" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "อ่านไฟล์คิวถาวรใหม่และทำงานต่อเมื่อที่เก็บข้อมูลพร้อมใช้งาน"
           }
         }
       }
@@ -5676,6 +5926,16 @@
         }
       }
     },
+    "Retrying…" : {
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "กำลังลองอีกครั้ง…"
+          }
+        }
+      }
+    },
     "Review" : {
       "extractionState" : "manual",
       "localizations" : {
@@ -5852,17 +6112,6 @@
         }
       }
     },
-    "Saving…" : {
-      "extractionState" : "manual",
-      "localizations" : {
-        "th" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "กำลังบันทึก…"
-          }
-        }
-      }
-    },
     "Saving PIN…" : {
       "extractionState" : "manual",
       "localizations" : {
@@ -5870,6 +6119,17 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "กำลังบันทึก PIN…"
+          }
+        }
+      }
+    },
+    "Saving…" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "กำลังบันทึก…"
           }
         }
       }
@@ -6065,17 +6325,6 @@
         }
       }
     },
-    "Session: %@" : {
-      "extractionState" : "manual",
-      "localizations" : {
-        "th" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "เซสชัน: %1$@"
-          }
-        }
-      }
-    },
     "Server user" : {
       "localizations" : {
         "th" : {
@@ -6157,6 +6406,17 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "เริ่มเซสชันล้มเหลว: %1$@"
+          }
+        }
+      }
+    },
+    "Session: %@" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "เซสชัน: %1$@"
           }
         }
       }
@@ -6430,6 +6690,26 @@
         }
       }
     },
+    "Soak Test Failed" : {
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "การทดสอบความทนทานล้มเหลว"
+          }
+        }
+      }
+    },
+    "Soak Test In Progress" : {
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "กำลังทดสอบความทนทาน"
+          }
+        }
+      }
+    },
     "Soft" : {
       "extractionState" : "manual",
       "localizations" : {
@@ -6570,6 +6850,16 @@
         }
       }
     },
+    "Stopping Soak Test..." : {
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "กำลังหยุดการทดสอบความทนทาน..."
+          }
+        }
+      }
+    },
     "Strip Preview" : {
       "extractionState" : "manual",
       "localizations" : {
@@ -6599,6 +6889,16 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "กำลังส่งหน้าทดสอบเครื่องพิมพ์…"
+          }
+        }
+      }
+    },
+    "Subsystem Coverage" : {
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ความครอบคลุมของระบบย่อย"
           }
         }
       }
@@ -6663,6 +6963,16 @@
         }
       }
     },
+    "Target Cycles:" : {
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "จำนวนรอบเป้าหมาย:"
+          }
+        }
+      }
+    },
     "Template" : {
       "localizations" : {
         "th" : {
@@ -6722,6 +7032,16 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "การทดสอบถ่ายภาพล้มเหลว: %1$@"
+          }
+        }
+      }
+    },
+    "Test Configuration" : {
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "การกำหนดค่าการทดสอบ"
           }
         }
       }
@@ -6902,6 +7222,27 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "คิวอาร์ที่พิมพ์ยังใช้งานได้ การลองอัปโหลดใหม่จะคงลิงก์เดิมไว้"
+          }
+        }
+      }
+    },
+    "The public guest URL is invalid. Cloud delivery requires HTTPS." : {
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "URL สาธารณะสำหรับลูกค้าไม่ถูกต้อง การส่งมอบผ่านคลาวด์ต้องใช้ HTTPS"
+          }
+        }
+      }
+    },
+    "The session is cancelled. Its files remain protected until background work stops." : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "เซสชันถูกยกเลิกแล้ว ไฟล์จะยังคงได้รับการปกป้องจนกว่างานเบื้องหลังจะหยุดทำงาน"
           }
         }
       }
@@ -7135,6 +7476,7 @@
       }
     },
     "Used in QR codes after cloud upload succeeds. Leave blank to use the LAN server." : {
+      "extractionState" : "stale",
       "localizations" : {
         "th" : {
           "stringUnit" : {
@@ -7150,50 +7492,6 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "ใช้โหมดรับแสง AUTO หรือ P ของ ZV-E10 ค่า ISO ความเร็วชัตเตอร์ และรูรับแสงจะเป็นอัตโนมัติ"
-          }
-        }
-      }
-    },
-    "Printed successfully" : {
-      "extractionState" : "manual",
-      "localizations" : {
-        "th" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "พิมพ์สำเร็จ"
-          }
-        }
-      }
-    },
-    "Not printed" : {
-      "extractionState" : "manual",
-      "localizations" : {
-        "th" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "ยังไม่ได้พิมพ์"
-          }
-        }
-      }
-    },
-    "Confirm printer outcome" : {
-      "extractionState" : "manual",
-      "localizations" : {
-        "th" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "ยืนยันผลลัพธ์การพิมพ์"
-          }
-        }
-      }
-    },
-    "Confirm the physical printer result before releasing this print lane." : {
-      "extractionState" : "manual",
-      "localizations" : {
-        "th" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "ยืนยันผลลัพธ์จริงของเครื่องพิมพ์ก่อนปล่อยช่องพิมพ์นี้"
           }
         }
       }
@@ -7219,17 +7517,6 @@
         }
       }
     },
-    "Verifying…" : {
-      "extractionState" : "manual",
-      "localizations" : {
-        "th" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "กำลังตรวจสอบ…"
-          }
-        }
-      }
-    },
     "Verify printer" : {
       "extractionState" : "manual",
       "localizations" : {
@@ -7241,6 +7528,17 @@
         }
       }
     },
+    "Verifying…" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "กำลังตรวจสอบ…"
+          }
+        }
+      }
+    },
     "Version 1.2 options are stored separately from the legacy event layout." : {
       "extractionState" : "stale",
       "localizations" : {
@@ -7248,6 +7546,17 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "ตัวเลือก Version 1.2 จะจัดเก็บแยกจากรูปแบบงานเดิม"
+          }
+        }
+      }
+    },
+    "View Details" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ดูรายละเอียด"
           }
         }
       }
@@ -7349,17 +7658,6 @@
         }
       }
     },
-    "View Details" : {
-      "extractionState" : "manual",
-      "localizations" : {
-        "th" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "ดูรายละเอียด"
-          }
-        }
-      }
-    },
     "Wi-Fi" : {
       "extractionState" : "manual",
       "localizations" : {
@@ -7410,292 +7708,6 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Z%1$@"
-          }
-        }
-      }
-    },
-    "%@%%" : {
-      "localizations" : {
-        "th" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "%@%%"
-          }
-        }
-      }
-    },
-    "10 (Quick Smoke)" : {
-      "localizations" : {
-        "th" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "10 (ทดสอบสั้น)"
-          }
-        }
-      }
-    },
-    "100 (Stress Test)" : {
-      "localizations" : {
-        "th" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "100 (ทดสอบความทนทาน)"
-          }
-        }
-      }
-    },
-    "25 (Short Benchmark)" : {
-      "localizations" : {
-        "th" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "25 (ทดสอบระยะสั้น)"
-          }
-        }
-      }
-    },
-    "50 (Standard Soak)" : {
-      "localizations" : {
-        "th" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "50 (ทดสอบมาตรฐาน)"
-          }
-        }
-      }
-    },
-    "500 (Full Event Soak)" : {
-      "localizations" : {
-        "th" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "500 (ทดสอบงานเต็มรูปแบบ)"
-          }
-        }
-      }
-    },
-    "Choose a synthetic benchmark, physical camera check, or production session soak. Only Production Pipeline exercises the live booth workflow." : {
-      "localizations" : {
-        "th" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "เลือกการทดสอบสังเคราะห์ การตรวจสอบกล้องจริง หรือการทดสอบเซสชันการทำงานจริง เฉพาะ Production Pipeline เท่านั้นที่ทดสอบเวิร์กโฟลว์ของบูธจริง"
-          }
-        }
-      }
-    },
-    "Cycle %@ of %@" : {
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "new",
-            "value" : "Cycle %1$@ of %2$@"
-          }
-        },
-        "th" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "รอบที่ %@ จาก %@"
-          }
-        }
-      }
-    },
-    "DANGEROUS" : {
-      "localizations" : {
-        "th" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "อันตราย"
-          }
-        }
-      }
-    },
-    "Delay Between Cycles:" : {
-      "localizations" : {
-        "th" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "หน่วงเวลาระหว่างรอบ:"
-          }
-        }
-      }
-    },
-    "Each production cycle performs a real upload. Review the configured destination and credentials before enabling." : {
-      "localizations" : {
-        "th" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "แต่ละรอบการทำงานจริงจะอัปโหลดไฟล์จริง โปรดตรวจสอบปลายทางและข้อมูลรับรองที่ตั้งค่าไว้ก่อนเปิดใช้"
-          }
-        }
-      }
-    },
-    "Enable Physical Printing" : {
-      "localizations" : {
-        "th" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "เปิดใช้การพิมพ์จริง"
-          }
-        }
-      }
-    },
-    "Enable public HTTPS or trusted LAN HTTP in Global booth guest-delivery settings." : {
-      "localizations" : {
-        "th" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "เปิดใช้ HTTPS สาธารณะหรือ HTTP บน LAN ที่เชื่อถือได้ในการตั้งค่าการส่งมอบรูปภาพลูกค้าส่วนกลางของบูธ"
-          }
-        }
-      }
-    },
-    "Global booth guest-delivery setting" : {
-      "localizations" : {
-        "th" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "การตั้งค่าการส่งมอบรูปภาพลูกค้าส่วนกลางของบูธ"
-          }
-        }
-      }
-    },
-    "Guest photos and download links are unencrypted on the local network. Use only on an isolated, operator-controlled network." : {
-      "localizations" : {
-        "th" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "รูปภาพและลิงก์ดาวน์โหลดของลูกค้าไม่มีการเข้ารหัสบนเครือข่ายภายใน ใช้เฉพาะบนเครือข่ายแยกที่ผู้ดูแลควบคุมเท่านั้น"
-          }
-        }
-      }
-    },
-    "Issues & Warnings" : {
-      "localizations" : {
-        "th" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "ปัญหาและคำเตือน"
-          }
-        }
-      }
-    },
-    "Opt-in sends real print jobs to the configured printer. The cadence limits paper and ribbon use." : {
-      "localizations" : {
-        "th" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "เมื่อเปิดใช้ ระบบจะส่งงานพิมพ์จริงไปยังเครื่องพิมพ์ที่ตั้งค่าไว้ ความถี่ช่วยจำกัดการใช้กระดาษและริบบอน"
-          }
-        }
-      }
-    },
-    "Preflight Diagnostics" : {
-      "localizations" : {
-        "th" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "การวินิจฉัยก่อนเริ่ม"
-          }
-        }
-      }
-    },
-    "Public guest URLs must use HTTPS. Session pages use this URL after cloud upload succeeds." : {
-      "localizations" : {
-        "th" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "URL สาธารณะสำหรับลูกค้าต้องใช้ HTTPS หน้าของเซสชันจะใช้ URL นี้เมื่ออัปโหลดขึ้นคลาวด์สำเร็จ"
-          }
-        }
-      }
-    },
-    "QR codes use this URL when cloud upload is enabled. Example: https://photos.yourdomain.com" : {
-      "localizations" : {
-        "th" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "QR code จะใช้ URL นี้เมื่อเปิดการอัปโหลดขึ้นคลาวด์ ตัวอย่าง: https://photos.yourdomain.com"
-          }
-        }
-      }
-    },
-    "Soak Test Failed" : {
-      "localizations" : {
-        "th" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "การทดสอบความทนทานล้มเหลว"
-          }
-        }
-      }
-    },
-    "Soak Test In Progress" : {
-      "localizations" : {
-        "th" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "กำลังทดสอบความทนทาน"
-          }
-        }
-      }
-    },
-    "Stopping Soak Test..." : {
-      "localizations" : {
-        "th" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "กำลังหยุดการทดสอบความทนทาน..."
-          }
-        }
-      }
-    },
-    "Subsystem Coverage" : {
-      "localizations" : {
-        "th" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "ความครอบคลุมของระบบย่อย"
-          }
-        }
-      }
-    },
-    "Target Cycles:" : {
-      "localizations" : {
-        "th" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "จำนวนรอบเป้าหมาย:"
-          }
-        }
-      }
-    },
-    "Test Configuration" : {
-      "localizations" : {
-        "th" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "การกำหนดค่าการทดสอบ"
-          }
-        }
-      }
-    },
-    "The public guest URL is invalid. Cloud delivery requires HTTPS." : {
-      "localizations" : {
-        "th" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "URL สาธารณะสำหรับลูกค้าไม่ถูกต้อง การส่งมอบผ่านคลาวด์ต้องใช้ HTTPS"
-          }
-        }
-      }
-    },
-    "• %@" : {
-      "localizations" : {
-        "th" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "• %@"
           }
         }
       }
