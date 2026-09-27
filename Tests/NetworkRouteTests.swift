@@ -1516,8 +1516,27 @@ struct NetworkRouteTests {
         macRuntime.stopControlCore()
         #expect(await iPadEvents.waitForDisconnectedCount(1, timeout: 5))
         iPadRuntime.cancelReconnect()
-        _ = replacementMacRuntime.startControlListener(using: .tcp, port: nil, service: service)
-        let replacementPort = try #require(replacementMacEvents.waitForListener())
+        let replacementListener = try NWListener(using: .tcp)
+        let replacementListenerReady = DispatchSemaphore(value: 0)
+        let replacementServiceRegistered = DispatchSemaphore(value: 0)
+        replacementListener.service = service
+        replacementListener.stateUpdateHandler = { state in
+            if case .ready = state { replacementListenerReady.signal() }
+        }
+        replacementListener.serviceRegistrationUpdateHandler = { change in
+            if case .add = change { replacementServiceRegistered.signal() }
+        }
+        replacementListener.newConnectionHandler = { connection in
+            _ = replacementMacRuntime.startInboundControlConnection(connection)
+        }
+        replacementListener.start(queue: replacementMacQueue)
+        defer { replacementListener.cancel() }
+        #expect(waitForSemaphore(replacementListenerReady))
+        let replacementPort = try #require(replacementListener.port)
+        #expect(
+            waitForSemaphore(replacementServiceRegistered, timeout: 5),
+            "The replacement listener became ready before Bonjour registration completed."
+        )
         #expect(stalePort != replacementPort)
         #expect(iPadRuntime.scheduleReconnect(after: 0.05, attempt: 6, generation: 981))
 
