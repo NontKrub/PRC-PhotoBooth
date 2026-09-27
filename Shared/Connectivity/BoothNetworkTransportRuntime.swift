@@ -2472,6 +2472,10 @@ final class BoothNetworkTransportRuntime: @unchecked Sendable {
         }
     }
 
+    func identityProbeCooldownIsActive() -> Bool {
+        onQueue { admissionLimiter.isIdentityProbeCoolingDown() }
+    }
+
     private func makeInboundAdmissionOnQueue(
         _ connection: NWConnection,
         endpointKey: String,

@@ -6,8 +6,8 @@ import Testing
 
 @Suite("Trusted control authentication under finite flood")
 struct TrustedFloodAuthenticationTests {
-    @Test("fresh runtime authenticates stored-secret peer after 100 slow pre-auth sockets")
-    func freshRuntimeAuthenticatesAfterFiniteHostileFlood() async throws {
+    @Test("fresh runtime authenticates stored-secret peer after finite flood without endpoint history")
+    func freshRuntimeAuthenticatesAfterFiniteHostileFloodWithoutEndpointHistory() async throws {
         let macQueue = DispatchQueue(label: "PRC-PhotoBooth.Tests.TrustedFloodFresh.Mac")
         let iPadQueue = DispatchQueue(label: "PRC-PhotoBooth.Tests.TrustedFloodFresh.iPad")
         let hostileQueue = DispatchQueue(label: "PRC-PhotoBooth.Tests.TrustedFloodFresh.Hostiles")
@@ -16,7 +16,13 @@ struct TrustedFloodAuthenticationTests {
             host: NWEndpoint.Host("127.0.0.1"),
             port: .any
         )
-        let macRuntime = BoothNetworkTransportRuntime(queue: macQueue)
+        let macRuntime = BoothNetworkTransportRuntime(
+            queue: macQueue,
+            admissionLimiter: BoothPreAuthAdmissionLimiter(
+                identityProbeGlobalFailureThreshold: 5,
+                identityProbeGlobalCooldown: 60
+            )
+        )
         let iPadRuntime = BoothNetworkTransportRuntime(queue: iPadQueue)
         let macIdentity = BoothDeviceIdentity(id: UUID().uuidString, displayName: "Fresh Flood Mac", role: .mac)
         let iPadIdentity = BoothDeviceIdentity(id: UUID().uuidString, displayName: "Trusted Flood iPad", role: .iPad)
@@ -143,9 +149,23 @@ struct TrustedFloodAuthenticationTests {
         #expect(laneSnapshot.identityProbePresent)
         #expect(laneSnapshot.queuedIdentityProbePresent)
 
-        // The real peer starts while hostile sockets still occupy the bounded
-        // lanes. It must recover after their queue-owned deadlines release
-        // admission without requiring an operator or a MainActor callback.
+        #expect(macRuntime.identityProbeCooldownIsActive())
+        hostileClients.forEach { $0.cancel() }
+        let floodLanesReleased = await waitForLanes(
+            macRuntime,
+            expected: .init(
+                normalCandidatePresent: false,
+                identityProbePresent: false,
+                queuedIdentityProbePresent: false
+            ),
+            timeout: 15
+        )
+        #expect(floodLanesReleased, "Queue-owned deadlines did not release the finite hostile flood slots.")
+        #expect(macRuntime.identityProbeCooldownIsActive())
+
+        // The runtime models a Mac restart: its endpoint cache is empty, while
+        // the flood's identity-probe cooldown remains active. The trusted
+        // peer must still prove its stored secret from this new source port.
         iPadRuntime.startTrustedControlConnection(
             endpoint: .hostPort(host: "127.0.0.1", port: port),
             parameters: trustedParameters,
@@ -153,8 +173,6 @@ struct TrustedFloodAuthenticationTests {
             provenance: .localNetworkBonjour,
             generation: 1002
         )
-
-        #expect(await iPadEvents.waitForDisconnectCount(1, timeout: 3))
 
         #expect(await iPadEvents.waitForAuthenticationCount(1, timeout: 15))
         #expect(await macEvents.waitForAuthenticationCount(1, timeout: 3))
@@ -198,11 +216,9 @@ private final class TrustedFloodObserver: @unchecked Sendable {
     private let listenerReady = DispatchSemaphore(value: 0)
     private let authenticationChanged = DispatchSemaphore(value: 0)
     private let rejectionChanged = DispatchSemaphore(value: 0)
-    private let disconnectChanged = DispatchSemaphore(value: 0)
     private var listenerPort: NWEndpoint.Port?
     private var authenticationGenerations: [Int] = []
     private var rejectionReasons: [String] = []
-    private var disconnectCountValue = 0
 
     func receive(_ event: BoothNetworkTransportRuntime.ControlCoreEvent) {
         switch event {
@@ -221,11 +237,6 @@ private final class TrustedFloodObserver: @unchecked Sendable {
             rejectionReasons.append(reason)
             lock.unlock()
             rejectionChanged.signal()
-        case .disconnected(_, _):
-            lock.lock()
-            disconnectCountValue += 1
-            lock.unlock()
-            disconnectChanged.signal()
         default:
             break
         }
@@ -279,32 +290,10 @@ private final class TrustedFloodObserver: @unchecked Sendable {
         }
     }
 
-    func waitForDisconnectCount(_ count: Int, timeout: TimeInterval) async -> Bool {
-        await Task.detached(priority: .utility) { [self] in
-            waitForDisconnectCountBlocking(count, timeout: timeout)
-        }.value
-    }
-
-    private func waitForDisconnectCountBlocking(_ count: Int, timeout: TimeInterval) -> Bool {
-        let deadline = DispatchTime.now() + timeout
-        while true {
-            if disconnectCount >= count { return true }
-            guard disconnectChanged.wait(timeout: deadline) == .success else {
-                return disconnectCount >= count
-            }
-        }
-    }
-
     var authenticationCount: Int {
         lock.lock()
         defer { lock.unlock() }
         return authenticationGenerations.count
-    }
-
-    private var disconnectCount: Int {
-        lock.lock()
-        defer { lock.unlock() }
-        return disconnectCountValue
     }
 }
 
