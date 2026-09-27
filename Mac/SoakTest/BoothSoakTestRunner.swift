@@ -126,6 +126,7 @@ actor BoothSoakTestRunner {
                 "Cloud QR route": config.testCloudUpload ? "NOT TESTED (enabled, no completed cycle yet)" : "NOT TESTED (disabled)",
                 "Cloud cleanup": config.testCloudUpload ? "NOT TESTED (enabled, no completed cycle yet)" : "NOT TESTED (disabled)",
                 "Soak cleanup": "NOT TESTED",
+                "Physical print submission": config.enablePhysicalPrint ? "NOT TESTED (no scheduled print cycle completed yet)" : "NOT TESTED (disabled)",
                 "Physical printing": config.enablePhysicalPrint ? "NOT TESTED (no scheduled print cycle completed yet)" : "NOT TESTED (disabled)",
                 "Gallery update": "NOT TESTED",
                 "iPad hardware": "NOT TESTED (device model compatibility is not inferred from connection readiness)",
@@ -311,9 +312,12 @@ actor BoothSoakTestRunner {
                         : "PASS (run-scoped customer routes were depublished; diagnostic artifacts were retained by configuration)")
                     : "WARNING (\(cycleResult.cleanupWarnings.joined(separator: " ")))"
                 if scheduledPrint {
-                    coverage["Physical printing"] = cycleResult.physicalPrintVerified
-                        ? "PASS (real print job succeeded in cycle \(cycle))"
-                        : "FAIL (scheduled print job was not verified)"
+                    coverage["Physical print submission"] = cycleResult.printJobCompleted
+                        ? "PASS (AppKit print job completed in cycle \(cycle))"
+                        : "FAIL (scheduled print job did not complete in cycle \(cycle))"
+                    coverage["Physical printing"] = BoothSoakPrintVerification.physicalOutputCoverage(
+                        jobCompleted: cycleResult.printJobCompleted
+                    )
                 } else if coverage["Physical printing"] == nil {
                     coverage["Physical printing"] = config.enablePhysicalPrint
                         ? "NOT TESTED (no scheduled print cycle has completed yet)"

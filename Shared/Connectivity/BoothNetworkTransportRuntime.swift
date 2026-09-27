@@ -9,17 +9,13 @@ import Network
 final class BoothNetworkTransportRuntime: @unchecked Sendable {
     typealias ControlListenerFactory = (NWParameters, NWEndpoint.Port?) throws -> NWListener
 
-    /// Trusted connection events carry a generation and values only. The
-    /// pairingCandidate case is a separate legacy handoff for an untrusted
-    /// pairing flow; that socket/decoder transfer remains a migration gap.
+    /// Transport events carry immutable values only. Live connections and
+    /// decoders remain owned by this runtime's serial queue.
     enum ControlCoreEvent: Sendable {
-        case pairingCandidate(
-            connection: NWConnection,
-            admission: InboundControlAdmission,
-            hello: BoothTransportHello,
-            decoder: BoothTransportFrameDecoder,
-            bufferedFrames: [BoothDecodedTransportFrame]
-        )
+        case pairingIntentCandidate(PairingCandidate, BoothPairingIntent)
+        case pairingSessionConsumed(PairingSessionConsumption)
+        case pairingVerificationRequired(PairingVerificationSnapshot)
+        case pairingTrustRequired(PairingTrustSnapshot)
         case trustedAuthenticated(
             generation: Int,
             endpointDescription: String,
@@ -35,6 +31,60 @@ final class BoothNetworkTransportRuntime: @unchecked Sendable {
         case rejected(generation: Int, reason: String)
         case listenerReady(generation: Int, port: NWEndpoint.Port?)
         case listenerFailed(generation: Int, reason: String)
+
+        var controlGeneration: Int? {
+            switch self {
+            case .pairingIntentCandidate(let candidate, _):
+                candidate.generation
+            case .pairingSessionConsumed(let consumption):
+                consumption.candidate.generation
+            case .pairingVerificationRequired(let snapshot):
+                snapshot.candidate.generation
+            case .pairingTrustRequired(let snapshot):
+                snapshot.candidate.generation
+            case .trustedAuthenticated(let generation, _, _, _, _, _, _, _),
+                 .controlFrames(let generation, _),
+                 .disconnected(let generation, _),
+                 .rejected(let generation, _):
+                generation
+            case .listenerReady, .listenerFailed:
+                nil
+            }
+        }
+    }
+
+    struct PairingCandidate: Sendable, Equatable {
+        let token: UUID
+        let generation: Int
+        let hello: BoothTransportHello
+    }
+
+    struct PairingVerificationSnapshot: Sendable, Equatable {
+        let candidate: PairingCandidate
+        let sessionID: String
+        let peer: TrustedBoothPeer
+        let verificationCode: String
+        let expiresAt: Date
+    }
+
+    struct PairingSessionConsumption: Sendable, Equatable {
+        let candidate: PairingCandidate
+        let sessionID: String
+        let outcome: Outcome
+
+        enum Outcome: Sendable, Equatable {
+            case proofAccepted(method: BoothPairingMethod)
+            case expired
+            case locked
+        }
+    }
+
+    struct PairingTrustSnapshot: Sendable, Equatable {
+        let candidate: PairingCandidate
+        let sessionID: String
+        let peer: TrustedBoothPeer
+        let secret: Data
+        let expiresAt: Date
     }
 
     private enum AdmissionLane: Sendable, Equatable {
@@ -64,10 +114,22 @@ final class BoothNetworkTransportRuntime: @unchecked Sendable {
         var peerSecureHello: BoothSecureChannelHello?
         var readySent = false
         var readyReceived = false
+        var secureHandshakeEstablished = false
         var isTrusted = false
         var isIdentityProbeCoolingDown = false
         var authenticated = false
         var claimedTrustedPeerID: String?
+        var isPairingCandidate = false
+        var receivedPairingIntent: BoothPairingIntent?
+        var pairingSessionID: String?
+        var pairingExpiresAt: Date?
+        var pairingSecret: Data?
+        var pairingTranscript: Data?
+        var pairingPeer: TrustedBoothPeer?
+        var pairingMethod: BoothPairingMethod?
+        var pairingVerificationCode: String?
+        var pairingTrustRequested = false
+        var pairingTrustCommitClaimed = false
 
         init(
             connection: NWConnection,
@@ -134,6 +196,19 @@ final class BoothNetworkTransportRuntime: @unchecked Sendable {
         let queuedIdentityProbePresent: Bool
     }
 
+    struct RouteBrowserRetryBackoff: Sendable, Equatable {
+        private(set) var attempt = 0
+
+        mutating func nextDelay() -> TimeInterval {
+            defer { attempt += 1 }
+            return BoothNetworkTransportRuntime.coreRouteBrowserRetryDelay(attempt: attempt)
+        }
+
+        mutating func browserRecovered() {
+            attempt = 0
+        }
+    }
+
     private struct ControlReconnectRoute {
         let endpoint: NWEndpoint
         let parameters: NWParameters
@@ -150,6 +225,11 @@ final class BoothNetworkTransportRuntime: @unchecked Sendable {
     }
 
     private static let controlListenerRetryDelays: [TimeInterval] = [0.25, 0.5, 1, 2, 4, 8]
+    private static let coreRouteBrowserRetryDelays: [TimeInterval] = [1, 2, 4, 8, 16, 30]
+
+    static func coreRouteBrowserRetryDelay(attempt: Int) -> TimeInterval {
+        coreRouteBrowserRetryDelays[min(max(0, attempt), coreRouteBrowserRetryDelays.count - 1)]
+    }
 
     private let queue: DispatchQueue
     private let controlListenerFactory: ControlListenerFactory
@@ -187,9 +267,11 @@ final class BoothNetworkTransportRuntime: @unchecked Sendable {
     private var activeControlAuthenticated = false
     private var activeControlIsIdentityProbe = false
     private var activeIdentityProbePeerID: String?
+    private var inboundControlConnectionsSeen = 0
     private var localIdentity: BoothDeviceIdentity?
     private var localNetworkPreference: BoothNetworkPreference = .wifi
     private var trustedSecrets: [String: Data] = [:]
+    private var inboundPairingSession: BoothPairingSession?
     private var selectedPeerID: String?
     private var sharedSecureChannel: BoothSecureChannel?
     private var controlWriter: BoothControlWritePump?
@@ -202,11 +284,13 @@ final class BoothNetworkTransportRuntime: @unchecked Sendable {
     private var coreControlListenerRetrySource: DispatchSourceTimer?
     private var coreControlListenerRetryAttempt = 0
     private var coreRouteBrowsers: [String: NWBrowser] = [:]
+    private var coreRouteBrowserRetrySources: [String: DispatchSourceTimer] = [:]
+    private var coreRouteBrowserRetryTokens: [String: UUID] = [:]
+    private var coreRouteBrowserRetryBackoffs: [String: RouteBrowserRetryBackoff] = [:]
     private var coreRouteGeneration = 0
     private var coreRouteSelection = BoothRouteDiscoverySelection()
     private var corePendingRoute: ControlReconnectRoute?
     private var coreRouteFallbackSource: DispatchSourceTimer?
-    private var coreRouteRetrySource: DispatchSourceTimer?
     private var nextControlGeneration = 0
 
     private var heartbeatTimeoutHandler: (@Sendable (Int) -> Void)?
@@ -284,6 +368,194 @@ final class BoothNetworkTransportRuntime: @unchecked Sendable {
             self.sharedSecureChannel = secureChannel
             self.controlWriter = writer
             self.controlCoreEvent = onEvent
+        }
+    }
+
+    /// Installs the locally displayed pairing session into the transport
+    /// authority. The returned UI values remain a presentation copy; proof
+    /// validation and attempt accounting use only this queue-owned value.
+    func installInboundPairingSession(_ session: BoothPairingSession?) {
+        onQueue {
+            if let session {
+                for candidate in Array(protocolCandidates.values) where
+                    candidate.isPairingCandidate
+                        && candidate.pairingSessionID != nil
+                        && candidate.pairingSessionID != session.info.sessionID {
+                    rejectTrustedCandidateOnQueue(
+                        candidate.connection,
+                        generation: candidate.generation,
+                        reason: "Pairing session was replaced."
+                    )
+                }
+            }
+            inboundPairingSession = session
+            guard let session else { return }
+            for candidate in protocolCandidates.values where candidate.isPairingCandidate {
+                guard candidate.pairingSessionID == nil,
+                      candidate.peerHello?.role == .iPad else { continue }
+                candidate.pairingSessionID = session.info.sessionID
+                candidate.pairingExpiresAt = session.info.expiresAt
+                startCoreTimeoutOnQueue(
+                    candidate,
+                    after: max(1, session.info.expiresAt.timeIntervalSinceNow),
+                    reason: "Pairing session expired."
+                )
+            }
+        }
+    }
+
+    func clearInboundPairingSession(sessionID: String?) {
+        onQueue {
+            if let sessionID {
+                guard inboundPairingSession?.info.sessionID == sessionID
+                        || protocolCandidates.values.contains(where: { $0.pairingSessionID == sessionID }) else { return }
+                if inboundPairingSession?.info.sessionID == sessionID {
+                    inboundPairingSession = nil
+                }
+                for candidate in Array(protocolCandidates.values) where candidate.pairingSessionID == sessionID {
+                    rejectTrustedCandidateOnQueue(
+                        candidate.connection,
+                        generation: candidate.generation,
+                        reason: "Pairing session was cancelled."
+                    )
+                }
+            } else {
+                inboundPairingSession = nil
+            }
+        }
+    }
+
+    func respondToInboundPairingIntent(
+        token: UUID,
+        generation: Int,
+        session: BoothPairingSessionInfo
+    ) -> Bool {
+        onQueue {
+            guard let candidate = pairingCandidateOnQueue(token: token, generation: generation),
+                  let identity = localIdentity,
+                  candidate.receivedPairingIntent != nil,
+                  session.macDeviceID == identity.id,
+                  inboundPairingSession?.info.sessionID == session.sessionID,
+                  session.expiresAt > Date() else { return false }
+            candidate.pairingSessionID = session.sessionID
+            candidate.pairingExpiresAt = session.expiresAt
+            startCoreTimeoutOnQueue(
+                candidate,
+                after: max(1, session.expiresAt.timeIntervalSinceNow),
+                reason: "Pairing session expired."
+            )
+            sendCoreMessageOnQueue(.pairingSessionAvailable(session: session), candidate: candidate)
+            return true
+        }
+    }
+
+    func rejectInboundPairingCandidate(token: UUID, generation: Int, reason: String) {
+        onQueue {
+            guard let candidate = pairingCandidateOnQueue(token: token, generation: generation) else { return }
+            let result = BoothPairingResult(
+                accepted: false,
+                reason: reason,
+                pairingSessionID: candidate.pairingSessionID
+            )
+            sendCoreMessageOnQueue(.pairingResult(result: result), candidate: candidate) { [weak self] _ in
+                guard let self,
+                      let current = self.pairingCandidateOnQueue(token: token, generation: generation) else { return }
+                self.rejectTrustedCandidateOnQueue(
+                    current.connection,
+                    generation: generation,
+                    reason: reason
+                )
+            }
+        }
+    }
+
+    @discardableResult
+    func confirmPairingVerification(token: UUID, generation: Int) -> Bool {
+        onQueue {
+            guard let candidate = pairingCandidateOnQueue(token: token, generation: generation),
+                  candidate.pairingMethod == .pin,
+                  let sessionID = candidate.pairingSessionID,
+                  let secret = candidate.pairingSecret,
+                  let transcript = candidate.pairingTranscript,
+                  candidate.pairingVerificationCode != nil,
+                  !candidate.pairingTrustRequested,
+                  Date() < (candidate.pairingExpiresAt ?? .distantPast) else { return false }
+            let proof = BoothPairingCrypto.makeVerificationConfirmationProof(
+                secret: secret,
+                transcript: transcript,
+                role: .mac
+            )
+            candidate.pairingVerificationCode = nil
+            candidate.isTrusted = true
+            sendCoreMessageOnQueue(
+                .pairingVerificationConfirmed(sessionID: sessionID, proof: proof),
+                candidate: candidate
+            ) { [weak self] sent in
+                guard let self,
+                      let current = self.pairingCandidateOnQueue(token: token, generation: generation) else { return }
+                guard sent, let secret = current.pairingSecret else {
+                    self.rejectTrustedCandidateOnQueue(
+                        current.connection,
+                        generation: generation,
+                        reason: "Pairing verification could not be delivered."
+                    )
+                    return
+                }
+                self.beginCoreAuthenticationOnQueue(current, secret: secret)
+            }
+            return true
+        }
+    }
+
+    func beginPairingTrustCommit(token: UUID, generation: Int) -> Bool {
+        onQueue {
+            guard let candidate = pairingCandidateOnQueue(token: token, generation: generation),
+                  candidate.pairingTrustRequested,
+                  !candidate.pairingTrustCommitClaimed else { return false }
+            candidate.pairingTrustCommitClaimed = true
+            candidate.timeout?.cancel()
+            candidate.timeout = nil
+            return true
+        }
+    }
+
+    func finishPairingTrustCommit(token: UUID, generation: Int, succeeded: Bool) -> Bool {
+        onQueue {
+            guard let candidate = pairingCandidateOnQueue(token: token, generation: generation),
+                  candidate.pairingTrustRequested,
+                  candidate.pairingTrustCommitClaimed,
+                  let peer = candidate.pairingPeer,
+                  let secret = candidate.pairingSecret else { return false }
+            guard succeeded else {
+                rejectTrustedCandidateOnQueue(
+                    candidate.connection,
+                    generation: generation,
+                    reason: "Pairing trust could not be saved."
+                )
+                return true
+            }
+            trustedSecrets[peer.id] = secret
+            trustedPeerIDs.insert(peer.id)
+            candidate.isTrusted = true
+            promoteCoreCandidateOnQueue(candidate)
+            return true
+        }
+    }
+
+    func cancelInboundPairingCandidate(token: UUID, generation: Int, reason: String) {
+        onQueue {
+            guard let candidate = pairingCandidateOnQueue(token: token, generation: generation) else { return }
+            rejectTrustedCandidateOnQueue(
+                candidate.connection,
+                generation: generation,
+                reason: reason
+            )
+        }
+    }
+
+    func isInboundPairingCandidateCurrent(token: UUID, generation: Int) -> Bool {
+        onQueue {
+            pairingCandidateOnQueue(token: token, generation: generation) != nil
         }
     }
 
@@ -565,42 +837,118 @@ final class BoothNetworkTransportRuntime: @unchecked Sendable {
                 compatibility = true
                 parameters = .tcp
             }
-            let browserParameters = parameters
-            let key = "\(generation):\(interface.rawValue):\(compatibility)"
-            let browser = NWBrowser(
-                for: .bonjourWithTXTRecord(type: "_prc-control._tcp", domain: nil),
-                using: browserParameters
+            startTrustedRouteBrowserOnQueue(
+                preference: preference,
+                interface: interface,
+                compatibility: compatibility,
+                parameters: parameters,
+                generation: generation
             )
-            browser.browseResultsChangedHandler = { [weak self, weak browser] results, _ in
-                guard let self, let browser else { return }
-                self.onQueue {
-                    guard self.coreRouteBrowsers[key] === browser,
-                          self.coreRouteGeneration == generation,
-                          let targetPeerID = self.selectedPeerID else { return }
-                    self.consumeTrustedRouteResultsOnQueue(
-                        results,
-                        targetPeerID: targetPeerID,
+        }
+    }
+
+    private func startTrustedRouteBrowserOnQueue(
+        preference: BoothNetworkPreference,
+        interface: BoothNetworkInterfacePolicy,
+        compatibility: Bool,
+        parameters: NWParameters,
+        generation: Int
+    ) {
+        let key = "\(generation):\(interface.rawValue):\(compatibility)"
+        guard coreRouteGeneration == generation,
+              coreRouteBrowsers[key] == nil,
+              let targetPeerID = selectedPeerID,
+              trustedSecrets[targetPeerID] != nil else { return }
+        coreRouteBrowserRetryTokens.removeValue(forKey: key)
+        coreRouteBrowserRetrySources.removeValue(forKey: key)?.cancel()
+        let browser = NWBrowser(
+            for: .bonjourWithTXTRecord(type: "_prc-control._tcp", domain: nil),
+            using: parameters
+        )
+        browser.browseResultsChangedHandler = { [weak self, weak browser] results, _ in
+            guard let self, let browser else { return }
+            self.onQueue {
+                guard self.coreRouteBrowsers[key] === browser,
+                      self.coreRouteGeneration == generation,
+                      let targetPeerID = self.selectedPeerID else { return }
+                self.consumeTrustedRouteResultsOnQueue(
+                    results,
+                    targetPeerID: targetPeerID,
+                    preference: preference,
+                    interface: interface,
+                    compatibility: compatibility,
+                    parameters: parameters,
+                    generation: generation
+                )
+            }
+        }
+        browser.stateUpdateHandler = { [weak self, weak browser] state in
+            guard let self, let browser else { return }
+            self.onQueue {
+                guard self.coreRouteBrowsers[key] === browser,
+                      self.coreRouteGeneration == generation else { return }
+                switch state {
+                case .ready:
+                    var backoff = self.coreRouteBrowserRetryBackoffs[key, default: .init()]
+                    backoff.browserRecovered()
+                    self.coreRouteBrowserRetryBackoffs[key] = backoff
+                case .failed:
+                    self.coreRouteBrowsers.removeValue(forKey: key)
+                    self.scheduleCoreRouteBrowserRetryOnQueue(
+                        key: key,
                         preference: preference,
                         interface: interface,
                         compatibility: compatibility,
-                        parameters: browserParameters,
+                        parameters: parameters,
                         generation: generation
                     )
+                default:
+                    break
                 }
             }
-            browser.stateUpdateHandler = { [weak self, weak browser] state in
-                guard let self, let browser, case .failed = state else { return }
-                self.onQueue {
-                    guard self.coreRouteBrowsers[key] === browser else { return }
-                    self.coreRouteBrowsers.removeValue(forKey: key)
-                    if self.coreRouteBrowsers.isEmpty {
-                        self.scheduleCoreRouteRetryOnQueue(generation: generation)
-                    }
-                }
-            }
-            coreRouteBrowsers[key] = browser
-            browser.start(queue: queue)
         }
+        coreRouteBrowsers[key] = browser
+        browser.start(queue: queue)
+    }
+
+    private func scheduleCoreRouteBrowserRetryOnQueue(
+        key: String,
+        preference: BoothNetworkPreference,
+        interface: BoothNetworkInterfacePolicy,
+        compatibility: Bool,
+        parameters: NWParameters,
+        generation: Int
+    ) {
+        guard coreRouteBrowserRetrySources[key] == nil,
+              !activeControlAuthenticated,
+              selectedPeerID.flatMap({ trustedSecrets[$0] }) != nil else { return }
+        let retryToken = UUID()
+        var backoff = coreRouteBrowserRetryBackoffs[key, default: .init()]
+        let delay = backoff.nextDelay()
+        coreRouteBrowserRetryBackoffs[key] = backoff
+        let source = DispatchSource.makeTimerSource(queue: queue)
+        source.schedule(deadline: .now() + delay)
+        source.setEventHandler { [weak self] in
+            guard let self else { return }
+            guard self.coreRouteBrowserRetryTokens[key] == retryToken else { return }
+            self.coreRouteBrowserRetryTokens.removeValue(forKey: key)
+            self.coreRouteBrowserRetrySources.removeValue(forKey: key)?.cancel()
+            guard self.coreRouteGeneration == generation,
+                  !self.activeControlAuthenticated,
+                  self.coreRouteBrowsers[key] == nil else {
+                return
+            }
+            self.startTrustedRouteBrowserOnQueue(
+                preference: preference,
+                interface: interface,
+                compatibility: compatibility,
+                parameters: parameters,
+                generation: generation
+            )
+        }
+        coreRouteBrowserRetrySources[key] = source
+        coreRouteBrowserRetryTokens[key] = retryToken
+        source.resume()
     }
 
     private func consumeTrustedRouteResultsOnQueue(
@@ -684,38 +1032,19 @@ final class BoothNetworkTransportRuntime: @unchecked Sendable {
         source.resume()
     }
 
-    private func scheduleCoreRouteRetryOnQueue(generation: Int) {
-        guard coreRouteRetrySource == nil,
-              !activeControlAuthenticated,
-              selectedPeerID.flatMap({ trustedSecrets[$0] }) != nil else { return }
-        let source = DispatchSource.makeTimerSource(queue: queue)
-        source.schedule(deadline: .now() + 1.0)
-        source.setEventHandler { [weak self] in
-            guard let self, self.coreRouteGeneration == generation,
-                  !self.activeControlAuthenticated else { return }
-            self.coreRouteRetrySource?.cancel()
-            self.coreRouteRetrySource = nil
-            self.coreRouteSelection.reset()
-            self.startTrustedRouteBrowsersOnQueue(
-                preference: self.localNetworkPreference,
-                generation: generation
-            )
-        }
-        coreRouteRetrySource = source
-        source.resume()
-    }
-
     private func stopTrustedRouteBrowsersOnQueue() {
         coreRouteBrowsers.values.forEach { $0.cancel() }
         coreRouteBrowsers.removeAll()
+        coreRouteBrowserRetryTokens.removeAll()
+        coreRouteBrowserRetrySources.values.forEach { $0.cancel() }
+        coreRouteBrowserRetrySources.removeAll()
+        coreRouteBrowserRetryBackoffs.removeAll()
     }
 
     private func stopTrustedRouteDiscoveryOnQueue() {
         stopTrustedRouteBrowsersOnQueue()
         coreRouteFallbackSource?.cancel()
         coreRouteFallbackSource = nil
-        coreRouteRetrySource?.cancel()
-        coreRouteRetrySource = nil
         corePendingRoute = nil
         coreRouteSelection.reset()
     }
@@ -922,25 +1251,11 @@ final class BoothNetworkTransportRuntime: @unchecked Sendable {
                             channel: .control,
                             secureChannel: candidate.secureChannel
                         )
-                        for (index, frame) in frames.enumerated() {
+                        for frame in frames {
                             switch frame {
                             case .control(let message):
                                 self.handleCoreMessageOnQueue(message, candidate: candidate)
-                                if candidate.peerHello != nil, !candidate.isTrusted {
-                                    guard let admission = candidate.admission else { return }
-                                    let buffered = Array(frames.dropFirst(index + 1))
-                                    candidate.timeout?.cancel()
-                                    candidate.timeout = nil
-                                    self.protocolCandidates.removeValue(forKey: ObjectIdentifier(connection))
-                                    self.controlCoreEvent?(.pairingCandidate(
-                                        connection: connection,
-                                        admission: admission,
-                                        hello: candidate.peerHello!,
-                                        decoder: candidate.decoder,
-                                        bufferedFrames: buffered
-                                    ))
-                                    return
-                                }
+                                guard self.candidateOnQueue(connection, generation: generation) === candidate else { return }
                             case .heartbeat:
                                 guard self.activeControlConnection === connection,
                                       self.activeControlAuthenticated else { continue }
@@ -996,6 +1311,34 @@ final class BoothNetworkTransportRuntime: @unchecked Sendable {
             return
         }
         switch message {
+        case .pairingIntent(let intent) where candidate.isPairingCandidate:
+            guard let hello = candidate.peerHello,
+                  let identity = localIdentity else { return }
+            do {
+                try intent.validate(peerHello: hello, localMacDeviceID: identity.id)
+                if let previous = candidate.receivedPairingIntent {
+                    guard previous == intent else {
+                        rejectTrustedCandidateOnQueue(
+                            candidate.connection,
+                            generation: candidate.generation,
+                            reason: "Pairing intent changed during an active candidate."
+                        )
+                        return
+                    }
+                    return
+                }
+                candidate.receivedPairingIntent = intent
+                guard let pairing = pairingCandidateValueOnQueue(candidate) else { return }
+                controlCoreEvent?(.pairingIntentCandidate(pairing, intent))
+            } catch {
+                rejectTrustedCandidateOnQueue(
+                    candidate.connection,
+                    generation: candidate.generation,
+                    reason: error.localizedDescription
+                )
+            }
+        case .pairingRequest(let request) where candidate.isPairingCandidate:
+            handleCorePairingRequestOnQueue(request, candidate: candidate)
         case .authChallenge(let challenge):
             handleCoreAuthChallengeOnQueue(challenge, candidate: candidate)
         case .authProof(let proof):
@@ -1040,6 +1383,206 @@ final class BoothNetworkTransportRuntime: @unchecked Sendable {
         return protocolCandidates[ObjectIdentifier(connection)]
     }
 
+    private func pairingCandidateOnQueue(token: UUID, generation: Int) -> TrustedHandshake? {
+        guard let candidate = protocolCandidates.values.first(where: {
+            $0.admission?.token == token && $0.generation == generation && $0.isPairingCandidate
+        }),
+              activeControlConnection === candidate.connection,
+              activeControlGeneration == generation else { return nil }
+        return candidate
+    }
+
+    private func pairingCandidateValueOnQueue(_ candidate: TrustedHandshake) -> PairingCandidate? {
+        guard candidate.isPairingCandidate,
+              let admission = candidate.admission,
+              let hello = candidate.peerHello else { return nil }
+        return PairingCandidate(token: admission.token, generation: candidate.generation, hello: hello)
+    }
+
+    private func handleCorePairingRequestOnQueue(
+        _ request: BoothPairingRequest,
+        candidate: TrustedHandshake
+    ) {
+        guard candidateOnQueue(candidate.connection, generation: candidate.generation) === candidate,
+              candidate.isPairingCandidate,
+              let hello = candidate.peerHello,
+              let identity = localIdentity,
+              identity.role == .mac,
+              hello.role == .iPad,
+              request.iPadIdentity.id == hello.deviceID,
+              request.iPadIdentity.role == .iPad,
+              !request.iPadIdentity.displayName.isEmpty,
+              request.targetMacDeviceID == identity.id else {
+            rejectTrustedCandidateOnQueue(
+                candidate.connection,
+                generation: candidate.generation,
+                reason: "Pairing request does not match this connection."
+            )
+            return
+        }
+        guard var session = inboundPairingSession,
+              session.isActive(),
+              request.sessionID == session.info.sessionID,
+              request.sessionID == candidate.pairingSessionID,
+              request.iPadEphemeralPublicKey.count == 32,
+              request.admissionProof.count == 32 else {
+            rejectTrustedCandidateOnQueue(
+                candidate.connection,
+                generation: candidate.generation,
+                reason: "Pairing session is unavailable or request proof is malformed."
+            )
+            return
+        }
+
+        let transcript = BoothPairingCrypto.pairingTranscript(
+            sessionID: request.sessionID,
+            macDeviceID: identity.id,
+            iPadDeviceID: request.iPadIdentity.id,
+            method: request.method,
+            macEphemeralPublicKey: session.info.macEphemeralPublicKey,
+            iPadEphemeralPublicKey: request.iPadEphemeralPublicKey
+        )
+        let validation = session.validateAdmissionProof(
+            request.admissionProof,
+            method: request.method,
+            transcript: transcript
+        )
+        inboundPairingSession = session
+        switch validation {
+        case .rejected(let remainingAttempts):
+            sendCoreMessageOnQueue(
+                .pairingResult(result: BoothPairingResult(
+                    accepted: false,
+                    reason: request.method == .pin
+                        ? "Pairing PIN is invalid. \(remainingAttempts) attempts remaining."
+                        : "Pairing QR code is invalid.",
+                    retryable: remainingAttempts > 0,
+                    pairingSessionID: request.sessionID
+                )),
+                candidate: candidate
+            )
+        case .expired:
+            inboundPairingSession = nil
+            emitPairingSessionConsumedOnQueue(
+                sessionID: request.sessionID,
+                outcome: .expired,
+                candidate: candidate
+            )
+            rejectTrustedCandidateOnQueue(
+                candidate.connection,
+                generation: candidate.generation,
+                reason: "Pairing session expired."
+            )
+        case .locked:
+            inboundPairingSession = nil
+            emitPairingSessionConsumedOnQueue(
+                sessionID: request.sessionID,
+                outcome: .locked,
+                candidate: candidate
+            )
+            rejectTrustedCandidateOnQueue(
+                candidate.connection,
+                generation: candidate.generation,
+                reason: "Too many incorrect pairing PIN attempts."
+            )
+        case .accepted:
+            inboundPairingSession = nil
+            emitPairingSessionConsumedOnQueue(
+                sessionID: request.sessionID,
+                outcome: .proofAccepted(method: request.method),
+                candidate: candidate
+            )
+            do {
+                let secret = try session.deriveSecret(
+                    iPadEphemeralPublicKey: request.iPadEphemeralPublicKey,
+                    method: request.method,
+                    transcript: transcript
+                )
+                let peer = TrustedBoothPeer(
+                    id: request.iPadIdentity.id,
+                    displayName: request.iPadIdentity.displayName,
+                    role: .iPad,
+                    lastSeenAt: Date()
+                )
+                candidate.pairingSessionID = request.sessionID
+                candidate.pairingExpiresAt = session.info.expiresAt
+                candidate.pairingSecret = secret
+                candidate.pairingTranscript = transcript
+                candidate.pairingPeer = peer
+                candidate.pairingMethod = request.method
+                candidate.pairingVerificationCode = request.method == .pin
+                    ? BoothPairingCrypto.makeVerificationCode(secret: secret, transcript: transcript)
+                    : nil
+                candidate.isTrusted = true
+                candidate.secureNegotiator.setExpectedPeerDeviceID(peer.id)
+                startCoreTimeoutOnQueue(
+                    candidate,
+                    after: max(1, session.info.expiresAt.timeIntervalSinceNow),
+                    reason: "Pairing session expired."
+                )
+                let result = BoothPairingResult(
+                    accepted: true,
+                    macIdentity: identity,
+                    pairingSessionID: request.sessionID,
+                    macEphemeralPublicKey: session.info.macEphemeralPublicKey,
+                    keyAgreementProof: BoothPairingCrypto.makeKeyAgreementProof(
+                        secret: secret,
+                        transcript: transcript,
+                        role: .mac
+                    )
+                )
+                let token = candidate.admission?.token
+                let generation = candidate.generation
+                sendCoreMessageOnQueue(.pairingResult(result: result), candidate: candidate) { [weak self] sent in
+                    guard let self,
+                          let token,
+                          let current = self.pairingCandidateOnQueue(token: token, generation: generation) else { return }
+                    guard sent,
+                          let currentPeer = current.pairingPeer,
+                          let expiresAt = current.pairingExpiresAt else {
+                        self.rejectTrustedCandidateOnQueue(
+                            current.connection,
+                            generation: generation,
+                            reason: "Pairing result could not be delivered."
+                        )
+                        return
+                    }
+                    if let code = current.pairingVerificationCode {
+                        guard let snapshotCandidate = self.pairingCandidateValueOnQueue(current) else { return }
+                        self.controlCoreEvent?(.pairingVerificationRequired(PairingVerificationSnapshot(
+                            candidate: snapshotCandidate,
+                            sessionID: request.sessionID,
+                            peer: currentPeer,
+                            verificationCode: code,
+                            expiresAt: expiresAt
+                        )))
+                    } else if let secret = current.pairingSecret {
+                        self.beginCoreAuthenticationOnQueue(current, secret: secret)
+                    }
+                }
+            } catch {
+                rejectTrustedCandidateOnQueue(
+                    candidate.connection,
+                    generation: candidate.generation,
+                    reason: "Pairing key agreement failed."
+                )
+            }
+        }
+    }
+
+    private func emitPairingSessionConsumedOnQueue(
+        sessionID: String,
+        outcome: PairingSessionConsumption.Outcome,
+        candidate: TrustedHandshake
+    ) {
+        guard let candidateValue = pairingCandidateValueOnQueue(candidate) else { return }
+        controlCoreEvent?(.pairingSessionConsumed(PairingSessionConsumption(
+            candidate: candidateValue,
+            sessionID: sessionID,
+            outcome: outcome
+        )))
+    }
+
     private func handleCoreHelloOnQueue(_ hello: BoothTransportHello, candidate: TrustedHandshake) {
         guard let identity = localIdentity,
               hello.deviceID.isEmpty == false,
@@ -1065,9 +1608,20 @@ final class BoothNetworkTransportRuntime: @unchecked Sendable {
             )
             return
         }
+        if identity.role == .mac,
+           let selectedPeerID,
+           hello.deviceID != selectedPeerID {
+            rejectTrustedCandidateOnQueue(
+                candidate.connection,
+                generation: candidate.generation,
+                reason: "This Mac is configured for another iPad."
+            )
+            return
+        }
         guard let secret = trustedSecrets[hello.deviceID] else {
             guard candidate.lane == .normal,
-                  candidate.admission != nil else {
+                  let admission = candidate.admission,
+                  identity.role == .mac else {
                 rejectTrustedCandidateOnQueue(
                     candidate.connection,
                     generation: candidate.generation,
@@ -1076,8 +1630,38 @@ final class BoothNetworkTransportRuntime: @unchecked Sendable {
                 return
             }
             candidate.peerHello = hello
+            candidate.isPairingCandidate = true
+            candidate.pairingSessionID = inboundPairingSession?.info.sessionID
+            candidate.pairingExpiresAt = inboundPairingSession?.info.expiresAt
             candidate.timeout?.cancel()
             candidate.timeout = nil
+            // Hello has been consumed by the core; MainActor adoption is no
+            // longer part of the admission deadline or socket ownership.
+            if inboundAdmission?.token == admission.token {
+                stopInboundAdmissionTimeoutOnQueue()
+                inboundAdmission = nil
+            }
+            if let pairingSession = inboundPairingSession,
+               pairingSession.isActive(),
+               let localHello = candidate.localHello {
+                candidate.pairingSessionID = pairingSession.info.sessionID
+                candidate.pairingExpiresAt = pairingSession.info.expiresAt
+                sendCoreMessageOnQueue(.helloDetails(hello: localHello), candidate: candidate)
+                startCoreTimeoutOnQueue(
+                    candidate,
+                    after: max(1, pairingSession.info.expiresAt.timeIntervalSinceNow),
+                    reason: "Pairing session expired."
+                )
+            } else {
+                if let localHello = candidate.localHello {
+                    sendCoreMessageOnQueue(.helloDetails(hello: localHello), candidate: candidate)
+                }
+                startCoreTimeoutOnQueue(
+                    candidate,
+                    after: 30,
+                    reason: "Pairing intent deadline expired."
+                )
+            }
             return
         }
         if identity.role == .mac, selectedPeerID != hello.deviceID {
@@ -1147,7 +1731,7 @@ final class BoothNetworkTransportRuntime: @unchecked Sendable {
               challenge.challengerDeviceID == peer.deviceID,
               challenge.responderDeviceID == identity.id,
               challenge.isWellFormed,
-              let secret = trustedSecrets[peer.deviceID] else {
+              let secret = authenticationSecretOnQueue(candidate) else {
             rejectTrustedCandidateOnQueue(
                 candidate.connection,
                 generation: candidate.generation,
@@ -1168,7 +1752,7 @@ final class BoothNetworkTransportRuntime: @unchecked Sendable {
     private func handleCoreAuthProofOnQueue(_ proof: BoothAuthProof, candidate: TrustedHandshake) {
         guard let peer = candidate.peerHello,
               let challenge = candidate.localChallenge,
-              let secret = trustedSecrets[peer.deviceID],
+              let secret = authenticationSecretOnQueue(candidate),
               BoothPairingCrypto.verificationFailure(
                 proof,
                 for: challenge,
@@ -1243,10 +1827,11 @@ final class BoothNetworkTransportRuntime: @unchecked Sendable {
     }
 
     private func configureCoreSecureChannelOnQueue(_ candidate: TrustedHandshake) throws {
+        guard !candidate.readySent, !candidate.secureHandshakeEstablished else { return }
         guard let localHello = candidate.secureNegotiator.localHello,
               let peerHello = candidate.secureNegotiator.peerHello,
-              let peerID = candidate.peerHello?.deviceID,
-              let secret = trustedSecrets[peerID] else { throw BoothSecureChannelError.invalidHello }
+              candidate.peerHello != nil,
+              let secret = authenticationSecretOnQueue(candidate) else { throw BoothSecureChannelError.invalidHello }
         try candidate.secureChannel.configure(secret: secret, localHello: localHello, peerHello: peerHello)
         let macHello = localHello.senderRole == .mac ? localHello : peerHello
         let iPadHello = localHello.senderRole == .iPad ? localHello : peerHello
@@ -1256,12 +1841,13 @@ final class BoothNetworkTransportRuntime: @unchecked Sendable {
             iPadHello: iPadHello,
             senderRole: localHello.senderRole
         )
+        try candidate.secureNegotiator.markReadySent(generation: candidate.generation)
+        candidate.readySent = true
         sendCoreMessageOnQueue(
             .secureChannelReady(sessionID: localHello.sessionID, proof: proof),
             candidate: candidate
         )
-        try candidate.secureNegotiator.markReadySent(generation: candidate.generation)
-        candidate.readySent = true
+        finishCoreSecureChannelIfReadyOnQueue(candidate)
     }
 
     private func handleCoreSecureReadyOnQueue(
@@ -1269,12 +1855,13 @@ final class BoothNetworkTransportRuntime: @unchecked Sendable {
         proof: Data,
         candidate: TrustedHandshake
     ) {
+        guard !candidate.readyReceived else { return }
         guard let localHello = candidate.secureNegotiator.localHello,
               let peerHello = candidate.secureNegotiator.peerHello,
               sessionID == localHello.sessionID,
               sessionID == peerHello.sessionID,
-              let peerID = candidate.peerHello?.deviceID,
-              let secret = trustedSecrets[peerID] else {
+              candidate.peerHello != nil,
+              let secret = authenticationSecretOnQueue(candidate) else {
             rejectTrustedCandidateOnQueue(
                 candidate.connection,
                 generation: candidate.generation,
@@ -1299,16 +1886,56 @@ final class BoothNetworkTransportRuntime: @unchecked Sendable {
             return
         }
         do {
-            _ = try candidate.secureNegotiator.receiveReady(
+            let action = try candidate.secureNegotiator.receiveReady(
                 sessionID: sessionID,
                 generation: candidate.generation
             )
+            guard action == .established || !candidate.readySent else { return }
             candidate.readyReceived = true
-            guard candidate.readySent,
-              candidate.secureChannel.isConfigured else { return }
+            finishCoreSecureChannelIfReadyOnQueue(candidate)
+        } catch {
+            rejectTrustedCandidateOnQueue(
+                candidate.connection,
+                generation: candidate.generation,
+                reason: "Secure-channel confirmation was invalid."
+            )
+        }
+    }
+
+    private func finishCoreSecureChannelIfReadyOnQueue(_ candidate: TrustedHandshake) {
+        guard candidate.readySent,
+              candidate.readyReceived,
+              candidate.secureChannel.isConfigured,
+              !candidate.secureHandshakeEstablished else { return }
+        do {
             try candidate.secureNegotiator.markEstablished(generation: candidate.generation)
+            candidate.secureHandshakeEstablished = true
             candidate.decoder.setHandshakeComplete(true, channel: .control)
-            promoteCoreCandidateOnQueue(candidate)
+            if let peer = candidate.pairingPeer,
+               let secret = candidate.pairingSecret,
+               let admission = candidate.admission,
+               let hello = candidate.peerHello {
+                guard !candidate.pairingTrustRequested else { return }
+                candidate.pairingTrustRequested = true
+                startCoreTimeoutOnQueue(
+                    candidate,
+                    after: 60,
+                    reason: "Pairing trust persistence deadline expired."
+                )
+                controlCoreEvent?(.pairingTrustRequired(PairingTrustSnapshot(
+                    candidate: PairingCandidate(
+                        token: admission.token,
+                        generation: candidate.generation,
+                        hello: hello
+                    ),
+                    sessionID: candidate.pairingSessionID ?? "",
+                    peer: peer,
+                    secret: secret,
+                    expiresAt: candidate.pairingExpiresAt ?? .distantPast
+                )))
+            } else {
+                promoteCoreCandidateOnQueue(candidate)
+            }
         } catch {
             rejectTrustedCandidateOnQueue(
                 candidate.connection,
@@ -1319,6 +1946,8 @@ final class BoothNetworkTransportRuntime: @unchecked Sendable {
     }
 
     private func promoteCoreCandidateOnQueue(_ candidate: TrustedHandshake) {
+        guard !candidate.authenticated,
+              candidate.secureHandshakeEstablished else { return }
         guard let peer = candidate.peerHello,
               let localHello = candidate.secureNegotiator.localHello,
               let peerSecureHello = candidate.secureNegotiator.peerHello else { return }
@@ -1348,7 +1977,7 @@ final class BoothNetworkTransportRuntime: @unchecked Sendable {
         }
         candidate.timeout?.cancel()
         candidate.timeout = nil
-        guard let secret = trustedSecrets[peer.deviceID],
+        guard let secret = authenticationSecretOnQueue(candidate),
               let sharedSecureChannel,
               let writer = controlWriter else {
             rejectTrustedCandidateOnQueue(
@@ -1420,20 +2049,35 @@ final class BoothNetworkTransportRuntime: @unchecked Sendable {
         ))
     }
 
-    private func sendCoreMessageOnQueue(_ message: Message, candidate: TrustedHandshake) {
+    private func authenticationSecretOnQueue(_ candidate: TrustedHandshake) -> Data? {
+        if let pairingSecret = candidate.pairingSecret { return pairingSecret }
+        guard let peerID = candidate.peerHello?.deviceID else { return nil }
+        return trustedSecrets[peerID]
+    }
+
+    private func sendCoreMessageOnQueue(
+        _ message: Message,
+        candidate: TrustedHandshake,
+        completion: (@Sendable (Bool) -> Void)? = nil
+    ) {
         do {
             let payload = try message.encoded()
             let frame = try BoothFrameEncoder.encode(channel: .control, payload: payload)
             let generation = candidate.generation
             candidate.connection.send(content: frame, completion: .contentProcessed { [weak self, weak connection = candidate.connection] error in
-                guard let self, let connection, let error else { return }
+                guard let self, let connection else { return }
                 self.onQueue {
                     guard self.isCurrentCandidateOnQueue(connection, generation: generation) else { return }
-                    self.rejectTrustedCandidateOnQueue(
-                        connection,
-                        generation: generation,
-                        reason: "Control handshake send failed: \(error.localizedDescription)"
-                    )
+                    if let error {
+                        self.rejectTrustedCandidateOnQueue(
+                            connection,
+                            generation: generation,
+                            reason: "Control handshake send failed: \(error.localizedDescription)"
+                        )
+                        completion?(false)
+                    } else {
+                        completion?(true)
+                    }
                 }
             })
         } catch {
@@ -1442,6 +2086,7 @@ final class BoothNetworkTransportRuntime: @unchecked Sendable {
                 generation: candidate.generation,
                 reason: "Control handshake encoding failed."
             )
+            completion?(false)
         }
     }
 
@@ -1469,14 +2114,13 @@ final class BoothNetworkTransportRuntime: @unchecked Sendable {
     }
 
     private func isCurrentCandidateOnQueue(_ connection: NWConnection, generation: Int) -> Bool {
-        guard let candidate = protocolCandidates[ObjectIdentifier(connection)],
-              candidate.generation == generation else { return false }
-        return true
+        candidateOnQueue(connection, generation: generation) != nil
     }
 
     private func candidateOnQueue(_ connection: NWConnection, generation: Int) -> TrustedHandshake? {
         guard let candidate = protocolCandidates[ObjectIdentifier(connection)],
-              candidate.generation == generation else { return nil }
+              candidate.generation == generation,
+              activeControlConnection === connection || identityProbeConnection === connection else { return nil }
         return candidate
     }
 
@@ -1500,7 +2144,9 @@ final class BoothNetworkTransportRuntime: @unchecked Sendable {
         candidate.timeout = nil
         protocolCandidates.removeValue(forKey: ObjectIdentifier(candidate.connection))
         if !candidate.authenticated {
-            if let peerID = candidate.claimedTrustedPeerID {
+            let claimedPeerID = candidate.claimedTrustedPeerID
+                ?? (identityProbeConnection === candidate.connection ? activeIdentityProbePeerID : nil)
+            if let peerID = claimedPeerID {
                 admissionLimiter.recordIdentityProbeFailure(peerID: peerID, trustedPeerIDs: trustedPeerIDs)
             } else if candidate.lane == .identityProbe {
                 admissionLimiter.recordIdentityProbeAttemptFailure()
@@ -1513,7 +2159,7 @@ final class BoothNetworkTransportRuntime: @unchecked Sendable {
             )
         }
         if identityProbeConnection === candidate.connection {
-            clearProbeOnQueue(connection: candidate.connection)
+            clearProbeOnQueue(connection: candidate.connection, recordFailure: false)
         } else if activeControlConnection === candidate.connection {
             stopHeartbeatOnQueue()
             clearControlSlotOnQueue(connection: candidate.connection)
@@ -1543,7 +2189,7 @@ final class BoothNetworkTransportRuntime: @unchecked Sendable {
         }
     }
 
-    private func clearProbeOnQueue(connection: NWConnection) {
+    private func clearProbeOnQueue(connection: NWConnection, recordFailure: Bool = true) {
         guard identityProbeConnection === connection else { return }
         stopIdentityProbeAdmissionTimeoutOnQueue()
         identityProbeAdmission = nil
@@ -1551,7 +2197,7 @@ final class BoothNetworkTransportRuntime: @unchecked Sendable {
         if let candidate = protocolCandidates.removeValue(forKey: ObjectIdentifier(connection)) {
             candidate.timeout?.cancel()
         }
-        if let peerID = activeIdentityProbePeerID {
+        if recordFailure, let peerID = activeIdentityProbePeerID {
             admissionLimiter.recordIdentityProbeFailure(peerID: peerID, trustedPeerIDs: trustedPeerIDs)
         }
         activeIdentityProbePeerID = nil
@@ -1745,13 +2391,17 @@ final class BoothNetworkTransportRuntime: @unchecked Sendable {
             }
             guard candidate == nil || candidate?.generation == generation else { return false }
             guard isProbe || candidate?.admission?.isPreferredCandidate == true else { return true }
-            // The claimed ID only selects its own retry budget. The transport
-            // still requires the existing stored-secret HMAC before trust.
+            // A claimed ID may select its failure budget, but cannot veto its
+            // own HMAC attempt: an attacker could otherwise cooldown a real
+            // peer by repeatedly spoofing its identifier.
             activeIdentityProbePeerID = peerID
-            return admissionLimiter.shouldAdmitIdentityProbe(
+            let decision = admissionLimiter.shouldAdmitIdentityProbe(
                 peerID: peerID,
                 trustedPeerIDs: trustedPeerIDs
-            ).admitted
+            )
+            candidate?.isIdentityProbeCoolingDown = !decision.admitted
+                || admissionLimiter.isIdentityProbeCoolingDown()
+            return true
         }
     }
 
@@ -1889,6 +2539,7 @@ final class BoothNetworkTransportRuntime: @unchecked Sendable {
         adoptionTimeout: TimeInterval = 10
     ) -> InboundControlAdmissionResult {
         onQueue {
+            inboundControlConnectionsSeen &+= 1
             let result = admitInboundControlConnection(
                 connection,
                 preferredCandidateHint: preferredCandidateHint,
@@ -1912,6 +2563,10 @@ final class BoothNetworkTransportRuntime: @unchecked Sendable {
             if localIdentity == nil { connection.start(queue: queue) }
             return result
         }
+    }
+
+    func inboundControlConnectionCount() -> Int {
+        onQueue { inboundControlConnectionsSeen }
     }
 
     func confirmInboundControlAdmission(
@@ -2148,6 +2803,10 @@ final class BoothNetworkTransportRuntime: @unchecked Sendable {
 
     private func clearControlSlotOnQueue(connection: NWConnection) {
         guard activeControlConnection === connection else { return }
+        if let candidate = protocolCandidates.removeValue(forKey: ObjectIdentifier(connection)) {
+            candidate.timeout?.cancel()
+            candidate.timeout = nil
+        }
         if heartbeatConnection === connection { stopHeartbeatOnQueue() }
         if activeControlIsIdentityProbe { recordIdentityProbeFailureOnQueue() }
         stopInboundAdmissionTimeoutOnQueue()
@@ -2240,9 +2899,14 @@ final class BoothNetworkTransportRuntime: @unchecked Sendable {
     }
 
     private func beginReconnectOnQueue() {
+        guard reconnectAttempt <= 5 else {
+            if restartTrustedRouteDiscoveryAfterCachedRetriesOnQueue() { return }
+            onReconnectDue?(reconnectAttempt, reconnectGeneration)
+            return
+        }
         guard let route = reconnectRoute,
-              route.generation == reconnectGeneration,
-              reconnectAttempt <= 5 else {
+              route.generation == reconnectGeneration else {
+            if restartTrustedRouteDiscoveryAfterCachedRetriesOnQueue() { return }
             onReconnectDue?(reconnectAttempt, reconnectGeneration)
             return
         }
@@ -2314,19 +2978,33 @@ final class BoothNetworkTransportRuntime: @unchecked Sendable {
                 generation: generation
             )
         } else {
-            if let peerID = selectedPeerID,
-               trustedSecrets[peerID] != nil,
-               localIdentity?.role == .iPad {
-                reconnectAttempt = 0
-                coreRouteSelection.reset()
-                startTrustedRouteBrowsersOnQueue(
-                    preference: localNetworkPreference,
-                    generation: coreRouteGeneration
-                )
-            } else {
+            reconnectAttempt = attempt
+            reconnectGeneration = generation
+            if !restartTrustedRouteDiscoveryAfterCachedRetriesOnQueue() {
                 onReconnectDue?(attempt, generation)
             }
         }
+    }
+
+    /// A trusted iPad owns its reconnect discovery. Once the cached Bonjour
+    /// endpoint stops working, refresh discovery on this queue so a blocked
+    /// MainActor cannot transfer socket ownership back to the facade.
+    private func restartTrustedRouteDiscoveryAfterCachedRetriesOnQueue() -> Bool {
+        guard localIdentity?.role == .iPad,
+              let peerID = selectedPeerID,
+              trustedSecrets[peerID] != nil,
+              coreRouteGeneration == reconnectGeneration else { return false }
+        reconnectAttempt = 0
+        corePendingRoute = nil
+        coreRouteSelection.reset()
+        coreRouteFallbackSource?.cancel()
+        coreRouteFallbackSource = nil
+        stopTrustedRouteBrowsersOnQueue()
+        startTrustedRouteBrowsersOnQueue(
+            preference: localNetworkPreference,
+            generation: coreRouteGeneration
+        )
+        return true
     }
 
 
@@ -2358,6 +3036,14 @@ final class BoothNetworkTransportRuntime: @unchecked Sendable {
                 if let connection = activeControlConnection {
                     connection.cancel()
                     clearControlSlotOnQueue(connection: connection)
+                    if let route = reconnectRoute,
+                       localIdentity?.role == .iPad,
+                       selectedPeerID.flatMap({ trustedSecrets[$0] }) != nil {
+                        _ = scheduleRecoveryReconnectOnQueue(
+                            after: 0.5,
+                            generation: route.generation
+                        )
+                    }
                 } else {
                     recordIdentityProbeFailureOnQueue()
                     activeControlAuthenticated = false
@@ -2370,6 +3056,28 @@ final class BoothNetworkTransportRuntime: @unchecked Sendable {
                     controlWriter?.invalidate(generation: generation)
                 }
             }
+        }
+    }
+
+    /// Fails the queue-owned connection for this generation when UI event
+    /// delivery overflows. Stale overflow notifications cannot affect a newer
+    /// generation.
+    func failControlCoreConnection(generation: Int, reason: String) {
+        onQueue {
+            if let candidate = protocolCandidates.values.first(where: { $0.generation == generation }) {
+                rejectTrustedCandidateOnQueue(
+                    candidate.connection,
+                    generation: generation,
+                    reason: reason
+                )
+                return
+            }
+            guard activeControlGeneration == generation,
+                  let connection = activeControlConnection else { return }
+            connection.cancel()
+            stopHeartbeatOnQueue()
+            clearControlSlotOnQueue(connection: connection)
+            controlCoreEvent?(.disconnected(generation: generation, reason: reason))
         }
     }
 

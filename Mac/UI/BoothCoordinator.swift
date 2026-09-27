@@ -2829,7 +2829,7 @@ final class BoothCoordinator {
             localDeliveryVerified: localDeliveryVerified,
             cloudUploadVerified: cloudUploadVerified,
             cloudQRRouteVerified: cloudQRRouteVerified,
-            physicalPrintVerified: finalJobs.contains { $0.kind == .autoPrint && $0.status == .succeeded },
+            printJobCompleted: finalJobs.contains { $0.kind == .autoPrint && $0.status == .succeeded },
             galleryUpdateVerified: galleryUpdateVerified,
             galleryIsolationVerified: galleryIsolationVerified,
             cleanupWarnings: cleanupWarnings

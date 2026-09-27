@@ -152,10 +152,18 @@ struct BoothAutomatedSoakCycleResult: Sendable {
     let localDeliveryVerified: Bool
     let cloudUploadVerified: Bool
     let cloudQRRouteVerified: Bool
-    let physicalPrintVerified: Bool
+    let printJobCompleted: Bool
     let galleryUpdateVerified: Bool
     let galleryIsolationVerified: Bool
     let cleanupWarnings: [String]
+}
+
+enum BoothSoakPrintVerification {
+    static func physicalOutputCoverage(jobCompleted: Bool) -> String {
+        jobCompleted
+            ? "WARNING (the AppKit print job completed; paper output requires operator confirmation)"
+            : "FAIL (the scheduled print job did not complete)"
+    }
 }
 
 enum BoothSoakCaptureMetrics {
@@ -483,7 +491,7 @@ public struct BoothSoakTestReport: Codable, Sendable, Equatable {
         case .passed:
             "PASSED: All \(completed) cycles completed cleanly."
         case .completedWithWarnings:
-            "COMPLETED WITH WARNINGS: All \(completed) cycles completed; review the listed cleanup warnings."
+            "COMPLETED WITH WARNINGS: All \(completed) cycles completed; review the subsystem and cleanup warnings."
         case .failed:
             "FAILED: Completed \(completed)/\(targetCycles) cycles with \(failed) cycle failures, \(violations.count) violations, and \(hasCoverageFailures ? "one or more subsystem failures" : "no subsystem coverage failures")."
         case .stoppedEarly:

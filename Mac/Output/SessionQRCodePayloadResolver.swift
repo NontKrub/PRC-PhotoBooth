@@ -57,15 +57,26 @@ public struct CloudGuestRoute: Sendable, Equatable {
 
     static func resolve(for manifest: SessionManifest) throws -> CloudGuestRoute {
         if manifest.origin == .soakTest {
-            guard let runID = manifest.soakRunID, Self.isSafeComponent(runID) else {
+            guard let runID = manifest.soakRunID else {
                 throw SessionQRCodePayloadError.invalidGuestRoute("Soak run identifier is missing or invalid.")
             }
             guard Self.isSafeComponent(manifest.id) else {
                 throw SessionQRCodePayloadError.invalidGuestRoute("Session identifier is invalid.")
             }
-            return CloudGuestRoute(relativePath: "/s/soak/\(runID)/\(manifest.id)")
+            return CloudGuestRoute(relativePath: try soakPathPrefix(runID: runID) + manifest.id)
         }
         return try normal(token: manifest.downloadToken)
+    }
+
+    public static func soakPathPattern(runID: String) throws -> String {
+        try soakPathPrefix(runID: runID) + "<sessionID>/"
+    }
+
+    private static func soakPathPrefix(runID: String) throws -> String {
+        guard isSafeComponent(runID) else {
+            throw SessionQRCodePayloadError.invalidGuestRoute("Soak run identifier is missing or invalid.")
+        }
+        return "/s/soak/\(runID)/"
     }
 
     static func normal(token: String) throws -> CloudGuestRoute {

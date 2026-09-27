@@ -440,11 +440,13 @@ public struct SoakTestSettingsView: View {
                         readinessCell("Queue", value: "\(queue.running) running · \(queue.queued) queued · \(queue.failed) failed", color: queue.failed > 0 ? .red : .primary)
                         readinessCell("Gallery", value: coordinator.activeExperienceDocument?.gallery.mode == .disabled ? "Not enabled" : "Enabled", color: .primary)
                     }
-                    if controller.config.testCloudUpload, let runID {
+                    if controller.config.testCloudUpload,
+                       let runID,
+                       let routePattern = try? CloudGuestRoute.soakPathPattern(runID: runID) {
                         VStack(alignment: .leading, spacing: 3) {
                             Label("Run-scoped cloud QR route", systemImage: "qrcode")
                                 .font(.caption.weight(.medium))
-                            Text("/s/soak/\(runID)/<sessionID>/")
+                            Text(routePattern)
                                 .font(.system(.caption, design: .monospaced))
                                 .textSelection(.enabled)
                                 .foregroundStyle(.secondary)
@@ -557,8 +559,9 @@ public struct SoakTestSettingsView: View {
                     .textSelection(.enabled)
             }
             if report.subsystemCoverage["Cloud QR route"]?.hasPrefix("PASS") == true,
-               let runID = report.runID {
-                LabeledContent("Cloud test route", value: "/s/soak/\(runID)/<sessionID>/")
+               let runID = report.runID,
+               let routePattern = try? CloudGuestRoute.soakPathPattern(runID: runID) {
+                LabeledContent("Cloud test route", value: routePattern)
                     .font(.caption)
                     .textSelection(.enabled)
             }

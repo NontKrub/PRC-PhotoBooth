@@ -5,6 +5,83 @@ import Network
 import UIKit
 #endif
 
+/// AsyncStream's buffer is bounded so a stalled MainActor cannot accumulate an
+/// unbounded control-frame backlog. The lock protects its generation latches;
+/// stream continuation operations are thread-safe by contract.
+final class BoothNetworkTransportCoreEventStream: @unchecked Sendable {
+    private static let defaultBufferLimit = 128
+    let stream: AsyncStream<BoothNetworkTransportRuntime.ControlCoreEvent>
+    private let continuation: AsyncStream<BoothNetworkTransportRuntime.ControlCoreEvent>.Continuation
+    private let overflowLock = NSLock()
+    private var highestSuppressedGeneration = 0
+    private var highestHandledOverflowGeneration = 0
+
+    init(bufferLimit: Int = defaultBufferLimit) {
+        let (stream, continuation) = AsyncStream<BoothNetworkTransportRuntime.ControlCoreEvent>.makeStream(
+            bufferingPolicy: .bufferingOldest(max(1, bufferLimit))
+        )
+        self.stream = stream
+        self.continuation = continuation
+    }
+
+    @discardableResult
+    func yield(_ event: BoothNetworkTransportRuntime.ControlCoreEvent) -> Bool {
+        if case .enqueued = continuation.yield(event) { return true }
+        return false
+    }
+
+    @discardableResult
+    func publish(
+        _ event: BoothNetworkTransportRuntime.ControlCoreEvent,
+        failOverflowedGeneration: @Sendable (Int, String) -> Void,
+        reportOverflow: @Sendable (Int, String) -> Void,
+        reportDroppedListenerFailure: @Sendable (BoothNetworkTransportRuntime.ControlCoreEvent) -> Void
+    ) -> Bool {
+        guard !yield(event) else { return true }
+        guard let generation = event.controlGeneration else {
+            if case .listenerFailed = event {
+                reportDroppedListenerFailure(event)
+            }
+            return false
+        }
+
+        suppressEvents(through: generation)
+        let reason = "Transport event backlog exceeded its limit; the connection was closed for recovery."
+        failOverflowedGeneration(generation, reason)
+        guard claimOverflowHandling(for: generation) else { return false }
+        reportOverflow(generation, reason)
+        return false
+    }
+
+    func claimOverflowHandling(for generation: Int) -> Bool {
+        overflowLock.lock()
+        defer { overflowLock.unlock() }
+        guard generation > highestHandledOverflowGeneration else { return false }
+        highestHandledOverflowGeneration = generation
+        return true
+    }
+
+    func suppressEvents(through generation: Int) {
+        overflowLock.lock()
+        highestSuppressedGeneration = max(highestSuppressedGeneration, generation)
+        overflowLock.unlock()
+    }
+
+    func isSuppressed(_ generation: Int) -> Bool {
+        overflowLock.lock()
+        defer { overflowLock.unlock() }
+        return generation <= highestSuppressedGeneration
+    }
+
+    func finish() {
+        continuation.finish()
+    }
+
+    deinit {
+        continuation.finish()
+    }
+}
+
 @MainActor
 public final class NetworkBoothTransport: BoothTransport {
     public static let lanHandshakeTimeout: TimeInterval = 5
@@ -135,6 +212,7 @@ public final class NetworkBoothTransport: BoothTransport {
     private var pendingPairingSessionID: String?
     private var receivedPairingSession: BoothPairingSessionInfo?
     private var currentPairingSession: BoothPairingSession?
+    private var pendingCorePairingCandidate: BoothNetworkTransportRuntime.PairingCandidate?
     private var pairingExpiryTask: Task<Void, Never>?
     private var pairingExpirySessionID: String?
     private var pairingExpiryAt: Date?
@@ -212,6 +290,8 @@ public final class NetworkBoothTransport: BoothTransport {
     private let previewWritePump: BoothPreviewWritePump
     private let previewDeliveryPump: BoothLatestPreviewDeliveryPump
     private let transportRuntime: BoothNetworkTransportRuntime
+    private let controlCoreEventStream = BoothNetworkTransportCoreEventStream()
+    private var controlCoreEventConsumer: Task<Void, Never>?
     private var lanHandshakeTask: Task<Void, Never>?
     private let waitingRecoveryScheduler: BoothConnectionRecoveryScheduler
     private var waitingRecoveryChannels = Set<UInt8>()
@@ -495,6 +575,13 @@ public final class NetworkBoothTransport: BoothTransport {
                 self.connectionDidClose(connection, channel: .control, reason: reason)
             }
         }
+        let eventStream = controlCoreEventStream.stream
+        controlCoreEventConsumer = Task { @MainActor [weak self, eventStream] in
+            for await event in eventStream {
+                guard let self else { return }
+                self.handleControlCoreEvent(event)
+            }
+        }
         configureControlCore()
         publishPairingStatus()
     }
@@ -503,17 +590,34 @@ public final class NetworkBoothTransport: BoothTransport {
         let credentials = Dictionary(uniqueKeysWithValues: trustedStore.trustedPeerIDs.compactMap { peerID in
             trustedStore.secret(for: peerID).map { (peerID, $0) }
         })
-        transportRuntime.configureControlCore(
+        let eventStream = controlCoreEventStream
+        let runtime = transportRuntime
+        runtime.configureControlCore(
             localIdentity: localIdentity,
             networkPreference: requestedPreference,
             trustedSecrets: credentials,
             selectedPeerID: targetPeerID ?? trustedStore.preferredPeerID,
             secureChannel: secureChannel,
             writer: controlWritePump
-        ) { [weak self] event in
-            Task { @MainActor [weak self] in
-                self?.handleControlCoreEvent(event)
-            }
+        ) { [weak self, weak runtime] event in
+            guard let runtime else { return }
+            let transport = self
+            eventStream.publish(
+                event,
+                failOverflowedGeneration: { generation, reason in
+                    runtime.failControlCoreConnection(generation: generation, reason: reason)
+                },
+                reportOverflow: { generation, reason in
+                    Task { @MainActor [weak transport] in
+                        transport?.handleControlCoreEventOverflow(generation: generation, reason: reason)
+                    }
+                },
+                reportDroppedListenerFailure: { event in
+                    Task { @MainActor [weak transport] in
+                        transport?.handleControlCoreEvent(event)
+                    }
+                }
+            )
         }
     }
 
@@ -531,21 +635,56 @@ public final class NetworkBoothTransport: BoothTransport {
     }
 
     private func handleControlCoreEvent(_ event: BoothNetworkTransportRuntime.ControlCoreEvent) {
+        if let generation = event.controlGeneration,
+           controlCoreEventStream.isSuppressed(generation) { return }
         switch event {
-        case let .pairingCandidate(connection, admission, hello, decoder, bufferedFrames):
-            guard role == .mac, shouldReconnect else {
-                transportRuntime.abandonInboundControlAdmission(admission, connection: connection)
+        case let .pairingIntentCandidate(candidate, intent):
+            guard transportRuntime.isInboundPairingCandidateCurrent(
+                token: candidate.token,
+                generation: candidate.generation
+            ) else { return }
+            handleCorePairingIntent(candidate: candidate, intent: intent)
+        case let .pairingSessionConsumed(consumption):
+            handleCorePairingSessionConsumed(consumption)
+        case let .pairingVerificationRequired(snapshot):
+            guard transportRuntime.isInboundPairingCandidateCurrent(
+                token: snapshot.candidate.token,
+                generation: snapshot.candidate.generation
+            ) else { return }
+            guard shouldReconnect, role == .mac else {
+                transportRuntime.cancelInboundPairingCandidate(
+                    token: snapshot.candidate.token,
+                    generation: snapshot.candidate.generation,
+                    reason: "Pairing is no longer active."
+                )
                 return
             }
-            accept(
-                connection,
-                channel: .control,
-                preAuthAdmission: admission,
-                connectionAlreadyStarted: true,
-                preAuthHello: hello,
-                preAuthDecoder: decoder,
-                bufferedFrames: bufferedFrames
-            )
+            guard pendingCorePairingCandidate == nil
+                    || pendingCorePairingCandidate == snapshot.candidate else {
+                transportRuntime.cancelInboundPairingCandidate(
+                    token: snapshot.candidate.token,
+                    generation: snapshot.candidate.generation,
+                    reason: "A different pairing candidate is already active."
+                )
+                return
+            }
+            pendingCorePairingCandidate = snapshot.candidate
+            currentPairingSession?.invalidate()
+            currentPairingSession = nil
+            incomingPairingRequest = IncomingBoothPairingRequest(iPadIdentity: BoothDeviceIdentity(
+                id: snapshot.peer.id,
+                displayName: snapshot.peer.displayName,
+                role: snapshot.peer.role
+            ))
+            peerHello = snapshot.candidate.hello
+            peerDeviceID = snapshot.candidate.hello.deviceID
+            pendingPairingSessionID = snapshot.sessionID
+            pendingPairingVerificationCode = snapshot.verificationCode
+            didConfirmPairingVerification = false
+            schedulePairingExpiry(sessionID: snapshot.sessionID, expiresAt: snapshot.expiresAt)
+            setPairingStage(.verificationPending, state: .authenticating(peerID: snapshot.peer.id))
+        case let .pairingTrustRequired(snapshot):
+            persistCorePairingTrust(snapshot)
         case let .trustedAuthenticated(
             generation,
             endpointDescription,
@@ -556,6 +695,11 @@ public final class NetworkBoothTransport: BoothTransport {
             provenance,
             routeGeneration
         ):
+            if pendingCorePairingCandidate?.generation == generation {
+                pendingCorePairingCandidate = nil
+                pendingPairingVerificationCode = nil
+                didConfirmPairingVerification = false
+            }
             adoptTrustedControlState(
                 generation: generation,
                 endpointDescription: endpointDescription,
@@ -573,8 +717,10 @@ public final class NetworkBoothTransport: BoothTransport {
                   secureChannelEstablished else { return }
             handleDecodedFrames(frames)
         case let .disconnected(generation, reason):
+            if finishCorePairingCandidate(generation: generation, reason: reason) { return }
             handleCoreOwnedControlDisconnect(generation: generation, reason: reason)
         case let .rejected(generation, reason):
+            if finishCorePairingCandidate(generation: generation, reason: reason) { return }
             handleCoreOwnedControlDisconnect(generation: generation, reason: reason)
         case .listenerFailed(let generation, let reason):
             guard generation == coreControlListenerGeneration else { return }
@@ -585,6 +731,229 @@ public final class NetworkBoothTransport: BoothTransport {
         case .listenerReady:
             break
         }
+    }
+
+    private func handleControlCoreEventOverflow(generation: Int, reason: String) {
+        if finishCorePairingCandidate(generation: generation, reason: reason) { return }
+        guard coreOwnedControlGeneration == generation
+                || controlConnectionGeneration == generation else { return }
+        handleCoreOwnedControlDisconnect(generation: generation, reason: reason)
+    }
+
+    private func handleCorePairingSessionConsumed(
+        _ consumption: BoothNetworkTransportRuntime.PairingSessionConsumption
+    ) {
+        let sessionID = consumption.sessionID
+        let currentSessionMatches = currentPairingSession?.info.sessionID == sessionID
+        let pendingSessionMatches = pendingPairingSessionID == sessionID
+        let expiryMatches = pairingExpirySessionID == sessionID
+        guard currentSessionMatches || pendingSessionMatches || expiryMatches else { return }
+
+        if currentSessionMatches {
+            currentPairingSession?.invalidate()
+            currentPairingSession = nil
+        }
+        refreshAdvertisedServices()
+
+        switch consumption.outcome {
+        case .proofAccepted(method: .pin):
+            // PIN proof consumes the displayed source, while its SAS remains
+            // operator-visible until confirmation or its original expiry.
+            break
+        case .proofAccepted(method: .qrToken):
+            if expiryMatches {
+                pairingGeneration &+= 1
+                cancelPairingExpiry()
+            }
+            if pendingSessionMatches {
+                pendingPairingSessionID = nil
+                incomingPairingRequest = nil
+            }
+            pendingPairingVerificationCode = nil
+            didConfirmPairingVerification = false
+        case .expired, .locked:
+            if expiryMatches {
+                pairingGeneration &+= 1
+                cancelPairingExpiry()
+            }
+            if pendingSessionMatches {
+                pendingPairingSessionID = nil
+                incomingPairingRequest = nil
+                pendingPairingVerificationCode = nil
+                didConfirmPairingVerification = false
+            }
+            if pendingCorePairingCandidate == consumption.candidate {
+                pendingCorePairingCandidate = nil
+            }
+            let reason = consumption.outcome == .expired
+                ? BoothPairingError.expired.localizedDescription
+                : "Too many incorrect pairing PIN attempts."
+            pendingPairingFailure = reason
+            setPairingStage(.failed, state: .failed(reason))
+        }
+    }
+
+    private func handleCorePairingIntent(
+        candidate: BoothNetworkTransportRuntime.PairingCandidate,
+        intent: BoothPairingIntent
+    ) {
+        guard transportRuntime.isInboundPairingCandidateCurrent(
+            token: candidate.token,
+            generation: candidate.generation
+        ) else { return }
+        guard role == .mac, shouldReconnect else {
+            transportRuntime.cancelInboundPairingCandidate(
+                token: candidate.token,
+                generation: candidate.generation,
+                reason: "Pairing is no longer active."
+            )
+            return
+        }
+        if let pending = pendingCorePairingCandidate, pending != candidate {
+            transportRuntime.cancelInboundPairingCandidate(
+                token: candidate.token,
+                generation: candidate.generation,
+                reason: "A different pairing candidate is already active."
+            )
+            return
+        }
+        do {
+            try intent.validate(peerHello: candidate.hello, localMacDeviceID: localIdentity.id)
+        } catch {
+            transportRuntime.rejectInboundPairingCandidate(
+                token: candidate.token,
+                generation: candidate.generation,
+                reason: error.localizedDescription
+            )
+            return
+        }
+
+        let now = Date()
+        let decision = BoothPairingIntentPolicy.decide(
+            iPadID: intent.iPadIdentity.id,
+            activeRequestID: incomingPairingRequest?.iPadIdentity.id,
+            hasActivePairingSession: currentPairingSession?.isActive(at: now) == true,
+            boothIsIdle: canAcceptIncomingPairing(),
+            hasAuthenticatedPeer: peerAuthenticated,
+            lastRequestAt: lastPairingIntentAt[intent.iPadIdentity.id],
+            now: now
+        )
+        switch decision {
+        case .reject(let reason):
+            transportRuntime.rejectInboundPairingCandidate(
+                token: candidate.token,
+                generation: candidate.generation,
+                reason: reason
+            )
+        case .reuseSession:
+            guard let session = currentPairingSession,
+                  transportRuntime.respondToInboundPairingIntent(
+                    token: candidate.token,
+                    generation: candidate.generation,
+                    session: session.info
+                  ) else {
+                transportRuntime.cancelInboundPairingCandidate(
+                    token: candidate.token,
+                    generation: candidate.generation,
+                    reason: "Pairing session is unavailable."
+                )
+                return
+            }
+            pendingCorePairingCandidate = candidate
+            let request = IncomingBoothPairingRequest(iPadIdentity: intent.iPadIdentity, receivedAt: now)
+            incomingPairingRequest = request
+            peerHello = candidate.hello
+            peerDeviceID = candidate.hello.deviceID
+            pendingPairingSessionID = session.info.sessionID
+            setPairingStage(.sessionSent, state: .incoming(request: request, expiresAt: session.info.expiresAt))
+        case .startSession:
+            lastPairingIntentAt[intent.iPadIdentity.id] = now
+            guard startPairingSession(keepingControlConnection: true),
+                  let session = currentPairingSession,
+                  transportRuntime.respondToInboundPairingIntent(
+                    token: candidate.token,
+                    generation: candidate.generation,
+                    session: session.info
+                  ) else {
+                transportRuntime.cancelInboundPairingCandidate(
+                    token: candidate.token,
+                    generation: candidate.generation,
+                    reason: "Pairing mode could not be started."
+                )
+                return
+            }
+            pendingCorePairingCandidate = candidate
+            let request = IncomingBoothPairingRequest(iPadIdentity: intent.iPadIdentity, receivedAt: now)
+            incomingPairingRequest = request
+            peerHello = candidate.hello
+            peerDeviceID = candidate.hello.deviceID
+            pendingPairingSessionID = session.info.sessionID
+            setPairingStage(.sessionSent, state: .incoming(request: request, expiresAt: session.info.expiresAt))
+        }
+    }
+
+    private func persistCorePairingTrust(
+        _ snapshot: BoothNetworkTransportRuntime.PairingTrustSnapshot
+    ) {
+        guard role == .mac,
+              shouldReconnect,
+              pendingCorePairingCandidate == nil
+                || pendingCorePairingCandidate == snapshot.candidate,
+              transportRuntime.beginPairingTrustCommit(
+                token: snapshot.candidate.token,
+                generation: snapshot.candidate.generation
+              ) else { return }
+        pendingCorePairingCandidate = snapshot.candidate
+        do {
+            try trustedStore.trust(snapshot.peer, secret: snapshot.secret)
+            trustedStore.preferredPeerID = snapshot.peer.id
+            trustedStore.autoReconnect = true
+            refreshControlCoreCredentials()
+            let candidatePromoted = transportRuntime.finishPairingTrustCommit(
+                token: snapshot.candidate.token,
+                generation: snapshot.candidate.generation,
+                succeeded: true
+            )
+            cancelPairingExpiry()
+            pairingGeneration &+= 1
+            pendingPairingCommit = nil
+            pendingPairingVerificationCode = nil
+            didConfirmPairingVerification = false
+            pendingPairingSessionID = nil
+            incomingPairingRequest = nil
+            pendingCorePairingCandidate = nil
+            if !candidatePromoted {
+                let reason = "Peer was saved as trusted, but the pairing connection ended before authentication completed. Reconnect to continue."
+                pendingPairingFailure = reason
+                setPairingStage(.failed, state: .failed(reason))
+            }
+        } catch {
+            _ = transportRuntime.finishPairingTrustCommit(
+                token: snapshot.candidate.token,
+                generation: snapshot.candidate.generation,
+                succeeded: false
+            )
+            pendingPairingFailure = "Pairing trust could not be saved: \(error.localizedDescription)"
+            pendingPairingVerificationCode = nil
+            didConfirmPairingVerification = false
+            pendingCorePairingCandidate = nil
+            setPairingStage(.failed, state: .failed(pendingPairingFailure ?? "Pairing trust could not be saved."))
+        }
+    }
+
+    private func finishCorePairingCandidate(generation: Int, reason: String?) -> Bool {
+        guard pendingCorePairingCandidate?.generation == generation else { return false }
+        pendingCorePairingCandidate = nil
+        pendingPairingVerificationCode = nil
+        didConfirmPairingVerification = false
+        incomingPairingRequest = nil
+        pendingPairingSessionID = nil
+        cancelPairingExpiry()
+        if let reason {
+            pendingPairingFailure = reason
+            setPairingStage(.failed, state: .failed(reason))
+        }
+        return true
     }
 
     private func handleCoreOwnedControlDisconnect(generation: Int, reason: String?) {
@@ -874,6 +1243,14 @@ public final class NetworkBoothTransport: BoothTransport {
     private func startPairingSession(keepingControlConnection: Bool) -> Bool {
         guard role == .mac else { return false }
         do {
+            if let pendingCorePairingCandidate {
+                self.pendingCorePairingCandidate = nil
+                transportRuntime.cancelInboundPairingCandidate(
+                    token: pendingCorePairingCandidate.token,
+                    generation: pendingCorePairingCandidate.generation,
+                    reason: "Pairing session was replaced."
+                )
+            }
             if !keepingControlConnection, !peerAuthenticated {
                 controlConnectionGeneration &+= 1
                 assetConnectionGeneration &+= 1
@@ -893,6 +1270,7 @@ public final class NetworkBoothTransport: BoothTransport {
                 return false
             }
             currentPairingSession = session
+            transportRuntime.installInboundPairingSession(session)
             if role == .mac {
                 if let connection = controlConnection {
                     schedulePreAuthWatchdogTick(generation: controlConnectionGeneration, connection: connection)
@@ -913,9 +1291,18 @@ public final class NetworkBoothTransport: BoothTransport {
     }
 
     public func cancelPairingSession() {
+        let coreCandidate = pendingCorePairingCandidate
         let connection = !peerAuthenticated ? controlConnection : nil
         let pairingSessionID = activePairingControlSessionID
         resetPairingState(clearTarget: true, clearPendingCommit: true, clearFailure: true)
+        pendingCorePairingCandidate = nil
+        if let coreCandidate {
+            transportRuntime.cancelInboundPairingCandidate(
+                token: coreCandidate.token,
+                generation: coreCandidate.generation,
+                reason: "Pairing cancelled on Mac."
+            )
+        }
         setPairingStage(.idle, state: .idle)
         refreshAdvertisedServices()
         if let connection {
@@ -959,6 +1346,18 @@ public final class NetworkBoothTransport: BoothTransport {
     /// The code itself is derived independently on both devices and is never
     /// transmitted.
     public func confirmPairingVerification() {
+        if let candidate = pendingCorePairingCandidate {
+            guard role == .mac,
+                  pendingPairingVerificationCode != nil,
+                  !didConfirmPairingVerification,
+                  transportRuntime.confirmPairingVerification(
+                    token: candidate.token,
+                    generation: candidate.generation
+                  ) else { return }
+            didConfirmPairingVerification = true
+            setPairingStage(.authenticating, state: .authenticating(peerID: candidate.hello.deviceID))
+            return
+        }
         guard role == .mac,
               let commit = pendingPairingCommit,
               commit.method == .pin,
@@ -976,6 +1375,10 @@ public final class NetworkBoothTransport: BoothTransport {
     ) {
         pairingGeneration &+= 1
         cancelPairingExpiry()
+        let installedSessionID = currentPairingSession?.info.sessionID
+        if role == .mac {
+            transportRuntime.clearInboundPairingSession(sessionID: installedSessionID)
+        }
         currentPairingSession?.invalidate()
         currentPairingSession = nil
         incomingPairingRequest = nil

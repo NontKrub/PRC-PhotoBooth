@@ -89,6 +89,32 @@ struct SoakTests {
         #expect(report.summaryVerdict.hasPrefix("COMPLETED WITH WARNINGS"))
     }
 
+    @Test("AppKit job completion does not claim physical paper output was verified")
+    func printJobCompletionRequiresOperatorPhysicalVerification() {
+        let metric = BoothSoakCycleMetric(
+            cycleIndex: 1,
+            durationSeconds: 1,
+            captureLatencies: [],
+            memoryFootprintBytes: 10
+        )
+        let physicalCoverage = BoothSoakPrintVerification.physicalOutputCoverage(jobCompleted: true)
+        let report = BoothSoakTestReport.compute(
+            mode: .productionPipeline,
+            targetCycles: 1,
+            startedAt: Date().addingTimeInterval(-1),
+            finishedAt: Date(),
+            baselineMemory: 10,
+            metrics: [metric],
+            subsystemCoverage: [
+                "Physical print submission": "PASS (AppKit print job completed)",
+                "Physical printing": physicalCoverage
+            ]
+        )
+
+        #expect(physicalCoverage.hasPrefix("WARNING"))
+        #expect(report.outcome == .completedWithWarnings)
+    }
+
     @Test("subsystem failure cannot coexist with a passed report")
     func subsystemFailureCannotPass() {
         let metric = BoothSoakCycleMetric(

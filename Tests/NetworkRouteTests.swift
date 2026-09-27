@@ -22,6 +22,92 @@ private final class RecoveryTestFlag: @unchecked Sendable {
     }
 }
 
+/// Records the order observed by the MainActor consumer without relying on
+/// MainActor progress to synchronize the transport queue with the test.
+private final class CoreEventDeliveryObserver: @unchecked Sendable {
+    private let lock = NSLock()
+    private let eventReceived = DispatchSemaphore(value: 0)
+    private var value: [String] = []
+
+    func receive(_ event: BoothNetworkTransportRuntime.ControlCoreEvent) {
+        let kind: String
+        switch event {
+        case .trustedAuthenticated:
+            kind = "authenticated"
+        case .controlFrames:
+            kind = "controlFrames"
+        default:
+            return
+        }
+        lock.lock()
+        value.append(kind)
+        lock.unlock()
+        eventReceived.signal()
+    }
+
+    private func waitForCountBlocking(_ count: Int, timeout: TimeInterval) -> Bool {
+        let deadline = DispatchTime.now() + timeout
+        while self.count < count {
+            guard eventReceived.wait(timeout: deadline) == .success else { return false }
+        }
+        return true
+    }
+
+    func waitForCount(_ count: Int, timeout: TimeInterval) async -> Bool {
+        await Task.detached(priority: .utility) { [self] in
+            waitForCountBlocking(count, timeout: timeout)
+        }.value
+    }
+
+    var count: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return value.count
+    }
+
+    var order: [String] {
+        lock.lock()
+        defer { lock.unlock() }
+        return value
+    }
+}
+
+private final class ControlCoreOverflowTestObserver: @unchecked Sendable {
+    private let lock = NSLock()
+    private let listenerReady = DispatchSemaphore(value: 0)
+    private let overflowReady = DispatchSemaphore(value: 0)
+    private var port: NWEndpoint.Port?
+    private var overflowedGeneration: Int?
+
+    func receiveListener(_ value: NWEndpoint.Port?) {
+        lock.lock()
+        port = value
+        lock.unlock()
+        listenerReady.signal()
+    }
+
+    func waitForListener(timeout: TimeInterval = 3) -> NWEndpoint.Port? {
+        guard listenerReady.wait(timeout: .now() + timeout) == .success else { return nil }
+        lock.lock()
+        defer { lock.unlock() }
+        return port
+    }
+
+    func recordOverflow(generation: Int) {
+        lock.lock()
+        overflowedGeneration = generation
+        lock.unlock()
+        overflowReady.signal()
+    }
+
+    func waitForOverflow(timeout: TimeInterval = 5) -> Int? {
+        guard overflowReady.wait(timeout: .now() + timeout) == .success else { return nil }
+        lock.lock()
+        defer { lock.unlock() }
+        return overflowedGeneration
+    }
+}
+
 private enum ControlStressError: Error {
     case connectionCancelled
     case connectionClosed
@@ -709,12 +795,20 @@ private final class TrustedCoreTestObserver: @unchecked Sendable {
     private let lock = NSLock()
     private let listenerReady = DispatchSemaphore(value: 0)
     private let authenticated = DispatchSemaphore(value: 0)
+    private let disconnected = DispatchSemaphore(value: 0)
     private let rejected = DispatchSemaphore(value: 0)
     private let controlMessageReceived = DispatchSemaphore(value: 0)
+    private let pairingVerificationRequired = DispatchSemaphore(value: 0)
+    private let pairingSessionConsumed = DispatchSemaphore(value: 0)
+    private let pairingIntentReceived = DispatchSemaphore(value: 0)
     private var portValue: NWEndpoint.Port?
     private var authenticatedGenerations: [Int] = []
+    private var disconnectedGenerations: [Int] = []
     private var rejectionReasons: [String] = []
     private var controlMessages: [Message] = []
+    private var pairingVerificationSnapshot: BoothNetworkTransportRuntime.PairingVerificationSnapshot?
+    private var pairingSessionConsumptions: [BoothNetworkTransportRuntime.PairingSessionConsumption] = []
+    private var pairingIntentCandidates: [(BoothNetworkTransportRuntime.PairingCandidate, BoothPairingIntent)] = []
 
     func receive(_ event: BoothNetworkTransportRuntime.ControlCoreEvent) {
         switch event {
@@ -728,6 +822,11 @@ private final class TrustedCoreTestObserver: @unchecked Sendable {
             authenticatedGenerations.append(generation)
             lock.unlock()
             authenticated.signal()
+        case .disconnected(let generation, _):
+            lock.lock()
+            disconnectedGenerations.append(generation)
+            lock.unlock()
+            disconnected.signal()
         case .controlFrames(_, let frames):
             let messages = frames.compactMap { frame -> Message? in
                 guard case .control(let message) = frame else { return nil }
@@ -738,6 +837,21 @@ private final class TrustedCoreTestObserver: @unchecked Sendable {
             controlMessages.append(contentsOf: messages)
             lock.unlock()
             messages.forEach { _ in controlMessageReceived.signal() }
+        case .pairingVerificationRequired(let snapshot):
+            lock.lock()
+            pairingVerificationSnapshot = snapshot
+            lock.unlock()
+            pairingVerificationRequired.signal()
+        case .pairingSessionConsumed(let consumption):
+            lock.lock()
+            pairingSessionConsumptions.append(consumption)
+            lock.unlock()
+            pairingSessionConsumed.signal()
+        case .pairingIntentCandidate(let candidate, let intent):
+            lock.lock()
+            pairingIntentCandidates.append((candidate, intent))
+            lock.unlock()
+            pairingIntentReceived.signal()
         case .rejected(_, let reason), .listenerFailed(_, let reason):
             lock.lock()
             rejectionReasons.append(reason)
@@ -755,12 +869,76 @@ private final class TrustedCoreTestObserver: @unchecked Sendable {
         return portValue
     }
 
-    func waitForAuthenticationCount(_ count: Int, timeout: TimeInterval = 5) -> Bool {
+    func waitForAuthenticationCount(_ count: Int, timeout: TimeInterval = 5) async -> Bool {
+        await Task.detached(priority: .utility) { [self] in
+            waitForAuthenticationCountBlocking(count, timeout: timeout)
+        }.value
+    }
+
+    private func waitForAuthenticationCountBlocking(_ count: Int, timeout: TimeInterval) -> Bool {
         let deadline = DispatchTime.now() + timeout
         while authenticationCount < count {
             guard authenticated.wait(timeout: deadline) == .success else { return false }
         }
         return true
+    }
+
+    func waitForDisconnectedCount(_ count: Int, timeout: TimeInterval = 5) async -> Bool {
+        await Task.detached(priority: .utility) { [self] in
+            waitForDisconnectedCountBlocking(count, timeout: timeout)
+        }.value
+    }
+
+    private func waitForDisconnectedCountBlocking(_ count: Int, timeout: TimeInterval) -> Bool {
+        let deadline = DispatchTime.now() + timeout
+        while disconnectedCount < count {
+            guard disconnected.wait(timeout: deadline) == .success else { return false }
+        }
+        return true
+    }
+
+    func waitForPairingVerification(timeout: TimeInterval = 8) -> Bool {
+        pairingVerificationRequired.wait(timeout: .now() + timeout) == .success
+    }
+
+    func waitForPairingSessionConsumption(timeout: TimeInterval = 5) -> Bool {
+        pairingSessionConsumed.wait(timeout: .now() + timeout) == .success
+    }
+
+    func waitForPairingIntent(timeout: TimeInterval = 5) -> Bool {
+        pairingIntentReceived.wait(timeout: .now() + timeout) == .success
+    }
+
+    func waitForPairingIntentCount(_ count: Int, timeout: TimeInterval = 5) -> Bool {
+        let deadline = DispatchTime.now() + timeout
+        while pairingIntentCount < count {
+            guard pairingIntentReceived.wait(timeout: deadline) == .success else { return false }
+        }
+        return true
+    }
+
+    var lastPairingVerificationSnapshot: BoothNetworkTransportRuntime.PairingVerificationSnapshot? {
+        lock.lock()
+        defer { lock.unlock() }
+        return pairingVerificationSnapshot
+    }
+
+    var lastPairingSessionConsumption: BoothNetworkTransportRuntime.PairingSessionConsumption? {
+        lock.lock()
+        defer { lock.unlock() }
+        return pairingSessionConsumptions.last
+    }
+
+    var lastPairingIntentCandidate: (BoothNetworkTransportRuntime.PairingCandidate, BoothPairingIntent)? {
+        lock.lock()
+        defer { lock.unlock() }
+        return pairingIntentCandidates.last
+    }
+
+    private var pairingIntentCount: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return pairingIntentCandidates.count
     }
 
     func waitForRejectionCount(_ count: Int, timeout: TimeInterval = 5) -> Bool {
@@ -789,6 +967,12 @@ private final class TrustedCoreTestObserver: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         return authenticatedGenerations.count
+    }
+
+    private var disconnectedCount: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return disconnectedGenerations.count
     }
 
     var lastAuthenticatedGeneration: Int? {
@@ -841,7 +1025,13 @@ private final class ListenerLifecycleTestObserver: @unchecked Sendable {
         }
     }
 
-    func waitForReadyCount(_ count: Int, timeout: TimeInterval = 3) -> Bool {
+    func waitForReadyCount(_ count: Int, timeout: TimeInterval = 3) async -> Bool {
+        await Task.detached(priority: .utility) { [self] in
+            waitForReadyCountBlocking(count, timeout: timeout)
+        }.value
+    }
+
+    private func waitForReadyCountBlocking(_ count: Int, timeout: TimeInterval) -> Bool {
         let deadline = DispatchTime.now() + timeout
         while readyCount < count {
             guard listenerReady.wait(timeout: deadline) == .success else { return false }
@@ -849,7 +1039,13 @@ private final class ListenerLifecycleTestObserver: @unchecked Sendable {
         return true
     }
 
-    func waitForFailureCount(_ count: Int, timeout: TimeInterval = 3) -> Bool {
+    func waitForFailureCount(_ count: Int, timeout: TimeInterval = 3) async -> Bool {
+        await Task.detached(priority: .utility) { [self] in
+            waitForFailureCountBlocking(count, timeout: timeout)
+        }.value
+    }
+
+    private func waitForFailureCountBlocking(_ count: Int, timeout: TimeInterval) -> Bool {
         let deadline = DispatchTime.now() + timeout
         while failureCount < count {
             guard listenerFailed.wait(timeout: deadline) == .success else { return false }
@@ -973,6 +1169,22 @@ private final class HostileLoopbackClient: @unchecked Sendable {
         }
     }
 
+    func send(_ messages: [Message], timeout: TimeInterval = 3) -> Bool {
+        guard let payload = try? messages.reduce(into: Data(), { bytes, message in
+            bytes.append(try BoothFrameEncoder.encode(channel: .control, payload: message.encoded()))
+        }) else { return false }
+        let completion = DispatchSemaphore(value: 0)
+        let result = RecoveryTestFlag()
+        queue.async { [connection] in
+            connection.send(content: payload, completion: .contentProcessed { error in
+                if error == nil { result.mark() }
+                completion.signal()
+            })
+        }
+        guard completion.wait(timeout: .now() + timeout) == .success else { return false }
+        return result.value
+    }
+
     private func finishSend(_ state: SendState) {
         lock.lock()
         guard sendState != .sent, sendState != .closed else {
@@ -987,10 +1199,36 @@ private final class HostileLoopbackClient: @unchecked Sendable {
     func cancel() { connection.cancel() }
 }
 
+private func makeAdmissionPairingRequest(
+    session: BoothPairingSession,
+    macIdentity: BoothDeviceIdentity,
+    iPadIdentity: BoothDeviceIdentity,
+    method: BoothPairingMethod,
+    proofCode: String
+) -> BoothPairingRequest {
+    let ephemeralKey = Curve25519.KeyAgreement.PrivateKey()
+    let transcript = BoothPairingCrypto.pairingTranscript(
+        sessionID: session.info.sessionID,
+        macDeviceID: macIdentity.id,
+        iPadDeviceID: iPadIdentity.id,
+        method: method,
+        macEphemeralPublicKey: session.info.macEphemeralPublicKey,
+        iPadEphemeralPublicKey: ephemeralKey.publicKey.rawRepresentation
+    )
+    return BoothPairingRequest(
+        sessionID: session.info.sessionID,
+        targetMacDeviceID: macIdentity.id,
+        iPadIdentity: iPadIdentity,
+        method: method,
+        iPadEphemeralPublicKey: ephemeralKey.publicKey.rawRepresentation,
+        admissionProof: BoothPairingCrypto.makeAdmissionProof(code: proofCode, transcript: transcript)
+    )
+}
+
 @Suite("Network route policy", .serialized)
 struct NetworkRouteTests {
     @Test("duplicate control-listener start keeps the runtime generation")
-    func duplicateControlListenerStartKeepsCanonicalGeneration() throws {
+    func duplicateControlListenerStartKeepsCanonicalGeneration() async throws {
         let queue = DispatchQueue(label: "PRC-PhotoBooth.Tests.ControlListenerGeneration")
         let runtime = BoothNetworkTransportRuntime(queue: queue)
         let identity = BoothDeviceIdentity(id: UUID().uuidString, displayName: "Listener Mac", role: .mac)
@@ -1016,7 +1254,7 @@ struct NetworkRouteTests {
             txtRecord: NWTXTRecord(["deviceID": identity.id])
         )
         let firstGeneration = runtime.startControlListener(using: .tcp, port: nil, service: service)
-        #expect(events.waitForReadyCount(1))
+        #expect(await events.waitForReadyCount(1))
 
         let duplicateGeneration = runtime.startControlListener(using: .tcp, port: nil, service: service)
         #expect(duplicateGeneration == firstGeneration)
@@ -1025,7 +1263,7 @@ struct NetworkRouteTests {
     }
 
     @Test("control-listener retry recovers during MainActor stall")
-    func controlListenerRetryRecoversDuringMainActorStall() throws {
+    func controlListenerRetryRecoversDuringMainActorStall() async throws {
         let queue = DispatchQueue(label: "PRC-PhotoBooth.Tests.ControlListenerRetry")
         let failureBudget = ListenerFactoryFailureBudget(1)
         let runtime = BoothNetworkTransportRuntime(
@@ -1071,8 +1309,8 @@ struct NetworkRouteTests {
                 txtRecord: NWTXTRecord(["deviceID": identity.id])
             )
         )
-        #expect(events.waitForFailureCount(1))
-        #expect(events.waitForReadyCount(1))
+        #expect(await events.waitForFailureCount(1))
+        #expect(await events.waitForReadyCount(1))
         #expect(events.lastReadyEvent?.generation == generation)
         #expect(events.lastReadyEvent?.port != nil)
     }
@@ -1116,7 +1354,7 @@ struct NetworkRouteTests {
         ) { [weak iPadEvents] event in
             iPadEvents?.receive(event)
         }
-        macRuntime.startControlListener(
+        _ = macRuntime.startControlListener(
             using: .tcp,
             port: nil,
             service: NWListener.Service(
@@ -1154,8 +1392,8 @@ struct NetworkRouteTests {
             provenance: .localNetworkBonjour,
             generation: 771
         )
-        #expect(iPadEvents.waitForAuthenticationCount(1, timeout: 8))
-        #expect(macEvents.waitForAuthenticationCount(1, timeout: 3))
+        #expect(await iPadEvents.waitForAuthenticationCount(1, timeout: 8))
+        #expect(await macEvents.waitForAuthenticationCount(1, timeout: 3))
         if let generation = iPadEvents.lastAuthenticatedGeneration {
             #expect(iPadRuntime.enqueueAuthenticatedControl(
                 .boothPaused(isPaused: true),
@@ -1168,8 +1406,8 @@ struct NetworkRouteTests {
         if let generation = iPadEvents.lastAuthenticatedGeneration {
             iPadRuntime.invalidateControlConnection(generation: generation)
         }
-        #expect(iPadEvents.waitForAuthenticationCount(2, timeout: 5))
-        #expect(macEvents.waitForAuthenticationCount(2, timeout: 3))
+        #expect(await iPadEvents.waitForAuthenticationCount(2, timeout: 5))
+        #expect(await macEvents.waitForAuthenticationCount(2, timeout: 3))
 
         let elapsed = Date().timeIntervalSince(stallStarted)
         if elapsed < 12 {
@@ -1178,6 +1416,736 @@ struct NetworkRouteTests {
         #expect(Date().timeIntervalSince(stallStarted) >= 11.9)
         #expect(iPadEvents.authenticationCount >= 2)
         #expect(macEvents.authenticationCount >= 2)
+    }
+
+    @Test(
+        "trusted cached-route exhaustion rediscovers and authenticates during MainActor stall",
+        .disabled(if: !runMainActorStallTests)
+    )
+    func trustedRouteRefreshAuthenticatesDuringMainActorStall() async throws {
+        let macQueue = DispatchQueue(label: "PRC-PhotoBooth.Tests.RouteRefresh.MacA")
+        let replacementMacQueue = DispatchQueue(label: "PRC-PhotoBooth.Tests.RouteRefresh.MacB")
+        let iPadQueue = DispatchQueue(label: "PRC-PhotoBooth.Tests.RouteRefresh.iPad")
+        let macRuntime = BoothNetworkTransportRuntime(queue: macQueue)
+        let replacementMacRuntime = BoothNetworkTransportRuntime(queue: replacementMacQueue)
+        let iPadRuntime = BoothNetworkTransportRuntime(queue: iPadQueue)
+        let macIdentity = BoothDeviceIdentity(id: UUID().uuidString, displayName: "Route Mac", role: .mac)
+        let iPadIdentity = BoothDeviceIdentity(id: UUID().uuidString, displayName: "Route iPad", role: .iPad)
+        let secret = Data(repeating: 0x91, count: 32)
+        let macSecureChannel = BoothSecureChannel()
+        let replacementMacSecureChannel = BoothSecureChannel()
+        let iPadSecureChannel = BoothSecureChannel()
+        let macWriter = BoothControlWritePump(queue: macQueue, secureChannel: macSecureChannel)
+        let replacementMacWriter = BoothControlWritePump(
+            queue: replacementMacQueue,
+            secureChannel: replacementMacSecureChannel
+        )
+        let iPadWriter = BoothControlWritePump(queue: iPadQueue, secureChannel: iPadSecureChannel)
+        let macEvents = TrustedCoreTestObserver()
+        let replacementMacEvents = TrustedCoreTestObserver()
+        let iPadEvents = TrustedCoreTestObserver()
+        let reconnectEvents = TransportLivenessObserver()
+
+        macRuntime.configureControlCore(
+            localIdentity: macIdentity,
+            networkPreference: .wifi,
+            trustedSecrets: [iPadIdentity.id: secret],
+            selectedPeerID: iPadIdentity.id,
+            secureChannel: macSecureChannel,
+            writer: macWriter
+        ) { [weak macEvents] event in macEvents?.receive(event) }
+        replacementMacRuntime.configureControlCore(
+            localIdentity: macIdentity,
+            networkPreference: .wifi,
+            trustedSecrets: [iPadIdentity.id: secret],
+            selectedPeerID: iPadIdentity.id,
+            secureChannel: replacementMacSecureChannel,
+            writer: replacementMacWriter
+        ) { [weak replacementMacEvents] event in replacementMacEvents?.receive(event) }
+        iPadRuntime.configureControlCore(
+            localIdentity: iPadIdentity,
+            networkPreference: .wifi,
+            trustedSecrets: [macIdentity.id: secret],
+            selectedPeerID: macIdentity.id,
+            secureChannel: iPadSecureChannel,
+            writer: iPadWriter
+        ) { [weak iPadEvents] event in iPadEvents?.receive(event) }
+        iPadRuntime.onReconnectDue = { [weak reconnectEvents] _, _ in
+            reconnectEvents?.markReconnectDue()
+        }
+        let service = NWListener.Service(
+            name: BoothBonjourServiceIdentity.serviceName(channel: .control, deviceID: macIdentity.id),
+            type: "_prc-control._tcp",
+            txtRecord: NWTXTRecord([
+                "deviceID": macIdentity.id,
+                "network": BoothNetworkPreference.wifi.rawValue,
+                "role": DeviceRole.mac.rawValue,
+                "protocolVersion": String(BoothTransportHello.currentProtocolVersion)
+            ])
+        )
+        _ = macRuntime.startControlListener(using: .tcp, port: nil, service: service)
+        let stalePort = try #require(macEvents.waitForListener())
+        _ = replacementMacRuntime.startControlListener(using: .tcp, port: nil, service: service)
+        let replacementPort = try #require(replacementMacEvents.waitForListener())
+        #expect(stalePort != replacementPort)
+
+        let mainEntered = DispatchSemaphore(value: 0)
+        let releaseMain = DispatchSemaphore(value: 0)
+        defer {
+            releaseMain.signal()
+            iPadRuntime.stopControlCore()
+            macRuntime.stopControlCore()
+            replacementMacRuntime.stopControlCore()
+            iPadWriter.invalidate(generation: Int.max)
+            macWriter.invalidate(generation: Int.max)
+            replacementMacWriter.invalidate(generation: Int.max)
+        }
+        iPadRuntime.startTrustedControlConnection(
+            endpoint: .hostPort(host: "127.0.0.1", port: stalePort),
+            parameters: .tcp,
+            interface: .wifi,
+            provenance: .localNetworkBonjour,
+            generation: 981
+        )
+        #expect(await iPadEvents.waitForAuthenticationCount(1, timeout: 5))
+        #expect(await macEvents.waitForAuthenticationCount(1, timeout: 3))
+
+        DispatchQueue.main.async {
+            mainEntered.signal()
+            releaseMain.wait()
+        }
+        #expect(waitForSemaphore(mainEntered))
+        let stallStarted = Date()
+        macRuntime.stopControlCore()
+        #expect(await iPadEvents.waitForDisconnectedCount(1, timeout: 5))
+        iPadRuntime.cancelReconnect()
+        #expect(iPadRuntime.scheduleReconnect(after: 0.05, attempt: 6, generation: 981))
+
+        let authenticatedDuringStall = await iPadEvents.waitForAuthenticationCount(2, timeout: 9)
+        let authenticatedAt = Date()
+        if authenticatedAt.timeIntervalSince(stallStarted) < 12 {
+            try await Task.sleep(for: .seconds(12 - authenticatedAt.timeIntervalSince(stallStarted)))
+        }
+        #expect(authenticatedDuringStall, "Trusted Bonjour rediscovery waited for MainActor after the cached route failed.")
+        #expect(await replacementMacEvents.waitForAuthenticationCount(1, timeout: 1))
+        #expect(Date().timeIntervalSince(stallStarted) >= 11.9)
+        #expect(reconnectEvents.snapshot().reconnectDueCount == 0)
+        #expect(iPadEvents.authenticationCount == 2)
+        #expect(macEvents.authenticationCount == 1)
+        #expect(replacementMacEvents.authenticationCount == 1)
+    }
+
+    @Test(
+        "control-core events keep authentication before frames through a MainActor stall",
+        .disabled(if: !runMainActorStallTests)
+    )
+    func controlCoreEventStreamPreservesAuthenticationOrderDuringMainActorStall() async throws {
+        let stream = BoothNetworkTransportCoreEventStream()
+        let observer = CoreEventDeliveryObserver()
+        let consumer = Task { @MainActor in
+            for await event in stream.stream {
+                observer.receive(event)
+                if observer.count == 2 { return }
+            }
+        }
+        let mainEntered = DispatchSemaphore(value: 0)
+        let releaseMain = DispatchSemaphore(value: 0)
+        defer {
+            releaseMain.signal()
+            stream.finish()
+            consumer.cancel()
+        }
+        DispatchQueue.main.async {
+            mainEntered.signal()
+            releaseMain.wait()
+        }
+        #expect(waitForSemaphore(mainEntered))
+
+        let macID = UUID().uuidString
+        let iPadID = UUID().uuidString
+        let sessionID = "ordered-core-events"
+        let localSecureHello = BoothSecureChannelHello(
+            sessionID: sessionID,
+            challenge: Data(repeating: 0x2A, count: 32),
+            senderRole: .iPad,
+            senderDeviceID: iPadID,
+            receiverDeviceID: macID
+        )
+        let peerSecureHello = BoothSecureChannelHello(
+            sessionID: sessionID,
+            challenge: Data(repeating: 0x3B, count: 32),
+            senderRole: .mac,
+            senderDeviceID: macID,
+            receiverDeviceID: iPadID
+        )
+        let authenticated = BoothNetworkTransportRuntime.ControlCoreEvent.trustedAuthenticated(
+            generation: 442,
+            endpointDescription: "127.0.0.1",
+            hello: BoothTransportHello(role: .mac, deviceID: macID, deviceName: "Mac"),
+            localSecureHello: localSecureHello,
+            peerSecureHello: peerSecureHello,
+            interface: .wifi,
+            provenance: .localNetworkBonjour,
+            routeGeneration: 19
+        )
+        let frames = BoothNetworkTransportRuntime.ControlCoreEvent.controlFrames(
+            generation: 442,
+            frames: [.control(.boothPaused(isPaused: true))]
+        )
+        let transportQueue = DispatchQueue(label: "PRC-PhotoBooth.Tests.CoreEventOrder")
+        let yielded = DispatchSemaphore(value: 0)
+        transportQueue.async {
+            stream.yield(authenticated)
+            stream.yield(frames)
+            yielded.signal()
+        }
+        #expect(waitForSemaphore(yielded))
+        #expect(observer.count == 0)
+
+        releaseMain.signal()
+        #expect(await observer.waitForCount(2, timeout: 2))
+        #expect(observer.order == ["authenticated", "controlFrames"])
+        await consumer.value
+    }
+
+    @Test("control-core event stream bounds its backlog and handles overflow once per generation")
+    func controlCoreEventStreamBoundsBacklog() {
+        let stream = BoothNetworkTransportCoreEventStream(bufferLimit: 2)
+        let first = BoothNetworkTransportRuntime.ControlCoreEvent.listenerReady(generation: 1, port: nil)
+        let second = BoothNetworkTransportRuntime.ControlCoreEvent.listenerReady(generation: 2, port: nil)
+        let overflow = BoothNetworkTransportRuntime.ControlCoreEvent.listenerReady(generation: 3, port: nil)
+
+        #expect(stream.yield(first))
+        #expect(stream.yield(second))
+        #expect(!stream.yield(overflow))
+        stream.suppressEvents(through: 3)
+        #expect(stream.isSuppressed(1))
+        #expect(stream.isSuppressed(3))
+        #expect(!stream.isSuppressed(4))
+        #expect(stream.claimOverflowHandling(for: 3))
+        #expect(!stream.claimOverflowHandling(for: 3))
+        #expect(stream.claimOverflowHandling(for: 4))
+        stream.finish()
+    }
+
+    @Test("control-core event overflow invokes production close and listener-failure fallbacks")
+    func controlCoreEventStreamUsesProductionOverflowHandling() {
+        let stream = BoothNetworkTransportCoreEventStream(bufferLimit: 1)
+        let failCalled = RecoveryTestFlag()
+        let overflowReported = RecoveryTestFlag()
+        let listenerFailureReported = RecoveryTestFlag()
+        let buffered = BoothNetworkTransportRuntime.ControlCoreEvent.listenerReady(generation: 1, port: nil)
+        #expect(stream.yield(buffered))
+
+        let droppedControl = BoothNetworkTransportRuntime.ControlCoreEvent.rejected(
+            generation: 8,
+            reason: "test overflow"
+        )
+        let failedToPublishControl = stream.publish(
+            droppedControl,
+            failOverflowedGeneration: { _, _ in failCalled.mark() },
+            reportOverflow: { _, _ in overflowReported.mark() },
+            reportDroppedListenerFailure: { _ in listenerFailureReported.mark() }
+        )
+        #expect(!failedToPublishControl)
+        #expect(failCalled.value)
+        #expect(overflowReported.value)
+        #expect(stream.isSuppressed(8))
+        #expect(!listenerFailureReported.value)
+
+        let listenerFailureStream = BoothNetworkTransportCoreEventStream(bufferLimit: 1)
+        #expect(listenerFailureStream.yield(buffered))
+        let failedToPublishListener = listenerFailureStream.publish(
+            .listenerFailed(generation: 9, reason: "listener failed"),
+            failOverflowedGeneration: { _, _ in failCalled.mark() },
+            reportOverflow: { _, _ in overflowReported.mark() },
+            reportDroppedListenerFailure: { _ in listenerFailureReported.mark() }
+        )
+        #expect(!failedToPublishListener)
+        #expect(listenerFailureReported.value)
+        listenerFailureStream.finish()
+        stream.finish()
+    }
+
+    @Test("production overflow closes an authenticated socket before UI event consumption")
+    func productionControlEventOverflowClosesSocketAndSuppressesGeneration() async throws {
+        let macQueue = DispatchQueue(label: "PRC-PhotoBooth.Tests.CoreOverflow.Mac")
+        let iPadQueue = DispatchQueue(label: "PRC-PhotoBooth.Tests.CoreOverflow.iPad")
+        let macRuntime = BoothNetworkTransportRuntime(queue: macQueue)
+        let iPadRuntime = BoothNetworkTransportRuntime(queue: iPadQueue)
+        let macIdentity = BoothDeviceIdentity(id: UUID().uuidString, displayName: "Overflow Mac", role: .mac)
+        let iPadIdentity = BoothDeviceIdentity(id: UUID().uuidString, displayName: "Overflow iPad", role: .iPad)
+        let secret = Data(repeating: 0xD6, count: 32)
+        let macSecureChannel = BoothSecureChannel()
+        let iPadSecureChannel = BoothSecureChannel()
+        let macWriter = BoothControlWritePump(queue: macQueue, secureChannel: macSecureChannel)
+        let iPadWriter = BoothControlWritePump(queue: iPadQueue, secureChannel: iPadSecureChannel)
+        let iPadEvents = TrustedCoreTestObserver()
+        let overflowObserver = ControlCoreOverflowTestObserver()
+        let eventStream = BoothNetworkTransportCoreEventStream(bufferLimit: 1)
+
+        macRuntime.configureControlCore(
+            localIdentity: macIdentity,
+            networkPreference: .wifi,
+            trustedSecrets: [iPadIdentity.id: secret],
+            selectedPeerID: iPadIdentity.id,
+            secureChannel: macSecureChannel,
+            writer: macWriter
+        ) { [weak macRuntime] event in
+            guard let macRuntime else { return }
+            if case .listenerReady(_, let port) = event {
+                overflowObserver.receiveListener(port)
+            }
+            eventStream.publish(
+                event,
+                failOverflowedGeneration: { generation, reason in
+                    macRuntime.failControlCoreConnection(generation: generation, reason: reason)
+                },
+                reportOverflow: { generation, _ in
+                    overflowObserver.recordOverflow(generation: generation)
+                },
+                reportDroppedListenerFailure: { _ in }
+            )
+        }
+        iPadRuntime.configureControlCore(
+            localIdentity: iPadIdentity,
+            networkPreference: .wifi,
+            trustedSecrets: [macIdentity.id: secret],
+            selectedPeerID: macIdentity.id,
+            secureChannel: iPadSecureChannel,
+            writer: iPadWriter
+        ) { [weak iPadEvents] event in iPadEvents?.receive(event) }
+        defer {
+            eventStream.finish()
+            iPadRuntime.stopControlCore()
+            macRuntime.stopControlCore()
+            iPadWriter.invalidate(generation: Int.max)
+            macWriter.invalidate(generation: Int.max)
+        }
+        _ = macRuntime.startControlListener(
+            using: .tcp,
+            port: nil,
+            service: NWListener.Service(
+                name: BoothBonjourServiceIdentity.serviceName(channel: .control, deviceID: macIdentity.id),
+                type: "_prc-control._tcp",
+                txtRecord: NWTXTRecord([
+                    "deviceID": macIdentity.id,
+                    "network": BoothNetworkPreference.wifi.rawValue,
+                    "role": DeviceRole.mac.rawValue,
+                    "protocolVersion": String(BoothTransportHello.currentProtocolVersion)
+                ])
+            )
+        )
+        let port = try #require(overflowObserver.waitForListener())
+
+        // ListenerReady occupies the single buffer slot, modeling a stalled
+        // MainActor consumer. The real secure handshake event then overflows.
+        iPadRuntime.startTrustedControlConnection(
+            endpoint: .hostPort(host: "127.0.0.1", port: port),
+            parameters: .tcp,
+            interface: .wifi,
+            provenance: .localNetworkBonjour,
+            generation: 887
+        )
+
+        let overflowedGeneration = try #require(overflowObserver.waitForOverflow(timeout: 8))
+        #expect(await iPadEvents.waitForDisconnectedCount(1, timeout: 5))
+        #expect(eventStream.isSuppressed(overflowedGeneration))
+        #expect(macRuntime.isControlSlotAvailable())
+    }
+
+    @Test("control-core event stream finishes when its owner is released")
+    func controlCoreEventStreamFinishesWhenOwnerIsReleased() async {
+        var eventStream: BoothNetworkTransportCoreEventStream? = BoothNetworkTransportCoreEventStream()
+        var iterator = eventStream!.stream.makeAsyncIterator()
+
+        eventStream = nil
+
+        #expect(await iterator.next() == nil)
+    }
+
+    @Test("persistent Bonjour browser failures back off to a bounded retry interval")
+    func trustedRouteBrowserRetryDelayCapsAfterRepeatedFailures() {
+        #expect(BoothNetworkTransportRuntime.coreRouteBrowserRetryDelay(attempt: 0) == 1)
+        #expect(BoothNetworkTransportRuntime.coreRouteBrowserRetryDelay(attempt: 1) == 2)
+        #expect(BoothNetworkTransportRuntime.coreRouteBrowserRetryDelay(attempt: 2) == 4)
+        #expect(BoothNetworkTransportRuntime.coreRouteBrowserRetryDelay(attempt: 3) == 8)
+        #expect(BoothNetworkTransportRuntime.coreRouteBrowserRetryDelay(attempt: 4) == 16)
+        #expect(BoothNetworkTransportRuntime.coreRouteBrowserRetryDelay(attempt: 5) == 30)
+        #expect(BoothNetworkTransportRuntime.coreRouteBrowserRetryDelay(attempt: 100) == 30)
+    }
+
+    @Test("Bonjour browser recovery resets retry backoff before the next failure")
+    func trustedRouteBrowserRecoveryResetsRetryBackoff() {
+        var backoff = BoothNetworkTransportRuntime.RouteBrowserRetryBackoff()
+
+        #expect(backoff.nextDelay() == 1)
+        #expect(backoff.nextDelay() == 2)
+        #expect(backoff.nextDelay() == 4)
+
+        backoff.browserRecovered()
+
+        #expect(backoff.attempt == 0)
+        #expect(backoff.nextDelay() == 1)
+    }
+
+    @Test(
+        "incoming PIN pairing reaches the operator boundary after a 12-second MainActor stall",
+        .disabled(if: !runMainActorStallTests)
+    )
+    func incomingPairingCandidateSurvivesMainActorStall() async throws {
+        let macQueue = DispatchQueue(label: "PRC-PhotoBooth.Tests.PairingCore.Mac")
+        let runtime = BoothNetworkTransportRuntime(queue: macQueue)
+        let macIdentity = BoothDeviceIdentity(id: UUID().uuidString, displayName: "Pairing Mac", role: .mac)
+        let iPadIdentity = BoothDeviceIdentity(id: UUID().uuidString, displayName: "Pairing iPad", role: .iPad)
+        let secureChannel = BoothSecureChannel()
+        let writer = BoothControlWritePump(queue: macQueue, secureChannel: secureChannel)
+        let events = TrustedCoreTestObserver()
+        let session = try BoothPairingSession.make(macIdentity: macIdentity)
+        let iPadEphemeralKey = Curve25519.KeyAgreement.PrivateKey()
+        let transcript = BoothPairingCrypto.pairingTranscript(
+            sessionID: session.info.sessionID,
+            macDeviceID: macIdentity.id,
+            iPadDeviceID: iPadIdentity.id,
+            method: .pin,
+            macEphemeralPublicKey: session.info.macEphemeralPublicKey,
+            iPadEphemeralPublicKey: iPadEphemeralKey.publicKey.rawRepresentation
+        )
+        let request = BoothPairingRequest(
+            sessionID: session.info.sessionID,
+            targetMacDeviceID: macIdentity.id,
+            iPadIdentity: iPadIdentity,
+            method: .pin,
+            iPadEphemeralPublicKey: iPadEphemeralKey.publicKey.rawRepresentation,
+            admissionProof: BoothPairingCrypto.makeAdmissionProof(code: session.pin, transcript: transcript)
+        )
+        runtime.configureControlCore(
+            localIdentity: macIdentity,
+            networkPreference: .wifi,
+            trustedSecrets: [:],
+            selectedPeerID: nil,
+            secureChannel: secureChannel,
+            writer: writer
+        ) { [weak events] event in events?.receive(event) }
+        runtime.installInboundPairingSession(session)
+        _ = runtime.startControlListener(
+            using: .tcp,
+            port: nil,
+            service: NWListener.Service(
+                name: BoothBonjourServiceIdentity.serviceName(channel: .control, deviceID: macIdentity.id),
+                type: "_prc-control._tcp",
+                txtRecord: NWTXTRecord(["deviceID": macIdentity.id])
+            )
+        )
+        let port = try #require(events.waitForListener())
+
+        let mainEntered = DispatchSemaphore(value: 0)
+        let releaseMain = DispatchSemaphore(value: 0)
+        let mainResumed = DispatchSemaphore(value: 0)
+        DispatchQueue.main.async {
+            mainEntered.signal()
+            releaseMain.wait()
+            mainResumed.signal()
+        }
+        let client = try HostileLoopbackClient(
+            port: port,
+            messages: [
+                .helloDetails(hello: BoothTransportHello(
+                    role: .iPad,
+                    deviceID: iPadIdentity.id,
+                    deviceName: iPadIdentity.displayName
+                )),
+                .pairingRequest(request: request)
+            ]
+        )
+        defer {
+            releaseMain.signal()
+            client.cancel()
+            runtime.stopControlCore()
+            writer.invalidate(generation: Int.max)
+        }
+        #expect(waitForSemaphore(mainEntered))
+        let stallStarted = Date()
+        client.start()
+        #expect(client.waitUntilSent())
+        #expect(events.waitForPairingVerification())
+
+        let snapshot = try #require(events.lastPairingVerificationSnapshot)
+        #expect(runtime.isInboundPairingCandidateCurrent(
+            token: snapshot.candidate.token,
+            generation: snapshot.candidate.generation
+        ))
+        #expect(snapshot.candidate.hello.deviceID == iPadIdentity.id)
+        #expect(snapshot.sessionID == session.info.sessionID)
+        #expect(BoothPairingSession.isValidPIN(snapshot.verificationCode))
+        while Date().timeIntervalSince(stallStarted) < 12 {
+            try await Task.sleep(for: .milliseconds(50))
+        }
+        #expect(Date().timeIntervalSince(stallStarted) >= 12)
+        #expect(runtime.admissionLaneSnapshot().normalCandidatePresent)
+        #expect(!runtime.confirmPairingVerification(
+            token: snapshot.candidate.token,
+            generation: snapshot.candidate.generation &+ 1
+        ))
+
+        releaseMain.signal()
+        #expect(waitForSemaphore(mainResumed))
+        runtime.cancelInboundPairingCandidate(
+            token: snapshot.candidate.token,
+            generation: snapshot.candidate.generation,
+            reason: "Test teardown."
+        )
+        #expect(!runtime.isInboundPairingCandidateCurrent(
+            token: snapshot.candidate.token,
+            generation: snapshot.candidate.generation
+        ))
+    }
+
+    @Test("accepted QR pairing consumes the advertised session while retaining its candidate")
+    func acceptedQRPairingReportsSessionConsumption() throws {
+        let queue = DispatchQueue(label: "PRC-PhotoBooth.Tests.PairingConsumption.QR")
+        let runtime = BoothNetworkTransportRuntime(queue: queue)
+        let macIdentity = BoothDeviceIdentity(id: UUID().uuidString, displayName: "QR Mac", role: .mac)
+        let iPadIdentity = BoothDeviceIdentity(id: UUID().uuidString, displayName: "QR iPad", role: .iPad)
+        let secureChannel = BoothSecureChannel()
+        let writer = BoothControlWritePump(queue: queue, secureChannel: secureChannel)
+        let events = TrustedCoreTestObserver()
+        let session = try BoothPairingSession.make(macIdentity: macIdentity)
+        let request = makeAdmissionPairingRequest(
+            session: session,
+            macIdentity: macIdentity,
+            iPadIdentity: iPadIdentity,
+            method: .qrToken,
+            proofCode: session.qrToken
+        )
+        runtime.configureControlCore(
+            localIdentity: macIdentity,
+            networkPreference: .wifi,
+            trustedSecrets: [:],
+            selectedPeerID: nil,
+            secureChannel: secureChannel,
+            writer: writer
+        ) { [weak events] event in events?.receive(event) }
+        runtime.installInboundPairingSession(session)
+        _ = runtime.startControlListener(
+            using: .tcp,
+            port: nil,
+            service: NWListener.Service(
+                name: BoothBonjourServiceIdentity.serviceName(channel: .control, deviceID: macIdentity.id),
+                type: "_prc-control._tcp",
+                txtRecord: NWTXTRecord(["deviceID": macIdentity.id])
+            )
+        )
+        let port = try #require(events.waitForListener())
+        let client = try HostileLoopbackClient(
+            port: port,
+            messages: [
+                .helloDetails(hello: BoothTransportHello(
+                    role: .iPad,
+                    deviceID: iPadIdentity.id,
+                    deviceName: iPadIdentity.displayName
+                )),
+                .pairingRequest(request: request)
+            ]
+        )
+        defer {
+            client.cancel()
+            runtime.stopControlCore()
+            writer.invalidate(generation: Int.max)
+        }
+
+        client.start()
+        #expect(client.waitUntilSent())
+        #expect(events.waitForPairingSessionConsumption())
+        let consumption = try #require(events.lastPairingSessionConsumption)
+        #expect(consumption.sessionID == session.info.sessionID)
+        #expect(consumption.outcome == .proofAccepted(method: .qrToken))
+        #expect(runtime.isInboundPairingCandidateCurrent(
+            token: consumption.candidate.token,
+            generation: consumption.candidate.generation
+        ))
+        #expect(!runtime.respondToInboundPairingIntent(
+            token: consumption.candidate.token,
+            generation: consumption.candidate.generation,
+            session: session.info
+        ))
+    }
+
+    @Test("preempted pairing candidate cannot consume the replacement candidate session")
+    func preemptedPairingCandidateCannotConsumeReplacementSession() throws {
+        let queue = DispatchQueue(label: "PRC-PhotoBooth.Tests.PairingPreemption")
+        let runtime = BoothNetworkTransportRuntime(queue: queue)
+        let macIdentity = BoothDeviceIdentity(id: UUID().uuidString, displayName: "Preemption Mac", role: .mac)
+        let iPadIdentity = BoothDeviceIdentity(id: UUID().uuidString, displayName: "Preemption iPad", role: .iPad)
+        let secureChannel = BoothSecureChannel()
+        let writer = BoothControlWritePump(queue: queue, secureChannel: secureChannel)
+        let events = TrustedCoreTestObserver()
+        let session = try BoothPairingSession.make(macIdentity: macIdentity)
+        let intent = BoothPairingIntent(iPadIdentity: iPadIdentity, targetMacDeviceID: macIdentity.id)
+        let hello = BoothTransportHello(
+            role: .iPad,
+            deviceID: iPadIdentity.id,
+            deviceName: iPadIdentity.displayName
+        )
+        let request = makeAdmissionPairingRequest(
+            session: session,
+            macIdentity: macIdentity,
+            iPadIdentity: iPadIdentity,
+            method: .qrToken,
+            proofCode: session.qrToken
+        )
+        runtime.configureControlCore(
+            localIdentity: macIdentity,
+            networkPreference: .wifi,
+            trustedSecrets: [:],
+            selectedPeerID: nil,
+            secureChannel: secureChannel,
+            writer: writer
+        ) { [weak events] event in events?.receive(event) }
+        runtime.installInboundPairingSession(session)
+        _ = runtime.startControlListener(
+            using: .tcp,
+            port: nil,
+            service: NWListener.Service(
+                name: BoothBonjourServiceIdentity.serviceName(channel: .control, deviceID: macIdentity.id),
+                type: "_prc-control._tcp",
+                txtRecord: NWTXTRecord(["deviceID": macIdentity.id])
+            )
+        )
+        let port = try #require(events.waitForListener())
+        let first = try HostileLoopbackClient(
+            port: port,
+            messages: [.helloDetails(hello: hello), .pairingIntent(intent: intent)]
+        )
+        let replacement = try HostileLoopbackClient(
+            port: port,
+            messages: [.helloDetails(hello: hello), .pairingIntent(intent: intent)]
+        )
+        defer {
+            first.cancel()
+            replacement.cancel()
+            runtime.stopControlCore()
+            writer.invalidate(generation: Int.max)
+        }
+
+        first.start()
+        #expect(first.waitUntilSent())
+        #expect(events.waitForPairingIntentCount(1))
+        let firstCandidate = try #require(events.lastPairingIntentCandidate?.0)
+
+        // A previously authenticated endpoint hint makes the next connection
+        // preferred. This exercises production replacement and cancellation.
+        runtime.updateTrustedPeerIDs([iPadIdentity.id])
+        runtime.recordAuthenticatedPeer(
+            iPadIdentity.id,
+            endpoint: .hostPort(host: "127.0.0.1", port: .any)
+        )
+        replacement.start()
+        #expect(replacement.waitUntilSent())
+        #expect(events.waitForPairingIntentCount(2))
+        let replacementCandidate = try #require(events.lastPairingIntentCandidate?.0)
+        #expect(replacementCandidate.generation != firstCandidate.generation)
+
+        // Attempt a valid request from the cancelled socket, then have the
+        // replacement candidate consume the same one-use pairing session.
+        _ = first.send([.pairingRequest(request: request)])
+        _ = replacement.send([.pairingRequest(request: request)])
+        #expect(events.waitForPairingSessionConsumption())
+        let consumption = try #require(events.lastPairingSessionConsumption)
+        #expect(consumption.outcome == .proofAccepted(method: .qrToken))
+        #expect(consumption.candidate.generation == replacementCandidate.generation)
+    }
+
+    @Test("pairing PIN lockout clears its session and admits a fresh pairing intent")
+    func pairingPINLockoutAllowsFreshIntent() throws {
+        let queue = DispatchQueue(label: "PRC-PhotoBooth.Tests.PairingConsumption.Lockout")
+        let runtime = BoothNetworkTransportRuntime(queue: queue)
+        let macIdentity = BoothDeviceIdentity(id: UUID().uuidString, displayName: "Lockout Mac", role: .mac)
+        let iPadIdentity = BoothDeviceIdentity(id: UUID().uuidString, displayName: "Lockout iPad", role: .iPad)
+        let secureChannel = BoothSecureChannel()
+        let writer = BoothControlWritePump(queue: queue, secureChannel: secureChannel)
+        let events = TrustedCoreTestObserver()
+        let session = try BoothPairingSession.make(macIdentity: macIdentity)
+        let wrongPIN = session.pin == "000000" ? "000001" : "000000"
+        let invalidRequest = makeAdmissionPairingRequest(
+            session: session,
+            macIdentity: macIdentity,
+            iPadIdentity: iPadIdentity,
+            method: .pin,
+            proofCode: wrongPIN
+        )
+        runtime.configureControlCore(
+            localIdentity: macIdentity,
+            networkPreference: .wifi,
+            trustedSecrets: [:],
+            selectedPeerID: nil,
+            secureChannel: secureChannel,
+            writer: writer
+        ) { [weak events] event in events?.receive(event) }
+        runtime.installInboundPairingSession(session)
+        _ = runtime.startControlListener(
+            using: .tcp,
+            port: nil,
+            service: NWListener.Service(
+                name: BoothBonjourServiceIdentity.serviceName(channel: .control, deviceID: macIdentity.id),
+                type: "_prc-control._tcp",
+                txtRecord: NWTXTRecord(["deviceID": macIdentity.id])
+            )
+        )
+        let port = try #require(events.waitForListener())
+        let lockoutClient = try HostileLoopbackClient(
+            port: port,
+            messages: [.helloDetails(hello: BoothTransportHello(
+                role: .iPad,
+                deviceID: iPadIdentity.id,
+                deviceName: iPadIdentity.displayName
+            ))] + Array(repeating: .pairingRequest(request: invalidRequest), count: BoothPairingSession.maximumPINAttempts)
+        )
+        defer {
+            lockoutClient.cancel()
+            runtime.stopControlCore()
+            writer.invalidate(generation: Int.max)
+        }
+
+        lockoutClient.start()
+        #expect(lockoutClient.waitUntilSent())
+        #expect(events.waitForPairingSessionConsumption())
+        let consumption = try #require(events.lastPairingSessionConsumption)
+        #expect(consumption.sessionID == session.info.sessionID)
+        #expect(consumption.outcome == .locked)
+        #expect(events.waitForRejectionReason("Too many incorrect pairing PIN attempts"))
+        #expect(!runtime.isInboundPairingCandidateCurrent(
+            token: consumption.candidate.token,
+            generation: consumption.candidate.generation
+        ))
+
+        let replacementSession = try BoothPairingSession.make(macIdentity: macIdentity)
+        runtime.installInboundPairingSession(replacementSession)
+        let replacementClient = try HostileLoopbackClient(
+            port: port,
+            messages: [
+                .helloDetails(hello: BoothTransportHello(
+                    role: .iPad,
+                    deviceID: iPadIdentity.id,
+                    deviceName: iPadIdentity.displayName
+                )),
+                .pairingIntent(intent: BoothPairingIntent(
+                    iPadIdentity: iPadIdentity,
+                    targetMacDeviceID: macIdentity.id
+                ))
+            ]
+        )
+        defer { replacementClient.cancel() }
+        replacementClient.start()
+        #expect(replacementClient.waitUntilSent())
+        #expect(events.waitForPairingIntent())
+        let (candidate, intent) = try #require(events.lastPairingIntentCandidate)
+        #expect(intent.iPadIdentity == iPadIdentity)
+        #expect(runtime.respondToInboundPairingIntent(
+            token: candidate.token,
+            generation: candidate.generation,
+            session: replacementSession.info
+        ))
     }
 
     @Test(
@@ -1219,7 +2187,7 @@ struct NetworkRouteTests {
         ) { [weak iPadEvents] event in
             iPadEvents?.receive(event)
         }
-        macRuntime.startControlListener(
+        _ = macRuntime.startControlListener(
             using: .tcp,
             port: nil,
             service: NWListener.Service(
@@ -1270,8 +2238,8 @@ struct NetworkRouteTests {
             provenance: .localNetworkBonjour,
             generation: 991
         )
-        #expect(iPadEvents.waitForAuthenticationCount(1, timeout: 8))
-        #expect(macEvents.waitForAuthenticationCount(1, timeout: 3))
+        #expect(await iPadEvents.waitForAuthenticationCount(1, timeout: 8))
+        #expect(await macEvents.waitForAuthenticationCount(1, timeout: 3))
 
         let elapsed = Date().timeIntervalSince(stallStarted)
         if elapsed < 12 {
@@ -1329,7 +2297,7 @@ struct NetworkRouteTests {
             secureChannel: spoofSecureChannel,
             writer: spoofWriter
         ) { [weak spoofEvents] event in spoofEvents?.receive(event) }
-        macRuntime.startControlListener(
+        _ = macRuntime.startControlListener(
             using: .tcp,
             port: nil,
             service: NWListener.Service(
@@ -1420,8 +2388,8 @@ struct NetworkRouteTests {
         #expect(macEvents.waitForRejectionReason("Stored-secret authentication failed", timeout: 8))
         spoofRuntime.stopControlCore()
         #expect(spoofEvents.authenticationCount == 0)
-        #expect(iPadEvents.waitForAuthenticationCount(1, timeout: 8))
-        #expect(macEvents.waitForAuthenticationCount(1, timeout: 3))
+        #expect(await iPadEvents.waitForAuthenticationCount(1, timeout: 8))
+        #expect(await macEvents.waitForAuthenticationCount(1, timeout: 3))
         let authenticationFinishedAt = Date()
         #expect(authenticationFinishedAt.timeIntervalSince(stallStarted) < 10)
         if authenticationFinishedAt.timeIntervalSince(stallStarted) < 12 {
@@ -1507,7 +2475,7 @@ struct NetworkRouteTests {
             secureChannel: iPadSecureChannel,
             writer: iPadWriter
         ) { [weak iPadEvents] event in iPadEvents?.receive(event) }
-        macRuntime.startControlListener(
+        _ = macRuntime.startControlListener(
             using: .tcp,
             port: nil,
             service: NWListener.Service(
@@ -1545,8 +2513,8 @@ struct NetworkRouteTests {
             selectedPeerID: macIdentity.id
         )
         connect(generation: 1499)
-        #expect(iPadEvents.waitForAuthenticationCount(1, timeout: 5))
-        #expect(macEvents.waitForAuthenticationCount(1, timeout: 3))
+        #expect(await iPadEvents.waitForAuthenticationCount(1, timeout: 5))
+        #expect(await macEvents.waitForAuthenticationCount(1, timeout: 3))
     }
 
     @Test("100 hostile pre-auth loopback connections stay within bounded admission lanes")
@@ -1778,7 +2746,7 @@ struct NetworkRouteTests {
         }
     }
 
-    @Test("spoofed trusted IDs exhaust only their identity-probe retry budget")
+    @Test("spoofed trusted IDs cannot cooldown-veto a claimed ID before HMAC proof")
     func identityProbeThrottlesSpoofedTrustedID() {
         let runtime = BoothNetworkTransportRuntime(
             queue: DispatchQueue(label: "PRC-PhotoBooth.Tests.IdentityProbeSpoof")
@@ -1826,11 +2794,11 @@ struct NetworkRouteTests {
             using: .tcp
         )
         guard let admission = runtime.admitInboundControlConnection(spoofed).admission else {
-            #expect(Bool(false), "A throttled claimed ID should be rejected after the hello probe.")
+            #expect(Bool(false), "A bounded probe candidate should be available for the HMAC attempt.")
             return
         }
         #expect(admission.isIdentityProbe)
-        #expect(!runtime.acceptIdentityProbeClaim(
+        #expect(runtime.acceptIdentityProbeClaim(
             "paired-ipad",
             connection: spoofed,
             generation: admission.generation
@@ -2219,7 +3187,10 @@ struct NetworkRouteTests {
                 )
                 let queue = DispatchQueue(label: "PRC-PhotoBooth.Tests.TransportSoak.\(index)")
                 let parameters = NWParameters.tcp
-                parameters.allowLocalEndpointReuse = true
+                parameters.requiredLocalEndpoint = .hostPort(
+                    host: NWEndpoint.Host("127.0.0.1"),
+                    port: .any
+                )
                 let connection = NWConnection(host: "127.0.0.1", port: port, using: parameters)
                 let pump = BoothControlWritePump(queue: queue, secureChannel: iPadChannel)
                 let connectionLifetime = ControlStressConnectionLifetime()

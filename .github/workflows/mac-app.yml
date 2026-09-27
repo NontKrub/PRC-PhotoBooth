@@ -86,15 +86,23 @@ jobs:
             -scheme PRC-PhotoBoothTests \
             -destination "platform=macOS" \
             -derivedDataPath "$RUNNER_TEMP/PRC-PhotoBooth-DerivedData" \
-            -only-testing:PRC-PhotoBoothTests/NetworkRouteTests/trustedControlHandshakeAndReconnectSurviveMainActorStall \
-            -only-testing:PRC-PhotoBoothTests/NetworkRouteTests/trustedIdentityProbeAuthenticatesAfterAnonymousEndpointFlood \
-            -only-testing:PRC-PhotoBoothTests/NetworkRouteTests/trustedProbeWaitsBehindOccupiedProbeAndAuthenticatesDuringMainActorStall \
-            -only-testing:PRC-PhotoBoothTests/NetworkRouteTests/productionListenerAdmissionIsQueueOwned \
-            -only-testing:PRC-PhotoBoothTests/NetworkRouteTests/productionReconnectStartsSocketOffMainActor \
-            -only-testing:PRC-PhotoBoothTests/NetworkRouteTests/reconnectTimerIsQueueOwned \
-            -only-testing:PRC-PhotoBoothTests/NetworkRouteTests/preAuthWatchdogCancelsConnectionWhileMainActorBlocked \
-            -only-testing:PRC-PhotoBoothTests/NetworkRouteTests/authenticatedControlTrafficSurvivesTwelveSecondMainActorStall \
-            -only-testing:PRC-PhotoBoothTests/NetworkRouteTests/controlFailureDuringMainActorStallSchedulesOneReconnect \
+            -only-testing:'PRC-PhotoBoothTests/NetworkRouteTests/trustedControlHandshakeAndReconnectSurviveMainActorStall()' \
+            -only-testing:'PRC-PhotoBoothTests/NetworkRouteTests/incomingPairingCandidateSurvivesMainActorStall()' \
+            -only-testing:'PRC-PhotoBoothTests/NetworkRouteTests/trustedIdentityProbeAuthenticatesAfterAnonymousEndpointFlood()' \
+            -only-testing:'PRC-PhotoBoothTests/TrustedFloodAuthenticationTests/freshRuntimeAuthenticatesAfterFiniteHostileFlood()' \
+            -only-testing:'PRC-PhotoBoothTests/NetworkRouteTests/trustedProbeWaitsBehindOccupiedProbeAndAuthenticatesDuringMainActorStall()' \
+            -only-testing:'PRC-PhotoBoothTests/NetworkRouteTests/productionListenerAdmissionIsQueueOwned()' \
+            -only-testing:'PRC-PhotoBoothTests/NetworkRouteTests/controlListenerRetryRecoversDuringMainActorStall()' \
+            -only-testing:'PRC-PhotoBoothTests/NetworkRouteTests/trustedRouteRefreshAuthenticatesDuringMainActorStall()' \
+            -only-testing:'PRC-PhotoBoothTests/NetworkRouteTests/controlCoreEventStreamPreservesAuthenticationOrderDuringMainActorStall()' \
+            -only-testing:'PRC-PhotoBoothTests/NetworkRouteTests/controlCoreEventStreamBoundsBacklog()' \
+            -only-testing:'PRC-PhotoBoothTests/NetworkRouteTests/controlCoreEventStreamFinishesWhenOwnerIsReleased()' \
+            -only-testing:'PRC-PhotoBoothTests/NetworkRouteTests/trustedRouteBrowserRetryDelayCapsAfterRepeatedFailures()' \
+            -only-testing:'PRC-PhotoBoothTests/NetworkRouteTests/productionReconnectStartsSocketOffMainActor()' \
+            -only-testing:'PRC-PhotoBoothTests/NetworkRouteTests/reconnectTimerIsQueueOwned()' \
+            -only-testing:'PRC-PhotoBoothTests/NetworkRouteTests/preAuthWatchdogCancelsConnectionWhileMainActorBlocked()' \
+            -only-testing:'PRC-PhotoBoothTests/NetworkRouteTests/authenticatedControlTrafficSurvivesTwelveSecondMainActorStall()' \
+            -only-testing:'PRC-PhotoBoothTests/NetworkRouteTests/controlFailureDuringMainActorStallSchedulesOneReconnect()' \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
             test

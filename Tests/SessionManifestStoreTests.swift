@@ -283,7 +283,7 @@ struct SessionManifestStoreTests {
 
         let diagnostics = BoothSoakCleanupPolicy.retainedDiagnosticManifests(
             [normal, soak],
-            unresolvedSessionIDs: [normal.id]
+            unresolvedSessionIDs: [normal.id, soak.id]
         )
 
         #expect(diagnostics.map(\.id) == [soak.id])

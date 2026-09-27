@@ -165,6 +165,7 @@ struct CloudUploadServiceTests {
             cloudUploadEnabled: true
         )
         #expect(qrURL == "https://photos.example/s/soak/run-123/session-456/")
+        #expect(try CloudGuestRoute.soakPathPattern(runID: "run-123") == "/s/soak/run-123/<sessionID>/")
         let route = try CloudGuestRoute.resolve(for: manifest)
 
         try await service.upload(manifest: manifest, configuration: configuration)
