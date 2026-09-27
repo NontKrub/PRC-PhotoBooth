@@ -15,6 +15,9 @@ xcodebuild -scheme PRC-PhotoBooth-iPad \
 # Run unit tests (Mac host)
 xcodebuild -scheme PRC-PhotoBoothTests -destination "platform=macOS" test
 
+# Run unit tests (iPad simulator)
+xcodebuild -scheme PRC-PhotoBooth-iPadTests -destination "platform=iOS Simulator,id=<simulator-uuid>" test
+
 # Build + launch both apps (Mac + iPad simulator) in one shot
 bash run.sh
 ```
@@ -33,34 +36,32 @@ Two apps share a `Shared/` layer:
 
 ```
 Shared/
-  Models/SharedTypes.swift        — EventConfig, SharedPhotoSlot, SessionOutput, enums
-  Connectivity/Message.swift      — shared JSON wire protocol and state-sync models
-  Connectivity/BoothTransport.swift — framed channels and transport abstraction
-  Connectivity/NetworkBoothTransport.swift — production Bonjour/TCP transport
-  Connectivity/MultipeerService.swift — retained legacy adapter source; not app-selected
-  State/BoothPhase.swift          — session state enum
-  State/SessionStateMachine.swift — @Observable state machine
+  Models/           — SharedTypes, ExperienceTypes, LocalizedText
+  Connectivity/     — NetworkBoothTransport, Message (JSON wire protocol), BoothPairing (secure auth)
+  Imaging/          — BoothImageDecoder, PhotoFilter, QRCodeGenerator, PreviewQuality
+  State/            — BoothPhase, SessionStateMachine, CustomerDisplayWorkflow
 
 Mac/
-  MacApp.swift                    — entry point; injects BoothCoordinator + DataStore into environment
-  UI/BoothCoordinator.swift       — @MainActor @Observable hub; owns all services
-  UI/OperatorConsoleView.swift    — camera panel, session controls, strip preview
-  UI/EventSetupView.swift         — event CRUD, frame PNG import
-  UI/TemplateFrameSlotEditor.swift — template slot/QR drag/resize/duplicate editor
-  UI/AdminDashboardView.swift     — Charts analytics, CSV export (PIN-gated)
-  Camera/CameraSource.swift       — protocol for camera backends
-  Camera/AVFoundationCameraSource.swift — built-in/USB/Continuity camera
-  Camera/DSLRCameraSource.swift   — ImageCaptureCore USB tethered
-  Capture/CaptureService.swift    — wraps both cameras; owns capturedStills [Int:CGImage]
-  Output/Compositor.swift         — CGBitmapContext strip renderer
-  Output/GIFEncoder.swift
-  Persistence/BoothModels.swift   — SwiftData @Model classes
-  Persistence/DataStore.swift     — ModelContainer init with schema-migration recovery
+  MacApp.swift      — entry point; injects BoothCoordinator + DataStore into environment
+  UI/               — BoothCoordinator, OperatorConsoleView, EventSetupView, AdminDashboardView
+  Camera/           — CameraSource protocol, AVFoundationCameraSource, DSLRCameraSource
+  Capture/          — CaptureService, RollingVideoBuffer
+  Experience/       — CustomerExperienceCatalogBuilder, EventExperienceStore
+  Gallery/          — EventGalleryStore, GalleryThumbnailGenerator
+  Jobs/             — SessionJobQueue, SessionJobExecutor
+  Output/           — Compositor (CGBitmapContext), GIFEncoder
+  Persistence/      — DataStore, BoothModels (SwiftData)
+  Printing/         — PrinterService
+  Runtime/          — SessionWorkspace, SessionManifestStore, SessionRecoveryService
+  Server/           — LocalWebServer, LocalDownloadRouter, RemoteOperatorAuth
+  SoakTest/         — BoothSoakTestRunner
+  Diagnostics/      — BoothHealthSnapshot, BoothPreflightService
+  Cloud/            — CloudUploadService
 
 iPad/
-  UI/iPadViewModel.swift          — @Observable; mirrors BoothPhase from Mac messages
-  UI/iPadContentView.swift        — routes to phase-specific views
-  UI/CountdownView.swift, ReviewView.swift, FinishView.swift, ...
+  iPadApp.swift     — entry point
+  UI/               — iPadViewModel, iPadContentView, ExperienceSelectionView, CountdownView
+  Debug/            — DemoKioskDriver
 ```
 
 ## Key Data Flows
