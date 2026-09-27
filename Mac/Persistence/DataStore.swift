@@ -11,9 +11,9 @@ final class DataStore {
     private(set) var persistentStorageAvailable = true
     private(set) var databaseWasRecreated = false
 
-    private init() {
+    private init(isStoredInMemoryOnly: Bool = false) {
         let schema = Schema([BoothEvent.self, BoothSlot.self, BoothSession.self, CapturedShot.self])
-        let config = ModelConfiguration(schema: schema, isStoredInMemoryOnly: false)
+        let config = ModelConfiguration(schema: schema, isStoredInMemoryOnly: isStoredInMemoryOnly)
         do {
             container = try ModelContainer(for: schema, configurations: config)
         } catch {
@@ -54,6 +54,12 @@ final class DataStore {
             }
         }
     }
+
+#if DEBUG
+    static func inMemoryForTesting() -> DataStore {
+        DataStore(isStoredInMemoryOnly: true)
+    }
+#endif
 
     // MARK: - Events
 

@@ -545,7 +545,9 @@ final class BoothCoordinator {
         testingJobQueue: SessionJobQueue,
         runtimeDirectory: URL,
         testingRecoveryService: SessionRecoveryService? = nil,
-        testingWorkspace: SessionWorkspace? = nil
+        testingWorkspace: SessionWorkspace? = nil,
+        testingDataStore: DataStore? = nil,
+        testingCloudUpload: CloudUploadService? = nil
     ) {
         let networkPreference = Self.loadNetworkPreference()
         let status = BoothConnectionStatus(requestedNetwork: networkPreference)
@@ -555,7 +557,7 @@ final class BoothCoordinator {
         stateMachine = SessionStateMachine()
         server = LocalWebServer(port: 8585)
         operatorAuth = RemoteOperatorAuth()
-        store = DataStore.shared
+        store = testingDataStore ?? DataStore.shared
         cloudSSHSetup = CloudSSHSetupService()
         experienceStore = EventExperienceStore(baseDirectory: runtimeDirectory)
         filterPipeline = PhotoFilterPipeline()
@@ -565,7 +567,7 @@ final class BoothCoordinator {
         self.workspace = ws
         operationsEvents = OperationsEventStore(fileURL: runtimeDirectory.appendingPathComponent("operations-events.json"))
         printer = PrinterService()
-        cloudUpload = CloudUploadService()
+        cloudUpload = testingCloudUpload ?? CloudUploadService()
         self.jobQueue = testingJobQueue
         self.recoveryService = testingRecoveryService ?? SessionRecoveryService(
             manifestStore: testingManifestStore,
@@ -2943,7 +2945,7 @@ final class BoothCoordinator {
         await cancelCurrentSession()
     }
 
-    private func cleanupSoakSession(
+    func cleanupSoakSession(
         _ manifest: SessionManifest,
         expectedRunID: String,
         removeArtifacts: Bool

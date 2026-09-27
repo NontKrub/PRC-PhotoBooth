@@ -1485,9 +1485,6 @@ struct NetworkRouteTests {
         )
         _ = macRuntime.startControlListener(using: .tcp, port: nil, service: service)
         let stalePort = try #require(macEvents.waitForListener())
-        _ = replacementMacRuntime.startControlListener(using: .tcp, port: nil, service: service)
-        let replacementPort = try #require(replacementMacEvents.waitForListener())
-        #expect(stalePort != replacementPort)
 
         let mainEntered = DispatchSemaphore(value: 0)
         let releaseMain = DispatchSemaphore(value: 0)
@@ -1519,6 +1516,9 @@ struct NetworkRouteTests {
         macRuntime.stopControlCore()
         #expect(await iPadEvents.waitForDisconnectedCount(1, timeout: 5))
         iPadRuntime.cancelReconnect()
+        _ = replacementMacRuntime.startControlListener(using: .tcp, port: nil, service: service)
+        let replacementPort = try #require(replacementMacEvents.waitForListener())
+        #expect(stalePort != replacementPort)
         #expect(iPadRuntime.scheduleReconnect(after: 0.05, attempt: 6, generation: 981))
 
         let authenticatedDuringStall = await iPadEvents.waitForAuthenticationCount(2, timeout: 9)
