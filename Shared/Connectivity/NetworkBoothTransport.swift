@@ -35,12 +35,15 @@ final class BoothNetworkTransportCoreEventStream: @unchecked Sendable {
         _ event: BoothNetworkTransportRuntime.ControlCoreEvent,
         failOverflowedGeneration: @Sendable (Int, String) -> Void,
         reportOverflow: @Sendable (Int, String) -> Void,
-        reportDroppedListenerFailure: @Sendable (BoothNetworkTransportRuntime.ControlCoreEvent) -> Void
+        reportDroppedListenerEvent: @Sendable (BoothNetworkTransportRuntime.ControlCoreEvent) -> Void
     ) -> Bool {
         guard !yield(event) else { return true }
         guard let generation = event.controlGeneration else {
-            if case .listenerFailed = event {
-                reportDroppedListenerFailure(event)
+            switch event {
+            case .listenerReady, .listenerFailed:
+                reportDroppedListenerEvent(event)
+            default:
+                break
             }
             return false
         }
@@ -612,7 +615,7 @@ public final class NetworkBoothTransport: BoothTransport {
                         transport?.handleControlCoreEventOverflow(generation: generation, reason: reason)
                     }
                 },
-                reportDroppedListenerFailure: { event in
+                reportDroppedListenerEvent: { event in
                     Task { @MainActor [weak transport] in
                         transport?.handleControlCoreEvent(event)
                     }
@@ -725,12 +728,56 @@ public final class NetworkBoothTransport: BoothTransport {
         case .listenerFailed(let generation, let reason):
             guard generation == coreControlListenerGeneration else { return }
             lastNetworkError = reason
-            if activeInterface == .wiredEthernet {
-                handleLANHandshakeFailure(reason: reason, retainManualListener: false)
+            publishStatus()
+        case .listenerReady(let generation, _, let interface):
+            guard generation == coreControlListenerGeneration,
+                  role == .mac else { return }
+            if activeInterface != interface {
+                adoptControlListenerInterface(interface)
+            } else if lastNetworkError != nil {
+                lastNetworkError = nil
+                publishStatus()
             }
-        case .listenerReady:
-            break
         }
+    }
+
+    private func adoptControlListenerInterface(_ interface: BoothNetworkInterfacePolicy) {
+        guard role == .mac,
+              requestedPreference == .lan,
+              activeInterface == .wiredEthernet,
+              interface == .wifi,
+              shouldReconnect else { return }
+
+        activeInterface = .wifi
+        fallbackActive = true
+        fallbackReason = "LAN control listener failed"
+        lastNetworkError = nil
+        _ = routeMachine.lanHandshakeTimedOut(wifiAvailable: true)
+
+        previewListener?.cancel()
+        previewListener = nil
+        assetListener?.cancel()
+        assetListener = nil
+        resetPreviewConnection()
+        assetReconnectSource?.cancel()
+        assetReconnectToken &+= 1
+        assetReconnectSource = nil
+        assetConnectionGeneration &+= 1
+        assetWritePump.invalidate(generation: assetConnectionGeneration)
+        assetConnection?.cancel()
+        assetConnection = nil
+        assetEndpointDescription = nil
+        resetAssetBinding()
+        deferredAssetRequests.removeAll()
+
+        startListener(channel: .preview)
+        startListener(channel: .asset)
+        publishStatus()
+        emitTransportEvent(
+            .transportConnecting,
+            route: interface.rawValue,
+            reason: fallbackReason
+        )
     }
 
     private func handleControlCoreEventOverflow(generation: Int, reason: String) {
@@ -3046,10 +3093,20 @@ public final class NetworkBoothTransport: BoothTransport {
             let port: NWEndpoint.Port? = activeInterface == .wiredEthernet
                 ? Self.directLANControlPort
                 : nil
+            let listenerInterface = activeInterface
+            let fallback = listenerInterface == .wiredEthernet
+                ? (
+                    interface: BoothNetworkInterfacePolicy.wifi,
+                    parameters: makeParameters(for: .wifi),
+                    port: nil as NWEndpoint.Port?
+                )
+                : nil
             coreControlListenerGeneration = transportRuntime.startControlListener(
                 using: makeParameters(for: activeInterface),
                 port: port,
-                service: advertisedService(for: .control)
+                service: advertisedService(for: .control),
+                interface: listenerInterface,
+                fallback: fallback
             )
             return
         }

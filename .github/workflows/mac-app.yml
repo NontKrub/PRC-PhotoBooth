@@ -90,7 +90,8 @@ jobs:
             -only-testing:'PRC-PhotoBoothTests/NetworkRouteTests/incomingPairingCandidateSurvivesMainActorStall()' \
             -only-testing:'PRC-PhotoBoothTests/NetworkRouteTests/trustedIdentityProbeAuthenticatesAfterAnonymousEndpointFlood()' \
             -only-testing:'PRC-PhotoBoothTests/TrustedFloodAuthenticationTests/freshRuntimeAuthenticatesAfterFiniteHostileFloodWithoutEndpointHistory()' \
-            -only-testing:'PRC-PhotoBoothTests/NetworkRouteTests/trustedProbeWaitsBehindOccupiedProbeAndAuthenticatesDuringMainActorStall()' \
+            -only-testing:'PRC-PhotoBoothTests/NetworkRouteTests/trustedProbeRetriesAfterOccupiedSlotsDuringMainActorStall()' \
+            -only-testing:'PRC-PhotoBoothTests/NetworkRouteTests/macControlListenerFallbackAuthenticatesDuringMainActorStall()' \
             -only-testing:'PRC-PhotoBoothTests/NetworkRouteTests/productionListenerAdmissionIsQueueOwned()' \
             -only-testing:'PRC-PhotoBoothTests/NetworkRouteTests/controlListenerRetryRecoversDuringMainActorStall()' \
             -only-testing:'PRC-PhotoBoothTests/NetworkRouteTests/trustedRouteRefreshAuthenticatesDuringMainActorStall()' \
@@ -106,6 +107,10 @@ jobs:
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
             test
+
+      - name: Report Bonjour route-refresh integration coverage
+        run: |
+          echo "::notice::The loopback Bonjour route-refresh integration is opt-in because hosted Mac runners may not publish and browse local mDNS. Run it on a Bonjour-capable Mac with PRC_RUN_BONJOUR_ROUTE_REFRESH_TESTS=1."
 
       - name: Build macOS app (Release)
         run: |

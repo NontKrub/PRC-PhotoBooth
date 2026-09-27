@@ -29,7 +29,11 @@ final class BoothNetworkTransportRuntime: @unchecked Sendable {
         case controlFrames(generation: Int, frames: [BoothDecodedTransportFrame])
         case disconnected(generation: Int, reason: String?)
         case rejected(generation: Int, reason: String)
-        case listenerReady(generation: Int, port: NWEndpoint.Port?)
+        case listenerReady(
+            generation: Int,
+            port: NWEndpoint.Port?,
+            interface: BoothNetworkInterfacePolicy
+        )
         case listenerFailed(generation: Int, reason: String)
 
         var controlGeneration: Int? {
@@ -152,20 +156,6 @@ final class BoothNetworkTransportRuntime: @unchecked Sendable {
         }
     }
 
-    /// A single FIFO waiter protects a trusted reconnect from one socket that
-    /// currently occupies the probe lane. It remains queue-owned and does not
-    /// start receiving until promoted.
-    private final class QueuedIdentityProbe {
-        let connection: NWConnection
-        let admission: InboundControlAdmission
-        var timeout: DispatchSourceTimer?
-
-        init(connection: NWConnection, admission: InboundControlAdmission) {
-            self.connection = connection
-            self.admission = admission
-        }
-    }
-
     struct InboundControlAdmission: Sendable {
         let token: UUID
         let generation: Int
@@ -177,23 +167,11 @@ final class BoothNetworkTransportRuntime: @unchecked Sendable {
     struct InboundControlAdmissionResult: Sendable {
         let admission: InboundControlAdmission?
         let rejectionReason: String?
-        let isQueuedProbe: Bool
-
-        init(
-            admission: InboundControlAdmission?,
-            rejectionReason: String?,
-            isQueuedProbe: Bool = false
-        ) {
-            self.admission = admission
-            self.rejectionReason = rejectionReason
-            self.isQueuedProbe = isQueuedProbe
-        }
     }
 
     struct AdmissionLaneSnapshot: Sendable, Equatable {
         let normalCandidatePresent: Bool
         let identityProbePresent: Bool
-        let queuedIdentityProbePresent: Bool
     }
 
     struct RouteBrowserRetryBackoff: Sendable, Equatable {
@@ -218,8 +196,15 @@ final class BoothNetworkTransportRuntime: @unchecked Sendable {
     }
 
     private struct ControlListenerConfiguration {
-        let parameters: NWParameters
-        let port: NWEndpoint.Port?
+        var parameters: NWParameters
+        var port: NWEndpoint.Port?
+        var interface: BoothNetworkInterfacePolicy
+        let fallback: (
+            interface: BoothNetworkInterfacePolicy,
+            parameters: NWParameters,
+            port: NWEndpoint.Port?
+        )?
+        var didUseFallback = false
         var service: NWListener.Service
         let generation: Int
     }
@@ -250,7 +235,6 @@ final class BoothNetworkTransportRuntime: @unchecked Sendable {
     private var inboundAdmissionSource: DispatchSourceTimer?
     private var identityProbeAdmission: InboundControlAdmission?
     private var identityProbeAdmissionSource: DispatchSourceTimer?
-    private var queuedIdentityProbe: QueuedIdentityProbe?
     private var admissionLimiter: BoothPreAuthAdmissionLimiter
     private var trustedPeerIDs = Set<String>()
     private var authenticatedEndpointsByPeerID: [String: Set<String>] = [:]
@@ -580,7 +564,13 @@ final class BoothNetworkTransportRuntime: @unchecked Sendable {
     func startControlListener(
         using parameters: NWParameters,
         port: NWEndpoint.Port?,
-        service: NWListener.Service
+        service: NWListener.Service,
+        interface: BoothNetworkInterfacePolicy = .wifi,
+        fallback: (
+            interface: BoothNetworkInterfacePolicy,
+            parameters: NWParameters,
+            port: NWEndpoint.Port?
+        )? = nil
     ) -> Int {
         onQueue {
             if var configuration = self.coreControlListenerConfiguration {
@@ -599,6 +589,8 @@ final class BoothNetworkTransportRuntime: @unchecked Sendable {
             self.coreControlListenerConfiguration = ControlListenerConfiguration(
                 parameters: parameters,
                 port: port,
+                interface: interface,
+                fallback: fallback,
                 service: service,
                 generation: generation
             )
@@ -653,7 +645,6 @@ final class BoothNetworkTransportRuntime: @unchecked Sendable {
             self.identityProbeConnection = nil
             self.identityProbeAdmission = nil
             self.stopIdentityProbeAdmissionTimeoutOnQueue()
-            self.cancelQueuedIdentityProbeOnQueue(recordFailure: false)
             self.inboundAdmission = nil
             self.stopInboundAdmissionTimeoutOnQueue()
             self.activeControlConnection?.cancel()
@@ -695,7 +686,11 @@ final class BoothNetworkTransportRuntime: @unchecked Sendable {
                           self.coreControlListenerGeneration == generation,
                           self.coreControlListenerConfiguration?.generation == generation else { return }
                     self.coreControlListenerRetryAttempt = 0
-                    self.controlCoreEvent?(.listenerReady(generation: generation, port: listener.port))
+                    self.controlCoreEvent?(.listenerReady(
+                        generation: generation,
+                        port: listener.port,
+                        interface: self.coreControlListenerConfiguration?.interface ?? .wifi
+                    ))
                 }
             case .failed(let error):
                 self.onQueue {
@@ -718,9 +713,17 @@ final class BoothNetworkTransportRuntime: @unchecked Sendable {
                 break
             }
         }
-        listener.newConnectionHandler = { [weak self] connection in
-            guard let self else { connection.cancel(); return }
-            _ = self.startInboundControlConnection(connection)
+        listener.newConnectionHandler = { [weak self, weak listener] connection in
+            guard let self, let listener else { connection.cancel(); return }
+            self.onQueue {
+                guard self.coreControlListener === listener,
+                      self.coreControlListenerGeneration == generation,
+                      self.coreControlListenerConfiguration?.generation == generation else {
+                    connection.cancel()
+                    return
+                }
+                _ = self.startInboundControlConnection(connection)
+            }
         }
         coreControlListener = listener
         listener.start(queue: queue)
@@ -741,7 +744,25 @@ final class BoothNetworkTransportRuntime: @unchecked Sendable {
             guard coreControlListener == nil else { return }
         }
         controlCoreEvent?(.listenerFailed(generation: generation, reason: reason))
-        scheduleControlListenerRetryOnQueue(generation: generation)
+        guard switchControlListenerToFallbackOnQueue(generation: generation) else {
+            scheduleControlListenerRetryOnQueue(generation: generation)
+            return
+        }
+        coreControlListenerRetryAttempt = 0
+        scheduleControlListenerRetryOnQueue(generation: generation, immediate: true)
+    }
+
+    private func switchControlListenerToFallbackOnQueue(generation: Int) -> Bool {
+        guard var configuration = coreControlListenerConfiguration,
+              configuration.generation == generation,
+              !configuration.didUseFallback,
+              let fallback = configuration.fallback else { return false }
+        configuration.parameters = fallback.parameters
+        configuration.port = fallback.port
+        configuration.interface = fallback.interface
+        configuration.didUseFallback = true
+        coreControlListenerConfiguration = configuration
+        return true
     }
 
     private func scheduleControlListenerRetryOnQueue(generation: Int, immediate: Bool = false) {
@@ -1962,7 +1983,6 @@ final class BoothNetworkTransportRuntime: @unchecked Sendable {
                 )
                 return
             }
-            cancelQueuedIdentityProbeOnQueue(recordFailure: false)
             if let activeControlConnection, activeControlConnection !== candidate.connection {
                 activeControlConnection.cancel()
                 clearControlSlotOnQueue(connection: activeControlConnection)
@@ -2004,7 +2024,6 @@ final class BoothNetworkTransportRuntime: @unchecked Sendable {
         writer.bind(candidate.connection, generation: candidate.generation)
         candidate.authenticated = true
         if candidate.lane == .identityProbe {
-            cancelQueuedIdentityProbeOnQueue(recordFailure: false)
             identityProbeAdmission = nil
             stopIdentityProbeAdmissionTimeoutOnQueue()
             identityProbeConnection = nil
@@ -2201,7 +2220,6 @@ final class BoothNetworkTransportRuntime: @unchecked Sendable {
             admissionLimiter.recordIdentityProbeFailure(peerID: peerID, trustedPeerIDs: trustedPeerIDs)
         }
         activeIdentityProbePeerID = nil
-        promoteQueuedIdentityProbeOnQueue()
     }
 
 
@@ -2466,8 +2484,7 @@ final class BoothNetworkTransportRuntime: @unchecked Sendable {
         onQueue {
             AdmissionLaneSnapshot(
                 normalCandidatePresent: activeControlConnection != nil,
-                identityProbePresent: identityProbeConnection != nil,
-                queuedIdentityProbePresent: queuedIdentityProbe != nil
+                identityProbePresent: identityProbeConnection != nil
             )
         }
     }
@@ -2483,6 +2500,16 @@ final class BoothNetworkTransportRuntime: @unchecked Sendable {
         identityProbe: Bool,
         adoptionTimeout: TimeInterval
     ) -> InboundControlAdmissionResult {
+        if identityProbe && (identityProbeConnection != nil || identityProbeAdmission != nil) {
+            connection.cancel()
+            admissionLimiter.recordFailure(endpointKey: endpointKey)
+            admissionLimiter.recordIdentityProbeAttemptFailure()
+            return InboundControlAdmissionResult(
+                admission: nil,
+                rejectionReason: "The trusted-identity probe slot is occupied."
+            )
+        }
+
         nextInboundAdmissionGeneration = max(nextInboundAdmissionGeneration, nextControlGeneration) &+ 1
         nextControlGeneration = nextInboundAdmissionGeneration
         let admission = InboundControlAdmission(
@@ -2492,31 +2519,14 @@ final class BoothNetworkTransportRuntime: @unchecked Sendable {
             isPreferredCandidate: preferred,
             isIdentityProbe: identityProbe
         )
-        let isQueuedProbe = identityProbe
-            && (identityProbeConnection != nil || identityProbeAdmission != nil)
         if identityProbe {
-            if isQueuedProbe {
-                guard queuedIdentityProbe == nil else {
-                    connection.cancel()
-                    admissionLimiter.recordFailure(endpointKey: endpointKey)
-                    admissionLimiter.recordIdentityProbeAttemptFailure()
-                    return InboundControlAdmissionResult(
-                        admission: nil,
-                        rejectionReason: "The trusted-identity probe waiter is occupied."
-                    )
-                }
-                let queued = QueuedIdentityProbe(connection: connection, admission: admission)
-                queuedIdentityProbe = queued
-                startQueuedIdentityProbeTimeoutOnQueue(queued, timeout: min(10, max(1, adoptionTimeout)))
-            } else {
-                identityProbeAdmission = admission
-                identityProbeConnection = connection
-                startIdentityProbeAdmissionTimeoutOnQueue(
-                    connection: connection,
-                    admission: admission,
-                    timeout: min(5, max(1, adoptionTimeout))
-                )
-            }
+            identityProbeAdmission = admission
+            identityProbeConnection = connection
+            startIdentityProbeAdmissionTimeoutOnQueue(
+                connection: connection,
+                admission: admission,
+                timeout: min(5, max(1, adoptionTimeout))
+            )
         } else {
             inboundAdmission = admission
             activeControlConnection = connection
@@ -2532,8 +2542,7 @@ final class BoothNetworkTransportRuntime: @unchecked Sendable {
         }
         return InboundControlAdmissionResult(
             admission: admission,
-            rejectionReason: nil,
-            isQueuedProbe: isQueuedProbe
+            rejectionReason: nil
         )
     }
 
@@ -2550,7 +2559,6 @@ final class BoothNetworkTransportRuntime: @unchecked Sendable {
                 adoptionTimeout: adoptionTimeout
             )
             guard let admission = result.admission else { return result }
-            guard !result.isQueuedProbe else { return result }
             if localIdentity != nil {
                 startAdmittedInboundConnectionOnQueue(connection, admission: admission)
             } else {
@@ -2600,11 +2608,6 @@ final class BoothNetworkTransportRuntime: @unchecked Sendable {
     func abandonInboundControlAdmission(_ admission: InboundControlAdmission, connection: NWConnection) {
         onQueue {
             if admission.isIdentityProbe {
-                if queuedIdentityProbe?.admission.token == admission.token,
-                   queuedIdentityProbe?.connection === connection {
-                    cancelQueuedIdentityProbeOnQueue(recordFailure: true)
-                    return
-                }
                 guard identityProbeAdmission?.token == admission.token,
                       identityProbeConnection === connection else { return }
                 stopIdentityProbeAdmissionTimeoutOnQueue()
@@ -2634,64 +2637,6 @@ final class BoothNetworkTransportRuntime: @unchecked Sendable {
         let lane: AdmissionLane = admission.isIdentityProbe ? .identityProbe : .normal
         startTrustedHandshakeOnQueue(connection: connection, admission: admission, lane: lane)
         connection.start(queue: queue)
-    }
-
-    private func startQueuedIdentityProbeTimeoutOnQueue(
-        _ queued: QueuedIdentityProbe,
-        timeout: TimeInterval
-    ) {
-        let source = DispatchSource.makeTimerSource(queue: queue)
-        source.schedule(deadline: .now() + timeout)
-        source.setEventHandler { [weak self, weak queued] in
-            guard let self, let queued,
-                  self.queuedIdentityProbe === queued else { return }
-            self.cancelQueuedIdentityProbeOnQueue(recordFailure: true)
-        }
-        queued.timeout = source
-        source.resume()
-    }
-
-    private func cancelQueuedIdentityProbeOnQueue(recordFailure: Bool) {
-        guard let queued = queuedIdentityProbe else { return }
-        queuedIdentityProbe = nil
-        queued.timeout?.cancel()
-        queued.timeout = nil
-        if recordFailure {
-            admissionLimiter.recordFailure(endpointKey: queued.admission.endpointKey)
-            admissionLimiter.recordIdentityProbeAttemptFailure()
-        }
-        queued.connection.cancel()
-    }
-
-    private func promoteQueuedIdentityProbeOnQueue() {
-        guard identityProbeConnection == nil,
-              identityProbeAdmission == nil,
-              !activeControlAuthenticated,
-              let queued = queuedIdentityProbe else { return }
-        queuedIdentityProbe = nil
-        queued.timeout?.cancel()
-        queued.timeout = nil
-        identityProbeAdmission = queued.admission
-        identityProbeConnection = queued.connection
-        startIdentityProbeAdmissionTimeoutOnQueue(
-            connection: queued.connection,
-            admission: queued.admission,
-            timeout: 5
-        )
-        if localIdentity != nil {
-            startAdmittedInboundConnectionOnQueue(queued.connection, admission: queued.admission)
-        } else {
-            queued.connection.stateUpdateHandler = { [weak self, weak connection = queued.connection] state in
-                guard let self, let connection else { return }
-                switch state {
-                case .failed, .cancelled:
-                    self.controlConnectionEnded(connection)
-                default:
-                    break
-                }
-            }
-            queued.connection.start(queue: queue)
-        }
     }
 
     func controlConnectionEnded(_ connection: NWConnection, generation: Int? = nil) {

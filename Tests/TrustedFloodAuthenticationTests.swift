@@ -1,4 +1,5 @@
 import Foundation
+import Darwin
 import Network
 import Testing
 
@@ -6,14 +7,15 @@ import Testing
 
 @Suite("Trusted control authentication under finite flood")
 struct TrustedFloodAuthenticationTests {
-    @Test("fresh runtime authenticates stored-secret peer after finite flood without endpoint history")
+    @Test("fresh runtime authenticates stored-secret peer after finite flood from a new IPv4 address")
     func freshRuntimeAuthenticatesAfterFiniteHostileFloodWithoutEndpointHistory() async throws {
         let macQueue = DispatchQueue(label: "PRC-PhotoBooth.Tests.TrustedFloodFresh.Mac")
         let iPadQueue = DispatchQueue(label: "PRC-PhotoBooth.Tests.TrustedFloodFresh.iPad")
         let hostileQueue = DispatchQueue(label: "PRC-PhotoBooth.Tests.TrustedFloodFresh.Hostiles")
+        let trustedAddress = try #require(nonLoopbackEthernetIPv4Address())
         let trustedParameters = NWParameters.tcp
         trustedParameters.requiredLocalEndpoint = .hostPort(
-            host: NWEndpoint.Host("127.0.0.1"),
+            host: NWEndpoint.Host(trustedAddress),
             port: .any
         )
         let macRuntime = BoothNetworkTransportRuntime(
@@ -117,8 +119,8 @@ struct TrustedFloodAuthenticationTests {
         let hostileConnectionBaseline = macRuntime.inboundControlConnectionCount()
 
         // Open 100 real TCP sockets from distinct ephemeral source ports and
-        // leave them before protocol Hello. The runtime admits only its
-        // normal candidate, probe, and FIFO waiter.
+        // leave them before protocol Hello. The runtime admits one normal
+        // candidate and exactly one independent identity probe.
         for _ in 0..<100 {
             let client = TrustedFloodLoopbackClient(port: port)
             hostileClients.append(client)
@@ -138,8 +140,7 @@ struct TrustedFloodAuthenticationTests {
             macRuntime,
             expected: .init(
                 normalCandidatePresent: true,
-                identityProbePresent: true,
-                queuedIdentityProbePresent: true
+                identityProbePresent: true
             ),
             timeout: 3
         )
@@ -147,37 +148,129 @@ struct TrustedFloodAuthenticationTests {
         #expect(saturatedLanes)
         #expect(laneSnapshot.normalCandidatePresent)
         #expect(laneSnapshot.identityProbePresent)
-        #expect(laneSnapshot.queuedIdentityProbePresent)
 
         #expect(macRuntime.identityProbeCooldownIsActive())
-        let floodLanesReleased = await waitForLanes(
-            macRuntime,
-            expected: .init(
-                normalCandidatePresent: false,
-                identityProbePresent: false,
-                queuedIdentityProbePresent: false
-            ),
-            timeout: 15
-        )
-        #expect(floodLanesReleased, "Queue-owned deadlines did not release the finite hostile flood slots.")
-        #expect(macRuntime.identityProbeCooldownIsActive())
-
-        // The Mac runtime has no endpoint history, the finite flood sockets
-        // are still open, and the probe cooldown remains active. The trusted
-        // peer must prove its stored secret from this new source port.
+        // Retry while the flood's candidates still occupy the normal and probe
+        // lanes. Their queue-owned deadlines must release the probe opportunity
+        // without MainActor help, then the changed-address peer must prove its
+        // stored secret before the hostile clients are closed.
         iPadRuntime.startTrustedControlConnection(
-            endpoint: .hostPort(host: "127.0.0.1", port: port),
+            endpoint: .hostPort(host: NWEndpoint.Host(trustedAddress), port: port),
             parameters: trustedParameters,
             interface: .wifi,
             provenance: .localNetworkBonjour,
             generation: 1002
         )
 
+        let trustedConnectionReachedListener = await waitForInboundConnections(
+            macRuntime,
+            expected: hostileConnectionBaseline + 101,
+            timeout: 5
+        )
+        #expect(trustedConnectionReachedListener)
         #expect(await iPadEvents.waitForAuthenticationCount(1, timeout: 15))
         #expect(await macEvents.waitForAuthenticationCount(1, timeout: 3))
+        #expect(macEvents.authenticatedEndpointDescriptions.contains { $0.contains(trustedAddress) })
         hostileClients.forEach { $0.cancel() }
         #expect(spoofEvents.authenticationCount == 0)
         #expect(iPadEvents.authenticationCount == 1)
+        #expect(macEvents.authenticationCount == 1)
+    }
+
+    @Test("trusted new-address HMAC uses probe lane while anonymous control slot is occupied")
+    func trustedNewAddressAuthenticatesBesideAnonymousControlCandidate() async throws {
+        let macQueue = DispatchQueue(label: "PRC-PhotoBooth.Tests.OccupiedSlot.Mac")
+        let iPadQueue = DispatchQueue(label: "PRC-PhotoBooth.Tests.OccupiedSlot.iPad")
+        let hostileQueue = DispatchQueue(label: "PRC-PhotoBooth.Tests.OccupiedSlot.Hostile")
+        let trustedAddress = try #require(nonLoopbackEthernetIPv4Address())
+        let macRuntime = BoothNetworkTransportRuntime(
+            queue: macQueue,
+            admissionLimiter: BoothPreAuthAdmissionLimiter(globalFailureThreshold: 1)
+        )
+        let iPadRuntime = BoothNetworkTransportRuntime(queue: iPadQueue)
+        let macIdentity = BoothDeviceIdentity(id: UUID().uuidString, displayName: "Occupied Slot Mac", role: .mac)
+        let iPadIdentity = BoothDeviceIdentity(id: UUID().uuidString, displayName: "Trusted New Address iPad", role: .iPad)
+        let secret = Data(repeating: 0x76, count: 32)
+        let macSecureChannel = BoothSecureChannel()
+        let iPadSecureChannel = BoothSecureChannel()
+        let macWriter = BoothControlWritePump(queue: macQueue, secureChannel: macSecureChannel)
+        let iPadWriter = BoothControlWritePump(queue: iPadQueue, secureChannel: iPadSecureChannel)
+        let macEvents = TrustedFloodObserver()
+        let iPadEvents = TrustedFloodObserver()
+        macRuntime.configureControlCore(
+            localIdentity: macIdentity,
+            networkPreference: .wifi,
+            trustedSecrets: [iPadIdentity.id: secret],
+            selectedPeerID: iPadIdentity.id,
+            secureChannel: macSecureChannel,
+            writer: macWriter
+        ) { [weak macEvents] event in macEvents?.receive(event) }
+        iPadRuntime.configureControlCore(
+            localIdentity: iPadIdentity,
+            networkPreference: .wifi,
+            trustedSecrets: [macIdentity.id: secret],
+            selectedPeerID: macIdentity.id,
+            secureChannel: iPadSecureChannel,
+            writer: iPadWriter
+        ) { [weak iPadEvents] event in iPadEvents?.receive(event) }
+        _ = macRuntime.startControlListener(
+            using: .tcp,
+            port: nil,
+            service: NWListener.Service(
+                name: BoothBonjourServiceIdentity.serviceName(channel: .control, deviceID: macIdentity.id),
+                type: "_prc-control._tcp",
+                txtRecord: NWTXTRecord(["deviceID": macIdentity.id])
+            )
+        )
+        let port = try #require(await macEvents.waitForListener())
+        let anonymousClient = TrustedFloodLoopbackClient(port: port)
+        defer {
+            anonymousClient.cancel()
+            iPadRuntime.stopControlCore()
+            macRuntime.stopControlCore()
+            iPadWriter.invalidate(generation: Int.max)
+            macWriter.invalidate(generation: Int.max)
+        }
+
+        anonymousClient.start(on: hostileQueue)
+        #expect(await waitForInboundConnections(macRuntime, expected: 1, timeout: 3))
+        #expect(await waitForLanes(
+            macRuntime,
+            expected: .init(
+                normalCandidatePresent: true,
+                identityProbePresent: false
+            ),
+            timeout: 3
+        ))
+
+        // Force the global anonymous limiter over its threshold while the real
+        // listener's normal candidate still occupies the control slot.
+        let failedProbe = NWConnection(
+            to: .hostPort(host: "192.0.2.77", port: NWEndpoint.Port(rawValue: 54_321)!),
+            using: .tcp
+        )
+        let admission = try #require(macRuntime.admitInboundControlConnection(failedProbe).admission)
+        #expect(admission.isIdentityProbe)
+        macRuntime.abandonInboundControlAdmission(admission, connection: failedProbe)
+        #expect(macRuntime.admissionLaneSnapshot().normalCandidatePresent)
+        #expect(!macRuntime.admissionLaneSnapshot().identityProbePresent)
+
+        let trustedParameters = NWParameters.tcp
+        trustedParameters.requiredLocalEndpoint = .hostPort(
+            host: NWEndpoint.Host(trustedAddress),
+            port: .any
+        )
+        iPadRuntime.startTrustedControlConnection(
+            endpoint: .hostPort(host: NWEndpoint.Host(trustedAddress), port: port),
+            parameters: trustedParameters,
+            interface: .wifi,
+            provenance: .localNetworkBonjour,
+            generation: 2001
+        )
+
+        #expect(await iPadEvents.waitForAuthenticationCount(1, timeout: 5))
+        #expect(await macEvents.waitForAuthenticationCount(1, timeout: 3))
+        #expect(macEvents.authenticatedEndpointDescriptions.contains { $0.contains(trustedAddress) })
         #expect(macEvents.authenticationCount == 1)
     }
 
@@ -208,6 +301,32 @@ struct TrustedFloodAuthenticationTests {
         }
         return runtime.inboundControlConnectionCount() >= expected
     }
+
+    private func nonLoopbackEthernetIPv4Address() -> String? {
+        var interfaces: UnsafeMutablePointer<ifaddrs>?
+        guard getifaddrs(&interfaces) == 0, let firstInterface = interfaces else { return nil }
+        defer { freeifaddrs(interfaces) }
+
+        var current: UnsafeMutablePointer<ifaddrs>? = firstInterface
+        while let interface = current {
+            let entry = interface.pointee
+            if let name = entry.ifa_name,
+               String(cString: name).hasPrefix("en"),
+               entry.ifa_flags & UInt32(IFF_UP) != 0,
+               let socketAddress = entry.ifa_addr,
+               socketAddress.pointee.sa_family == UInt8(AF_INET) {
+                var address = UnsafeRawPointer(socketAddress)
+                    .assumingMemoryBound(to: sockaddr_in.self).pointee.sin_addr
+                var buffer = [CChar](repeating: 0, count: Int(INET_ADDRSTRLEN))
+                if inet_ntop(AF_INET, &address, &buffer, socklen_t(INET_ADDRSTRLEN)) != nil {
+                    let host = String(decoding: buffer.prefix { $0 != 0 }.map(UInt8.init(bitPattern:)), as: UTF8.self)
+                    if !host.hasPrefix("169.254.") { return host }
+                }
+            }
+            current = entry.ifa_next
+        }
+        return nil
+    }
 }
 
 private final class TrustedFloodObserver: @unchecked Sendable {
@@ -217,18 +336,20 @@ private final class TrustedFloodObserver: @unchecked Sendable {
     private let rejectionChanged = DispatchSemaphore(value: 0)
     private var listenerPort: NWEndpoint.Port?
     private var authenticationGenerations: [Int] = []
+    private var authenticatedEndpoints: [String] = []
     private var rejectionReasons: [String] = []
 
     func receive(_ event: BoothNetworkTransportRuntime.ControlCoreEvent) {
         switch event {
-        case .listenerReady(_, let port):
+        case .listenerReady(_, let port, _):
             lock.lock()
             listenerPort = port
             lock.unlock()
             listenerReady.signal()
-        case .trustedAuthenticated(let generation, _, _, _, _, _, _, _):
+        case .trustedAuthenticated(let generation, let endpointDescription, _, _, _, _, _, _):
             lock.lock()
             authenticationGenerations.append(generation)
+            authenticatedEndpoints.append(endpointDescription)
             lock.unlock()
             authenticationChanged.signal()
         case .rejected(_, let reason):
@@ -293,6 +414,12 @@ private final class TrustedFloodObserver: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         return authenticationGenerations.count
+    }
+
+    var authenticatedEndpointDescriptions: [String] {
+        lock.lock()
+        defer { lock.unlock() }
+        return authenticatedEndpoints
     }
 }
 
