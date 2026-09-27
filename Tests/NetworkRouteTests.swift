@@ -108,6 +108,63 @@ private final class ControlCoreOverflowTestObserver: @unchecked Sendable {
     }
 }
 
+/// The test waiter and Network.framework callback share `serviceNames`; the
+/// condition guards every access. Browser callbacks stay on the supplied queue.
+private final class BonjourRouteObserver: @unchecked Sendable {
+    private let changed = NSCondition()
+    private let browser: NWBrowser
+    private let targetDeviceID: String
+    private var serviceNames = Set<String>()
+
+    init(targetDeviceID: String, queue: DispatchQueue) {
+        self.targetDeviceID = targetDeviceID
+        let parameters = NWParameters.tcp
+        parameters.includePeerToPeer = true
+        browser = NWBrowser(
+            for: .bonjourWithTXTRecord(type: "_prc-control._tcp", domain: nil),
+            using: parameters
+        )
+        browser.browseResultsChangedHandler = { [weak self] results, _ in
+            self?.record(results)
+        }
+        browser.start(queue: queue)
+    }
+
+    func waitForRoutes(
+        containing requiredName: String,
+        excluding excludedName: String,
+        timeout: TimeInterval
+    ) -> Bool {
+        let deadline = Date(timeIntervalSinceNow: timeout)
+        changed.lock()
+        defer { changed.unlock() }
+        while !serviceNames.contains(requiredName) || serviceNames.contains(excludedName) {
+            guard changed.wait(until: deadline) else { return false }
+        }
+        return true
+    }
+
+    func cancel() {
+        browser.cancel()
+    }
+
+    private func record(_ results: Set<NWBrowser.Result>) {
+        let names = Set(results.compactMap { result -> String? in
+            guard case let .service(name, _, _, _) = result.endpoint,
+                  BoothBonjourServiceIdentity.parse(name)?.deviceID == targetDeviceID,
+                  case let .bonjour(record) = result.metadata,
+                  record["deviceID"] == targetDeviceID else {
+                return nil
+            }
+            return name
+        })
+        changed.lock()
+        serviceNames = names
+        changed.broadcast()
+        changed.unlock()
+    }
+}
+
 private enum ControlStressError: Error {
     case connectionCancelled
     case connectionClosed
@@ -1473,8 +1530,17 @@ struct NetworkRouteTests {
         iPadRuntime.onReconnectDue = { [weak reconnectEvents] _, _ in
             reconnectEvents?.markReconnectDue()
         }
+        let staleServiceName = BoothBonjourServiceIdentity.serviceName(
+            channel: .control,
+            deviceID: macIdentity.id
+        )
+        let replacementServiceName = "\(staleServiceName) (2)"
+        #expect(
+            BoothBonjourServiceIdentity.parse(replacementServiceName)
+                == BoothBonjourServiceIdentity(channel: .control, deviceID: macIdentity.id)
+        )
         let service = NWListener.Service(
-            name: BoothBonjourServiceIdentity.serviceName(channel: .control, deviceID: macIdentity.id),
+            name: staleServiceName,
             type: "_prc-control._tcp",
             txtRecord: NWTXTRecord([
                 "deviceID": macIdentity.id,
@@ -1483,9 +1549,19 @@ struct NetworkRouteTests {
                 "protocolVersion": String(BoothTransportHello.currentProtocolVersion)
             ])
         )
-        _ = macRuntime.startControlListener(using: .tcp, port: nil, service: service)
-        let stalePort = try #require(macEvents.waitForListener())
-
+        // The identity parser accepts Bonjour's collision suffix. A distinct
+        // instance name lets the replacement register while the old listener
+        // is still winding down.
+        let replacementService = NWListener.Service(
+            name: replacementServiceName,
+            type: "_prc-control._tcp",
+            txtRecord: NWTXTRecord([
+                "deviceID": macIdentity.id,
+                "network": BoothNetworkPreference.wifi.rawValue,
+                "role": DeviceRole.mac.rawValue,
+                "protocolVersion": String(BoothTransportHello.currentProtocolVersion)
+            ])
+        )
         let mainEntered = DispatchSemaphore(value: 0)
         let releaseMain = DispatchSemaphore(value: 0)
         defer {
@@ -1497,6 +1573,44 @@ struct NetworkRouteTests {
             macWriter.invalidate(generation: Int.max)
             replacementMacWriter.invalidate(generation: Int.max)
         }
+        let staleListener = try NWListener(using: .tcp)
+        var staleListenerCancelledByTest = false
+        defer {
+            if !staleListenerCancelledByTest {
+                staleListener.cancel()
+            }
+        }
+        let staleListenerReady = DispatchSemaphore(value: 0)
+        let staleListenerCancelled = DispatchSemaphore(value: 0)
+        let routeObserver = BonjourRouteObserver(
+            targetDeviceID: macIdentity.id,
+            queue: DispatchQueue(label: "PRC-PhotoBooth.Tests.RouteRefresh.Bonjour", qos: .userInitiated)
+        )
+        defer { routeObserver.cancel() }
+        let replacementListener = try NWListener(using: .tcp)
+        defer { replacementListener.cancel() }
+        let replacementListenerReady = DispatchSemaphore(value: 0)
+        let replacementServiceRegistered = DispatchSemaphore(value: 0)
+        staleListener.service = service
+        staleListener.stateUpdateHandler = { state in
+            switch state {
+            case .ready: staleListenerReady.signal()
+            case .cancelled: staleListenerCancelled.signal()
+            default: break
+            }
+        }
+        staleListener.newConnectionHandler = { connection in
+            _ = macRuntime.startInboundControlConnection(connection)
+        }
+        staleListener.start(queue: macQueue)
+        #expect(waitForSemaphore(staleListenerReady, timeout: 5))
+        let stalePort = try #require(staleListener.port)
+        #expect(routeObserver.waitForRoutes(
+            containing: staleServiceName,
+            excluding: replacementServiceName,
+            timeout: 5
+        ))
+
         iPadRuntime.startTrustedControlConnection(
             endpoint: .hostPort(host: "127.0.0.1", port: stalePort),
             parameters: .tcp,
@@ -1507,19 +1621,7 @@ struct NetworkRouteTests {
         #expect(await iPadEvents.waitForAuthenticationCount(1, timeout: 5))
         #expect(await macEvents.waitForAuthenticationCount(1, timeout: 3))
 
-        DispatchQueue.main.async {
-            mainEntered.signal()
-            releaseMain.wait()
-        }
-        #expect(waitForSemaphore(mainEntered))
-        let stallStarted = Date()
-        macRuntime.stopControlCore()
-        #expect(await iPadEvents.waitForDisconnectedCount(1, timeout: 5))
-        iPadRuntime.cancelReconnect()
-        let replacementListener = try NWListener(using: .tcp)
-        let replacementListenerReady = DispatchSemaphore(value: 0)
-        let replacementServiceRegistered = DispatchSemaphore(value: 0)
-        replacementListener.service = service
+        replacementListener.service = replacementService
         replacementListener.stateUpdateHandler = { state in
             if case .ready = state { replacementListenerReady.signal() }
         }
@@ -1530,7 +1632,6 @@ struct NetworkRouteTests {
             _ = replacementMacRuntime.startInboundControlConnection(connection)
         }
         replacementListener.start(queue: replacementMacQueue)
-        defer { replacementListener.cancel() }
         #expect(waitForSemaphore(replacementListenerReady, timeout: 5))
         let replacementPort = try #require(replacementListener.port)
         #expect(
@@ -1538,9 +1639,32 @@ struct NetworkRouteTests {
             "The replacement listener became ready before Bonjour registration completed."
         )
         #expect(stalePort != replacementPort)
+
+        DispatchQueue.main.async {
+            mainEntered.signal()
+            releaseMain.wait()
+        }
+        #expect(waitForSemaphore(mainEntered))
+        let stallStarted = Date()
+        macRuntime.stopControlCore()
+        #expect(await iPadEvents.waitForDisconnectedCount(1, timeout: 5))
+        iPadRuntime.cancelReconnect()
+        staleListener.cancel()
+        staleListenerCancelledByTest = true
+        #expect(
+            waitForSemaphore(staleListenerCancelled, timeout: 5),
+            "The old listener did not stop before cached-route recovery began."
+        )
+        #expect(routeObserver.waitForRoutes(
+            containing: replacementServiceName,
+            excluding: staleServiceName,
+            timeout: 5
+        ), "Bonjour still advertised the stale route when reconnection began.")
+        // Enter at the exhausted retry boundary; timer and per-attempt retry
+        // behavior have separate tests, while this case covers route refresh.
         #expect(iPadRuntime.scheduleReconnect(after: 0.05, attempt: 6, generation: 981))
 
-        let authenticatedDuringStall = await iPadEvents.waitForAuthenticationCount(2, timeout: 9)
+        let authenticatedDuringStall = await iPadEvents.waitForAuthenticationCount(2, timeout: 11)
         let authenticatedAt = Date()
         if authenticatedAt.timeIntervalSince(stallStarted) < 12 {
             try await Task.sleep(for: .seconds(12 - authenticatedAt.timeIntervalSince(stallStarted)))
