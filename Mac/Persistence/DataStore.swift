@@ -17,6 +17,9 @@ final class DataStore {
         do {
             container = try ModelContainer(for: schema, configurations: config)
         } catch {
+            guard !isStoredInMemoryOnly else {
+                fatalError("SwiftData in-memory test store failed: \(error)")
+            }
             // Schema changed — preserve the old store before starting fresh.
             let base = config.url.deletingPathExtension()
             let backup = base.deletingLastPathComponent()
