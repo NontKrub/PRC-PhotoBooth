@@ -1,0 +1,13 @@
+2026-09-26T11:53:56.128Z dispatch ready-1 opened: leaf-1.1.1, leaf-1.1.2, leaf-1.2.1
+2026-09-26T11:54:31.654Z dispatch ready-1 started leaf-1.1.1 as /root/impl_cloud_route
+2026-09-26T11:54:31.761Z dispatch ready-1 started leaf-1.1.2 as /root/impl_data_isolation
+2026-09-26T11:54:31.888Z dispatch ready-1 started leaf-1.2.1 as /root/impl_transport_core
+2026-09-26T11:54:32.028Z dispatch ready-1 sealed
+2026-09-26T11:57:29.961Z dispatch ready-1 returned leaf-1.2.1
+leaf-1.2.1 returned design handoff; no edits were made
+2026-09-26T11:58:45.512Z dispatch ready-2 opened: leaf-1.2.1
+2026-09-26T11:58:45.647Z dispatch ready-2 started leaf-1.2.1 as /root/impl_transport_core
+2026-09-26T11:58:45.776Z dispatch ready-2 sealed
+2026-09-26T12:00:38.616Z dispatch ready-1 returned leaf-1.1.1
+2026-09-26T12:00:38.940Z dispatch ready-1 returned leaf-1.1.2
+ready-1 leaves returned; cloud and data changes await parent tests; transport returned without edits

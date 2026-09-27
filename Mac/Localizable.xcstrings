@@ -62,6 +62,38 @@
         }
       }
     },
+    "%@ · Run %@ · Cycle %@" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "%1$@ · Run %2$@ · Cycle %3$@"
+          }
+        },
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%1$@ · รัน %2$@ · รอบ %3$@"
+          }
+        }
+      }
+    },
+    "%@ cycles × %@ photos = %@ camera captures." : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "%1$@ cycles × %2$@ photos = %3$@ camera captures."
+          }
+        },
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%1$@ รอบ × %2$@ ภาพ = %3$@ ภาพที่บันทึกจากกล้อง"
+          }
+        }
+      }
+    },
     "%@ Elements Selected" : {
       "extractionState" : "manual",
       "localizations" : {
@@ -150,6 +182,22 @@
         }
       }
     },
+    "%@ sessions × %@ photos = %@ camera captures." : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "%1$@ sessions × %2$@ photos = %3$@ camera captures."
+          }
+        },
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%1$@ เซสชัน × %2$@ ภาพ = %3$@ ภาพที่บันทึกจากกล้อง"
+          }
+        }
+      }
+    },
     "%@ slots · %@ capture indexes" : {
       "extractionState" : "stale",
       "localizations" : {
@@ -157,6 +205,16 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "%1$@ ช่อง · ดัชนีภาพ %2$@"
+          }
+        }
+      }
+    },
+    "%@ synthetic benchmark cycles; no camera captures." : {
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%1$@ รอบการทดสอบจำลอง โดยไม่มีการถ่ายภาพจากกล้อง"
           }
         }
       }
@@ -235,6 +293,16 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "0° (ค่าเริ่มต้น)"
+          }
+        }
+      }
+    },
+    "1 (Single-cycle check)" : {
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "1 (ตรวจสอบรอบเดียว)"
           }
         }
       }
@@ -1170,6 +1238,22 @@
         }
       }
     },
+    "Camera shutters: %@ succeeded / %@ attempted" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Camera shutters: %1$@ succeeded / %2$@ attempted"
+          }
+        },
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ชัตเตอร์กล้อง: สำเร็จ %1$@ / พยายาม %2$@ ครั้ง"
+          }
+        }
+      }
+    },
     "Camera Source" : {
       "extractionState" : "manual",
       "localizations" : {
@@ -1409,6 +1493,16 @@
         }
       }
     },
+    "Cleanup: %@" : {
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ล้างข้อมูล: %1$@"
+          }
+        }
+      }
+    },
     "Clear Selection" : {
       "extractionState" : "manual",
       "localizations" : {
@@ -1459,6 +1553,17 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "การตั้งค่า Cloud SSH ยังไม่เสร็จสมบูรณ์"
+          }
+        }
+      }
+    },
+    "Cloud" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "คลาวด์"
           }
         }
       }
@@ -2019,6 +2124,16 @@
         }
       }
     },
+    "Custom…" : {
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "กำหนดเอง…"
+          }
+        }
+      }
+    },
     "Customer display" : {
       "extractionState" : "manual",
       "localizations" : {
@@ -2042,6 +2157,7 @@
       }
     },
     "Cycle %@ of %@" : {
+      "extractionState" : "stale",
       "localizations" : {
         "en" : {
           "stringUnit" : {
@@ -2053,6 +2169,16 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "รอบที่ %@ จาก %@"
+          }
+        }
+      }
+    },
+    "cycles" : {
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "รอบ"
           }
         }
       }
@@ -2274,6 +2400,17 @@
         }
       }
     },
+    "Display" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "หน้าจอ"
+          }
+        }
+      }
+    },
     "Do not remove these files manually. Cleanup will retry after background work stops." : {
       "extractionState" : "manual",
       "localizations" : {
@@ -2391,6 +2528,7 @@
       }
     },
     "Each production cycle performs a real upload. Review the configured destination and credentials before enabling." : {
+      "extractionState" : "stale",
       "localizations" : {
         "th" : {
           "stringUnit" : {
@@ -2615,6 +2753,16 @@
         }
       }
     },
+    "Estimated new output: about %@; estimate uses 10 MiB per photo plus 10 MiB per session." : {
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "คาดว่าข้อมูลใหม่ประมาณ %1$@ โดยประเมินจากภาพละ 10 MiB และเซสชันละ 10 MiB"
+          }
+        }
+      }
+    },
     "Ethernet has not been confirmed by the system. Retry performs a direct wired connection attempt." : {
       "extractionState" : "stale",
       "localizations" : {
@@ -2763,6 +2911,17 @@
         }
       }
     },
+    "Event Readiness" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ความพร้อมสำหรับอีเวนต์"
+          }
+        }
+      }
+    },
     "Event Setup" : {
       "extractionState" : "manual",
       "localizations" : {
@@ -2803,6 +2962,16 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "จำนวนงานที่ทำ"
+          }
+        }
+      }
+    },
+    "Expected workload" : {
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ปริมาณงานที่คาดไว้"
           }
         }
       }
@@ -3182,6 +3351,17 @@
         }
       }
     },
+    "General" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ทั่วไป"
+          }
+        }
+      }
+    },
     "Global booth guest-delivery setting" : {
       "localizations" : {
         "th" : {
@@ -3505,6 +3685,17 @@
         }
       }
     },
+    "iPad & Network" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "iPad และเครือข่าย"
+          }
+        }
+      }
+    },
     "iPad connected: %@" : {
       "extractionState" : "manual",
       "localizations" : {
@@ -3555,6 +3746,17 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "ISO"
+          }
+        }
+      }
+    },
+    "Invalid control frame. Reconnecting…" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ข้อมูลควบคุมไม่ถูกต้อง กำลังเชื่อมต่อใหม่…"
           }
         }
       }
@@ -4948,6 +5150,17 @@
         }
       }
     },
+    "Photo count is unavailable until the active event template finishes loading." : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "จำนวนภาพจะยังไม่พร้อมใช้งานจนกว่าเทมเพลตกิจกรรมที่ใช้งานอยู่จะโหลดเสร็จ"
+          }
+        }
+      }
+    },
     "Photo count, canvas, and at least one slot are required." : {
       "extractionState" : "manual",
       "localizations" : {
@@ -5009,6 +5222,16 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "รูปภาพ: %1$@"
+          }
+        }
+      }
+    },
+    "Physical print jobs: up to %@." : {
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "งานพิมพ์จริง: สูงสุด %1$@"
           }
         }
       }
@@ -6166,6 +6389,28 @@
         }
       }
     },
+    "Secure connection failed. Reconnecting…" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "การเชื่อมต่อที่ปลอดภัยล้มเหลว กำลังเชื่อมต่อใหม่…"
+          }
+        }
+      }
+    },
+    "Security" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ความปลอดภัย"
+          }
+        }
+      }
+    },
     "Select" : {
       "extractionState" : "manual",
       "localizations" : {
@@ -6331,6 +6576,16 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "ผู้ใช้เซิร์ฟเวอร์"
+          }
+        }
+      }
+    },
+    "Session %@" : {
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "เซสชัน %1$@"
           }
         }
       }
@@ -6534,6 +6789,16 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "แสดงหน้าจอผู้ชม"
+          }
+        }
+      }
+    },
+    "Showing the 5 most recent of %@ retained sessions." : {
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "แสดงเซสชันล่าสุด 5 รายการจากทั้งหมด %1$@ รายการที่เก็บไว้"
           }
         }
       }
@@ -6964,6 +7229,7 @@
       }
     },
     "Target Cycles:" : {
+      "extractionState" : "stale",
       "localizations" : {
         "th" : {
           "stringUnit" : {
@@ -7247,6 +7513,16 @@
         }
       }
     },
+    "These test sessions are kept for operator review and excluded from production history and public gallery routes." : {
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "เซสชันทดสอบเหล่านี้จะเก็บไว้ให้ผู้ควบคุมตรวจสอบ และไม่รวมในประวัติการใช้งานจริงหรือแกลเลอรีสาธารณะ"
+          }
+        }
+      }
+    },
     "This iPad must be paired again before it can reconnect." : {
       "localizations" : {
         "en" : {
@@ -7296,6 +7572,16 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "การดำเนินการนี้จะส่งคำขอพิมพ์ใหม่และไม่สร้างงานพิมพ์อัตโนมัติถาวรเพิ่ม"
+          }
+        }
+      }
+    },
+    "This test entry is excluded from the public gallery." : {
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "รายการทดสอบนี้จะไม่แสดงในแกลเลอรีสาธารณะ"
           }
         }
       }

@@ -409,6 +409,7 @@ public enum BoothTransportDiagnosticKind: String, Codable, Sendable {
     case routeChanged
     case controlSendFailed
     case controlPayloadRejected
+    case controlFrameDecodeFailed
     case previewDisconnected
     case previewReconnected
     case sessionSyncSent
@@ -1301,6 +1302,16 @@ public enum BoothFrameError: Error, Equatable, Sendable {
     case unknownChannel(UInt8)
     case oversizedPayload(Int)
     case invalidMessage
+
+    var diagnosticName: String {
+        switch self {
+        case .invalidMagic: return "invalidMagic"
+        case .unsupportedVersion: return "unsupportedVersion"
+        case .unknownChannel: return "unknownChannel"
+        case .oversizedPayload: return "oversizedPayload"
+        case .invalidMessage: return "invalidMessage"
+        }
+    }
 }
 
 public struct BoothFrameParser: Sendable {
@@ -1366,6 +1377,51 @@ public struct BoothFrameParser: Sendable {
         return frames
     }
 
+    /// Pulls one complete frame while retaining any following bytes. The
+    /// control protocol uses this to apply a state transition between frames
+    /// that arrived in the same TCP receive.
+    public mutating func appendNext(_ data: Data) throws -> BoothNetworkFrame? {
+        buffer.append(data)
+        guard buffer.count >= Self.headerLength else { return nil }
+
+        let start = buffer.startIndex
+        guard buffer[start] == 0x50,
+              buffer[buffer.index(start, offsetBy: 1)] == 0x52 else {
+            throw BoothFrameError.invalidMagic
+        }
+        let versionIndex = buffer.index(start, offsetBy: 2)
+        guard buffer[versionIndex] == Self.protocolVersion else {
+            throw BoothFrameError.unsupportedVersion(buffer[versionIndex])
+        }
+        let rawChannel = buffer[buffer.index(start, offsetBy: 3)]
+        guard let channel = BoothTransportChannel(rawValue: rawChannel) else {
+            throw BoothFrameError.unknownChannel(rawChannel)
+        }
+        let lengthStart = buffer.index(start, offsetBy: 4)
+        let lengthByte0 = UInt32(buffer[lengthStart])
+        let lengthByte1 = UInt32(buffer[buffer.index(start, offsetBy: 5)])
+        let lengthByte2 = UInt32(buffer[buffer.index(start, offsetBy: 6)])
+        let lengthByte3 = UInt32(buffer[buffer.index(start, offsetBy: 7)])
+        let rawLength = (lengthByte0 << 24)
+            | (lengthByte1 << 16)
+            | (lengthByte2 << 8)
+            | lengthByte3
+        let length = Int(rawLength)
+        guard length <= Self.maximumPayloadLength(for: channel) else {
+            throw BoothFrameError.oversizedPayload(length)
+        }
+        guard buffer.count >= Self.headerLength + length else { return nil }
+
+        let payloadStart = buffer.index(start, offsetBy: Self.headerLength)
+        let payloadEnd = buffer.index(payloadStart, offsetBy: length)
+        let frame = BoothNetworkFrame(
+            channel: channel,
+            payload: Data(buffer[payloadStart..<payloadEnd])
+        )
+        buffer.removeSubrange(start..<payloadEnd)
+        return frame
+    }
+
     public var bufferedByteCount: Int { buffer.count }
 }
 
@@ -1390,6 +1446,40 @@ enum BoothDecodedTransportFrame: Sendable {
     case heartbeat
     case previewHello(Data)
     case preview(Data)
+}
+
+struct BoothControlFrameDecodeFailure: Error, Sendable, Equatable {
+    let timestamp: Date
+    let payloadByteCount: Int
+    let frameByteCount: Int?
+    let bufferedByteCount: Int?
+    let hasSecureEnvelopeMagic: Bool
+    let envelopeVersion: UInt8?
+    let envelopeChannel: UInt8?
+    let plaintextMessageCase: String?
+    let keysPrepared: Bool
+    let operationalChannelEstablished: Bool
+    let decoderPhase: String
+    let errorName: String
+
+    var diagnosticDescription: String {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return [
+            "at=\(formatter.string(from: timestamp))",
+            "payloadBytes=\(payloadByteCount)",
+            "frameBytes=\(frameByteCount.map(String.init) ?? "unknown")",
+            "bufferedBytes=\(bufferedByteCount.map(String.init) ?? "none")",
+            "secureMagic=\(hasSecureEnvelopeMagic ? "yes" : "no")",
+            "envelopeVersion=\(envelopeVersion.map(String.init) ?? "none")",
+            "envelopeChannel=\(envelopeChannel.map(String.init) ?? "none")",
+            "plaintextMessage=\(plaintextMessageCase ?? "unrecognized")",
+            "keysPrepared=\(keysPrepared ? "yes" : "no")",
+            "secureOperational=\(operationalChannelEstablished ? "yes" : "no")",
+            "decoderPhase=\(decoderPhase)",
+            "error=\(errorName)"
+        ].joined(separator: " ")
+    }
 }
 
 /// Network callbacks own this decoder on the transport serial queue. Keeping
@@ -1417,6 +1507,43 @@ final class BoothTransportFrameDecoder: @unchecked Sendable {
         setHandshakeComplete(false, channel: channel)
     }
 
+    /// Decodes one control frame and retains subsequent bytes until the
+    /// protocol owner has handled this message and applied its state change.
+    func decodeNextControl(
+        _ data: Data,
+        secureChannel: BoothSecureChannel? = nil
+    ) throws -> BoothDecodedTransportFrame? {
+        var pendingData = data
+        while true {
+            let frame: BoothNetworkFrame?
+            do {
+                frame = try controlParser.appendNext(pendingData)
+            } catch {
+                throw decodeFailure(
+                    for: Data(),
+                    keysPrepared: secureChannel?.hasPreparedKeys == true,
+                    operational: handshakeComplete[BoothTransportChannel.control.rawValue] == true,
+                    error: error,
+                    bufferedByteCount: controlParser.bufferedByteCount
+                )
+            }
+            guard let frame else { return nil }
+            pendingData = Data()
+            guard frame.channel == .control else {
+                if frame.channel == .heartbeat {
+                    throw decodeFailure(
+                        for: frame.payload,
+                        keysPrepared: secureChannel?.hasPreparedKeys == true,
+                        operational: handshakeComplete[BoothTransportChannel.control.rawValue] == true,
+                        error: BoothFrameError.invalidMessage
+                    )
+                }
+                continue
+            }
+            return try decodeControlFrame(frame, secureChannel: secureChannel)
+        }
+    }
+
     func decode(
         _ data: Data,
         channel: BoothTransportChannel,
@@ -1434,25 +1561,7 @@ final class BoothTransportFrameDecoder: @unchecked Sendable {
                     || (channel == .control && frame.channel == .heartbeat) else { return nil }
             switch frame.channel {
             case .control:
-                let payload: Data
-                // The bootstrap exemption exists so the handshake itself can
-                // travel before keys exist. Once the channel is established
-                // there is no legitimate plaintext control frame, and honouring
-                // one lets an off-path injector tear the channel down.
-                if let secureChannel, secureChannel.isConfigured,
-                   handshakeComplete[BoothTransportChannel.control.rawValue] != true,
-                   let bootstrap = try? Message.decoded(from: frame.payload),
-                   bootstrap.isSecureChannelBootstrap {
-                    payload = frame.payload
-                } else if let secureChannel, secureChannel.isConfigured {
-                    payload = try secureChannel.open(frame.payload, channel: .control)
-                } else {
-                    payload = frame.payload
-                }
-                guard let message = try? Message.decoded(from: payload) else {
-                    throw BoothFrameError.invalidMessage
-                }
-                return .control(message)
+                return try decodeControlFrame(frame, secureChannel: secureChannel)
             case .asset:
                 guard let secureChannel, secureChannel.isConfigured else {
                     throw BoothSecureChannelError.notReady
@@ -1480,5 +1589,82 @@ final class BoothTransportFrameDecoder: @unchecked Sendable {
                 return .preview(payload)
             }
         }
+    }
+
+    private func decodeControlFrame(
+        _ frame: BoothNetworkFrame,
+        secureChannel: BoothSecureChannel?
+    ) throws -> BoothDecodedTransportFrame {
+        let keysPrepared = secureChannel?.hasPreparedKeys == true
+        let operational = handshakeComplete[BoothTransportChannel.control.rawValue] == true
+        let plaintextMessage = try? Message.decoded(from: frame.payload)
+        let payload: Data
+
+        // Before activation, only secure-channel bootstrap messages may remain
+        // plaintext after keys are prepared. All other controls require a
+        // valid authenticated envelope.
+        if keysPrepared,
+           !operational,
+           let plaintextMessage,
+           plaintextMessage.isSecureChannelBootstrap {
+            payload = frame.payload
+        } else if keysPrepared, let secureChannel {
+            do {
+                payload = try secureChannel.open(frame.payload, channel: .control)
+            } catch {
+                throw decodeFailure(
+                    for: frame.payload,
+                    keysPrepared: keysPrepared,
+                    operational: operational,
+                    error: error
+                )
+            }
+        } else {
+            payload = frame.payload
+        }
+
+        guard let message = try? Message.decoded(from: payload) else {
+            throw decodeFailure(
+                for: frame.payload,
+                keysPrepared: keysPrepared,
+                operational: operational,
+                error: BoothFrameError.invalidMessage
+            )
+        }
+        return .control(message)
+    }
+
+    private func decodeFailure(
+        for payload: Data,
+        keysPrepared: Bool,
+        operational: Bool,
+        error: Error,
+        frameByteCount: Int? = nil,
+        bufferedByteCount: Int? = nil
+    ) -> BoothControlFrameDecodeFailure {
+        let plaintextMessage = try? Message.decoded(from: payload)
+        let phase = operational ? "established" : (keysPrepared ? "secureNegotiation" : "bootstrap")
+        return BoothControlFrameDecodeFailure(
+            timestamp: Date(),
+            payloadByteCount: payload.count,
+            frameByteCount: bufferedByteCount == nil ? frameByteCount ?? payload.count + 8 : frameByteCount,
+            bufferedByteCount: bufferedByteCount,
+            hasSecureEnvelopeMagic: payload.count >= 2
+                && payload[payload.startIndex] == 0x53
+                && payload[payload.index(payload.startIndex, offsetBy: 1)] == 0x43,
+            envelopeVersion: payload.count > 2 ? payload[payload.index(payload.startIndex, offsetBy: 2)] : nil,
+            envelopeChannel: payload.count > 3 ? payload[payload.index(payload.startIndex, offsetBy: 3)] : nil,
+            plaintextMessageCase: plaintextMessage?.diagnosticCaseName,
+            keysPrepared: keysPrepared,
+            operationalChannelEstablished: operational,
+            decoderPhase: phase,
+            errorName: Self.diagnosticName(for: error)
+        )
+    }
+
+    private static func diagnosticName(for error: Error) -> String {
+        if let error = error as? BoothSecureChannelError { return error.diagnosticName }
+        if let error = error as? BoothFrameError { return error.diagnosticName }
+        return "unexpectedError"
     }
 }

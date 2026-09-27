@@ -850,6 +850,70 @@ private final class NetworkTestConnectionBox: @unchecked Sendable {
     }
 }
 
+/// Captures only message case names from a loopback socket; payload fields stay
+/// in the parser and are never retained for assertions or diagnostic output.
+private final class ControlMessageCaseCapture: @unchecked Sendable {
+    private let lock = NSLock()
+    private let changed = DispatchSemaphore(value: 0)
+    private let closed = DispatchSemaphore(value: 0)
+    private var parser = BoothFrameParser()
+    private var cases: [String] = []
+    private var isClosed = false
+
+    func receive(from connection: NWConnection) {
+        connection.receive(minimumIncompleteLength: 1, maximumLength: 64 * 1024) { [weak self, weak connection] data, _, isComplete, error in
+            guard let self, let connection else { return }
+            if let data, !data.isEmpty,
+               let frames = try? self.parser.append(data) {
+                let names = frames.compactMap { frame in
+                    try? Message.decoded(from: frame.payload).diagnosticCaseName
+                }
+                if !names.isEmpty {
+                    self.lock.lock()
+                    self.cases.append(contentsOf: names)
+                    self.lock.unlock()
+                    names.forEach { _ in self.changed.signal() }
+                }
+            }
+            if isComplete || error != nil {
+                self.lock.lock()
+                self.isClosed = true
+                self.lock.unlock()
+                self.changed.signal()
+                self.closed.signal()
+            } else {
+                self.receive(from: connection)
+            }
+        }
+    }
+
+    func waitForCase(_ expected: String, timeout: TimeInterval = 5) -> Bool {
+        let deadline = DispatchTime.now() + timeout
+        while true {
+            lock.lock()
+            let found = cases.contains(expected)
+            let closed = isClosed
+            lock.unlock()
+            if found { return true }
+            if closed { return false }
+            guard changed.wait(timeout: deadline) == .success else { return false }
+        }
+    }
+
+    func waitUntilClosed(timeout: TimeInterval = 5) -> Bool {
+        lock.lock()
+        let alreadyClosed = isClosed
+        lock.unlock()
+        return alreadyClosed || closed.wait(timeout: .now() + timeout) == .success
+    }
+
+    func contains(_ expected: String) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return cases.contains(expected)
+    }
+}
+
 /// Test observer with all shared mutable state protected by `lock`.
 private final class TrustedCoreTestObserver: @unchecked Sendable {
     private let lock = NSLock()
@@ -858,15 +922,19 @@ private final class TrustedCoreTestObserver: @unchecked Sendable {
     private let disconnected = DispatchSemaphore(value: 0)
     private let rejected = DispatchSemaphore(value: 0)
     private let controlMessageReceived = DispatchSemaphore(value: 0)
+    private let heartbeatReceived = DispatchSemaphore(value: 0)
     private let pairingVerificationRequired = DispatchSemaphore(value: 0)
     private let pairingSessionConsumed = DispatchSemaphore(value: 0)
     private let pairingIntentReceived = DispatchSemaphore(value: 0)
     private var portValue: NWEndpoint.Port?
     private var authenticatedGenerations: [Int] = []
     private var authenticatedInterfaces: [BoothNetworkInterfacePolicy?] = []
+    private var authenticatedSessionIDs: [String] = []
     private var disconnectedGenerations: [Int] = []
     private var rejectionReasons: [String] = []
+    private var controlFrameFailureSummaries: [String] = []
     private var controlMessages: [Message] = []
+    private var heartbeatCountValue = 0
     private var pairingVerificationSnapshot: BoothNetworkTransportRuntime.PairingVerificationSnapshot?
     private var pairingSessionConsumptions: [BoothNetworkTransportRuntime.PairingSessionConsumption] = []
     private var pairingIntentCandidates: [(BoothNetworkTransportRuntime.PairingCandidate, BoothPairingIntent)] = []
@@ -878,10 +946,11 @@ private final class TrustedCoreTestObserver: @unchecked Sendable {
             portValue = port
             lock.unlock()
             listenerReady.signal()
-        case .trustedAuthenticated(let generation, _, _, _, _, let interface, _, _):
+        case .trustedAuthenticated(let generation, _, _, let localHello, _, let interface, _, _):
             lock.lock()
             authenticatedGenerations.append(generation)
             authenticatedInterfaces.append(interface)
+            authenticatedSessionIDs.append(localHello.sessionID)
             lock.unlock()
             authenticated.signal()
         case .disconnected(let generation, _):
@@ -894,11 +963,16 @@ private final class TrustedCoreTestObserver: @unchecked Sendable {
                 guard case .control(let message) = frame else { return nil }
                 return message
             }
-            guard !messages.isEmpty else { return }
+            let heartbeats = frames.reduce(into: 0) { count, frame in
+                if case .heartbeat = frame { count += 1 }
+            }
+            guard !messages.isEmpty || heartbeats > 0 else { return }
             lock.lock()
             controlMessages.append(contentsOf: messages)
+            heartbeatCountValue += heartbeats
             lock.unlock()
             messages.forEach { _ in controlMessageReceived.signal() }
+            (0..<heartbeats).forEach { _ in heartbeatReceived.signal() }
         case .pairingVerificationRequired(let snapshot):
             lock.lock()
             pairingVerificationSnapshot = snapshot
@@ -917,6 +991,11 @@ private final class TrustedCoreTestObserver: @unchecked Sendable {
         case .rejected(_, let reason), .listenerFailed(_, let reason):
             lock.lock()
             rejectionReasons.append(reason)
+            lock.unlock()
+            rejected.signal()
+        case .controlFrameDecodeFailed(_, _, _, let summary):
+            lock.lock()
+            controlFrameFailureSummaries.append(summary)
             lock.unlock()
             rejected.signal()
         default:
@@ -1035,6 +1114,52 @@ private final class TrustedCoreTestObserver: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         return disconnectedGenerations.count
+    }
+
+    var controlMessageCount: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return controlMessages.count
+    }
+
+    var heartbeatCount: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return heartbeatCountValue
+    }
+
+    var controlFrameFailureCount: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return controlFrameFailureSummaries.count
+    }
+
+    var secureSessionIDs: [String] {
+        lock.lock()
+        defer { lock.unlock() }
+        return authenticatedSessionIDs
+    }
+
+    func waitForControlMessageCount(_ count: Int, timeout: TimeInterval = 5) -> Bool {
+        let deadline = DispatchTime.now() + timeout
+        while controlMessageCount < count {
+            guard controlMessageReceived.wait(timeout: deadline) == .success else { return false }
+        }
+        return true
+    }
+
+    func waitForHeartbeatCount(_ count: Int, timeout: TimeInterval = 5) -> Bool {
+        let deadline = DispatchTime.now() + timeout
+        while heartbeatCount < count {
+            guard heartbeatReceived.wait(timeout: deadline) == .success else { return false }
+        }
+        return true
+    }
+
+    var controlMessagesSnapshot: [Message] {
+        lock.lock()
+        defer { lock.unlock() }
+        return controlMessages
     }
 
     var lastAuthenticatedGeneration: Int? {
@@ -1577,6 +1702,229 @@ struct NetworkRouteTests {
             normalCandidatePresent: false,
             identityProbePresent: false
         ))
+    }
+
+    @Test(
+        "trusted iPad rejects secure negotiation before mutual authentication",
+        arguments: ["secureChannelHello", "secureChannelReady"]
+    )
+    func trustedIPadRejectsSecureNegotiationBeforeAuthentication(_ prematureCase: String) async throws {
+        let iPadQueue = DispatchQueue(label: "PRC-PhotoBooth.Tests.PreAuthSecureHello.iPad")
+        let serverQueue = DispatchQueue(label: "PRC-PhotoBooth.Tests.PreAuthSecureHello.Server")
+        let runtime = BoothNetworkTransportRuntime(queue: iPadQueue)
+        let iPadIdentity = BoothDeviceIdentity(id: UUID().uuidString, displayName: "Phase iPad", role: .iPad)
+        let macIdentity = BoothDeviceIdentity(id: UUID().uuidString, displayName: "Phase Mac", role: .mac)
+        let secret = Data(repeating: 0xA4, count: 32)
+        let secureChannel = BoothSecureChannel()
+        let writer = BoothControlWritePump(queue: iPadQueue, secureChannel: secureChannel)
+        let events = TrustedCoreTestObserver()
+        let remoteMessages = ControlMessageCaseCapture()
+        let connections = NetworkTestConnectionBox()
+        let listenerReady = DispatchSemaphore(value: 0)
+        let listener = try NWListener(using: .tcp)
+        let fakeMacHello = BoothTransportHello(
+            role: .mac,
+            deviceID: macIdentity.id,
+            deviceName: macIdentity.displayName
+        )
+        let prematureSecureMessage: Message
+        let expectedRejectionReason: String
+        switch prematureCase {
+        case "secureChannelHello":
+            let hello = BoothSecureChannelHello(
+                sessionID: UUID().uuidString,
+                challenge: Data(repeating: 0x39, count: 32),
+                senderRole: .mac,
+                senderDeviceID: macIdentity.id,
+                receiverDeviceID: iPadIdentity.id
+            )
+            prematureSecureMessage = .secureChannelHello(hello: hello)
+            expectedRejectionReason = "Secure-channel Hello arrived before mutual authentication."
+        case "secureChannelReady":
+            prematureSecureMessage = .secureChannelReady(
+                sessionID: UUID().uuidString,
+                proof: Data(repeating: 0x39, count: 32)
+            )
+            expectedRejectionReason = "Secure-channel confirmation arrived before mutual authentication."
+        default:
+            Issue.record("Unexpected premature secure-message case: \(prematureCase)")
+            return
+        }
+        let attackPayload = try [
+            Message.helloDetails(hello: fakeMacHello),
+            prematureSecureMessage
+        ].reduce(into: Data()) { bytes, message in
+            bytes.append(try BoothFrameEncoder.encode(channel: .control, payload: message.encoded()))
+        }
+
+        runtime.configureControlCore(
+            localIdentity: iPadIdentity,
+            networkPreference: .wifi,
+            trustedSecrets: [macIdentity.id: secret],
+            selectedPeerID: macIdentity.id,
+            secureChannel: secureChannel,
+            writer: writer
+        ) { [weak events] event in events?.receive(event) }
+        listener.stateUpdateHandler = { state in
+            if case .ready = state { listenerReady.signal() }
+        }
+        listener.newConnectionHandler = { connection in
+            connections.store(connection)
+            connection.stateUpdateHandler = { state in
+                guard case .ready = state else { return }
+                remoteMessages.receive(from: connection)
+                connection.send(content: attackPayload, completion: .contentProcessed { _ in })
+            }
+            connection.start(queue: serverQueue)
+        }
+        listener.start(queue: serverQueue)
+        #expect(waitForSemaphore(listenerReady))
+        let port = try #require(listener.port)
+        defer {
+            runtime.stopControlCore()
+            writer.invalidate(generation: Int.max)
+            connections.cancel()
+            listener.cancel()
+        }
+
+        runtime.startTrustedControlConnection(
+            endpoint: .hostPort(host: "127.0.0.1", port: port),
+            parameters: .tcp,
+            interface: .wifi,
+            provenance: .localNetworkBonjour,
+            generation: 1
+        )
+
+        #expect(remoteMessages.waitForCase("authChallenge", timeout: 5))
+        #expect(events.waitForRejectionReason(expectedRejectionReason, timeout: 5))
+        #expect(remoteMessages.waitUntilClosed(timeout: 5))
+        #expect(!remoteMessages.contains("secureChannelHello"))
+        #expect(!remoteMessages.contains("secureChannelReady"))
+        #expect(events.authenticationCount == 0)
+        #expect(events.controlFrameFailureCount == 0)
+        #expect(!secureChannel.hasPreparedKeys)
+    }
+
+    @Test("100 stored-secret runtime reconnects establish fresh secure sessions and deliver encrypted controls")
+    func trustedRuntimeCompletesOneHundredSecureReconnectCycles() async throws {
+        let macQueue = DispatchQueue(label: "PRC-PhotoBooth.Tests.TrustedCycle.Mac")
+        let macRuntime = BoothNetworkTransportRuntime(queue: macQueue)
+        let macIdentity = BoothDeviceIdentity(id: UUID().uuidString, displayName: "Cycle Mac", role: .mac)
+        let iPadIdentity = BoothDeviceIdentity(id: UUID().uuidString, displayName: "Cycle iPad", role: .iPad)
+        let secret = Data(repeating: 0xC7, count: 32)
+        let macSecureChannel = BoothSecureChannel()
+        let macWriter = BoothControlWritePump(queue: macQueue, secureChannel: macSecureChannel)
+        let macEvents = TrustedCoreTestObserver()
+
+        macRuntime.configureControlCore(
+            localIdentity: macIdentity,
+            networkPreference: .wifi,
+            trustedSecrets: [iPadIdentity.id: secret],
+            selectedPeerID: iPadIdentity.id,
+            secureChannel: macSecureChannel,
+            writer: macWriter
+        ) { [weak macEvents] event in macEvents?.receive(event) }
+        _ = macRuntime.startControlListener(
+            using: .tcp,
+            port: nil,
+            service: NWListener.Service(
+                name: BoothBonjourServiceIdentity.serviceName(channel: .control, deviceID: macIdentity.id),
+                type: "_prc-control._tcp",
+                txtRecord: NWTXTRecord([
+                    "deviceID": macIdentity.id,
+                    "network": BoothNetworkPreference.wifi.rawValue,
+                    "role": DeviceRole.mac.rawValue,
+                    "protocolVersion": String(BoothTransportHello.currentProtocolVersion)
+                ])
+            )
+        )
+        let port = try #require(macEvents.waitForListener())
+
+        let iPadQueue = DispatchQueue(label: "PRC-PhotoBooth.Tests.TrustedCycle.iPad")
+        let iPadRuntime = BoothNetworkTransportRuntime(queue: iPadQueue)
+        let iPadSecureChannel = BoothSecureChannel()
+        let iPadWriter = BoothControlWritePump(queue: iPadQueue, secureChannel: iPadSecureChannel)
+        let iPadEvents = TrustedCoreTestObserver()
+        iPadRuntime.configureControlCore(
+            localIdentity: iPadIdentity,
+            networkPreference: .wifi,
+            trustedSecrets: [macIdentity.id: secret],
+            selectedPeerID: macIdentity.id,
+            secureChannel: iPadSecureChannel,
+            writer: iPadWriter
+        ) { [weak iPadEvents] event in iPadEvents?.receive(event) }
+        defer {
+            macRuntime.stopControlCore()
+            macWriter.invalidate(generation: Int.max)
+            iPadRuntime.stopControlCore()
+            iPadWriter.invalidate(generation: Int.max)
+        }
+
+        var iPadSessions: [String] = []
+        for index in 0..<100 {
+            iPadRuntime.startTrustedControlConnection(
+                endpoint: .hostPort(host: "127.0.0.1", port: port),
+                parameters: .tcp,
+                interface: .wifi,
+                provenance: .localNetworkBonjour,
+                generation: index + 1
+            )
+            let expectedCount = index + 1
+            try #require(
+                await iPadEvents.waitForAuthenticationCount(expectedCount, timeout: 5),
+                "iPad did not authenticate reconnect cycle \(expectedCount)"
+            )
+            try #require(
+                await macEvents.waitForAuthenticationCount(expectedCount, timeout: 5),
+                "Mac did not authenticate reconnect cycle \(expectedCount)"
+            )
+            #expect(iPadEvents.controlFrameFailureCount == 0)
+            #expect(macEvents.controlFrameFailureCount == 0)
+            iPadSessions.append(try #require(iPadEvents.secureSessionIDs.last))
+
+            let generation = try #require(iPadEvents.lastAuthenticatedGeneration)
+            #expect(iPadRuntime.enqueueAuthenticatedControl(
+                .heartbeat,
+                generation: generation,
+                secure: true,
+                completion: nil
+            ) == .sent)
+            try #require(
+                macEvents.waitForHeartbeatCount(expectedCount, timeout: 5),
+                "Mac did not receive the encrypted heartbeat for reconnect cycle \(expectedCount)"
+            )
+
+            let message = Message.boothPaused(isPaused: index.isMultiple(of: 2))
+            #expect(iPadRuntime.enqueueAuthenticatedControl(
+                message,
+                generation: generation,
+                secure: true,
+                completion: nil
+            ) == .sent)
+            try #require(
+                macEvents.waitForControlMessageCount(expectedCount, timeout: 5),
+                "Mac did not receive the encrypted control message for reconnect cycle \(expectedCount)"
+            )
+            #expect(macEvents.controlMessagesSnapshot.last == message)
+
+            iPadRuntime.stopControlCore()
+            try #require(
+                await macEvents.waitForDisconnectedCount(expectedCount, timeout: 5),
+                "Mac did not observe disconnect after reconnect cycle \(expectedCount)"
+            )
+        }
+
+        let macSessions = macEvents.secureSessionIDs
+        let iPadSecureSessions = iPadEvents.secureSessionIDs
+        #expect(macSessions.count == 100)
+        #expect(Set(macSessions).count == 100)
+        #expect(iPadSecureSessions.count == 100)
+        #expect(Set(iPadSecureSessions).count == 100)
+        #expect(iPadSessions == macSessions)
+        #expect(macEvents.heartbeatCount == 100)
+        #expect(macEvents.controlMessageCount == 100)
+        #expect(macEvents.controlFrameFailureCount == 0)
+        #expect(macEvents.rejectionCount == 0)
     }
 
     @Test(
@@ -4258,26 +4606,22 @@ struct TransportCallbackPolicyTests {
 struct PreviewChannelIdentityTests {
     @Test("preview channel must match the verified control peer")
     func matchesControlPeer() {
-        #expect(previewPeerMatchesControlPeer(
+        #expect(comparePreviewPeerWithControlPeer(
             previewPeerID: "peer",
-            controlPeerID: "peer",
-            identityRequired: true
-        ))
-        #expect(!previewPeerMatchesControlPeer(
+            controlPeerID: "peer"
+        ) == .matched)
+        #expect(comparePreviewPeerWithControlPeer(
             previewPeerID: "stale-peer",
-            controlPeerID: "peer",
-            identityRequired: true
-        ))
-        #expect(!previewPeerMatchesControlPeer(
+            controlPeerID: "peer"
+        ) == .mismatched)
+        #expect(comparePreviewPeerWithControlPeer(
             previewPeerID: nil,
-            controlPeerID: "peer",
-            identityRequired: true
-        ))
-        #expect(previewPeerMatchesControlPeer(
-            previewPeerID: nil,
-            controlPeerID: nil,
-            identityRequired: false
-        ))
+            controlPeerID: "peer"
+        ) == .awaitingHello)
+        #expect(comparePreviewPeerWithControlPeer(
+            previewPeerID: "peer",
+            controlPeerID: nil
+        ) == .mismatched)
     }
 }
 

@@ -27,6 +27,12 @@ final class BoothNetworkTransportRuntime: @unchecked Sendable {
             routeGeneration: Int?
         )
         case controlFrames(generation: Int, frames: [BoothDecodedTransportFrame])
+        case controlFrameDecodeFailed(
+            generation: Int,
+            routeGeneration: Int?,
+            byteCount: Int,
+            summary: String
+        )
         case disconnected(generation: Int, reason: String?)
         case rejected(generation: Int, reason: String)
         case listenerReady(
@@ -48,6 +54,7 @@ final class BoothNetworkTransportRuntime: @unchecked Sendable {
                 snapshot.candidate.generation
             case .trustedAuthenticated(let generation, _, _, _, _, _, _, _),
                  .controlFrames(let generation, _),
+                 .controlFrameDecodeFailed(let generation, _, _, _),
                  .disconnected(let generation, _),
                  .rejected(let generation, _):
                 generation
@@ -113,6 +120,7 @@ final class BoothNetworkTransportRuntime: @unchecked Sendable {
         var localChallenge: BoothAuthChallenge?
         var peerProofVerified = false
         var peerProofSent = false
+        var mutualAuthenticationComplete: Bool { peerProofSent && peerProofVerified }
         var secureNegotiator: BoothSecureChannelNegotiator
         var localSecureHello: BoothSecureChannelHello?
         var peerSecureHello: BoothSecureChannelHello?
@@ -1267,12 +1275,12 @@ final class BoothNetworkTransportRuntime: @unchecked Sendable {
                 guard let candidate = self.candidateOnQueue(connection, generation: generation) else { return }
                 if let data, !data.isEmpty {
                     do {
-                        let frames = try candidate.decoder.decode(
-                            data,
-                            channel: .control,
+                        var pendingData = data
+                        while let frame = try candidate.decoder.decodeNextControl(
+                            pendingData,
                             secureChannel: candidate.secureChannel
-                        )
-                        for frame in frames {
+                        ) {
+                            pendingData = Data()
                             switch frame {
                             case .control(let message):
                                 self.handleCoreMessageOnQueue(message, candidate: candidate)
@@ -1295,10 +1303,20 @@ final class BoothNetworkTransportRuntime: @unchecked Sendable {
                             }
                         }
                     } catch {
+                        if let failure = error as? BoothControlFrameDecodeFailure {
+                            self.controlCoreEvent?(.controlFrameDecodeFailed(
+                                generation: candidate.generation,
+                                routeGeneration: candidate.routeGeneration,
+                                byteCount: failure.payloadByteCount,
+                                summary: self.controlFrameFailureSummary(failure, candidate: candidate)
+                            ))
+                        }
                         self.rejectTrustedCandidateOnQueue(
                             connection,
                             generation: candidate.generation,
-                            reason: "Invalid control frame: \(error.localizedDescription)"
+                            reason: error is BoothControlFrameDecodeFailure
+                                ? String(localized: "Secure connection failed. Reconnecting…")
+                                : String(localized: "Invalid control frame. Reconnecting…")
                         )
                         return
                     }
@@ -1315,6 +1333,47 @@ final class BoothNetworkTransportRuntime: @unchecked Sendable {
                     self.receiveCoreFramesOnQueue(candidate)
                 }
             }
+        }
+    }
+
+    private func controlFrameFailureSummary(
+        _ failure: BoothControlFrameDecodeFailure,
+        candidate: TrustedHandshake
+    ) -> String {
+        let role: String
+        switch localIdentity?.role {
+        case .mac: role = "Mac"
+        case .iPad: role = "iPad"
+        case nil: role = "unknown"
+        }
+        let routeGeneration = candidate.routeGeneration.map(String.init) ?? "none"
+        let prepared = candidate.secureChannel.hasPreparedKeys ? "yes" : "no"
+        let established = candidate.secureHandshakeEstablished ? "yes" : "no"
+        let endpoint = Self.sanitizedEndpoint(candidate.connection.endpoint)
+        return [
+            failure.diagnosticDescription,
+            "role=\(role)",
+            "generation=\(candidate.generation)",
+            "routeGeneration=\(routeGeneration)",
+            "endpoint=\(endpoint)",
+            "authenticated=\(candidate.authenticated ? "yes" : "no")",
+            "peerProofSent=\(candidate.peerProofSent ? "yes" : "no")",
+            "peerProofVerified=\(candidate.peerProofVerified ? "yes" : "no")",
+            "readySent=\(candidate.readySent ? "yes" : "no")",
+            "readyReceived=\(candidate.readyReceived ? "yes" : "no")",
+            "keysPrepared=\(prepared)",
+            "secureOperational=\(established)"
+        ].joined(separator: " ")
+    }
+
+    private static func sanitizedEndpoint(_ endpoint: NWEndpoint) -> String {
+        switch endpoint {
+        case .hostPort(_, let port): return "tcp-port:\(port.rawValue)"
+        case .service: return "bonjour-service"
+        case .url: return "url-endpoint"
+        case .unix: return "unix-endpoint"
+        case .opaque: return "opaque-endpoint"
+        @unknown default: return "unknown-endpoint"
         }
     }
 
@@ -1819,6 +1878,14 @@ final class BoothNetworkTransportRuntime: @unchecked Sendable {
     }
 
     private func handleCoreSecureHelloOnQueue(_ hello: BoothSecureChannelHello, candidate: TrustedHandshake) {
+        guard candidate.mutualAuthenticationComplete else {
+            rejectTrustedCandidateOnQueue(
+                candidate.connection,
+                generation: candidate.generation,
+                reason: "Secure-channel Hello arrived before mutual authentication."
+            )
+            return
+        }
         do {
             let actions = try candidate.secureNegotiator.receiveHello(
                 hello,
@@ -1876,6 +1943,14 @@ final class BoothNetworkTransportRuntime: @unchecked Sendable {
         proof: Data,
         candidate: TrustedHandshake
     ) {
+        guard candidate.mutualAuthenticationComplete else {
+            rejectTrustedCandidateOnQueue(
+                candidate.connection,
+                generation: candidate.generation,
+                reason: "Secure-channel confirmation arrived before mutual authentication."
+            )
+            return
+        }
         guard !candidate.readyReceived else { return }
         guard let localHello = candidate.secureNegotiator.localHello,
               let peerHello = candidate.secureNegotiator.peerHello,
@@ -1924,7 +1999,8 @@ final class BoothNetworkTransportRuntime: @unchecked Sendable {
     }
 
     private func finishCoreSecureChannelIfReadyOnQueue(_ candidate: TrustedHandshake) {
-        guard candidate.readySent,
+        guard candidate.mutualAuthenticationComplete,
+              candidate.readySent,
               candidate.readyReceived,
               candidate.secureChannel.isConfigured,
               !candidate.secureHandshakeEstablished else { return }
@@ -1968,6 +2044,7 @@ final class BoothNetworkTransportRuntime: @unchecked Sendable {
 
     private func promoteCoreCandidateOnQueue(_ candidate: TrustedHandshake) {
         guard !candidate.authenticated,
+              candidate.mutualAuthenticationComplete,
               candidate.secureHandshakeEstablished else { return }
         guard let peer = candidate.peerHello,
               let localHello = candidate.secureNegotiator.localHello,

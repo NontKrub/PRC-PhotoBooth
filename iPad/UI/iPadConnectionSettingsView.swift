@@ -17,10 +17,63 @@ struct iPadConnectionSettingsView: View {
     @State private var diagnosticsExportError: String?
     @State private var diagnosticsDocument = ConnectionLogDocument(text: "")
     @State private var isExportingDiagnostics = false
+    @State private var discoveryCache = BoothDiscoveryPresentationCache()
+    @State private var discoveryNow = Date()
 
     private var transport: NetworkBoothTransport? { vm.networkTransport }
     private var status: BoothConnectionStatus { vm.connectionStatus }
-    private var nearbyMacs: [BoothDiscoveredPeer] { status.discoveredPeers.filter { $0.role == .mac } }
+    private var discoveredMacs: [BoothDiscoveredPeer] { status.discoveredPeers.filter { $0.role == .mac } }
+    private var nearbyMacs: [BoothNearbyMacPresentation] {
+        discoveryCache.nearbyMacs(
+            at: discoveryNow,
+            trustedPeers: transport?.trustedPeers ?? [],
+            preferredPeerID: status.preferredPeerID
+        )
+    }
+    private var hasActiveControlAttempt: Bool {
+        transport?.hasActiveControlAttempt ?? (status.peerID != nil)
+    }
+    private var hasPreferredControlAttempt: Bool {
+        guard let preferredID = status.preferredPeerID,
+              hasActiveControlAttempt else { return false }
+        return status.peerID == preferredID
+            || transport?.discoveryDiagnostics.targetPeerID == preferredID
+    }
+    private var preferredMac: BoothPreferredMacPresentation {
+        BoothPreferredMacPresentation.resolve(
+            preferredPeerID: status.preferredPeerID,
+            trustedPeers: transport?.trustedPeers ?? [],
+            nearbyMacs: nearbyMacs,
+            connectionState: status.state,
+            connectedPeerID: status.peerID,
+            isAuthenticated: status.isPeerAuthenticated,
+            isSecureChannelEstablished: status.isSecureChannelEstablished,
+            isReconnectInProgress: status.isReconnectInProgress,
+            hasPreferredControlAttempt: hasPreferredControlAttempt
+        )
+    }
+    private var connectionTransitionInProgress: Bool {
+        if status.pairingStage == .verificationPending { return true }
+        if status.preferredPeerID == nil {
+            switch status.pairingState {
+            case .idle, .authenticated:
+                return false
+            default:
+                break
+            }
+        }
+        guard hasActiveControlAttempt else { return false }
+        if case .connecting = status.state { return true }
+        if case .connected = status.state,
+           status.peerID == status.preferredPeerID,
+           (!status.isPeerAuthenticated || !status.isSecureChannelEstablished) {
+            return true
+        }
+        return status.isReconnectInProgress || status.pairingStage == .authenticating
+    }
+    private var canChangeConnection: Bool {
+        vm.canChangeConnection && !connectionTransitionInProgress
+    }
 
     var body: some View {
         NavigationStack {
@@ -54,6 +107,20 @@ struct iPadConnectionSettingsView: View {
             if editedDeviceName.isEmpty {
                 editedDeviceName = transport?.deviceIdentity.displayName ?? "PRC Booth iPad"
             }
+            discoveryCache.update(status.discoveredPeers, at: Date())
+            while !Task.isCancelled {
+                do {
+                    try await Task.sleep(nanoseconds: 1_000_000_000)
+                } catch {
+                    break
+                }
+                discoveryNow = Date()
+                discoveryCache.pruneExpired(at: discoveryNow)
+            }
+        }
+        .onChange(of: status.discoveredPeers) { discoveries in
+            discoveryNow = Date()
+            discoveryCache.update(discoveries, at: discoveryNow)
         }
         .onChange(of: status.pairingState) { pairingState in
             switch pairingState {
@@ -72,7 +139,7 @@ struct iPadConnectionSettingsView: View {
         }
         .sheet(isPresented: $showPINEntry) {
             PairingPINEntryView(
-                peers: nearbyMacs,
+                peers: discoveredMacs,
                 initialPeerID: selectedPeerForPIN,
                 initialPeerName: selectedPairingMacName
             ) { peerID, pin in
@@ -129,66 +196,98 @@ struct iPadConnectionSettingsView: View {
             TextField("Device Name", text: $editedDeviceName)
                 .textInputAutocapitalization(.never)
                 .autocorrectionDisabled()
-                .disabled(!vm.canChangeConnection)
+                .disabled(!canChangeConnection)
                 .onSubmit { vm.renameDevice(editedDeviceName) }
             Button("Save Device Name") { vm.renameDevice(editedDeviceName) }
-                .disabled(!vm.canChangeConnection || editedDeviceName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                .disabled(!canChangeConnection || editedDeviceName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
         }
     }
 
     @ViewBuilder
     private var preferredMacSection: some View {
         Section("Preferred Mac") {
-            if let preferredID = status.preferredPeerID {
-                let preferred = nearbyMacs.first { $0.id == preferredID }
-                let trusted = transport?.trustedPeers.first { $0.id == preferredID }
-                Text(preferred?.displayName ?? trusted?.displayName ?? "Preferred Mac")
-                if status.peerID != preferredID || !status.isPeerAuthenticated {
-                    Label(
-                        preferred == nil ? "Preferred Mac unavailable" : "Preferred Mac not connected",
-                        systemImage: "exclamationmark.triangle"
-                    )
-                        .foregroundStyle(.orange)
+            if preferredMac.peerID != nil {
+                Text(preferredMac.displayName)
+                    .font(.headline)
+            }
+
+            switch preferredMac.state {
+            case .none:
+                Text("No Mac selected")
+                    .foregroundStyle(.secondary)
+            case .connected:
+                Label("Connected", systemImage: "checkmark.circle.fill")
+                    .foregroundStyle(.green)
+            case .reconnecting:
+                Label("Reconnecting…", systemImage: "arrow.triangle.2.circlepath")
+                    .foregroundStyle(.orange)
+            case .available:
+                Label("Available", systemImage: "wifi")
+                    .foregroundStyle(.secondary)
+            case .notConnected:
+                Label("Preferred Mac unavailable", systemImage: "exclamationmark.triangle")
+                    .foregroundStyle(.orange)
+            }
+
+            if transport?.preferredPeerNeedsRepair == true {
+                Label("Pairing key missing", systemImage: "exclamationmark.triangle.fill")
+                    .foregroundStyle(.orange)
+                Text("Forget this Mac on both devices, then pair again with PIN or QR.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            if let preferredID = preferredMac.peerID {
+                if !((transport?.preferredPeerNeedsRepair) ?? false),
+                   preferredMac.state == .available || preferredMac.state == .notConnected {
                     HStack {
-                        Button(trusted == nil ? "Retry" : "Reconnect") {
-                            if trusted == nil {
-                                vm.refreshNearbyMacs()
-                            } else {
+                        Button("Reconnect") {
+                            if transport?.trustedPeers.contains(where: { $0.id == preferredID }) == true {
                                 vm.connect(to: preferredID)
+                            } else {
+                                vm.refreshNearbyMacs()
                             }
                         }
-                            .accessibilityIdentifier("Retry Preferred Mac")
+                        .disabled(!canChangeConnection)
+                        .accessibilityIdentifier("Retry Preferred Mac")
+
                         Button("Choose Another Mac") {
                             transport?.selectPreferredPeer(nil)
                         }
+                        .disabled(!vm.canChangeConnection || status.pairingStage == .verificationPending)
                         .accessibilityIdentifier("Choose Another Mac")
                     }
                 }
+
+                if preferredMac.state == .reconnecting {
+                    Button("Stop Reconnecting") {
+                        transport?.selectPreferredPeer(nil)
+                    }
+                    .disabled(!vm.canChangeConnection || status.pairingStage == .verificationPending)
+                }
+
                 if let transport {
                     Toggle("Automatically reconnect to selected Mac", isOn: Binding(
                         get: { transport.automaticallyReconnectToPreferredPeer },
                         set: { transport.automaticallyReconnectToPreferredPeer = $0 }
                     ))
-                    .disabled(!vm.canChangeConnection)
+                    .disabled(!canChangeConnection)
                 }
                 Button("Forget Preferred Mac", role: .destructive) {
                     peerToForget = preferredID
                 }
-                .disabled(!vm.canChangeConnection)
+                .disabled(!vm.canChangeConnection || status.pairingStage == .verificationPending)
                 .accessibilityIdentifier("Forget Mac")
-            } else {
-                Text("No Mac selected")
-                    .foregroundStyle(.secondary)
             }
         }
     }
 
     @ViewBuilder
     private var connectedMacSection: some View {
-        Section("Connected") {
+        Section("Connection") {
             if status.pairingStage == .verificationPending,
                let code = transport?.pairingVerificationCodeForDisplay,
-               let name = status.peerDisplayName ?? transport?.pairingPeerDisplayName {
+               let name = resolvedPeerName(status.peerID, fallback: status.peerDisplayName ?? transport?.pairingPeerDisplayName) {
                 Label(name, systemImage: "checkmark.shield")
                     .foregroundStyle(.orange)
                     .accessibilityIdentifier("Pairing Verification Mac")
@@ -205,30 +304,44 @@ struct iPadConnectionSettingsView: View {
                 Text("Ask the operator to tap Codes Match on the Mac.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
-            } else if case .connected = status.state, let name = status.peerDisplayName, !status.isPeerAuthenticated {
-                Label(name, systemImage: "arrow.triangle.2.circlepath")
-                    .foregroundStyle(.orange)
-                    .accessibilityIdentifier("Connecting Mac")
-                LabeledContent("Authentication", value: "Authenticating")
-                LabeledContent("Connection", value: connectionLabel)
-            } else if case .connected = status.state, status.isPeerAuthenticated, let name = status.peerDisplayName {
-                Label(name, systemImage: "checkmark.circle.fill")
+            } else if case .connected = status.state,
+                      status.isPeerAuthenticated,
+                      status.isSecureChannelEstablished {
+                Label(connectedMacName, systemImage: "checkmark.circle.fill")
                     .foregroundStyle(.green)
                     .accessibilityIdentifier("Connected Mac")
                 LabeledContent("Authentication", value: "Trusted")
                 LabeledContent("Connection", value: connectionLabel)
-                LabeledContent("Secure transport", value: status.isSecureChannelEstablished ? "Ready" : "Unavailable")
+                LabeledContent("Secure transport", value: "Ready")
                 LabeledContent("Asset delivery", value: status.isAssetChannelReady ? "Ready" : "Reconnecting")
                 if let latency = status.roundTripLatency {
                     LabeledContent("Round trip", value: "\(Int(latency * 1000)) ms")
                 }
+            } else if connectionTransitionInProgress {
+                Label(connectedMacName, systemImage: "arrow.triangle.2.circlepath")
+                    .foregroundStyle(.orange)
+                    .accessibilityIdentifier("Reconnecting Mac")
+                LabeledContent("Authentication", value: status.isPeerAuthenticated ? "Securing connection" : "Authenticating")
+                LabeledContent("Connection", value: connectionLabel)
             } else {
                 switch status.pairingState {
+                case .idle, .authenticated:
+                    if status.preferredPeerID == nil {
+                        Text("Select or pair a Mac.")
+                            .foregroundStyle(.secondary)
+                    } else {
+                        Text("Not connected")
+                            .foregroundStyle(.secondary)
+                    }
+                case .authenticating where !hasActiveControlAttempt:
+                    Text("Not connected")
+                        .foregroundStyle(.secondary)
                 case .failed(let reason):
                     Text(reason)
                         .foregroundStyle(.orange)
                         .accessibilityIdentifier("Pairing Failure")
                     Button("Retry Pairing") { retryPairing() }
+                        .disabled(!canChangeConnection)
                         .accessibilityIdentifier("Pairing Retry")
                 case .pairing(let expiresAt):
                     VStack(alignment: .leading, spacing: 4) {
@@ -269,9 +382,17 @@ struct iPadConnectionSettingsView: View {
     private var nearbyMacsSection: some View {
         Section("Nearby Macs") {
             if nearbyMacs.isEmpty {
-                HStack {
-                    ProgressView()
-                    Text("Searching")
+                if preferredMac.state == .reconnecting {
+                    Label("Reconnecting…", systemImage: "arrow.triangle.2.circlepath")
+                        .foregroundStyle(.secondary)
+                } else if (transport?.discoveryDiagnostics.activeBrowserCount ?? 0) > 0 {
+                    HStack {
+                        ProgressView()
+                        Text("Searching for Macs…")
+                    }
+                } else {
+                    Text("No Macs found")
+                        .foregroundStyle(.secondary)
                 }
             } else {
                 ForEach(nearbyMacs) { peer in
@@ -280,7 +401,9 @@ struct iPadConnectionSettingsView: View {
                             VStack(alignment: .leading, spacing: 2) {
                                 Text(peer.displayName)
                                     .font(.headline)
-                                Text("\(peer.appVersion) • \(transportLabel(peer.availableInterfaces))")
+                                Text(peer.isStale
+                                     ? "Recently seen"
+                                     : "\(peer.appVersion) • \(transportLabel(peer.availableInterfaces))")
                                     .font(.caption)
                                     .foregroundStyle(.secondary)
                             }
@@ -291,7 +414,11 @@ struct iPadConnectionSettingsView: View {
                             }
                         }
 
-                        if peer.protocolVersion != 0,
+                        if peer.isStale {
+                            Label(peer.isPreferred ? "Reconnecting…" : "Recently seen", systemImage: "clock")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        } else if peer.protocolVersion != 0,
                            peer.protocolVersion != BoothTransportHello.currentProtocolVersion {
                             Text("Version incompatible")
                                 .font(.caption)
@@ -307,13 +434,13 @@ struct iPadConnectionSettingsView: View {
                                         lastPairingPeerID = peer.id
                                         vm.connect(to: peer.id)
                                     }
-                                        .disabled(!vm.canChangeConnection || status.peerID == peer.id && status.isPeerAuthenticated)
+                                        .disabled(!canChangeConnection || status.peerID == peer.id && status.isPeerAuthenticated && status.isSecureChannelEstablished)
                                         .accessibilityIdentifier("Connect Mac")
                                 } else {
                                     Button("Connect") {
                                         startPairing(with: peer.id)
                                     }
-                                    .disabled(!vm.canChangeConnection)
+                                    .disabled(!canChangeConnection)
                                     .accessibilityIdentifier("Connect Mac")
                                 }
                             }
@@ -325,7 +452,7 @@ struct iPadConnectionSettingsView: View {
             }
 
             Button("Refresh") { vm.refreshNearbyMacs() }
-                .disabled(!vm.canChangeConnection)
+                .disabled(!canChangeConnection)
         }
     }
 
@@ -336,20 +463,20 @@ struct iPadConnectionSettingsView: View {
             } label: {
                 Label("Scan Pairing QR", systemImage: "qrcode.viewfinder")
             }
-            .disabled(!vm.canChangeConnection)
+            .disabled(!canChangeConnection)
             .accessibilityHint("Recommended for the fastest pairing.")
             .accessibilityIdentifier("Scan Pairing QR")
 
             Button {
                 selectedPeerForPIN = lastPairingPeerID
                     ?? status.preferredPeerID
-                    ?? nearbyMacs.first?.id
+                    ?? discoveredMacs.first?.id
                 selectedPairingMacName = nearbyMacs.first { $0.id == selectedPeerForPIN }?.displayName
                 showPINEntry = true
             } label: {
                 Label("Enter Pairing PIN", systemImage: "number.square")
             }
-            .disabled(!vm.canChangeConnection || (nearbyMacs.isEmpty && lastPairingPeerID == nil))
+            .disabled(!canChangeConnection || (discoveredMacs.isEmpty && lastPairingPeerID == nil))
             .accessibilityIdentifier("Enter Pairing PIN")
         }
     }
@@ -385,7 +512,9 @@ struct iPadConnectionSettingsView: View {
         case .authenticating:
             return "Authenticating"
         case .authenticated:
-            return "Connected"
+            return status.isPeerAuthenticated && status.isSecureChannelEstablished
+                ? "Connected"
+                : "Not connected"
         case .failed(let reason):
             return reason
         }
@@ -408,8 +537,11 @@ struct iPadConnectionSettingsView: View {
     }
 
     private var connectionLabel: String {
-        if case .connecting = status.state { return "Reconnecting" }
         if case .disconnected = status.state { return "Disconnected" }
+        if case .connecting = status.state { return "Reconnecting" }
+        if status.isReconnectInProgress || !status.isPeerAuthenticated || !status.isSecureChannelEstablished {
+            return "Reconnecting"
+        }
         switch status.effectiveNetwork {
         case .lan: return "Connected via Ethernet"
         case .wifi: return status.isFallbackActive ? "Wi-Fi fallback" : "Connected via Wi-Fi"
@@ -422,6 +554,24 @@ struct iPadConnectionSettingsView: View {
         if interfaces.contains(.wiredEthernet) { return "Ethernet" }
         if interfaces.contains(.wifi) { return "Wi-Fi" }
         return "Available"
+    }
+
+    private var connectedMacName: String {
+        resolvedPeerName(status.peerID, fallback: status.peerDisplayName) ?? "Mac"
+    }
+
+    private func resolvedPeerName(_ peerID: String?, fallback: String?) -> String? {
+        guard let peerID else {
+            return BoothPeerDisplayName.usable(fallback, deviceID: "")
+        }
+        let trustedName = transport?.trustedPeers.first { $0.id == peerID }?.displayName
+        let discoveredName = status.discoveredPeers.first { $0.id == peerID }?.displayName ?? fallback
+        return BoothPeerDisplayName.resolve(
+            trustedName: trustedName,
+            discoveredName: discoveredName,
+            deviceID: peerID,
+            fallback: "Mac"
+        )
     }
 }
 

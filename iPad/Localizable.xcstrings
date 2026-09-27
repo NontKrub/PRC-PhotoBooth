@@ -12,6 +12,7 @@
       }
     },
     "%@ • %@" : {
+      "extractionState" : "stale",
       "localizations" : {
         "en" : {
           "stringUnit" : {
@@ -133,6 +134,17 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "เชื่อมต่อ Mac ที่เลือกโดยอัตโนมัติ"
+          }
+        }
+      }
+    },
+    "Available" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "พร้อมใช้งาน"
           }
         }
       }
@@ -569,6 +581,22 @@
         }
       }
     },
+    "Forget this Mac on both devices, then pair again with PIN or QR." : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Forget this Mac on both devices, then pair again with PIN or QR."
+          }
+        },
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ลืมการจับคู่ Mac นี้บนอุปกรณ์ทั้งสองเครื่อง แล้วจับคู่อีกครั้งด้วย PIN หรือ QR"
+          }
+        }
+      }
+    },
     "High Contrast" : {
       "extractionState" : "stale",
       "localizations" : {
@@ -596,6 +624,17 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "รวมการเชื่อมต่อ การจับคู่ การค้นหา การแสดงตัวอย่าง และเหตุการณ์การส่งข้อมูลล่าสุด"
+          }
+        }
+      }
+    },
+    "Invalid control frame. Reconnecting…" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ข้อมูลควบคุมไม่ถูกต้อง กำลังเชื่อมต่อใหม่…"
           }
         }
       }
@@ -701,6 +740,33 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "ยังไม่ได้เลือก Mac"
+          }
+        }
+      }
+    },
+    "No Macs found" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ไม่พบ Mac"
+          }
+        }
+      }
+    },
+    "Not connected" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Not connected"
+          }
+        },
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ยังไม่ได้เชื่อมต่อ"
           }
         }
       }
@@ -835,6 +901,23 @@
         }
       }
     },
+    "Pairing key missing" : {
+      "extractionState" : "stale",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Pairing key missing"
+          }
+        },
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ไม่พบกุญแจจับคู่"
+          }
+        }
+      }
+    },
     "Pairing PIN" : {
       "extractionState" : "stale",
       "localizations" : {
@@ -965,22 +1048,23 @@
         }
       }
     },
+    "Processing recovery choice…" : {
+      "extractionState" : "stale",
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "กำลังประมวลผลตัวเลือกการกู้คืน…"
+          }
+        }
+      }
+    },
     "Processing…" : {
       "localizations" : {
         "th" : {
           "stringUnit" : {
             "state" : "translated",
             "value" : "กำลังประมวลผล…"
-          }
-        }
-      }
-    },
-    "Processing recovery choice…" : {
-      "localizations" : {
-        "th" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "กำลังประมวลผลตัวเลือกการกู้คืน…"
           }
         }
       }
@@ -1012,6 +1096,17 @@
         }
       }
     },
+    "Recently seen" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "พบเมื่อไม่นานนี้"
+          }
+        }
+      }
+    },
     "Reconnect" : {
       "extractionState" : "stale",
       "localizations" : {
@@ -1019,6 +1114,17 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "เชื่อมต่ออีกครั้ง"
+          }
+        }
+      }
+    },
+    "Reconnecting…" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "กำลังเชื่อมต่อใหม่…"
           }
         }
       }
@@ -1058,6 +1164,7 @@
       }
     },
     "Retake" : {
+      "extractionState" : "stale",
       "localizations" : {
         "th" : {
           "stringUnit" : {
@@ -1118,6 +1225,16 @@
         }
       }
     },
+    "Saving your choice…" : {
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "กำลังบันทึกตัวเลือกของคุณ…"
+          }
+        }
+      }
+    },
     "Scan Pairing QR" : {
       "extractionState" : "stale",
       "localizations" : {
@@ -1146,6 +1263,7 @@
       }
     },
     "Searching" : {
+      "extractionState" : "stale",
       "localizations" : {
         "en" : {
           "stringUnit" : {
@@ -1157,6 +1275,55 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "กำลังค้นหา"
+          }
+        }
+      }
+    },
+    "Searching for Macs…" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "กำลังค้นหา Mac…"
+          }
+        }
+      }
+    },
+    "Secure connection failed. Reconnecting…" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "การเชื่อมต่อที่ปลอดภัยล้มเหลว กำลังเชื่อมต่อใหม่…"
+          }
+        }
+      }
+    },
+    "Securing connection" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "กำลังรักษาความปลอดภัยการเชื่อมต่อ"
+          }
+        }
+      }
+    },
+    "Select or pair a Mac." : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Select or pair a Mac."
+          }
+        },
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "เลือกหรือจับคู่กับ Mac"
           }
         }
       }
@@ -1209,6 +1376,17 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "เทมเพลต"
+          }
+        }
+      }
+    },
+    "The booth did not confirm that choice. Tap the same choice to retry safely." : {
+      "extractionState" : "stale",
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "บูธยังไม่ยืนยันตัวเลือกนี้ แตะตัวเลือกเดิมเพื่อทดลองใหม่อย่างปลอดภัย"
           }
         }
       }
@@ -1324,26 +1502,6 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "กำลังรอกล้อง…"
-          }
-        }
-      }
-    },
-    "Saving your choice…" : {
-      "localizations" : {
-        "th" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "กำลังบันทึกตัวเลือกของคุณ…"
-          }
-        }
-      }
-    },
-    "The booth did not confirm that choice. Tap the same choice to retry safely." : {
-      "localizations" : {
-        "th" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "บูธยังไม่ยืนยันตัวเลือกนี้ แตะตัวเลือกเดิมเพื่อทดลองใหม่อย่างปลอดภัย"
           }
         }
       }

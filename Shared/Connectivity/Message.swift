@@ -850,6 +850,53 @@ extension Data {
 
 // Encode / decode helpers
 extension Message {
+    /// Returns only the enum case name for diagnostics. Associated values such
+    /// as identities, proofs, QR data, and application content are never
+    /// included.
+    var diagnosticCaseName: String {
+        switch self {
+        case .hello: return "hello"
+        case .helloDetails: return "helloDetails"
+        case .pairingIntent: return "pairingIntent"
+        case .pairingSessionAvailable: return "pairingSessionAvailable"
+        case .pairingRequest: return "pairingRequest"
+        case .pairingResult: return "pairingResult"
+        case .pairingVerificationConfirmed: return "pairingVerificationConfirmed"
+        case .authChallenge: return "authChallenge"
+        case .authProof: return "authProof"
+        case .secureChannelHello: return "secureChannelHello"
+        case .secureChannelReady: return "secureChannelReady"
+        case .connectionRejected: return "connectionRejected"
+        case .sessionSync: return "sessionSync"
+        case .assetRequest: return "assetRequest"
+        case .assetUnavailable: return "assetUnavailable"
+        case .boothPaused: return "boothPaused"
+        case .eventConfig: return "eventConfig"
+        case .eventExperienceCatalog: return "eventExperienceCatalog"
+        case .eventExperienceAsset: return "eventExperienceAsset"
+        case .setMirrored: return "setMirrored"
+        case .sessionStart: return "sessionStart"
+        case .customerSessionStartRequest: return "customerSessionStartRequest"
+        case .customerSessionStartResult: return "customerSessionStartResult"
+        case .customerSessionRequest: return "customerSessionRequest"
+        case .sessionRequestRejected: return "sessionRequestRejected"
+        case .sessionPrepared: return "sessionPrepared"
+        case .beginCountdown: return "beginCountdown"
+        case .shotCaptured: return "shotCaptured"
+        case .shotCapturedAsset: return "shotCapturedAsset"
+        case .captureRecovery: return "captureRecovery"
+        case .captureRecoveryAction: return "captureRecoveryAction"
+        case .captureRecoveryActionResult: return "captureRecoveryActionResult"
+        case .reviewDecision: return "reviewDecision"
+        case .reviewDecisionResult: return "reviewDecisionResult"
+        case .sessionFinished: return "sessionFinished"
+        case .sessionFinishedAssets: return "sessionFinishedAssets"
+        case .customerFinished: return "customerFinished"
+        case .operatorOverride: return "operatorOverride"
+        case .heartbeat: return "heartbeat"
+        }
+    }
+
     func encoded() throws -> Data {
         try JSONEncoder().encode(self)
     }

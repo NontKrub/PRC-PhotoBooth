@@ -776,7 +776,7 @@ public struct BoothSecureChannelHello: Codable, Sendable, Equatable {
     }
 }
 
-enum BoothSecureChannelError: Error, Equatable, Sendable {
+enum BoothSecureChannelError: Error, Equatable, Sendable, LocalizedError {
     case invalidSecret
     case invalidHello
     case notReady
@@ -785,6 +785,21 @@ enum BoothSecureChannelError: Error, Equatable, Sendable {
     case replayedCounter
     case authenticationFailed
     case counterExhausted
+
+    var diagnosticName: String {
+        switch self {
+        case .invalidSecret: return "invalidSecret"
+        case .invalidHello: return "invalidHello"
+        case .notReady: return "notReady"
+        case .malformedEnvelope: return "malformedEnvelope"
+        case .wrongChannel: return "wrongChannel"
+        case .replayedCounter: return "replayedCounter"
+        case .authenticationFailed: return "authenticationFailed"
+        case .counterExhausted: return "counterExhausted"
+        }
+    }
+
+    var errorDescription: String? { diagnosticName }
 }
 
 private struct BoothSecureChannelKeySet {
@@ -811,13 +826,17 @@ final class BoothSecureChannel: @unchecked Sendable {
     private var localDeviceID = ""
     private var peerDeviceID = ""
 
-    var isReady: Bool {
+    var hasPreparedKeys: Bool {
         lock.lock()
         defer { lock.unlock() }
         return configuredSessionID != nil && !keySets.isEmpty
     }
 
-    var isConfigured: Bool { isReady }
+    /// Compatibility aliases for call sites that need to know whether the
+    /// secure context has key material. This does not mean the control
+    /// protocol has completed both Ready proofs.
+    var isReady: Bool { hasPreparedKeys }
+    var isConfigured: Bool { hasPreparedKeys }
 
     var sessionID: String? {
         lock.lock()
@@ -935,7 +954,7 @@ final class BoothSecureChannel: @unchecked Sendable {
         guard let keySet = keySets[channel.rawValue],
               let sessionID = configuredSessionID,
               let localRole,
-              let peerRole else { throw BoothSecureChannelError.malformedEnvelope }
+              let peerRole else { throw BoothSecureChannelError.notReady }
 
         let counter = Self.readUInt64(envelope, offset: 4)
         guard counter > (receivedCounters[channel.rawValue] ?? 0) else {
@@ -1393,6 +1412,8 @@ enum GenericPasswordKeychainAccessibility: Sendable {
 }
 
 protocol GenericPasswordKeychainStore: Sendable {
+    var hasSeparateLegacyKeychain: Bool { get }
+
     func readData(
         service: String,
         account: String,
@@ -1420,12 +1441,28 @@ func reportLegacyKeychainCleanupFailure(_ status: OSStatus) {
 }
 
 extension GenericPasswordKeychainStore {
+    var hasSeparateLegacyKeychain: Bool {
+        #if os(macOS)
+        true
+        #else
+        false
+        #endif
+    }
+
     func readDataMigratingToDataProtection(
         service: String,
         account: String,
         accessibility: GenericPasswordKeychainAccessibility
     ) -> GenericPasswordMigrationReadResult {
         let preferred = readData(service: service, account: account, useDataProtectionKeychain: true)
+        if !hasSeparateLegacyKeychain {
+            // iOS has only the Data Protection Keychain. A query without
+            // kSecUseDataProtectionKeychain addresses the same item.
+            return GenericPasswordMigrationReadResult(
+                data: preferred.status == errSecSuccess ? preferred.data : nil,
+                legacyCleanupError: nil
+            )
+        }
         if preferred.status == errSecSuccess {
             let cleanupStatus = deleteData(service: service, account: account, useDataProtectionKeychain: false)
             return GenericPasswordMigrationReadResult(
@@ -1490,6 +1527,9 @@ extension GenericPasswordKeychainStore {
 
     func deleteBothCopies(service: String, account: String) -> OSStatus {
         let dataProtectionStatus = deleteData(service: service, account: account, useDataProtectionKeychain: true)
+        if !hasSeparateLegacyKeychain {
+            return dataProtectionStatus == errSecItemNotFound ? errSecSuccess : dataProtectionStatus
+        }
         let legacyStatus = deleteData(service: service, account: account, useDataProtectionKeychain: false)
         for status in [dataProtectionStatus, legacyStatus]
         where status != errSecSuccess && status != errSecItemNotFound {
@@ -1604,6 +1644,16 @@ final class BoothTrustedPeerStore {
 
     var trustedPeerIDs: Set<String> { Set(trustedPeers.map(\.id)) }
 
+    func hasUsableSecret(for peerID: String) -> Bool {
+        secret(for: peerID)?.count == 32
+    }
+
+    var preferredPeerNeedsRepair: Bool {
+        guard let preferredID = preferredPeerID,
+              trustedPeerIDs.contains(preferredID) else { return false }
+        return !hasUsableSecret(for: preferredID)
+    }
+
     var preferredPeerID: String? {
         get { defaults.string(forKey: preferredKey) }
         set {
@@ -1685,7 +1735,9 @@ final class BoothTrustedPeerStore {
             accessibility: .afterFirstUnlockThisDeviceOnly
         )
         guard status == errSecSuccess else { throw BoothPairingError.keychain(status) }
-        _ = keychain.deleteData(service: keychainService, account: peerID, useDataProtectionKeychain: false)
+        if keychain.hasSeparateLegacyKeychain {
+            _ = keychain.deleteData(service: keychainService, account: peerID, useDataProtectionKeychain: false)
+        }
     }
 
     private func deleteSecret(peerID: String) -> OSStatus {

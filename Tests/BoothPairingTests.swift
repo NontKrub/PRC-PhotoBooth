@@ -621,6 +621,62 @@ struct BoothPairingTests {
         #expect(!store.autoReconnect)
     }
 
+    @Test("preferred peer with missing or invalid key requires repair")
+    func preferredPeerNeedsRepair() {
+        let suite = "BoothPairingTests.missing-secret.\(UUID().uuidString)"
+        let service = "com.nont.prcphoto.tests.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let keychain = InMemoryGenericPasswordKeychain()
+        let peerID = "mac-peer"
+        let store = BoothTrustedPeerStore(
+            defaults: defaults,
+            namespace: suite,
+            keychainService: service,
+            keychain: keychain
+        )
+        store.trustedPeers = [TrustedBoothPeer(id: peerID, displayName: "Event Mac", role: .mac)]
+        store.preferredPeerID = peerID
+
+        #expect(store.preferredPeerNeedsRepair)
+        #expect(!store.hasUsableSecret(for: peerID))
+
+        keychain.put(Data(repeating: 1, count: 31), service: service, account: peerID, useDataProtectionKeychain: true)
+        #expect(store.preferredPeerNeedsRepair)
+
+        keychain.put(Data(repeating: 1, count: 32), service: service, account: peerID, useDataProtectionKeychain: true)
+        #expect(!store.preferredPeerNeedsRepair)
+        #expect(store.hasUsableSecret(for: peerID))
+    }
+
+    @Test("iPad Keychain lookup keeps the newly saved pairing secret")
+    func unifiedKeychainDoesNotDeletePairingSecret() throws {
+        let suite = "BoothPairingTests.unified-keychain.\(UUID().uuidString)"
+        let service = "com.nont.prcphoto.tests.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let keychain = InMemoryGenericPasswordKeychain()
+        keychain.simulatesUnifiedKeychain = true
+        let store = BoothTrustedPeerStore(
+            defaults: defaults,
+            namespace: suite,
+            keychainService: service,
+            keychain: keychain
+        )
+        let peer = TrustedBoothPeer(id: "mac-peer", displayName: "Event Mac", role: .mac)
+        let secret = Data(repeating: 0x42, count: 32)
+
+        try store.trust(peer, secret: secret)
+        store.preferredPeerID = peer.id
+        #expect(store.secret(for: peer.id) == secret)
+        #expect(store.secret(for: peer.id) == secret)
+        #expect(!store.preferredPeerNeedsRepair)
+        #expect(keychain.item(service: service, account: peer.id, useDataProtectionKeychain: true) == secret)
+
+        #expect(store.forget(peerID: peer.id) == errSecSuccess)
+        #expect(store.secret(for: peer.id) == nil)
+    }
+
     @Test("trusted peer reads migrate legacy Keychain secret to Data Protection")
     func trustedPeerSecretMigratesToDataProtection() throws {
         let suite = "BoothPairingTests.migration.\(UUID().uuidString)"

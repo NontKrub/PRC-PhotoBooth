@@ -482,6 +482,8 @@ struct KeychainHelperTests {
 final class InMemoryGenericPasswordKeychain: GenericPasswordKeychainStore, @unchecked Sendable {
     private let lock = NSLock()
     private var items: [String: Data] = [:]
+    var simulatesUnifiedKeychain = false
+    var hasSeparateLegacyKeychain: Bool { !simulatesUnifiedKeychain }
     var failDataProtectionReads = false
     var failDataProtectionWrites = false
     var failDataProtectionDeletes = false
@@ -550,7 +552,7 @@ final class InMemoryGenericPasswordKeychain: GenericPasswordKeychainStore, @unch
     }
 
     private func itemKey(service: String, account: String, useDataProtectionKeychain: Bool) -> String {
-        "\(service)\u{0}\(account)\u{0}\(useDataProtectionKeychain)"
+        "\(service)\u{0}\(account)\u{0}\(simulatesUnifiedKeychain ? true : useDataProtectionKeychain)"
     }
 }
 

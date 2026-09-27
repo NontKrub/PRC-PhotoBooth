@@ -150,14 +150,19 @@ public enum BoothNetworkRouteCommand: Equatable, Sendable {
     case none
 }
 
-func previewPeerMatchesControlPeer(
+enum BoothPreviewIdentityMatch: Equatable, Sendable {
+    case awaitingHello
+    case matched
+    case mismatched
+}
+
+func comparePreviewPeerWithControlPeer(
     previewPeerID: String?,
-    controlPeerID: String?,
-    identityRequired: Bool
-) -> Bool {
-    guard identityRequired else { return true }
-    guard let previewPeerID, let controlPeerID else { return false }
-    return previewPeerID == controlPeerID
+    controlPeerID: String?
+) -> BoothPreviewIdentityMatch {
+    guard let previewPeerID else { return .awaitingHello }
+    guard let controlPeerID else { return .mismatched }
+    return previewPeerID == controlPeerID ? .matched : .mismatched
 }
 
 struct BoothRouteDiscoverySelection: Equatable, Sendable {

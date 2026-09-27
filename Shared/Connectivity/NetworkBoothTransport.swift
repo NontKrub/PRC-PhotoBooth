@@ -391,12 +391,13 @@ public final class NetworkBoothTransport: BoothTransport {
         duration: TimeInterval? = nil,
         reason: String? = nil,
         routeGeneration: Int? = nil,
-        candidateSource: String? = nil
+        candidateSource: String? = nil,
+        connectionGenerationOverride: Int? = nil
     ) {
         onTransportEvent?(BoothTransportDiagnosticEvent(
             kind: kind,
             channel: channel.map { String(describing: $0) },
-            generation: channel.map { connectionGeneration(for: $0) },
+            generation: connectionGenerationOverride ?? channel.map { connectionGeneration(for: $0) },
             route: route ?? activeInterface?.rawValue,
             attempt: attempt,
             byteCount: byteCount,
@@ -407,6 +408,44 @@ public final class NetworkBoothTransport: BoothTransport {
             networkPreference: requestedPreference,
             candidateSource: candidateSource
         ))
+    }
+
+    private func recordControlFrameFailure(
+        _ failure: BoothControlFrameDecodeFailure,
+        on connection: NWConnection,
+        generation: Int,
+        routeGeneration: Int,
+        localRole: DeviceRole
+    ) {
+        let roleText = localRole == .mac ? "Mac" : "iPad"
+        let summary = [
+            failure.diagnosticDescription,
+            "role=\(roleText)",
+            "generation=\(generation)",
+            "routeGeneration=\(routeGeneration)",
+            "endpoint=\(Self.sanitizedEndpoint(connection.endpoint))",
+            "authenticated=\(peerAuthenticated ? "yes" : "no")",
+            "pairingStage=\(pairingStageValue.rawValue)"
+        ].joined(separator: " ")
+        emitTransportEvent(
+            .controlFrameDecodeFailed,
+            channel: .control,
+            byteCount: failure.payloadByteCount,
+            reason: summary,
+            routeGeneration: routeGeneration,
+            connectionGenerationOverride: generation
+        )
+    }
+
+    private static func sanitizedEndpoint(_ endpoint: NWEndpoint) -> String {
+        switch endpoint {
+        case .hostPort(_, let port): return "tcp-port:\(port.rawValue)"
+        case .service: return "bonjour-service"
+        case .url: return "url-endpoint"
+        case .unix: return "unix-endpoint"
+        case .opaque: return "opaque-endpoint"
+        @unknown default: return "unknown-endpoint"
+        }
     }
 
     private var diagnosticTargetPeerID: String? {
@@ -454,8 +493,13 @@ public final class NetworkBoothTransport: BoothTransport {
         self.transportRuntime = BoothNetworkTransportRuntime(queue: self.transportQueue)
         self.waitingRecoveryScheduler = BoothConnectionRecoveryScheduler(queue: self.transportQueue)
         self.transportRuntime.updateTrustedPeerIDs(trustedStore.trustedPeerIDs)
-        if role == .iPad, trustedStore.autoReconnect {
-            self.targetPeerID = trustedStore.preferredPeerID
+        if role == .iPad, trustedStore.autoReconnect,
+           let preferredID = trustedStore.preferredPeerID {
+            if trustedStore.hasUsableSecret(for: preferredID) {
+                self.targetPeerID = preferredID
+            } else {
+                trustedStore.autoReconnect = false
+            }
         }
         self.controlWritePump.onFailure = { [weak self] outcome, reason, generation in
             Task { @MainActor [weak self] in
@@ -719,12 +763,39 @@ public final class NetworkBoothTransport: BoothTransport {
                   peerAuthenticated,
                   secureChannelEstablished else { return }
             handleDecodedFrames(frames)
+        case let .controlFrameDecodeFailed(generation, routeGeneration, byteCount, summary):
+            emitTransportEvent(
+                .controlFrameDecodeFailed,
+                channel: .control,
+                byteCount: byteCount,
+                reason: summary,
+                routeGeneration: routeGeneration,
+                connectionGenerationOverride: generation
+            )
         case let .disconnected(generation, reason):
             if finishCorePairingCandidate(generation: generation, reason: reason) { return }
-            handleCoreOwnedControlDisconnect(generation: generation, reason: reason)
+            if coreOwnedControlGeneration == generation {
+                handleCoreOwnedControlDisconnect(generation: generation, reason: reason)
+            } else {
+                emitTransportEvent(
+                    .transportDisconnected,
+                    channel: .control,
+                    reason: reason ?? "Control connection closed before app adoption.",
+                    connectionGenerationOverride: generation
+                )
+            }
         case let .rejected(generation, reason):
             if finishCorePairingCandidate(generation: generation, reason: reason) { return }
-            handleCoreOwnedControlDisconnect(generation: generation, reason: reason)
+            if coreOwnedControlGeneration == generation {
+                handleCoreOwnedControlDisconnect(generation: generation, reason: reason)
+            } else {
+                emitTransportEvent(
+                    .transportDisconnected,
+                    channel: .control,
+                    reason: reason,
+                    connectionGenerationOverride: generation
+                )
+            }
         case .listenerFailed(let generation, let reason):
             guard generation == coreControlListenerGeneration else { return }
             lastNetworkError = reason
@@ -1011,6 +1082,12 @@ public final class NetworkBoothTransport: BoothTransport {
         controlConnectionIsViable = false
         cancelWaitingRecovery(for: .control)
         resetPreviewConnection()
+        if role == .mac {
+            previewListener?.cancel()
+            previewListener = nil
+            assetListener?.cancel()
+            assetListener = nil
+        }
         assetConnection?.cancel()
         assetConnection = nil
         assetEndpointDescription = nil
@@ -1042,17 +1119,35 @@ public final class NetworkBoothTransport: BoothTransport {
         routeGeneration: Int?
     ) {
         guard transportRuntime.isControlConnectionAuthenticated(generation: generation) else {
+            emitTransportEvent(
+                .transportDisconnected,
+                channel: .control,
+                reason: "Authenticated control candidate was no longer active during app adoption.",
+                connectionGenerationOverride: generation
+            )
             transportRuntime.invalidateControlConnection(generation: generation)
             return
         }
         if role == .iPad, routeGeneration != routeDiscoveryGate.generation {
+            emitTransportEvent(
+                .transportDisconnected,
+                channel: .control,
+                reason: "Authenticated control candidate used an outdated discovery route.",
+                connectionGenerationOverride: generation
+            )
             transportRuntime.invalidateControlConnection(generation: generation)
             return
         }
         guard shouldReconnect,
               hello.role == (role == .mac ? .iPad : .mac),
-              trustedStore.secret(for: hello.deviceID) != nil,
+              trustedStore.trustedPeerIDs.contains(hello.deviceID),
               role != .iPad || targetPeerID == hello.deviceID else {
+            emitTransportEvent(
+                .transportDisconnected,
+                channel: .control,
+                reason: "Authenticated control candidate no longer matches the selected trusted peer.",
+                connectionGenerationOverride: generation
+            )
             transportRuntime.invalidateControlConnection(generation: generation)
             return
         }
@@ -1071,6 +1166,12 @@ public final class NetworkBoothTransport: BoothTransport {
             if previewBrowser == nil { startBrowser(channel: .preview) }
         }
         guard activeInterface != nil else {
+            emitTransportEvent(
+                .transportDisconnected,
+                channel: .control,
+                reason: "Authenticated control candidate has no active network interface.",
+                connectionGenerationOverride: generation
+            )
             transportRuntime.invalidateControlConnection(generation: generation)
             return
         }
@@ -1164,6 +1265,9 @@ public final class NetworkBoothTransport: BoothTransport {
         )
         emitTransportEvent(.secureChannelEstablished, channel: .control)
         emitTransportEvent(.transportReconnectSucceeded, channel: .control)
+        if role == .mac, previewListener == nil {
+            startListener(channel: .preview)
+        }
         if role == .iPad, previewConnection == nil {
             if activeInterface == .wiredEthernet {
                 connect(
@@ -1186,6 +1290,10 @@ public final class NetworkBoothTransport: BoothTransport {
     }
 
     public var deviceIdentity: BoothDeviceIdentity { localIdentity }
+    public var preferredPeerNeedsRepair: Bool { trustedStore.preferredPeerNeedsRepair }
+    public var hasActiveControlAttempt: Bool {
+        hasRuntimeOwnedControl || controlConnection != nil
+    }
     public var discoveryDiagnostics: BoothDiscoveryDiagnostics {
         let candidate = targetPeerID.flatMap(cachedRouteCandidate(for:))
         return BoothDiscoveryDiagnostics(
@@ -1578,6 +1686,13 @@ public final class NetworkBoothTransport: BoothTransport {
 
     public func selectPreferredPeer(_ peerID: String?) {
         guard peerID.map(trustedStore.trustedPeerIDs.contains) ?? true else { return }
+        if role == .iPad, let peerID,
+           !trustedStore.hasUsableSecret(for: peerID) {
+            let reason = "Pairing key is missing. Forget this Mac on both devices, then pair again."
+            lastNetworkError = reason
+            setPairingStage(.failed, state: .failed(reason))
+            return
+        }
         if role == .iPad { prepareForPeerSelection(peerID) }
         trustedStore.preferredPeerID = peerID
         if role == .iPad {
@@ -1597,6 +1712,12 @@ public final class NetworkBoothTransport: BoothTransport {
 
     public func connectToPeer(_ peerID: String) {
         guard role == .iPad, trustedStore.trustedPeerIDs.contains(peerID) else { return }
+        guard trustedStore.hasUsableSecret(for: peerID) else {
+            let reason = "Pairing key is missing. Forget this Mac on both devices, then pair again."
+            lastNetworkError = reason
+            setPairingStage(.failed, state: .failed(reason))
+            return
+        }
         guard !(targetPeerID == peerID && peerDeviceID == peerID && peerAuthenticated) else { return }
         prepareForPeerSelection(peerID)
         resetPairingState(clearTarget: false, clearPendingCommit: true, clearFailure: true)
@@ -2267,8 +2388,6 @@ public final class NetworkBoothTransport: BoothTransport {
         switch role {
         case .mac:
             startListener(channel: .control)
-            startListener(channel: .preview)
-            startListener(channel: .asset)
         case .iPad:
             if !directLANControlAttemptInFlight,
                targetPeerID.map({ trustedStore.secret(for: $0) == nil }) ?? true {
@@ -2305,6 +2424,18 @@ public final class NetworkBoothTransport: BoothTransport {
 
     private func startRouteDiscovery(skipDirectLANFallback: Bool) {
         guard role == .iPad, shouldReconnect else { return }
+        if targetPeerID == trustedStore.preferredPeerID,
+           targetPeerID != nil,
+           trustedStore.preferredPeerNeedsRepair,
+           !hasEphemeralPairingState {
+            let reason = "Pairing key is missing. Forget this Mac on both devices, then pair again."
+            trustedStore.autoReconnect = false
+            targetPeerID = nil
+            pendingPairingFailure = reason
+            lastNetworkError = reason
+            refreshControlCoreCredentials()
+            setPairingStage(.failed, state: .failed(reason))
+        }
         directLANControlAttemptInFlight = false
         discoveredPeersByID.removeAll()
         discoveredPeerProvenanceByID.removeAll()
@@ -2313,7 +2444,8 @@ public final class NetworkBoothTransport: BoothTransport {
         cancelRouteDiscovery()
         tearDownActiveTransport()
         routeMachine = BoothNetworkRouteMachine(preference: requestedPreference)
-        connectionState = .connecting
+        connectionState = targetPeerID == nil && !hasEphemeralPairingState
+            ? .disconnected : .connecting
         publishStatus()
         let generation = routeDiscoveryGate.begin()
         routeDiscoveryTargetPeerID = targetPeerID
@@ -2468,6 +2600,9 @@ public final class NetworkBoothTransport: BoothTransport {
                     // only the queue-owned core may create a trusted control
                     // socket or select its reconnect route.
                     if self.trustedStore.secret(for: peer.id) != nil { continue }
+                    // A stale target must not open an unauthenticated socket
+                    // unless the user has started a new pairing attempt.
+                    guard self.hasEphemeralPairingState else { continue }
 
                     let advertisedPreference = peer.networkPreference
                     guard !isLANCompatibilityFallback || advertisedPreference == .lan else {
@@ -2640,6 +2775,11 @@ public final class NetworkBoothTransport: BoothTransport {
         connectionParameters: NWParameters? = nil,
         provenance: BoothRouteCandidateProvenance? = nil
     ) {
+        if role == .iPad {
+            guard let targetPeerID,
+                  trustedStore.secret(for: targetPeerID) != nil
+                    || hasEphemeralPairingState else { return }
+        }
         routeDiscoveryFallbackTask?.cancel()
         routeDiscoveryFallbackToken &+= 1
         routeDiscoveryFallbackTask = nil
@@ -2995,9 +3135,15 @@ public final class NetworkBoothTransport: BoothTransport {
         }
         let peerRole = txtRecord?["role"].flatMap(DeviceRole.init(rawValue:)) ?? .mac
         let preferred = trustedStore.preferredPeerID
+        let displayName = BoothPeerDisplayName.resolve(
+            trustedName: trustedStore.trustedPeers.first { $0.id == id }?.displayName,
+            discoveredName: txtRecord?["deviceName"],
+            deviceID: id,
+            fallback: peerRole == .mac ? "Mac" : "iPad"
+        )
         return BoothDiscoveredPeer(
             id: id,
-            displayName: txtRecord?["deviceName"] ?? id,
+            displayName: displayName,
             role: peerRole,
             appVersion: txtRecord?["appVersion"] ?? "unknown",
             protocolVersion: Int(txtRecord?["protocolVersion"] ?? "0") ?? 0,
@@ -3824,6 +3970,9 @@ public final class NetworkBoothTransport: BoothTransport {
         let transportRuntime = self.transportRuntime
         let previewDeliveryPump = self.previewDeliveryPump
         let previewConnectionGeneration = self.previewConnectionGeneration
+        let controlConnectionGeneration = self.controlConnectionGeneration
+        let routeGeneration = self.routeDiscoveryGate.generation
+        let localRole = self.role
         transportQueue.async { [weak self, weak connection] in
             guard let self, let connection, token.isValid else { return }
             if decoderOverride == nil { decoder.reset(channel) }
@@ -3833,6 +3982,9 @@ public final class NetworkBoothTransport: BoothTransport {
                 decoder: decoder,
                 token: token,
                 secureChannel: secureChannel,
+                controlConnectionGeneration: controlConnectionGeneration,
+                routeGeneration: routeGeneration,
+                localRole: localRole,
                 activity: { [transportRuntime, secureChannel] in
                     guard secureChannel.isConfigured else { return }
                     transportRuntime.markControlActivityOnQueue()
@@ -3845,6 +3997,18 @@ public final class NetworkBoothTransport: BoothTransport {
                 },
                 deliverPreview: { [previewDeliveryPump, previewConnectionGeneration] data in
                     previewDeliveryPump.enqueueOnQueue(data, generation: previewConnectionGeneration)
+                },
+                diagnoseControlFailure: { [weak self, weak connection] failure in
+                    guard let self, let connection,
+                          token.isValid,
+                          self.isCurrent(connection, channel: .control) else { return }
+                    self.recordControlFrameFailure(
+                        failure,
+                        on: connection,
+                        generation: controlConnectionGeneration,
+                        routeGeneration: routeGeneration,
+                        localRole: localRole
+                    )
                 },
                 close: { [weak self, weak connection] reason in
                     guard let self, let connection,
@@ -3863,12 +4027,38 @@ public final class NetworkBoothTransport: BoothTransport {
         decoder: BoothTransportFrameDecoder,
         token: BoothTransportReceiveToken,
         secureChannel: BoothSecureChannel,
+        controlConnectionGeneration: Int = 0,
+        routeGeneration: Int = 0,
+        localRole: DeviceRole = .iPad,
         activity: @escaping @Sendable () -> Void,
         deliver: @escaping @MainActor ([BoothDecodedTransportFrame]) -> Void,
         deliverPreview: @escaping @Sendable (Data) -> Void,
+        diagnoseControlFailure: @escaping @MainActor (BoothControlFrameDecodeFailure) -> Void = { _ in },
         close: @escaping @MainActor (String?) -> Void
     ) {
         guard token.isValid else { return }
+        if channel == .control {
+            connection.receive(minimumIncompleteLength: 1, maximumLength: 64 * 1024) { data, _, isComplete, error in
+                guard token.isValid else { return }
+                Self.processControlReceive(
+                    on: connection,
+                    decoder: decoder,
+                    token: token,
+                    secureChannel: secureChannel,
+                    controlConnectionGeneration: controlConnectionGeneration,
+                    routeGeneration: routeGeneration,
+                    localRole: localRole,
+                    activity: activity,
+                    deliver: deliver,
+                    diagnoseControlFailure: diagnoseControlFailure,
+                    close: close,
+                    data: data ?? Data(),
+                    isComplete: isComplete,
+                    errorDescription: error?.localizedDescription
+                )
+            }
+            return
+        }
         connection.receive(minimumIncompleteLength: 1, maximumLength: 64 * 1024) { data, _, isComplete, error in
             guard token.isValid else { return }
             var shouldContinue = !isComplete && error == nil
@@ -3908,12 +4098,85 @@ public final class NetworkBoothTransport: BoothTransport {
                     decoder: decoder,
                     token: token,
                     secureChannel: secureChannel,
+                    controlConnectionGeneration: controlConnectionGeneration,
+                    routeGeneration: routeGeneration,
+                    localRole: localRole,
                     activity: activity,
                     deliver: deliver,
                     deliverPreview: deliverPreview,
+                    diagnoseControlFailure: diagnoseControlFailure,
                     close: close
                 )
             }
+        }
+    }
+
+    private nonisolated static func processControlReceive(
+        on connection: NWConnection,
+        decoder: BoothTransportFrameDecoder,
+        token: BoothTransportReceiveToken,
+        secureChannel: BoothSecureChannel,
+        controlConnectionGeneration: Int,
+        routeGeneration: Int,
+        localRole: DeviceRole,
+        activity: @escaping @Sendable () -> Void,
+        deliver: @escaping @MainActor ([BoothDecodedTransportFrame]) -> Void,
+        diagnoseControlFailure: @escaping @MainActor (BoothControlFrameDecodeFailure) -> Void,
+        close: @escaping @MainActor (String?) -> Void,
+        data: Data,
+        isComplete: Bool,
+        errorDescription: String?
+    ) {
+        guard token.isValid else { return }
+        do {
+            if let frame = try decoder.decodeNextControl(data, secureChannel: secureChannel) {
+                activity()
+                Task { @MainActor in
+                    guard token.isValid else { return }
+                    deliver([frame])
+                    Self.processControlReceive(
+                        on: connection,
+                        decoder: decoder,
+                        token: token,
+                        secureChannel: secureChannel,
+                        controlConnectionGeneration: controlConnectionGeneration,
+                        routeGeneration: routeGeneration,
+                        localRole: localRole,
+                        activity: activity,
+                        deliver: deliver,
+                        diagnoseControlFailure: diagnoseControlFailure,
+                        close: close,
+                        data: Data(),
+                        isComplete: isComplete,
+                        errorDescription: errorDescription
+                    )
+                }
+            } else if isComplete || errorDescription != nil {
+                Task { @MainActor in close(errorDescription) }
+            } else {
+                Self.receive(
+                    on: connection,
+                    channel: .control,
+                    decoder: decoder,
+                    token: token,
+                    secureChannel: secureChannel,
+                    controlConnectionGeneration: controlConnectionGeneration,
+                    routeGeneration: routeGeneration,
+                    localRole: localRole,
+                    activity: activity,
+                    deliver: deliver,
+                    deliverPreview: { _ in },
+                    diagnoseControlFailure: diagnoseControlFailure,
+                    close: close
+                )
+            }
+        } catch let failure as BoothControlFrameDecodeFailure {
+            Task { @MainActor in
+                diagnoseControlFailure(failure)
+                close(String(localized: "Secure connection failed. Reconnecting…"))
+            }
+        } catch {
+            Task { @MainActor in close(String(localized: "Invalid control frame. Reconnecting…")) }
         }
     }
 
@@ -5207,6 +5470,9 @@ public final class NetworkBoothTransport: BoothTransport {
         connectionStatus.publishSecureChannel(ready: true)
         emitTransportEvent(.secureChannelEstablished, channel: .control)
         startHeartbeat()
+        if role == .mac, previewListener == nil {
+            startListener(channel: .preview)
+        }
         if role == .iPad, previewConnection == nil {
             previewBrowser?.cancel()
             previewBrowser = nil
@@ -5519,47 +5785,7 @@ public final class NetworkBoothTransport: BoothTransport {
     }
 
     private func messageType(_ message: Message) -> String {
-        switch message {
-        case .hello: return "hello"
-        case .helloDetails: return "helloDetails"
-        case .pairingIntent: return "pairingIntent"
-        case .pairingSessionAvailable: return "pairingSessionAvailable"
-        case .pairingRequest: return "pairingRequest"
-        case .pairingResult: return "pairingResult"
-        case .pairingVerificationConfirmed: return "pairingVerificationConfirmed"
-        case .authChallenge: return "authChallenge"
-        case .authProof: return "authProof"
-        case .secureChannelHello: return "secureChannelHello"
-        case .secureChannelReady: return "secureChannelReady"
-        case .connectionRejected: return "connectionRejected"
-        case .sessionSync: return "sessionSync"
-        case .assetRequest: return "assetRequest"
-        case .assetUnavailable: return "assetUnavailable"
-        case .boothPaused: return "boothPaused"
-        case .eventConfig: return "eventConfig"
-        case .eventExperienceCatalog: return "eventExperienceCatalog"
-        case .eventExperienceAsset: return "eventExperienceAsset"
-        case .setMirrored: return "setMirrored"
-        case .sessionStart: return "sessionStart"
-        case .customerSessionStartRequest: return "customerSessionStartRequest"
-        case .customerSessionStartResult: return "customerSessionStartResult"
-        case .customerSessionRequest: return "customerSessionRequest"
-        case .sessionRequestRejected: return "sessionRequestRejected"
-        case .sessionPrepared: return "sessionPrepared"
-        case .beginCountdown: return "beginCountdown"
-        case .shotCaptured: return "shotCaptured"
-        case .shotCapturedAsset: return "shotCapturedAsset"
-        case .captureRecovery: return "captureRecovery"
-        case .captureRecoveryAction: return "captureRecoveryAction"
-        case .captureRecoveryActionResult: return "captureRecoveryActionResult"
-        case .reviewDecision: return "reviewDecision"
-        case .reviewDecisionResult: return "reviewDecisionResult"
-        case .sessionFinished: return "sessionFinished"
-        case .sessionFinishedAssets: return "sessionFinishedAssets"
-        case .customerFinished: return "customerFinished"
-        case .operatorOverride: return "operatorOverride"
-        case .heartbeat: return "heartbeat"
-        }
+        message.diagnosticCaseName
     }
 
     private func sendTransportHello() {
@@ -5651,19 +5877,29 @@ public final class NetworkBoothTransport: BoothTransport {
     }
 
     private func validatePreviewIdentity() {
+        guard let previewConnection else { return }
         guard peerAuthenticated, previewPeerSupportsIdentity else {
             if peerAuthenticated {
                 connectionDidClose(previewConnection, channel: .preview, reason: "preview identity capability is required")
             }
             return
         }
-        guard previewPeerMatchesControlPeer(
+        switch comparePreviewPeerWithControlPeer(
             previewPeerID: previewPeerID,
-            controlPeerID: expectedPeerDeviceID,
-            identityRequired: previewPeerSupportsIdentity
-        ) else {
-            connectionDidClose(previewConnection, channel: .preview, reason: "preview peer does not match control peer")
+            controlPeerID: expectedPeerDeviceID
+        ) {
+        case .awaitingHello:
+            // Control authentication can complete before the preview hello.
             return
+        case .mismatched:
+            connectionDidClose(
+                previewConnection,
+                channel: .preview,
+                reason: "preview peer does not match control peer (preview=\(previewPeerID ?? "none"), control=\(expectedPeerDeviceID ?? "none"))"
+            )
+            return
+        case .matched:
+            break
         }
         let wasPreviewIdentityVerified = previewIdentityVerified
         previewIdentityVerified = true
@@ -5671,8 +5907,8 @@ public final class NetworkBoothTransport: BoothTransport {
         if !wasPreviewIdentityVerified {
             emitTransportEvent(.previewReady, channel: .preview)
         }
-        if didSendPreviewHello, let connection = previewConnection {
-            previewWritePump.markReady(connection, generation: previewConnectionGeneration)
+        if didSendPreviewHello {
+            previewWritePump.markReady(previewConnection, generation: previewConnectionGeneration)
         }
     }
 

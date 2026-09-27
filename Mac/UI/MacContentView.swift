@@ -107,17 +107,43 @@ struct MacContentView: View {
 
 // MARK: - Settings
 
-private enum SettingsSection: String, CaseIterable, Identifiable {
-    case general = "General"
-    case camera = "Camera"
-    case network = "iPad & Network"
-    case display = "Display"
-    case printing = "Printing"
-    case cloud = "Cloud"
-    case security = "Security"
-    case eventReadiness = "Event Readiness"
+enum SettingsSection: String, CaseIterable, Identifiable {
+    case general
+    case camera
+    case network
+    case display
+    case printing
+    case cloud
+    case security
+    case eventReadiness
 
     var id: String { rawValue }
+
+    var title: LocalizedStringKey {
+        switch self {
+        case .general: "General"
+        case .camera: "Camera"
+        case .network: "iPad & Network"
+        case .display: "Display"
+        case .printing: "Printing"
+        case .cloud: "Cloud"
+        case .security: "Security"
+        case .eventReadiness: "Event Readiness"
+        }
+    }
+
+    var symbol: String {
+        switch self {
+        case .general: "slider.horizontal.3"
+        case .camera: "camera"
+        case .network: "ipad.and.iphone"
+        case .display: "display"
+        case .printing: "printer"
+        case .cloud: "cloud"
+        case .security: "lock.shield"
+        case .eventReadiness: "checkmark.seal"
+        }
+    }
 }
 
 struct SettingsView: View {
@@ -152,25 +178,39 @@ struct SettingsView: View {
     @State private var settingsActionError: String?
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            Picker("Settings section", selection: $selectedSection) {
+        NavigationSplitView {
+            List(selection: $selectedSection) {
                 ForEach(SettingsSection.allCases) { section in
-                    Text(section.rawValue).tag(section)
+                    Label(section.title, systemImage: section.symbol)
+                        .tag(section)
+                        .accessibilityIdentifier("Settings Section \(section.id)")
                 }
             }
-            .pickerStyle(.segmented)
-            .padding(.horizontal, 24)
-            .padding(.top, 16)
-
-            Divider().padding(.top, 14)
-
-            ScrollView {
-                settingsPage
+            .listStyle(.sidebar)
+            .navigationTitle("Settings")
+            .navigationSplitViewColumnWidth(min: 170, ideal: 190, max: 240)
+        } detail: {
+            VStack(alignment: .leading, spacing: 0) {
+                Text(selectedSection.title)
+                    .font(.largeTitle.weight(.semibold))
                     .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(24)
+                    .padding(.horizontal, 24)
+                    .padding(.top, 20)
+                    .padding(.bottom, 16)
+
+                Divider()
+
+                ScrollView(.vertical) {
+                    settingsPage
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(24)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
             }
+            .frame(minWidth: 520, minHeight: 440, alignment: .topLeading)
         }
         .navigationTitle("Settings")
+        .frame(minWidth: 760, minHeight: 500)
         .sheet(isPresented: $showCloudSSHSetup) {
             CloudSSHSetupView(setup: coordinator.cloudSSHSetup)
         }
