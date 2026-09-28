@@ -84,16 +84,38 @@ final class BoothSession {
     var stripPath: String?        // relative to Sessions dir
     var gifPath: String?
     var downloadToken: String
+    // Optional so existing SwiftData rows migrate as normal customer sessions.
+    var originRawValue: String?
+    var soakRunID: String?
+    var soakCycleIndex: Int?
     var event: BoothEvent?
     @Relationship(deleteRule: .cascade) var shots: [CapturedShot]
 
-    init(eventID: String, photoCount: Int) {
+    init(
+        eventID: String,
+        photoCount: Int,
+        origin: SessionOrigin = .normal,
+        soakRunID: String? = nil,
+        soakCycleIndex: Int? = nil
+    ) {
         self.id = UUID().uuidString
         self.eventID = eventID
         self.startedAt = Date()
         self.photoCount = photoCount
         self.downloadToken = UUID().uuidString
+        self.originRawValue = origin.rawValue
+        self.soakRunID = origin == .soakTest ? soakRunID : nil
+        self.soakCycleIndex = origin == .soakTest ? soakCycleIndex : nil
         self.shots = []
+    }
+
+    var origin: SessionOrigin {
+        get { SessionOrigin(rawValue: originRawValue ?? SessionOrigin.normal.rawValue) ?? .normal }
+        set { originRawValue = newValue.rawValue }
+    }
+
+    var isNormalProductionSession: Bool {
+        originRawValue == nil || originRawValue == SessionOrigin.normal.rawValue
     }
 }
 

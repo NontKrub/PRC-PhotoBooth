@@ -1,7 +1,7 @@
 import SwiftUI
 
 struct StartView: View {
-    @Environment(iPadViewModel.self) private var vm
+    @EnvironmentObject private var vm: iPadViewModel
     @State private var pressed = false
 
     private var isThai: Bool { vm.selectedLanguage == .thai }
@@ -61,7 +61,7 @@ struct StartView: View {
                         .background(Color.white)
                         .clipShape(RoundedRectangle(cornerRadius: 20))
                         .scaleEffect(pressed ? 0.96 : 1.0)
-                        .animation(.spring(duration: 0.2), value: pressed)
+                        .animation(.spring(response: 0.2, dampingFraction: 0.8), value: pressed)
                 }
                 .buttonStyle(.plain)
                 .disabled(vm.isSessionRequestPending)
@@ -81,16 +81,30 @@ struct StartView: View {
                 }
 
                 if vm.isSessionRequestPending {
-                    ProgressView("Waiting for operator…")
+                    ProgressView(LocalizedText(
+                        english: "Starting your session…",
+                        thai: "กำลังเริ่มเซสชัน…"
+                    ).value(for: vm.selectedLanguage))
                         .tint(.white)
                         .foregroundStyle(.white)
                         .padding(.top, 18)
                 } else if let error = vm.sessionRequestError {
-                    Text(error)
-                        .font(.callout)
-                        .foregroundStyle(.orange)
-                        .multilineTextAlignment(.center)
-                        .padding(.top, 18)
+                    VStack(spacing: 10) {
+                        Text(error)
+                            .font(.callout)
+                            .foregroundStyle(.orange)
+                            .multilineTextAlignment(.center)
+                        Button(LocalizedText(
+                            english: "Retry",
+                            thai: "ลองใหม่"
+                        ).value(for: vm.selectedLanguage)) {
+                            vm.customerTappedStart()
+                        }
+                        .buttonStyle(.bordered)
+                        .tint(.white)
+                        .accessibilityIdentifier("Session Start Retry")
+                    }
+                    .padding(.top, 18)
                 }
 
                 Spacer()

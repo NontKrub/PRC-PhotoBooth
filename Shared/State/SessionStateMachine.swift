@@ -1,16 +1,50 @@
 import Foundation
+#if os(macOS)
 import Observation
+#else
+import Combine
+#endif
 
-@MainActor
+#if os(macOS)
 @Observable
+#endif
+@MainActor
 public final class SessionStateMachine {
+#if os(iOS)
+    @Published
+#endif
     public private(set) var phase: BoothPhase = .idle
+#if os(iOS)
+    @Published
+#endif
     public var config: EventConfig = EventConfig()
+#if os(iOS)
+    @Published
+#endif
     public private(set) var keptShots: [Int: Data] = [:]   // photoIndex → JPEG thumbnail
+#if os(iOS)
+    @Published
+#endif
+    public private(set) var reviewImageData: Data? = nil
+#if os(iOS)
+    @Published
+#endif
     public private(set) var acceptedPhotoIndices: Set<Int> = []
+#if os(iOS)
+    @Published
+#endif
     public private(set) var deferredPhotoIndices: Set<Int> = []
+#if os(iOS)
+    @Published
+#endif
     public private(set) var currentSessionID: String = ""
+#if os(iOS)
+    @Published
+#endif
     public private(set) var nextPhotoIndex: Int = 0
+#if os(iOS)
+    @Published
+#endif
     public private(set) var countdownDeadline: Date?
 
     public init() {}
@@ -18,6 +52,7 @@ public final class SessionStateMachine {
     public func startSession(config: EventConfig, sessionID: String? = nil) {
         self.config = config
         self.keptShots = [:]
+        self.reviewImageData = nil
         self.acceptedPhotoIndices = []
         self.deferredPhotoIndices = []
         self.currentSessionID = sessionID ?? UUID().uuidString
@@ -35,6 +70,7 @@ public final class SessionStateMachine {
         self.config = config
         self.currentSessionID = sessionID
         self.keptShots = keptShots
+        self.reviewImageData = nil
         self.acceptedPhotoIndices = Set(keptShots.keys)
         self.deferredPhotoIndices = Set((0..<config.photoCount).filter {
             $0 < nextPhotoIndex && !self.acceptedPhotoIndices.contains($0)
@@ -91,9 +127,10 @@ public final class SessionStateMachine {
         phase = .countdown(photoIndex: idx, secondsRemaining: remaining)
     }
 
-    public func enterReview(photoIndex: Int, thumbnailData: Data) {
+    public func enterReview(photoIndex: Int, thumbnailData: Data, reviewImageData: Data? = nil) {
         guard isCurrentPhoto(photoIndex), canEnterReview else { return }
         keptShots[photoIndex] = thumbnailData
+        self.reviewImageData = reviewImageData ?? thumbnailData
         countdownDeadline = nil
         phase = .review(photoIndex: photoIndex)
     }
@@ -114,6 +151,20 @@ public final class SessionStateMachine {
     public func retakeShot(photoIndex: Int) {
         guard isCurrentPhoto(photoIndex), canRetake else { return }
         keptShots.removeValue(forKey: photoIndex)
+        reviewImageData = nil
+        acceptedPhotoIndices.remove(photoIndex)
+        deferredPhotoIndices.remove(photoIndex)
+        nextPhotoIndex = photoIndex
+        countdownDeadline = nil
+        phase = .countdown(photoIndex: photoIndex, secondsRemaining: config.countdownSeconds)
+    }
+
+    public func retakeFailedCapture(photoIndex: Int) {
+        guard case .captureRecovery(let currentIndex, _) = phase,
+              currentIndex == photoIndex,
+              isCurrentPhoto(photoIndex) else { return }
+        keptShots.removeValue(forKey: photoIndex)
+        reviewImageData = nil
         acceptedPhotoIndices.remove(photoIndex)
         deferredPhotoIndices.remove(photoIndex)
         nextPhotoIndex = photoIndex
@@ -122,23 +173,28 @@ public final class SessionStateMachine {
     }
 
     @discardableResult
-    public func continueAfterCaptureFailure(photoIndex: Int) -> Int? {
+    public func nextPhotoAfterCaptureFailure(photoIndex: Int) -> Int? {
         guard case .captureRecovery(let current, _) = phase, current == photoIndex else { return nil }
+        return nextPendingPhoto(excluding: photoIndex)
+    }
+
+    @discardableResult
+    public func continueAfterCaptureFailure(photoIndex: Int) -> Int? {
+        guard let next = nextPhotoAfterCaptureFailure(photoIndex: photoIndex) else { return nil }
+        // Never hand back the photograph that just failed: that is what the
+        // guest asked to move past. If nothing else is pending, stay in
+        // recovery so Retake and Use Previous remain the only exits.
         deferredPhotoIndices.insert(photoIndex)
-        guard let next = nextPendingPhoto() else {
-            nextPhotoIndex = config.photoCount
-            phase = .processing
-            return nil
-        }
         nextPhotoIndex = next
         countdownDeadline = nil
         phase = .countdown(photoIndex: next, secondsRemaining: config.countdownSeconds)
         return next
     }
 
-    public func usePreviousCapture(photoIndex: Int, thumbnailData: Data) {
+    public func usePreviousCapture(photoIndex: Int, thumbnailData: Data, reviewImageData: Data? = nil) {
         guard case .captureRecovery(let current, _) = phase, current == photoIndex else { return }
         keptShots[photoIndex] = thumbnailData
+        self.reviewImageData = reviewImageData ?? thumbnailData
         acceptedPhotoIndices.insert(photoIndex)
         deferredPhotoIndices.remove(photoIndex)
         advanceAfterAcceptance()
@@ -153,6 +209,7 @@ public final class SessionStateMachine {
     public func reset() {
         phase = .idle
         keptShots = [:]
+        reviewImageData = nil
         acceptedPhotoIndices = []
         deferredPhotoIndices = []
         currentSessionID = ""
@@ -167,6 +224,7 @@ public final class SessionStateMachine {
         config: EventConfig,
         phase: BoothPhase,
         keptShots: [Int: Data] = [:],
+        reviewImageData: Data? = nil,
         nextPhotoIndex: Int = 0,
         countdownDeadline: Date? = nil,
         acceptedPhotoIndices: Set<Int>? = nil,
@@ -175,6 +233,7 @@ public final class SessionStateMachine {
         self.config = config
         self.currentSessionID = sessionID
         self.keptShots = keptShots
+        self.reviewImageData = reviewImageData
         self.acceptedPhotoIndices = acceptedPhotoIndices ?? Set(keptShots.keys)
         self.deferredPhotoIndices = deferredPhotoIndices ?? []
         self.nextPhotoIndex = nextPhotoIndex
@@ -188,6 +247,7 @@ public final class SessionStateMachine {
     }
 
     private func advanceAfterAcceptance() {
+        reviewImageData = nil
         guard let next = nextPendingPhoto() else {
             nextPhotoIndex = config.photoCount
             phase = .processing
@@ -198,14 +258,16 @@ public final class SessionStateMachine {
         phase = .countdown(photoIndex: next, secondsRemaining: config.countdownSeconds)
     }
 
-    private func nextPendingPhoto() -> Int? {
+    private func nextPendingPhoto(excluding excluded: Int? = nil) -> Int? {
         if let next = (0..<config.photoCount).first(where: {
-            !acceptedPhotoIndices.contains($0) && !deferredPhotoIndices.contains($0)
+            $0 != excluded
+                && !acceptedPhotoIndices.contains($0)
+                && !deferredPhotoIndices.contains($0)
         }) {
             return next
         }
         return deferredPhotoIndices
-            .filter { !acceptedPhotoIndices.contains($0) }
+            .filter { $0 != excluded && !acceptedPhotoIndices.contains($0) }
             .sorted()
             .first
     }
@@ -255,3 +317,7 @@ public final class SessionStateMachine {
         }
     }
 }
+
+#if os(iOS)
+extension SessionStateMachine: ObservableObject {}
+#endif

@@ -1,6 +1,11 @@
 name: PR App Builds
 
 on:
+  push:
+    branches:
+      - 'fix/**'
+      - 'feat/**'
+      - 'release/**'
   pull_request:
     types: [opened, synchronize, reopened]
   workflow_dispatch:
@@ -9,21 +14,32 @@ permissions:
   contents: read
 
 concurrency:
-  group: pr-app-build-${{ github.event.pull_request.number || github.run_id }}
+  group: pr-app-build-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 jobs:
   build-mac-app:
     name: Build macOS app
-    runs-on: macos-15
+    runs-on: xcode-27
 
     steps:
       - name: Check out source
         uses: actions/checkout@v5
 
+      - name: Verify Xcode 27 toolchain
+        run: |
+          set -euo pipefail
+          xcode_version="$(xcodebuild -version)"
+          printf '%s\n' "$xcode_version"
+          swift --version
+          if [[ "$xcode_version" != *"Xcode 27"* ]]; then
+            echo 'Expected Xcode 27 toolchain.' >&2
+            exit 1
+          fi
+
       - name: Install XcodeGen
         run: |
-          if brew tap | grep -Fxq 'aws/tap'; then
+          if brew tap | grep -Fx 'aws/tap' >/dev/null; then
             brew untap aws/tap
           fi
           if ! command -v xcodegen >/dev/null 2>&1; then
@@ -32,7 +48,6 @@ jobs:
 
       - name: Show toolchain
         run: |
-          xcodebuild -version
           xcodegen --version
 
       - name: Generate Xcode project
@@ -61,10 +76,58 @@ jobs:
             CODE_SIGNING_REQUIRED=NO \
             test
 
+      - name: Run isolated MainActor transport stall tests
+        env:
+          # xcodebuild strips this prefix in the test runner process.
+          TEST_RUNNER_PRC_RUN_MAINACTOR_STALL_TESTS: "1"
+        run: |
+          xcodebuild \
+            -project PRC-PhotoBooth.xcodeproj \
+            -scheme PRC-PhotoBoothTests \
+            -destination "platform=macOS" \
+            -derivedDataPath "$RUNNER_TEMP/PRC-PhotoBooth-DerivedData" \
+            -only-testing:'PRC-PhotoBoothTests/NetworkRouteTests/trustedControlHandshakeAndReconnectSurviveMainActorStall()' \
+            -only-testing:'PRC-PhotoBoothTests/NetworkRouteTests/incomingPairingCandidateSurvivesMainActorStall()' \
+            -only-testing:'PRC-PhotoBoothTests/NetworkRouteTests/trustedIdentityProbeAuthenticatesAfterAnonymousEndpointFlood()' \
+            -only-testing:'PRC-PhotoBoothTests/TrustedFloodAuthenticationTests/freshRuntimeAuthenticatesAfterFiniteHostileFloodWithoutEndpointHistory()' \
+            -only-testing:'PRC-PhotoBoothTests/NetworkRouteTests/trustedProbeRetriesAfterOccupiedSlotsDuringMainActorStall()' \
+            -only-testing:'PRC-PhotoBoothTests/NetworkRouteTests/macControlListenerFallbackAuthenticatesDuringMainActorStall()' \
+            -only-testing:'PRC-PhotoBoothTests/NetworkRouteTests/productionListenerAdmissionIsQueueOwned()' \
+            -only-testing:'PRC-PhotoBoothTests/NetworkRouteTests/controlListenerRetryRecoversDuringMainActorStall()' \
+            -only-testing:'PRC-PhotoBoothTests/NetworkRouteTests/trustedRouteRefreshAuthenticatesDuringMainActorStall()' \
+            -only-testing:'PRC-PhotoBoothTests/NetworkRouteTests/controlCoreEventStreamPreservesAuthenticationOrderDuringMainActorStall()' \
+            -only-testing:'PRC-PhotoBoothTests/NetworkRouteTests/controlCoreEventStreamBoundsBacklog()' \
+            -only-testing:'PRC-PhotoBoothTests/NetworkRouteTests/controlCoreEventStreamFinishesWhenOwnerIsReleased()' \
+            -only-testing:'PRC-PhotoBoothTests/NetworkRouteTests/trustedRouteBrowserRetryDelayCapsAfterRepeatedFailures()' \
+            -only-testing:'PRC-PhotoBoothTests/NetworkRouteTests/productionReconnectStartsSocketOffMainActor()' \
+            -only-testing:'PRC-PhotoBoothTests/NetworkRouteTests/reconnectTimerIsQueueOwned()' \
+            -only-testing:'PRC-PhotoBoothTests/NetworkRouteTests/preAuthWatchdogCancelsConnectionWhileMainActorBlocked()' \
+            -only-testing:'PRC-PhotoBoothTests/NetworkRouteTests/authenticatedControlTrafficSurvivesTwelveSecondMainActorStall()' \
+            -only-testing:'PRC-PhotoBoothTests/NetworkRouteTests/controlFailureDuringMainActorStallSchedulesOneReconnect()' \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            test
+
+      - name: Report Bonjour route-refresh integration coverage
+        run: |
+          echo "::notice::The loopback Bonjour route-refresh integration is opt-in because hosted Mac runners may not publish and browse local mDNS. Run it on a Bonjour-capable Mac with PRC_RUN_BONJOUR_ROUTE_REFRESH_TESTS=1."
+
+      - name: Build macOS app (Release)
+        run: |
+          xcodebuild \
+            -project PRC-PhotoBooth.xcodeproj \
+            -scheme PRC-PhotoBooth-Mac \
+            -configuration Release \
+            -destination "platform=macOS" \
+            -derivedDataPath "$RUNNER_TEMP/PRC-PhotoBooth-DerivedData" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            build
+
       - name: Package app
         id: package
         run: |
-          app_path="$RUNNER_TEMP/PRC-PhotoBooth-DerivedData/Build/Products/Debug/PRC-PhotoBooth-Mac.app"
+          app_path="$RUNNER_TEMP/PRC-PhotoBooth-DerivedData/Build/Products/Release/PRC-PhotoBooth-Mac.app"
           archive_path="$RUNNER_TEMP/PRC-PhotoBooth-Mac-${GITHUB_SHA:0:7}.zip"
 
           test -d "$app_path"
@@ -84,21 +147,32 @@ jobs:
           {
             echo "## Release artifacts"
             echo
-            echo "Unsigned Debug build packaged as \`PRC-PhotoBooth-Mac-${GITHUB_SHA:0:7}.zip\`."
+            echo "Unsigned Release build packaged as \`PRC-PhotoBooth-Mac-${GITHUB_SHA:0:7}.zip\`."
             echo "Download it from [this workflow run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})."
           } >> "$GITHUB_STEP_SUMMARY"
 
   build-ipad-app:
     name: Build iPad Simulator app
-    runs-on: macos-15
+    runs-on: xcode-27
 
     steps:
       - name: Check out source
         uses: actions/checkout@v5
 
+      - name: Verify Xcode 27 toolchain
+        run: |
+          set -euo pipefail
+          xcode_version="$(xcodebuild -version)"
+          printf '%s\n' "$xcode_version"
+          swift --version
+          if [[ "$xcode_version" != *"Xcode 27"* ]]; then
+            echo 'Expected Xcode 27 toolchain.' >&2
+            exit 1
+          fi
+
       - name: Install XcodeGen
         run: |
-          if brew tap | grep -Fxq 'aws/tap'; then
+          if brew tap | grep -Fx 'aws/tap' >/dev/null; then
             brew untap aws/tap
           fi
           if ! command -v xcodegen >/dev/null 2>&1; then
@@ -107,7 +181,6 @@ jobs:
 
       - name: Show toolchain
         run: |
-          xcodebuild -version
           xcodegen --version
 
       - name: Generate Xcode project
@@ -126,10 +199,54 @@ jobs:
             CODE_SIGNING_REQUIRED=NO \
             build
 
+      - name: Build iPad Simulator app (Release)
+        run: |
+          xcodebuild \
+            -project PRC-PhotoBooth.xcodeproj \
+            -scheme PRC-PhotoBooth-iPad \
+            -configuration Release \
+            -destination "generic/platform=iOS Simulator" \
+            -sdk iphonesimulator \
+            -derivedDataPath "$RUNNER_TEMP/PRC-PhotoBooth-iPad-DerivedData" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            build
+
+      - name: Run iPad tests
+        run: |
+          set -euo pipefail
+          ipad_udid="$(xcrun simctl list devices available | sed -nE '/iPad/ s/.*\(([0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12})\).*/\1/p' | head -n 1)"
+          test -n "$ipad_udid" || {
+            echo 'No available iPad simulator found.' >&2
+            exit 1
+          }
+          echo "Testing on discovered iPad simulator: $ipad_udid"
+          xcodebuild \
+            -project PRC-PhotoBooth.xcodeproj \
+            -scheme PRC-PhotoBooth-iPadTests \
+            -configuration Debug \
+            -destination "platform=iOS Simulator,id=$ipad_udid" \
+            -derivedDataPath "$RUNNER_TEMP/PRC-PhotoBooth-iPad-DerivedData" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            test
+
+      - name: Build iPad (Release, generic device)
+        run: |
+          xcodebuild \
+            -project PRC-PhotoBooth.xcodeproj \
+            -scheme PRC-PhotoBooth-iPad \
+            -configuration Release \
+            -destination "generic/platform=iOS" \
+            -derivedDataPath "$RUNNER_TEMP/PRC-PhotoBooth-iPad-Device-DerivedData" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            build
+
       - name: Package app
         id: package
         run: |
-          app_path="$RUNNER_TEMP/PRC-PhotoBooth-iPad-DerivedData/Build/Products/Debug-iphonesimulator/PRC-PhotoBooth-iPad.app"
+          app_path="$RUNNER_TEMP/PRC-PhotoBooth-iPad-DerivedData/Build/Products/Release-iphonesimulator/PRC-PhotoBooth-iPad.app"
           archive_path="$RUNNER_TEMP/PRC-PhotoBooth-iPad-Simulator-${GITHUB_SHA:0:7}.zip"
 
           test -d "$app_path"
@@ -149,6 +266,55 @@ jobs:
           {
             echo "## Release artifacts"
             echo
-            echo "Unsigned Debug Simulator build packaged as \`PRC-PhotoBooth-iPad-Simulator-${GITHUB_SHA:0:7}.zip\`."
+            echo "Unsigned Release Simulator build packaged as \`PRC-PhotoBooth-iPad-Simulator-${GITHUB_SHA:0:7}.zip\`."
             echo "Download it from [this workflow run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})."
           } >> "$GITHUB_STEP_SUMMARY"
+
+  build-stable-macos:
+    name: Stable macOS lane
+    runs-on: macos-15
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v5
+
+      - name: Show stable toolchain
+        run: |
+          set -euo pipefail
+          xcodebuild -version
+          swift --version
+
+      - name: Install XcodeGen
+        run: |
+          if brew tap | grep -Fx 'aws/tap' >/dev/null; then
+            brew untap aws/tap
+          fi
+          if ! command -v xcodegen >/dev/null 2>&1; then
+            brew install --formula xcodegen
+          fi
+
+      - name: Generate Xcode project
+        run: xcodegen generate
+
+      - name: Build macOS Release
+        run: |
+          xcodebuild \
+            -project PRC-PhotoBooth.xcodeproj \
+            -scheme PRC-PhotoBooth-Mac \
+            -configuration Release \
+            -destination "platform=macOS" \
+            -derivedDataPath "$RUNNER_TEMP/PRC-PhotoBooth-Stable-DerivedData" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            build
+
+      - name: Run Mac tests
+        run: |
+          xcodebuild \
+            -project PRC-PhotoBooth.xcodeproj \
+            -scheme PRC-PhotoBoothTests \
+            -destination "platform=macOS" \
+            -derivedDataPath "$RUNNER_TEMP/PRC-PhotoBooth-Stable-DerivedData" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            test

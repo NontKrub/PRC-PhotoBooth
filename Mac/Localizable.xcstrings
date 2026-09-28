@@ -31,6 +31,17 @@
         }
       }
     },
+    "\"%@\" wants to connect to this Mac." : {
+      "extractionState" : "stale",
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "\"%1$@\" ต้องการเชื่อมต่อกับ Mac เครื่องนี้"
+          }
+        }
+      }
+    },
     "%@" : {
       "localizations" : {
         "th" : {
@@ -47,6 +58,49 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "%1$@ · %2$@"
+          }
+        }
+      }
+    },
+    "%@ · Run %@ · Cycle %@" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "%1$@ · Run %2$@ · Cycle %3$@"
+          }
+        },
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%1$@ · รัน %2$@ · รอบ %3$@"
+          }
+        }
+      }
+    },
+    "%@ cycles × %@ photos = %@ camera captures." : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "%1$@ cycles × %2$@ photos = %3$@ camera captures."
+          }
+        },
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%1$@ รอบ × %2$@ ภาพ = %3$@ ภาพที่บันทึกจากกล้อง"
+          }
+        }
+      }
+    },
+    "%@ Elements Selected" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%1$@ รายการที่เลือก"
           }
         }
       }
@@ -128,6 +182,39 @@
         }
       }
     },
+    "%@ sessions × (%@ photos + 1–4 retakes) = %@–%@ camera captures." : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "%1$@ sessions × (%2$@ photos + 1–4 retakes) = %3$@–%4$@ camera captures."
+          }
+        },
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%1$@ เซสชัน × (%2$@ ภาพ + ถ่ายใหม่ 1–4 ครั้ง) = %3$@–%4$@ ภาพที่บันทึกจากกล้อง"
+          }
+        }
+      }
+    },
+    "%@ sessions × %@ photos = %@ camera captures." : {
+      "extractionState" : "stale",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "%1$@ sessions × %2$@ photos = %3$@ camera captures."
+          }
+        },
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%1$@ เซสชัน × %2$@ ภาพ = %3$@ ภาพที่บันทึกจากกล้อง"
+          }
+        }
+      }
+    },
     "%@ slots · %@ capture indexes" : {
       "extractionState" : "stale",
       "localizations" : {
@@ -139,7 +226,18 @@
         }
       }
     },
+    "%@ synthetic benchmark cycles; no camera captures." : {
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%1$@ รอบการทดสอบจำลอง โดยไม่มีการถ่ายภาพจากกล้อง"
+          }
+        }
+      }
+    },
     "%@: %@ · %@: %@" : {
+      "extractionState" : "stale",
       "localizations" : {
         "en" : {
           "stringUnit" : {
@@ -151,6 +249,26 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "%1$@: %2$@ · %3$@: %4$@"
+          }
+        }
+      }
+    },
+    "%@%%" : {
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%@%%"
+          }
+        }
+      }
+    },
+    "• %@" : {
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "• %@"
           }
         }
       }
@@ -196,12 +314,62 @@
         }
       }
     },
+    "1 (Single-cycle check)" : {
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "1 (ตรวจสอบรอบเดียว)"
+          }
+        }
+      }
+    },
+    "10 (Quick Smoke)" : {
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "10 (ทดสอบสั้น)"
+          }
+        }
+      }
+    },
+    "25 (Short Benchmark)" : {
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "25 (ทดสอบระยะสั้น)"
+          }
+        }
+      }
+    },
+    "50 (Standard Soak)" : {
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "50 (ทดสอบมาตรฐาน)"
+          }
+        }
+      }
+    },
     "90° CW" : {
       "localizations" : {
         "th" : {
           "stringUnit" : {
             "state" : "translated",
             "value" : "90° ตามเข็มนาฬิกา"
+          }
+        }
+      }
+    },
+    "100 (Stress Test)" : {
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "100 (ทดสอบความทนทาน)"
           }
         }
       }
@@ -226,6 +394,16 @@
         }
       }
     },
+    "500 (Full Event Soak)" : {
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "500 (ทดสอบงานเต็มรูปแบบ)"
+          }
+        }
+      }
+    },
     "A configured filter failed synthetic-image validation." : {
       "extractionState" : "manual",
       "localizations" : {
@@ -244,6 +422,17 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "หน้าจอลูกค้าพร้อมใช้งาน"
+          }
+        }
+      }
+    },
+    "A print is already in progress." : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "มีงานพิมพ์กำลังดำเนินการอยู่"
           }
         }
       }
@@ -399,6 +588,74 @@
         }
       }
     },
+    "Admin credential unavailable" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Admin credential unavailable"
+          }
+        },
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ไม่สามารถเข้าถึงข้อมูลรับรองผู้ดูแลระบบ"
+          }
+        }
+      }
+    },
+    "Admin credential unavailable." : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Admin credential unavailable."
+          }
+        },
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ไม่สามารถเข้าถึงข้อมูลรับรองผู้ดูแลระบบ"
+          }
+        }
+      }
+    },
+    "Admin PIN could not be saved. Try again." : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Admin PIN could not be saved. Try again."
+          }
+        },
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "บันทึก PIN ผู้ดูแลระบบไม่ได้ ลองอีกครั้ง"
+          }
+        }
+      }
+    },
+    "Admin PIN is not configured. Retry Settings." : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Admin PIN is not configured. Retry Settings."
+          }
+        },
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ยังไม่ได้ตั้งค่า PIN ผู้ดูแลระบบ ลองเปิดการตั้งค่าอีกครั้ง"
+          }
+        }
+      }
+    },
     "All" : {
       "localizations" : {
         "th" : {
@@ -425,6 +682,22 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "ทุกงาน"
+          }
+        }
+      }
+    },
+    "All trusted iPads and their pairing secrets will be removed from this Mac." : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "All trusted iPads and their pairing secrets will be removed from this Mac."
+          }
+        },
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "iPad ที่เชื่อถือและรหัสลับการจับคู่ทั้งหมดจะถูกลบออกจาก Mac เครื่องนี้"
           }
         }
       }
@@ -625,6 +898,50 @@
         }
       }
     },
+    "Authenticating…" : {
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "กำลังยืนยันตัวตน…"
+          }
+        }
+      }
+    },
+    "Authentication" : {
+      "extractionState" : "stale",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Authentication"
+          }
+        },
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "การยืนยันตัวตน"
+          }
+        }
+      }
+    },
+    "Authentication failed" : {
+      "extractionState" : "stale",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Authentication failed"
+          }
+        },
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "การยืนยันตัวตนล้มเหลว"
+          }
+        }
+      }
+    },
     "Authorize this Mac on the server" : {
       "extractionState" : "manual",
       "localizations" : {
@@ -653,6 +970,17 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "โหมดถ่ายภาพอัตโนมัติ"
+          }
+        }
+      }
+    },
+    "Auto uses Standard on Wi-Fi and High on a stable Ethernet route." : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "โหมดอัตโนมัติใช้ Standard บน Wi-Fi และ High บนอีเทอร์เน็ตที่เสถียร"
           }
         }
       }
@@ -740,6 +1068,17 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "กลับไปที่ตัวเลือก"
+          }
+        }
+      }
+    },
+    "Balanced — Recommended" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "สมดุล — แนะนำ"
           }
         }
       }
@@ -853,6 +1192,7 @@
       }
     },
     "Camera Access Required" : {
+      "extractionState" : "stale",
       "localizations" : {
         "th" : {
           "stringUnit" : {
@@ -983,6 +1323,22 @@
         }
       }
     },
+    "Camera shutters: %@ succeeded / %@ attempted" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Camera shutters: %1$@ succeeded / %2$@ attempted"
+          }
+        },
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ชัตเตอร์กล้อง: สำเร็จ %1$@ / พยายาม %2$@ ครั้ง"
+          }
+        }
+      }
+    },
     "Camera Source" : {
       "extractionState" : "manual",
       "localizations" : {
@@ -1008,10 +1364,33 @@
     "Cancel" : {
       "extractionState" : "manual",
       "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Cancel"
+          }
+        },
         "th" : {
           "stringUnit" : {
             "state" : "translated",
             "value" : "ยกเลิก"
+          }
+        }
+      }
+    },
+    "Cancel Pairing" : {
+      "extractionState" : "stale",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Cancel Pairing"
+          }
+        },
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ยกเลิกการจับคู่"
           }
         }
       }
@@ -1023,6 +1402,17 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "ยกเลิกแล้ว"
+          }
+        }
+      }
+    },
+    "Cancelled — cleanup pending" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ยกเลิกแล้ว — รอการล้างข้อมูล"
           }
         }
       }
@@ -1091,6 +1481,23 @@
         }
       }
     },
+    "Checking Admin PIN…" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Checking Admin PIN…"
+          }
+        },
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "กำลังตรวจสอบ PIN ผู้ดูแลระบบ…"
+          }
+        }
+      }
+    },
     "Checking Booth…" : {
       "extractionState" : "manual",
       "localizations" : {
@@ -1120,6 +1527,27 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "เลือก PIN 4 หลักเพื่อปกป้องการตั้งค่าผู้ดูแล"
+          }
+        }
+      }
+    },
+    "Choose a synthetic benchmark, physical camera check, or production session soak. Only Production Pipeline exercises the live booth workflow." : {
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "เลือกการทดสอบสังเคราะห์ การตรวจสอบกล้องจริง หรือการทดสอบเซสชันการทำงานจริง เฉพาะ Production Pipeline เท่านั้นที่ทดสอบเวิร์กโฟลว์ของบูธจริง"
+          }
+        }
+      }
+    },
+    "Choose Delete to remove the selected events." : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "เลือก Delete เพื่อลบอีเวนต์ที่เลือก"
           }
         }
       }
@@ -1156,6 +1584,27 @@
         }
       }
     },
+    "Cleanup pending" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "รอการล้างข้อมูล"
+          }
+        }
+      }
+    },
+    "Cleanup: %@" : {
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ล้างข้อมูล: %1$@"
+          }
+        }
+      }
+    },
     "Clear Selection" : {
       "extractionState" : "manual",
       "localizations" : {
@@ -1185,6 +1634,17 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "ปิด"
+          }
+        }
+      }
+    },
+    "Cloud" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "คลาวด์"
           }
         }
       }
@@ -1286,6 +1746,28 @@
         }
       }
     },
+    "Codes Match" : {
+      "extractionState" : "stale",
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "รหัสตรงกัน"
+          }
+        }
+      }
+    },
+    "Compact — Smaller file, fastest guest download" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "กะทัดรัด — ไฟล์เล็ก ดาวน์โหลดสำหรับแขกได้เร็วที่สุด"
+          }
+        }
+      }
+    },
     "Completed" : {
       "extractionState" : "manual",
       "localizations" : {
@@ -1293,6 +1775,23 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "เสร็จแล้ว"
+          }
+        }
+      }
+    },
+    "Configured" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Configured"
+          }
+        },
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ตั้งค่าแล้ว"
           }
         }
       }
@@ -1363,9 +1862,47 @@
         }
       }
     },
+    "Confirm printer outcome" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ยืนยันผลลัพธ์การพิมพ์"
+          }
+        }
+      }
+    },
+    "Confirm the physical printer result before releasing this print lane." : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ยืนยันผลลัพธ์จริงของเครื่องพิมพ์ก่อนปล่อยช่องพิมพ์นี้"
+          }
+        }
+      }
+    },
+    "Confirm this code is also shown on the iPad:" : {
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ยืนยันว่ารหัสนี้แสดงบน iPad ด้วย:"
+          }
+        }
+      }
+    },
     "Connect" : {
       "extractionState" : "manual",
       "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Connect"
+          }
+        },
         "th" : {
           "stringUnit" : {
             "state" : "translated",
@@ -1460,6 +1997,39 @@
         }
       }
     },
+    "Connected iPad" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Connected iPad"
+          }
+        },
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "iPad ที่เชื่อมต่อ"
+          }
+        }
+      }
+    },
+    "Connecting or authenticating…" : {
+      "extractionState" : "stale",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Connecting or authenticating…"
+          }
+        },
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "กำลังเชื่อมต่อหรือยืนยันตัวตน…"
+          }
+        }
+      }
+    },
     "Connecting to iPad…" : {
       "extractionState" : "manual",
       "localizations" : {
@@ -1525,6 +2095,17 @@
         }
       }
     },
+    "Copied" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "คัดลอกแล้ว"
+          }
+        }
+      }
+    },
     "Copies" : {
       "extractionState" : "manual",
       "localizations" : {
@@ -1543,6 +2124,17 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "คัดลอก"
+          }
+        }
+      }
+    },
+    "Copy Diagnostics" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "คัดลอกข้อมูลวินิจฉัย"
           }
         }
       }
@@ -1623,6 +2215,44 @@
         }
       }
     },
+    "Current route" : {
+      "extractionState" : "stale",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Current route"
+          }
+        },
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "เส้นทางปัจจุบัน"
+          }
+        }
+      }
+    },
+    "Current route verification only. Switch Connection to LAN for a full booth connection test." : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ตรวจสอบเส้นทางปัจจุบันเท่านั้น เปลี่ยนการเชื่อมต่อเป็น LAN เพื่อทดสอบการเชื่อมต่อบูธแบบเต็มรูปแบบ"
+          }
+        }
+      }
+    },
+    "Custom…" : {
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "กำหนดเอง…"
+          }
+        }
+      }
+    },
     "Customer display" : {
       "extractionState" : "manual",
       "localizations" : {
@@ -1630,6 +2260,54 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "หน้าจอลูกค้า"
+          }
+        }
+      }
+    },
+    "Customer sessions remain available while printing." : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "เซสชันของลูกค้ายังดำเนินต่อได้ขณะกำลังพิมพ์"
+          }
+        }
+      }
+    },
+    "Cycle %@ of %@" : {
+      "extractionState" : "stale",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Cycle %1$@ of %2$@"
+          }
+        },
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "รอบที่ %@ จาก %@"
+          }
+        }
+      }
+    },
+    "cycles" : {
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "รอบ"
+          }
+        }
+      }
+    },
+    "DANGEROUS" : {
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "อันตราย"
           }
         }
       }
@@ -1688,6 +2366,16 @@
         }
       }
     },
+    "Delay Between Cycles:" : {
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "หน่วงเวลาระหว่างรอบ:"
+          }
+        }
+      }
+    },
     "Delete" : {
       "extractionState" : "manual",
       "localizations" : {
@@ -1695,6 +2383,34 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "ลบ"
+          }
+        }
+      }
+    },
+    "Development only — unencrypted HTTP. Use only on a trusted local network." : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "สำหรับการพัฒนาเท่านั้น — HTTP ไม่เข้ารหัส ใช้บนเครือข่ายท้องถิ่นที่เชื่อถือได้เท่านั้น"
+          }
+        }
+      }
+    },
+    "Device Name" : {
+      "extractionState" : "stale",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Device Name"
+          }
+        },
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ชื่ออุปกรณ์"
           }
         }
       }
@@ -1778,6 +2494,12 @@
     "Disconnect" : {
       "extractionState" : "manual",
       "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Disconnect"
+          }
+        },
         "th" : {
           "stringUnit" : {
             "state" : "translated",
@@ -1797,9 +2519,37 @@
         }
       }
     },
+    "Display" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "หน้าจอ"
+          }
+        }
+      }
+    },
+    "Do not remove these files manually. Cleanup will retry after background work stops." : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "อย่าลบไฟล์เหล่านี้ด้วยตนเอง ระบบจะลองล้างข้อมูลอีกครั้งหลังงานเบื้องหลังหยุดทำงาน"
+          }
+        }
+      }
+    },
     "Done" : {
       "extractionState" : "manual",
       "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Done"
+          }
+        },
         "th" : {
           "stringUnit" : {
             "state" : "translated",
@@ -1896,6 +2646,17 @@
         }
       }
     },
+    "Each production cycle performs a real upload. Review the configured destination and credentials before enabling." : {
+      "extractionState" : "stale",
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "แต่ละรอบการทำงานจริงจะอัปโหลดไฟล์จริง โปรดตรวจสอบปลายทางและข้อมูลรับรองที่ตั้งค่าไว้ก่อนเปิดใช้"
+          }
+        }
+      }
+    },
     "Edit" : {
       "extractionState" : "manual",
       "localizations" : {
@@ -1940,6 +2701,17 @@
         }
       }
     },
+    "Elapsed" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "เวลาที่ผ่านไป"
+          }
+        }
+      }
+    },
     "Element type: Session QR Code" : {
       "localizations" : {
         "th" : {
@@ -1957,6 +2729,37 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "เปิดใช้งาน"
+          }
+        }
+      }
+    },
+    "Enable Physical Printing" : {
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "เปิดใช้การพิมพ์จริง"
+          }
+        }
+      }
+    },
+    "Enable public HTTPS or trusted LAN HTTP in Global booth guest-delivery settings." : {
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "เปิดใช้ HTTPS สาธารณะหรือ HTTP บน LAN ที่เชื่อถือได้ในการตั้งค่าการส่งมอบรูปภาพลูกค้าส่วนกลางของบูธ"
+          }
+        }
+      }
+    },
+    "Enable Remote Operator" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "เปิดใช้ผู้ควบคุมระยะไกล"
           }
         }
       }
@@ -2065,6 +2868,44 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "ข้อผิดพลาด: %1$@"
+          }
+        }
+      }
+    },
+    "Estimated new output: about %@; estimate uses 10 MiB per photo plus 10 MiB per session." : {
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "คาดว่าข้อมูลใหม่ประมาณ %1$@ โดยประเมินจากภาพละ 10 MiB และเซสชันละ 10 MiB"
+          }
+        }
+      }
+    },
+    "Ethernet has not been confirmed by the system. Retry performs a direct wired connection attempt." : {
+      "extractionState" : "stale",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Ethernet has not been confirmed by the system. Retry performs a direct wired connection attempt."
+          }
+        },
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ระบบยังไม่ยืนยัน Ethernet การลองใหม่จะพยายามเชื่อมต่อแบบใช้สายโดยตรง"
+          }
+        }
+      }
+    },
+    "Ethernet is available. Retry the preferred wired connection now." : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "อีเทอร์เน็ตพร้อมใช้งาน ลองเชื่อมต่อแบบใช้สายที่ต้องการอีกครั้งทันที"
           }
         }
       }
@@ -2189,6 +3030,17 @@
         }
       }
     },
+    "Event Readiness" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ความพร้อมสำหรับอีเวนต์"
+          }
+        }
+      }
+    },
     "Event Setup" : {
       "extractionState" : "manual",
       "localizations" : {
@@ -2233,6 +3085,16 @@
         }
       }
     },
+    "Expected workload" : {
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ปริมาณงานที่คาดไว้"
+          }
+        }
+      }
+    },
     "Experience breakdown" : {
       "localizations" : {
         "th" : {
@@ -2250,6 +3112,22 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "โหลดและตรวจสอบเอกสารประสบการณ์แล้ว"
+          }
+        }
+      }
+    },
+    "Expires in" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Expires in"
+          }
+        },
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "หมดอายุใน"
           }
         }
       }
@@ -2380,6 +3258,51 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "โฟลเดอร์สามารถเขียนได้"
+          }
+        }
+      }
+    },
+    "Foreground overlay" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ภาพซ้อนด้านหน้า"
+          }
+        }
+      }
+    },
+    "Forget" : {
+      "extractionState" : "stale",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Forget"
+          }
+        },
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ลืม"
+          }
+        }
+      }
+    },
+    "Forget All Paired iPads" : {
+      "extractionState" : "stale",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Forget All Paired iPads"
+          }
+        },
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ลืม iPad ที่จับคู่ทั้งหมด"
           }
         }
       }
@@ -2516,12 +3439,34 @@
         }
       }
     },
+    "Gallery update needs attention. Customer strip and download are available." : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "การอัปเดตแกลเลอรีต้องตรวจสอบ แถบรูปและการดาวน์โหลดของลูกค้ายังพร้อมใช้งาน"
+          }
+        }
+      }
+    },
     "Gallery URL unavailable: no LAN address" : {
       "localizations" : {
         "th" : {
           "stringUnit" : {
             "state" : "translated",
             "value" : "URL แกลเลอรีใช้ไม่ได้: ไม่มีที่อยู่ LAN"
+          }
+        }
+      }
+    },
+    "General" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ทั่วไป"
           }
         }
       }
@@ -2536,7 +3481,18 @@
         }
       }
     },
+    "Global booth guest-delivery setting" : {
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "การตั้งค่าการส่งมอบรูปภาพลูกค้าส่วนกลางของบูธ"
+          }
+        }
+      }
+    },
     "Grant camera access in System Settings → Privacy & Security → Camera." : {
+      "extractionState" : "stale",
       "localizations" : {
         "th" : {
           "stringUnit" : {
@@ -2574,6 +3530,16 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "ประสบการณ์ผู้เข้าร่วมเป็นแหล่งข้อมูลหลัก ฟิลด์เลย์เอาต์งานเดิมยังคงเป็นมิเรอร์เพื่อความเข้ากันได้"
+          }
+        }
+      }
+    },
+    "Guest photos and download links are unencrypted on the local network. Use only on an isolated, operator-controlled network." : {
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "รูปภาพและลิงก์ดาวน์โหลดของลูกค้าไม่มีการเข้ารหัสบนเครือข่ายภายใน ใช้เฉพาะบนเครือข่ายแยกที่ผู้ดูแลควบคุมเท่านั้น"
           }
         }
       }
@@ -2662,6 +3628,17 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "ซ่อนหน้าจอผู้ชม"
+          }
+        }
+      }
+    },
+    "High — Best quality, larger file" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "สูง — คุณภาพดีที่สุด ไฟล์ใหญ่ขึ้น"
           }
         }
       }
@@ -2774,6 +3751,16 @@
         }
       }
     },
+    "Incoming iPad" : {
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "iPad ที่กำลังเชื่อมต่อ"
+          }
+        }
+      }
+    },
     "Incorrect PIN. Try again." : {
       "extractionState" : "manual",
       "localizations" : {
@@ -2806,6 +3793,17 @@
         }
       }
     },
+    "Invalid control frame. Reconnecting…" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ข้อมูลควบคุมไม่ถูกต้อง กำลังเชื่อมต่อใหม่…"
+          }
+        }
+      }
+    },
     "iPad" : {
       "extractionState" : "manual",
       "localizations" : {
@@ -2813,6 +3811,17 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "iPad"
+          }
+        }
+      }
+    },
+    "iPad & Network" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "iPad และเครือข่าย"
           }
         }
       }
@@ -2871,6 +3880,16 @@
         }
       }
     },
+    "Issues & Warnings" : {
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ปัญหาและคำเตือน"
+          }
+        }
+      }
+    },
     "Keep & finish" : {
       "extractionState" : "manual",
       "localizations" : {
@@ -2900,6 +3919,34 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "ขนาด L (3.5×5 นิ้ว)"
+          }
+        }
+      }
+    },
+    "LAN" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "LAN"
+          }
+        }
+      }
+    },
+    "LAN is unavailable. Wi-Fi fallback is active." : {
+      "extractionState" : "stale",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "LAN is unavailable. Wi-Fi fallback is active."
+          }
+        },
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "LAN ไม่พร้อมใช้งาน กำลังใช้ Wi-Fi สำรอง"
           }
         }
       }
@@ -2946,6 +3993,28 @@
         }
       }
     },
+    "Last print" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "พิมพ์ล่าสุด"
+          }
+        }
+      }
+    },
+    "Last print error" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ข้อผิดพลาดในการพิมพ์ล่าสุด"
+          }
+        }
+      }
+    },
     "Last Run" : {
       "extractionState" : "manual",
       "localizations" : {
@@ -2957,12 +4026,63 @@
         }
       }
     },
+    "Last seen: %@" : {
+      "extractionState" : "stale",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Last seen: %1$@"
+          }
+        },
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "พบล่าสุด: %1$@"
+          }
+        }
+      }
+    },
+    "Last seen: Never" : {
+      "extractionState" : "stale",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Last seen: Never"
+          }
+        },
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ยังไม่เคยพบ"
+          }
+        }
+      }
+    },
     "Last successful upload: %@" : {
       "localizations" : {
         "th" : {
           "stringUnit" : {
             "state" : "translated",
             "value" : "อัปโหลดสำเร็จล่าสุด: %1$@"
+          }
+        }
+      }
+    },
+    "Last Test" : {
+      "extractionState" : "stale",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Last Test"
+          }
+        },
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "การทดสอบล่าสุด"
           }
         }
       }
@@ -3236,6 +4356,17 @@
         }
       }
     },
+    "Network diagnostics" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "การวินิจฉัยเครือข่าย"
+          }
+        }
+      }
+    },
     "New Event" : {
       "localizations" : {
         "th" : {
@@ -3328,6 +4459,22 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "ไม่มีเลย์เอาต์งานที่ใช้งานอยู่ให้ตรวจสอบ"
+          }
+        }
+      }
+    },
+    "No authenticated iPad connected." : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "No authenticated iPad connected."
+          }
+        },
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ไม่มี iPad ที่ยืนยันตัวตนเชื่อมต่ออยู่"
           }
         }
       }
@@ -3425,6 +4572,17 @@
         }
       }
     },
+    "No host window is available for printing." : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ไม่พบหน้าต่างสำหรับการพิมพ์"
+          }
+        }
+      }
+    },
     "No iPad is connected." : {
       "extractionState" : "manual",
       "localizations" : {
@@ -3465,6 +4623,16 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "ยังไม่ได้ตั้งค่าโฟลเดอร์ผลลัพธ์"
+          }
+        }
+      }
+    },
+    "No pairing in progress" : {
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ไม่มีการจับคู่กำลังดำเนินอยู่"
           }
         }
       }
@@ -3523,6 +4691,33 @@
         }
       }
     },
+    "No trusted iPads" : {
+      "extractionState" : "stale",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "No trusted iPads"
+          }
+        },
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ไม่มี iPad ที่เชื่อถือ"
+          }
+        }
+      }
+    },
+    "No trusted iPads. A pending incoming iPad remains untrusted until PIN or QR authentication succeeds." : {
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ไม่มี iPad ที่เชื่อถือได้ iPad ที่รอจับคู่จะยังไม่ถือว่าเชื่อถือได้จนกว่าการยืนยันด้วย PIN หรือ QR จะสำเร็จ"
+          }
+        }
+      }
+    },
     "No unfinished capture session is waiting." : {
       "extractionState" : "manual",
       "localizations" : {
@@ -3530,6 +4725,23 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "ไม่มีเซสชันถ่ายภาพที่ยังไม่เสร็จรอดำเนินการ"
+          }
+        }
+      }
+    },
+    "None" : {
+      "extractionState" : "stale",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "None"
+          }
+        },
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ไม่มี"
           }
         }
       }
@@ -3550,6 +4762,17 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "ยังไม่ได้ตั้งค่า"
+          }
+        }
+      }
+    },
+    "Not printed" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ยังไม่ได้พิมพ์"
           }
         }
       }
@@ -3646,6 +4869,17 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "ดัชนีถ่ายภาพอย่างน้อยหนึ่งรายการไม่มีช่องภาพที่ตรงกัน"
+          }
+        }
+      }
+    },
+    "Only continue if you recognize this iPad." : {
+      "extractionState" : "stale",
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "โปรดดำเนินการต่อเฉพาะเมื่อคุณรู้จัก iPad เครื่องนี้"
           }
         }
       }
@@ -3759,6 +4993,16 @@
         }
       }
     },
+    "Opt-in sends real print jobs to the configured printer. The cadence limits paper and ribbon use." : {
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "เมื่อเปิดใช้ ระบบจะส่งงานพิมพ์จริงไปยังเครื่องพิมพ์ที่ตั้งค่าไว้ ความถี่ช่วยจำกัดการใช้กระดาษและริบบอน"
+          }
+        }
+      }
+    },
     "Optional cloud or print work is waiting or failed." : {
       "extractionState" : "manual",
       "localizations" : {
@@ -3810,6 +5054,120 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "P%1$@"
+          }
+        }
+      }
+    },
+    "Pair New iPad" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Pair New iPad"
+          }
+        },
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "จับคู่ iPad ใหม่"
+          }
+        }
+      }
+    },
+    "Paired iPads" : {
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "iPad ที่จับคู่แล้ว"
+          }
+        }
+      }
+    },
+    "Pairing" : {
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "กำลังจับคู่"
+          }
+        }
+      }
+    },
+    "Pairing accepted" : {
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ยอมรับการจับคู่แล้ว"
+          }
+        }
+      }
+    },
+    "Pairing code expired" : {
+      "extractionState" : "stale",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Pairing code expired"
+          }
+        },
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "รหัสจับคู่หมดอายุ"
+          }
+        }
+      }
+    },
+    "Pairing expired" : {
+      "extractionState" : "stale",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Pairing expired"
+          }
+        },
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "การจับคู่หมดอายุ"
+          }
+        }
+      }
+    },
+    "Pairing PIN" : {
+      "extractionState" : "stale",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Pairing PIN"
+          }
+        },
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "PIN สำหรับจับคู่"
+          }
+        }
+      }
+    },
+    "Pairing QR" : {
+      "extractionState" : "stale",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Pairing QR"
+          }
+        },
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "QR สำหรับจับคู่"
           }
         }
       }
@@ -3911,6 +5269,17 @@
         }
       }
     },
+    "Photo count is unavailable until the active event template finishes loading." : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "จำนวนภาพจะยังไม่พร้อมใช้งานจนกว่าเทมเพลตกิจกรรมที่ใช้งานอยู่จะโหลดเสร็จ"
+          }
+        }
+      }
+    },
     "Photo count, canvas, and at least one slot are required." : {
       "extractionState" : "manual",
       "localizations" : {
@@ -3976,6 +5345,26 @@
         }
       }
     },
+    "Physical print jobs: up to %@." : {
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "งานพิมพ์จริง: สูงสุด %1$@"
+          }
+        }
+      }
+    },
+    "PIN" : {
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "รหัส PIN"
+          }
+        }
+      }
+    },
     "PINs don't match. Start over." : {
       "extractionState" : "manual",
       "localizations" : {
@@ -4020,6 +5409,23 @@
         }
       }
     },
+    "PRC PhotoBooth could not access the saved Admin PIN." : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "PRC PhotoBooth could not access the saved Admin PIN."
+          }
+        },
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "PRC PhotoBooth ไม่สามารถเข้าถึง PIN ผู้ดูแลระบบที่บันทึกไว้ได้"
+          }
+        }
+      }
+    },
     "PRC-PhotoBooth" : {
       "extractionState" : "manual",
       "localizations" : {
@@ -4027,6 +5433,33 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "PRC-PhotoBooth"
+          }
+        }
+      }
+    },
+    "Preferred iPad" : {
+      "extractionState" : "stale",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Preferred iPad"
+          }
+        },
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "iPad ที่เลือก"
+          }
+        }
+      }
+    },
+    "Preflight Diagnostics" : {
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "การวินิจฉัยก่อนเริ่ม"
           }
         }
       }
@@ -4070,6 +5503,17 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "อัตราเฟรมภาพตัวอย่าง"
+          }
+        }
+      }
+    },
+    "Preview frame rate is independent of the selected network route. 60 FPS uses more bandwidth." : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "อัตราเฟรมภาพตัวอย่างไม่ขึ้นกับเส้นทางเครือข่ายที่เลือก 60 FPS ใช้แบนด์วิดท์มากขึ้น"
           }
         }
       }
@@ -4142,6 +5586,12 @@
     "Print Test Page" : {
       "extractionState" : "manual",
       "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Print Test Page"
+          }
+        },
         "th" : {
           "stringUnit" : {
             "state" : "translated",
@@ -4157,6 +5607,17 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "พิมพ์โฟโต้สตริปนี้อีกครั้งหรือไม่?"
+          }
+        }
+      }
+    },
+    "Printed successfully" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "พิมพ์สำเร็จ"
           }
         }
       }
@@ -4237,6 +5698,17 @@
         }
       }
     },
+    "Printing" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "กำลังพิมพ์"
+          }
+        }
+      }
+    },
     "Processing" : {
       "extractionState" : "manual",
       "localizations" : {
@@ -4265,6 +5737,16 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "URL สาธารณะหลัก"
+          }
+        }
+      }
+    },
+    "Public guest URLs must use HTTPS. Session pages use this URL after cloud upload succeeds." : {
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "URL สาธารณะสำหรับลูกค้าต้องใช้ HTTPS หน้าของเซสชันจะใช้ URL นี้เมื่ออัปโหลดขึ้นคลาวด์สำเร็จ"
           }
         }
       }
@@ -4322,12 +5804,39 @@
         }
       }
     },
+    "QR code unavailable" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "QR code unavailable"
+          }
+        },
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "QR ใช้งานไม่ได้"
+          }
+        }
+      }
+    },
     "QR codes use this URL after cloud upload succeeds; otherwise they use the LAN server.\nExample: https://photos.yourdomain.com" : {
+      "extractionState" : "stale",
       "localizations" : {
         "th" : {
           "stringUnit" : {
             "state" : "translated",
             "value" : "คิวอาร์โค้ดจะใช้ URL นี้หลังอัปโหลดขึ้นคลาวด์สำเร็จ มิฉะนั้นจะใช้เซิร์ฟเวอร์ LAN\nตัวอย่าง: https://photos.yourdomain.com"
+          }
+        }
+      }
+    },
+    "QR codes use this URL when cloud upload is enabled. Example: https://photos.yourdomain.com" : {
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "QR code จะใช้ URL นี้เมื่อเปิดการอัปโหลดขึ้นคลาวด์ ตัวอย่าง: https://photos.yourdomain.com"
           }
         }
       }
@@ -4354,6 +5863,17 @@
         }
       }
     },
+    "Queue Storage Error" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ข้อผิดพลาดของที่เก็บคิว"
+          }
+        }
+      }
+    },
     "Quit %@" : {
       "extractionState" : "manual",
       "localizations" : {
@@ -4361,6 +5881,17 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "ปิด %@"
+          }
+        }
+      }
+    },
+    "Re-read durable queue files and resume workers when storage is available." : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "อ่านไฟล์คิวถาวรใหม่และทำงานต่อเมื่อที่เก็บข้อมูลพร้อมใช้งาน"
           }
         }
       }
@@ -4419,9 +5950,37 @@
         }
       }
     },
+    "Reconnect iPad" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "เชื่อมต่อ iPad ใหม่"
+          }
+        }
+      }
+    },
+    "Reconnecting…" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "กำลังเชื่อมต่อใหม่…"
+          }
+        }
+      }
+    },
     "Refresh" : {
       "extractionState" : "manual",
       "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Refresh"
+          }
+        },
         "th" : {
           "stringUnit" : {
             "state" : "translated",
@@ -4506,6 +6065,17 @@
         }
       }
     },
+    "Remote control requires a secure operator transport. Local booth operation is unaffected." : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "การควบคุมระยะไกลต้องใช้การเชื่อมต่อผู้ควบคุมที่ปลอดภัย การทำงานของบูธภายในเครื่องยังใช้งานได้ตามปกติ"
+          }
+        }
+      }
+    },
     "Remote path" : {
       "extractionState" : "manual",
       "localizations" : {
@@ -4572,6 +6142,23 @@
         }
       }
     },
+    "Reset Admin PIN" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Reset Admin PIN"
+          }
+        },
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "รีเซ็ต PIN ผู้ดูแลระบบ"
+          }
+        }
+      }
+    },
     "Reset Admin PIN?" : {
       "extractionState" : "manual",
       "localizations" : {
@@ -4579,6 +6166,23 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "รีเซ็ต PIN ผู้ดูแลหรือไม่?"
+          }
+        }
+      }
+    },
+    "Reset Admin PIN…" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Reset Admin PIN…"
+          }
+        },
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "รีเซ็ต PIN ผู้ดูแลระบบ…"
           }
         }
       }
@@ -4594,6 +6198,23 @@
         }
       }
     },
+    "Reset saved Admin PIN?" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Reset saved Admin PIN?"
+          }
+        },
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "รีเซ็ต PIN ผู้ดูแลระบบที่บันทึกไว้หรือไม่"
+          }
+        }
+      }
+    },
     "Reset to Idle" : {
       "extractionState" : "manual",
       "localizations" : {
@@ -4601,6 +6222,17 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "รีเซ็ตเป็นพัก"
+          }
+        }
+      }
+    },
+    "Resetting re-locks Settings and requires PIN setup before protected access." : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "การรีเซ็ตจะล็อกการตั้งค่าอีกครั้งและต้องตั้งค่า PIN ก่อนเข้าถึงแบบมีการป้องกัน"
           }
         }
       }
@@ -4641,6 +6273,12 @@
     "Retry" : {
       "extractionState" : "manual",
       "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Retry"
+          }
+        },
         "th" : {
           "stringUnit" : {
             "state" : "translated",
@@ -4660,12 +6298,50 @@
         }
       }
     },
+    "Retry LAN Now" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Retry LAN Now"
+          }
+        },
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ลองเชื่อมต่อ LAN อีกครั้ง"
+          }
+        }
+      }
+    },
     "Retry scheduled " : {
       "localizations" : {
         "th" : {
           "stringUnit" : {
             "state" : "translated",
             "value" : "ตั้งเวลาลองใหม่ "
+          }
+        }
+      }
+    },
+    "Retry Storage Recovery" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ลองกู้คืนที่เก็บข้อมูลอีกครั้ง"
+          }
+        }
+      }
+    },
+    "Retrying…" : {
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "กำลังลองอีกครั้ง…"
           }
         }
       }
@@ -4688,6 +6364,23 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "การหมุน"
+          }
+        }
+      }
+    },
+    "Round trip" : {
+      "extractionState" : "stale",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Round trip"
+          }
+        },
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "เวลาไปกลับ"
           }
         }
       }
@@ -4812,6 +6505,68 @@
         }
       }
     },
+    "Save Device Name" : {
+      "extractionState" : "stale",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Save Device Name"
+          }
+        },
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "บันทึกชื่ออุปกรณ์"
+          }
+        }
+      }
+    },
+    "Saved Admin PIN is invalid" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Saved Admin PIN is invalid"
+          }
+        },
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "PIN ผู้ดูแลระบบที่บันทึกไว้ไม่ถูกต้อง"
+          }
+        }
+      }
+    },
+    "Saved Admin PIN is invalid. Retry or reset it." : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Saved Admin PIN is invalid. Retry or reset it."
+          }
+        },
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "PIN ผู้ดูแลระบบที่บันทึกไว้ไม่ถูกต้อง ลองอีกครั้งหรือรีเซ็ต PIN"
+          }
+        }
+      }
+    },
+    "Saving PIN…" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "กำลังบันทึก PIN…"
+          }
+        }
+      }
+    },
     "Saving…" : {
       "extractionState" : "manual",
       "localizations" : {
@@ -4823,7 +6578,19 @@
         }
       }
     },
+    "Scan once to connect an operator device. The link is a credential and expires shortly." : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "สแกนเพียงครั้งเดียวเพื่อเชื่อมต่ออุปกรณ์ผู้ควบคุม ลิงก์นี้เป็นข้อมูลรับรองและจะหมดอายุในไม่ช้า"
+          }
+        }
+      }
+    },
     "Scan to connect an operator device." : {
+      "extractionState" : "stale",
       "localizations" : {
         "th" : {
           "stringUnit" : {
@@ -4839,6 +6606,28 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "สแกนเพื่อรับรูปภาพของคุณ"
+          }
+        }
+      }
+    },
+    "Secure connection failed. Reconnecting…" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "การเชื่อมต่อที่ปลอดภัยล้มเหลว กำลังเชื่อมต่อใหม่…"
+          }
+        }
+      }
+    },
+    "Security" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ความปลอดภัย"
           }
         }
       }
@@ -4861,6 +6650,23 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "เลือกงานที่ใช้งานอยู่ก่อน"
+          }
+        }
+      }
+    },
+    "Selected" : {
+      "extractionState" : "stale",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Selected"
+          }
+        },
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "เลือกอยู่"
           }
         }
       }
@@ -4995,6 +6801,16 @@
         }
       }
     },
+    "Session %@" : {
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "เซสชัน %1$@"
+          }
+        }
+      }
+    },
     "Session cannot finish until every photograph is accepted." : {
       "extractionState" : "manual",
       "localizations" : {
@@ -5012,6 +6828,17 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "ลิงก์ดาวน์โหลดเซสชัน"
+          }
+        }
+      }
+    },
+    "Session ID: %@" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "รหัสเซสชัน: %1$@"
           }
         }
       }
@@ -5055,6 +6882,17 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "เริ่มเซสชันล้มเหลว: %1$@"
+          }
+        }
+      }
+    },
+    "Session: %@" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "เซสชัน: %1$@"
           }
         }
       }
@@ -5172,6 +7010,16 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "แสดงหน้าจอผู้ชม"
+          }
+        }
+      }
+    },
+    "Showing the 5 most recent of %@ retained sessions." : {
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "แสดงเซสชันล่าสุด 5 รายการจากทั้งหมด %1$@ รายการที่เก็บไว้"
           }
         }
       }
@@ -5328,6 +7176,26 @@
         }
       }
     },
+    "Soak Test Failed" : {
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "การทดสอบความทนทานล้มเหลว"
+          }
+        }
+      }
+    },
+    "Soak Test In Progress" : {
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "กำลังทดสอบความทนทาน"
+          }
+        }
+      }
+    },
     "Soft" : {
       "extractionState" : "manual",
       "localizations" : {
@@ -5345,6 +7213,23 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "การควบคุม DSLR บางรายการไม่พร้อมใช้งานในโปรไฟล์ USB ของกล้องนี้"
+          }
+        }
+      }
+    },
+    "Some iPad secrets could not be removed from Keychain. Those peers remain trusted." : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Some iPad secrets could not be removed from Keychain. Those peers remain trusted."
+          }
+        },
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ลบรหัสลับของ iPad บางเครื่องออกจาก Keychain ไม่ได้ อุปกรณ์เหล่านั้นจึงยังคงเป็นอุปกรณ์ที่เชื่อถือได้"
           }
         }
       }
@@ -5468,6 +7353,16 @@
         }
       }
     },
+    "Stopping Soak Test..." : {
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "กำลังหยุดการทดสอบความทนทาน..."
+          }
+        }
+      }
+    },
     "Strip Preview" : {
       "extractionState" : "manual",
       "localizations" : {
@@ -5501,6 +7396,16 @@
         }
       }
     },
+    "Subsystem Coverage" : {
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ความครอบคลุมของระบบย่อย"
+          }
+        }
+      }
+    },
     "System" : {
       "localizations" : {
         "th" : {
@@ -5512,11 +7417,62 @@
       }
     },
     "System Default" : {
+      "extractionState" : "stale",
       "localizations" : {
         "th" : {
           "stringUnit" : {
             "state" : "translated",
             "value" : "ค่าเริ่มต้นของระบบ"
+          }
+        }
+      }
+    },
+    "System default: %@" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ค่าเริ่มต้นของระบบ: %1$@"
+          }
+        }
+      }
+    },
+    "System Printer" : {
+      "extractionState" : "stale",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "System Printer"
+          }
+        },
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "เครื่องพิมพ์ระบบ"
+          }
+        }
+      }
+    },
+    "System printer unavailable: %@" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "เครื่องพิมพ์ระบบไม่พร้อมใช้งาน: %1$@"
+          }
+        }
+      }
+    },
+    "Target Cycles:" : {
+      "extractionState" : "stale",
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "จำนวนรอบเป้าหมาย:"
           }
         }
       }
@@ -5584,6 +7540,33 @@
         }
       }
     },
+    "Test Configuration" : {
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "การกำหนดค่าการทดสอบ"
+          }
+        }
+      }
+    },
+    "Test Connection" : {
+      "extractionState" : "stale",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Test Connection"
+          }
+        },
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ทดสอบการเชื่อมต่อ"
+          }
+        }
+      }
+    },
     "Test Connection Again" : {
       "extractionState" : "manual",
       "localizations" : {
@@ -5613,6 +7596,39 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "ทดสอบพิมพ์"
+          }
+        }
+      }
+    },
+    "Testing Connection…" : {
+      "extractionState" : "stale",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Testing Connection…"
+          }
+        },
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "กำลังทดสอบการเชื่อมต่อ…"
+          }
+        }
+      }
+    },
+    "Tests the selected iPad, current route, control handshake, and preview channel." : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Tests the selected iPad, current route, control handshake, and preview channel."
+          }
+        },
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ทดสอบ iPad ที่เลือก เส้นทางปัจจุบัน การจับมือช่องควบคุม และช่องภาพตัวอย่าง"
           }
         }
       }
@@ -5672,6 +7688,23 @@
         }
       }
     },
+    "The iPad remains trusted because its Keychain secret could not be removed." : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "The iPad remains trusted because its Keychain secret could not be removed."
+          }
+        },
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "iPad ยังคงเป็นอุปกรณ์ที่เชื่อถือได้ เนื่องจากไม่สามารถลบรหัสลับใน Keychain ได้"
+          }
+        }
+      }
+    },
     "The last unaccepted preview was not saved and will be retaken." : {
       "localizations" : {
         "th" : {
@@ -5704,12 +7737,143 @@
         }
       }
     },
+    "The PIN was not reset because Keychain could not remove every stored credential copy." : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "The PIN was not reset because Keychain could not remove every stored credential copy."
+          }
+        },
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ไม่ได้รีเซ็ต PIN เนื่องจาก Keychain ไม่สามารถลบข้อมูลรับรองที่จัดเก็บไว้ได้ทั้งหมด"
+          }
+        }
+      }
+    },
     "The printed QR is still valid. Retrying the upload will restore the same link." : {
       "localizations" : {
         "th" : {
           "stringUnit" : {
             "state" : "translated",
             "value" : "คิวอาร์ที่พิมพ์ยังใช้งานได้ การลองอัปโหลดใหม่จะคงลิงก์เดิมไว้"
+          }
+        }
+      }
+    },
+    "The public guest URL is invalid. Cloud delivery requires HTTPS." : {
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "URL สาธารณะสำหรับลูกค้าไม่ถูกต้อง การส่งมอบผ่านคลาวด์ต้องใช้ HTTPS"
+          }
+        }
+      }
+    },
+    "The saved Admin PIN could not be reset. Keychain access is still unavailable." : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "The saved Admin PIN could not be reset. Keychain access is still unavailable."
+          }
+        },
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "รีเซ็ต PIN ผู้ดูแลระบบไม่ได้ ขณะนี้ยังเข้าถึง Keychain ไม่ได้"
+          }
+        }
+      }
+    },
+    "The saved Admin PIN was preserved. Open Settings to retry or explicitly reset it." : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "The saved Admin PIN was preserved. Open Settings to retry or explicitly reset it."
+          }
+        },
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ระบบเก็บรักษา PIN ผู้ดูแลระบบไว้แล้ว เปิดการตั้งค่าเพื่อลองอีกครั้งหรือรีเซ็ตด้วยตนเอง"
+          }
+        }
+      }
+    },
+    "The saved Admin PIN was preserved. Retry or explicitly reset it to continue." : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "The saved Admin PIN was preserved. Retry or explicitly reset it to continue."
+          }
+        },
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ระบบเก็บรักษา PIN ผู้ดูแลระบบไว้แล้ว ลองอีกครั้งหรือรีเซ็ตด้วยตนเองเพื่อดำเนินการต่อ"
+          }
+        }
+      }
+    },
+    "The session is cancelled. Its files remain protected until background work stops." : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "เซสชันถูกยกเลิกแล้ว ไฟล์จะยังคงได้รับการปกป้องจนกว่างานเบื้องหลังจะหยุดทำงาน"
+          }
+        }
+      }
+    },
+    "These test sessions are kept for operator review and excluded from production history and public gallery routes." : {
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "เซสชันทดสอบเหล่านี้จะเก็บไว้ให้ผู้ควบคุมตรวจสอบ และไม่รวมในประวัติการใช้งานจริงหรือแกลเลอรีสาธารณะ"
+          }
+        }
+      }
+    },
+    "This iPad must be paired again before it can reconnect." : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "This iPad must be paired again before it can reconnect."
+          }
+        },
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ต้องจับคู่ iPad เครื่องนี้ใหม่ก่อนเชื่อมต่ออีกครั้ง"
+          }
+        }
+      }
+    },
+    "This Mac" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "This Mac"
+          }
+        },
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Mac เครื่องนี้"
           }
         }
       }
@@ -5725,12 +7889,39 @@
         }
       }
     },
+    "This removes the saved Admin credential and opens PIN setup." : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "This removes the saved Admin credential and opens PIN setup."
+          }
+        },
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "การดำเนินการนี้จะลบข้อมูลรับรองผู้ดูแลระบบที่บันทึกไว้และเปิดการตั้งค่า PIN ใหม่"
+          }
+        }
+      }
+    },
     "This submits a new print request and does not create another persistent automatic-print job." : {
       "localizations" : {
         "th" : {
           "stringUnit" : {
             "state" : "translated",
             "value" : "การดำเนินการนี้จะส่งคำขอพิมพ์ใหม่และไม่สร้างงานพิมพ์อัตโนมัติถาวรเพิ่ม"
+          }
+        }
+      }
+    },
+    "This test entry is excluded from the public gallery." : {
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "รายการทดสอบนี้จะไม่แสดงในแกลเลอรีสาธารณะ"
           }
         }
       }
@@ -5756,6 +7947,23 @@
         }
       }
     },
+    "Too many attempts. Try again shortly." : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Too many attempts. Try again shortly."
+          }
+        },
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "พยายามหลายครั้งเกินไป โปรดลองอีกครั้งในอีกสักครู่"
+          }
+        }
+      }
+    },
     "Torch" : {
       "extractionState" : "manual",
       "localizations" : {
@@ -5763,6 +7971,23 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "ไฟช่วย"
+          }
+        }
+      }
+    },
+    "Trusted" : {
+      "extractionState" : "stale",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Trusted"
+          }
+        },
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "เชื่อถือ"
           }
         }
       }
@@ -5784,6 +8009,17 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "ไม่พร้อมใช้งาน"
+          }
+        }
+      }
+    },
+    "Unavailable in this release" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ไม่พร้อมใช้งานในรุ่นนี้"
           }
         }
       }
@@ -5854,6 +8090,23 @@
         }
       }
     },
+    "Use This iPad" : {
+      "extractionState" : "stale",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Use This iPad"
+          }
+        },
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ใช้ iPad นี้"
+          }
+        }
+      }
+    },
     "Use Touch ID or Mac Password" : {
       "extractionState" : "manual",
       "localizations" : {
@@ -5866,6 +8119,7 @@
       }
     },
     "Used in QR codes after cloud upload succeeds. Leave blank to use the LAN server." : {
+      "extractionState" : "stale",
       "localizations" : {
         "th" : {
           "stringUnit" : {
@@ -5896,6 +8150,38 @@
         }
       }
     },
+    "Verify connection" : {
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ยืนยันการเชื่อมต่อ"
+          }
+        }
+      }
+    },
+    "Verify printer" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ตรวจสอบเครื่องพิมพ์"
+          }
+        }
+      }
+    },
+    "Verifying…" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "กำลังตรวจสอบ…"
+          }
+        }
+      }
+    },
     "Version 1.2 options are stored separately from the legacy event layout." : {
       "extractionState" : "stale",
       "localizations" : {
@@ -5903,6 +8189,17 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "ตัวเลือก Version 1.2 จะจัดเก็บแยกจากรูปแบบงานเดิม"
+          }
+        }
+      }
+    },
+    "View Details" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ดูรายละเอียด"
           }
         }
       }
@@ -5929,6 +8226,28 @@
         }
       }
     },
+    "Waiting for local server and LAN address…" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "กำลังรอเซิร์ฟเวอร์ภายในเครื่องและที่อยู่ LAN…"
+          }
+        }
+      }
+    },
+    "Waiting for macOS to finish the print operation. Automatic printing is paused; customer sessions remain available." : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "กำลังรอให้ macOS ดำเนินการพิมพ์ให้เสร็จ การพิมพ์อัตโนมัติหยุดชั่วคราว เซสชันของลูกค้ายังดำเนินต่อได้"
+          }
+        }
+      }
+    },
     "Waiting for the camera's Sony PTP live-view stream…" : {
       "extractionState" : "manual",
       "localizations" : {
@@ -5936,6 +8255,26 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "กำลังรอสตรีมภาพสด Sony PTP จากกล้อง…"
+          }
+        }
+      }
+    },
+    "Waiting for the selected Mac to provide a pairing session." : {
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "กำลังรอ Mac ที่เลือกส่งเซสชันการจับคู่"
+          }
+        }
+      }
+    },
+    "Waiting for verification" : {
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "กำลังรอการยืนยัน"
           }
         }
       }
@@ -5962,6 +8301,17 @@
         }
       }
     },
+    "Wi-Fi" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Wi-Fi"
+          }
+        }
+      }
+    },
     "Width" : {
       "extractionState" : "stale",
       "localizations" : {
@@ -5974,11 +8324,23 @@
       }
     },
     "You will be asked to create a new PIN now." : {
+      "extractionState" : "stale",
       "localizations" : {
         "th" : {
           "stringUnit" : {
             "state" : "translated",
             "value" : "ระบบจะให้คุณสร้าง PIN ใหม่ตอนนี้"
+          }
+        }
+      }
+    },
+    "You will be asked to create a new PIN the next time Settings is opened." : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ระบบจะให้คุณสร้าง PIN ใหม่เมื่อเปิด Settings ครั้งถัดไป"
           }
         }
       }

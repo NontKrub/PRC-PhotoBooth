@@ -15,13 +15,20 @@ xcodebuild -scheme PRC-PhotoBooth-iPad \
 # Run unit tests (Mac host)
 xcodebuild -scheme PRC-PhotoBoothTests -destination "platform=macOS" test
 
+# Run unit tests (iPad simulator)
+xcodebuild -scheme PRC-PhotoBooth-iPadTests -destination "platform=iOS Simulator,id=<simulator-uuid>" test
+
 # Build + launch both apps (Mac + iPad simulator) in one shot
 bash run.sh
 ```
 
 `project.yml` is the XcodeGen source file. The `.xcodeproj` is generated from it — edit `project.yml`, not the pbxproj.
 
-Swift 6.0, macOS 15.0 / iOS 18.0 deployment targets. `SWIFT_STRICT_CONCURRENCY: targeted`.
+Swift 6.0, macOS 15.0 / iPadOS 16.0 deployment targets. `SWIFT_STRICT_CONCURRENCY: targeted`.
+
+Xcode 27 uses Device Hub for simulated and physical iPad devices. The command-line
+destination string for a simulator remains `platform=iOS Simulator`; there is no
+`platform=Device Hub` xcodebuild destination.
 
 ## Architecture
 
@@ -29,41 +36,39 @@ Two apps share a `Shared/` layer:
 
 ```
 Shared/
-  Models/SharedTypes.swift        — EventConfig, SharedPhotoSlot, SessionOutput, enums
-  Connectivity/Message.swift      — shared JSON wire protocol and state-sync models
-  Connectivity/BoothTransport.swift — framed channels and transport abstraction
-  Connectivity/NetworkBoothTransport.swift — production Bonjour/TCP transport
-  Connectivity/MultipeerService.swift — temporary DEBUG fallback adapter
-  State/BoothPhase.swift          — session state enum
-  State/SessionStateMachine.swift — @Observable state machine
+  Models/           — SharedTypes, ExperienceTypes, LocalizedText
+  Connectivity/     — NetworkBoothTransport, Message (JSON wire protocol), BoothPairing (secure auth)
+  Imaging/          — BoothImageDecoder, PhotoFilter, QRCodeGenerator, PreviewQuality
+  State/            — BoothPhase, SessionStateMachine, CustomerDisplayWorkflow
 
 Mac/
-  MacApp.swift                    — entry point; injects BoothCoordinator + DataStore into environment
-  UI/BoothCoordinator.swift       — @MainActor @Observable hub; owns all services
-  UI/OperatorConsoleView.swift    — camera panel, session controls, strip preview
-  UI/EventSetupView.swift         — event CRUD, frame PNG import
-  UI/TemplateFrameSlotEditor.swift — template slot/QR drag/resize/duplicate editor
-  UI/AdminDashboardView.swift     — Charts analytics, CSV export (PIN-gated)
-  Camera/CameraSource.swift       — protocol for camera backends
-  Camera/AVFoundationCameraSource.swift — built-in/USB/Continuity camera
-  Camera/DSLRCameraSource.swift   — ImageCaptureCore USB tethered
-  Capture/CaptureService.swift    — wraps both cameras; owns capturedStills [Int:CGImage]
-  Output/Compositor.swift         — CGBitmapContext strip renderer
-  Output/GIFEncoder.swift
-  Persistence/BoothModels.swift   — SwiftData @Model classes
-  Persistence/DataStore.swift     — ModelContainer init with schema-migration recovery
+  MacApp.swift      — entry point; injects BoothCoordinator + DataStore into environment
+  UI/               — BoothCoordinator, OperatorConsoleView, EventSetupView, AdminDashboardView
+  Camera/           — CameraSource protocol, AVFoundationCameraSource, DSLRCameraSource
+  Capture/          — CaptureService, RollingVideoBuffer
+  Experience/       — CustomerExperienceCatalogBuilder, EventExperienceStore
+  Gallery/          — EventGalleryStore, GalleryThumbnailGenerator
+  Jobs/             — SessionJobQueue, SessionJobExecutor
+  Output/           — Compositor (CGBitmapContext), GIFEncoder
+  Persistence/      — DataStore, BoothModels (SwiftData)
+  Printing/         — PrinterService
+  Runtime/          — SessionWorkspace, SessionManifestStore, SessionRecoveryService
+  Server/           — LocalWebServer, LocalDownloadRouter, RemoteOperatorAuth
+  SoakTest/         — BoothSoakTestRunner
+  Diagnostics/      — BoothHealthSnapshot, BoothPreflightService
+  Cloud/            — CloudUploadService
 
 iPad/
-  UI/iPadViewModel.swift          — @Observable; mirrors BoothPhase from Mac messages
-  UI/iPadContentView.swift        — routes to phase-specific views
-  UI/CountdownView.swift, ReviewView.swift, FinishView.swift, ...
+  iPadApp.swift     — entry point
+  UI/               — iPadViewModel, iPadContentView, ExperienceSelectionView, CountdownView
+  Debug/            — DemoKioskDriver
 ```
 
 ## Key Data Flows
 
 **Session lifecycle:** `BoothCoordinator.startSession()` → `SessionStateMachine` drives `BoothPhase` → countdown task fires → `CaptureService.captureStill(for:)` → photo stored in `capturedStills[photoIndex]` → `Compositor.render(images:)` composites strip → saved to `Application Support/PRC-PhotoBooth/Sessions/<id>/strip.png`.
 
-**Mac → iPad messaging:** Control messages are `Message` enum encoded as JSON inside an explicit 8-byte framed Network.framework control stream. Preview JPEGs use a separate latest-frame-wins stream. `NetworkBoothTransport` is production; `MultipeerService` is a DEBUG fallback. Both expose `BoothTransport` so coordinators do not know the transport.
+**Mac → iPad messaging:** Control messages are `Message` enum encoded as JSON inside an explicit 8-byte framed Network.framework control stream. Preview JPEGs use a separate latest-frame-wins stream. `NetworkBoothTransport` is the production transport selected by both apps; the legacy `MultipeerService` source is not app-selected.
 
 **Capture recovery:** `BoothPhase.captureRecovery` is authoritative for failed receive/decode/PTP attempts. Actions pass through `CustomerDisplayWorkflow.canApply`; `CaptureService`/`DSLRCameraSource` isolate attempt IDs and cancel all terminal tasks. `SessionSyncSnapshot` rebuilds the iPad after reconnect.
 
@@ -103,4 +108,4 @@ Sessions older than 60 days are auto-cleaned on launch. The local HTTP server (`
 
 ## PIN Gate
 
-`PINGateView` gates the Event Setup and Analytics tabs. The PIN is stored in the macOS Keychain via `KeychainHelper`. Default PIN is `1234` if none is set.
+`PINGateView` gates the Event Setup and Analytics tabs. The PIN is stored in the macOS Keychain via `KeychainHelper`, with bounded retry backoff; a legacy UserDefaults hash is migrated after a successful verification.

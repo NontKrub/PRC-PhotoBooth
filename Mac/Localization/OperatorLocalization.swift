@@ -46,10 +46,6 @@ func operatorConnectingRoute(_ status: BoothConnectionStatus, locale: Locale) ->
     }
 }
 
-func operatorPaperSizeName(_ size: SelphyPaperSize, locale: Locale) -> String {
-    operatorString(size.rawValue, locale: locale)
-}
-
 func operatorFlashModeName(_ mode: DSLRFlashMode, locale: Locale) -> String {
     operatorString(mode.rawValue, locale: locale)
 }
@@ -103,7 +99,14 @@ func operatorPreflightTitle(_ id: PreflightCheckID, locale: Locale) -> String {
     case .wifiPath: key = "Wi-Fi path"
     case .lanPath: key = "LAN path"
     case .ipadTransport: key = "iPad transport"
+    case .authentication: key = "iPad authentication"
+    case .controlChannel: key = "Control channel"
+    case .previewChannel: key = "Preview channel"
+    case .secureTransport: key = "Secure transport"
+    case .assetChannel: key = "Asset channel"
     case .networkRoute: key = "Effective network route"
+    case .networkFreshness: key = "Network freshness"
+    case .reconnectState: key = "Reconnect state"
     case .outputFolder: key = "Output folder"
     case .diskSpace: key = "Disk space"
     case .localDownloadServer: key = "Local download server"
@@ -113,6 +116,7 @@ func operatorPreflightTitle(_ id: PreflightCheckID, locale: Locale) -> String {
     case .unfinishedSession: key = "Unfinished session"
     case .queueHealth: key = "Queue health"
     case .cloudUpload: key = "Cloud upload"
+    case .guestDeliverySecurity: key = "Guest delivery security"
     case .printerConfiguration: key = "Printer configuration"
     case .printerTest: key = "Printer test"
     }

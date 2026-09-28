@@ -4,15 +4,19 @@ import CoreGraphics
 import CoreImage
 import CoreImage.CIFilterBuiltins
 
-private enum PreviewStreamFormat {
-    // 640 px is noticeably soft when it fills a Retina iPad. Keep this below
-    // the camera's full frame while preserving enough detail for a large kiosk.
-    static let maxDimension: CGFloat = 1_280
-    static let jpegQuality: CGFloat = 0.7
-}
-
 private final class ThreadSafeCIContext: @unchecked Sendable {
     let value = CIContext(options: [.useSoftwareRenderer: false])
+}
+
+private final class PreviewFormatBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var profile = PreviewQualityProfile.standard
+
+    func get() -> PreviewQualityProfile { lock.withLock { profile } }
+
+    func set(_ profile: PreviewQualityProfile) {
+        lock.withLock { self.profile = profile }
+    }
 }
 
 private final class PreviewFrameThrottle: @unchecked Sendable {
@@ -63,7 +67,8 @@ final class AVFoundationCameraSource: NSObject, CameraSource {
 
     var captureSession: AVCaptureSession?
     private var photoOutput: AVCapturePhotoOutput?
-    private var stillContinuation: CheckedContinuation<CGImage, Error>?
+    let lifecycleCoordinator = StillCaptureLifecycleCoordinator(timeoutDuration: 10.0)
+    var isCapturing: Bool { lifecycleCoordinator.isCapturing }
     private var requestedPreviewFramesPerSecond = 30
 
     // rollingBuffer is NSLock-guarded internally — safe to share across threads
@@ -73,17 +78,44 @@ final class AVFoundationCameraSource: NSObject, CameraSource {
     // Keep preview updates at the selected rate, independent of the camera's
     // native frame rate (which can be 30 or 60 FPS).
     nonisolated private let previewFrameThrottle = PreviewFrameThrottle(maxFPS: 30)
+    nonisolated private let previewFormat = PreviewFormatBox()
 
     private let sampleQueue = DispatchQueue(label: "com.nont.camera.sample", qos: .userInitiated)
 
     override init() {
         super.init()
         refreshDeviceList()
-        for name in [AVCaptureDevice.wasConnectedNotification, AVCaptureDevice.wasDisconnectedNotification] {
-            NotificationCenter.default.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
-                Task { @MainActor [weak self] in self?.refreshDeviceList() }
+        NotificationCenter.default.addObserver(
+            forName: AVCaptureDevice.wasConnectedNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor [weak self] in self?.refreshDeviceList() }
+        }
+        NotificationCenter.default.addObserver(
+            forName: AVCaptureDevice.wasDisconnectedNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] notification in
+            let disconnectedID = (notification.object as? AVCaptureDevice)?.uniqueID
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                if let disconnectedID, disconnectedID == self.activeDevice?.uniqueID {
+                    self.handleActiveDeviceDisconnected()
+                }
+                self.refreshDeviceList()
             }
         }
+    }
+
+    func handleActiveDeviceDisconnected() {
+        lifecycleCoordinator.abortAll(error: CameraError.deviceDisconnected)
+        stop()
+        onError?(CameraError.deviceDisconnected)
+    }
+
+    func finishStillCapture(requestID: Int64, result: Result<CGImage, any Error>) {
+        lifecycleCoordinator.finish(requestID: requestID, result: result)
     }
 
     private func restart() {
@@ -93,13 +125,22 @@ final class AVFoundationCameraSource: NSObject, CameraSource {
 
     func setPreviewFrameRate(_ framesPerSecond: Int) {
         requestedPreviewFramesPerSecond = max(1, framesPerSecond)
-        previewFrameThrottle.setMaxFPS(Double(requestedPreviewFramesPerSecond))
+        let maxFPS = previewFormat.get().allows60FPS ? 60 : 30
+        previewFrameThrottle.setMaxFPS(Double(min(requestedPreviewFramesPerSecond, maxFPS)))
+        configurePreviewFrameRate()
+    }
+
+    func setPreviewQuality(_ profile: PreviewQualityProfile) {
+        previewFormat.set(profile)
+        previewFrameThrottle.setMaxFPS(Double(min(requestedPreviewFramesPerSecond, profile.allows60FPS ? 60 : 30)))
         configurePreviewFrameRate()
     }
 
     private func configurePreviewFrameRate() {
         guard let device = activeDevice else { return }
-        let requestedRate = Double(requestedPreviewFramesPerSecond)
+        let maxFPS = previewFormat.get().allows60FPS ? 60 : 30
+        let effectiveRequestedFramesPerSecond = min(requestedPreviewFramesPerSecond, maxFPS)
+        let requestedRate = Double(effectiveRequestedFramesPerSecond)
         let preferredFormat = device.formats
             .filter { format in
                 format.videoSupportedFrameRateRanges.contains {
@@ -108,7 +149,7 @@ final class AVFoundationCameraSource: NSObject, CameraSource {
             }
             .filter { format in
                 let dimensions = CMVideoFormatDescriptionGetDimensions(format.formatDescription)
-                return max(dimensions.width, dimensions.height) >= Int32(PreviewStreamFormat.maxDimension)
+                return max(dimensions.width, dimensions.height) >= Int32(self.previewFormat.get().maxDimension)
             }
             .min { lhs, rhs in
                 let l = CMVideoFormatDescriptionGetDimensions(lhs.formatDescription)
@@ -118,14 +159,14 @@ final class AVFoundationCameraSource: NSObject, CameraSource {
 
         guard let format = preferredFormat else {
             NSLog("[Camera] No %@ FPS format at %@ px or higher; keeping the active format.",
-                  String(requestedPreviewFramesPerSecond), String(Int(PreviewStreamFormat.maxDimension)))
+                  String(effectiveRequestedFramesPerSecond), String(previewFormat.get().maxDimension))
             return
         }
 
         do {
             try device.lockForConfiguration()
             device.activeFormat = format
-            let duration = CMTime(value: 1, timescale: CMTimeScale(requestedPreviewFramesPerSecond))
+            let duration = CMTime(value: 1, timescale: CMTimeScale(effectiveRequestedFramesPerSecond))
             device.activeVideoMinFrameDuration = duration
             device.activeVideoMaxFrameDuration = duration
             device.unlockForConfiguration()
@@ -215,20 +256,42 @@ final class AVFoundationCameraSource: NSObject, CameraSource {
         captureSession?.stopRunning()
         isRunning = false
         activeDevice = nil
+        lifecycleCoordinator.abortAll(error: CameraError.notRunning)
     }
 
     func captureStill() async throws -> CGImage {
         guard let photoOutput, let captureSession, captureSession.isRunning else {
             throw CameraError.notRunning
         }
-        let raw = try await withCheckedThrowingContinuation { continuation in
-            self.stillContinuation = continuation
-            let settings = AVCapturePhotoSettings()
-            if photoOutput.supportedFlashModes.contains(flashMode) {
-                settings.flashMode = flashMode
-            }
-            photoOutput.capturePhoto(with: settings, delegate: self)
+        guard !lifecycleCoordinator.isCapturing else { throw CameraError.captureInProgress }
+
+        let settings = AVCapturePhotoSettings()
+        if photoOutput.supportedFlashModes.contains(flashMode) {
+            settings.flashMode = flashMode
         }
+        let requestID = settings.uniqueID
+
+        let raw: CGImage = try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                do {
+                    try lifecycleCoordinator.beginCapture(
+                        requestID: requestID,
+                        continuation: continuation,
+                        onTimeout: { [weak self] reqID in
+                            self?.finishStillCapture(requestID: reqID, result: .failure(CameraError.timeout))
+                        }
+                    )
+                    photoOutput.capturePhoto(with: settings, delegate: self)
+                } catch {
+                    continuation.resume(throwing: error)
+                }
+            }
+        } onCancel: {
+            Task { @MainActor [weak self] in
+                self?.lifecycleCoordinator.cancelCurrent(requestID: requestID, error: CameraError.cancelled)
+            }
+        }
+
         guard isMirrored || exposureEV != 0 else { return raw }
         var ci = CIImage(cgImage: raw)
         if isMirrored {
@@ -256,10 +319,11 @@ extension AVFoundationCameraSource: AVCaptureVideoDataOutputSampleBufferDelegate
         guard previewFrameThrottle.shouldPublishPreview() else { return }
 
         let ciImage = CIImage(cvPixelBuffer: pixelBuffer)
-        let scale = min(1.0, PreviewStreamFormat.maxDimension / max(ciImage.extent.width, ciImage.extent.height))
+        let profile = previewFormat.get()
+        let scale = min(1.0, CGFloat(profile.maxDimension) / max(ciImage.extent.width, ciImage.extent.height))
         let scaled = ciImage.transformed(by: CGAffineTransform(scaleX: scale, y: scale))
         guard let cgImage = ciContext.value.createCGImage(scaled, from: scaled.extent),
-              let jpeg = jpegData(from: cgImage, quality: PreviewStreamFormat.jpegQuality)
+              let jpeg = jpegData(from: cgImage, quality: CGFloat(profile.jpegQuality))
         else { return }
 
         Task { @MainActor [weak self] in self?.onPreviewJPEG?(jpeg) }
@@ -270,22 +334,21 @@ extension AVFoundationCameraSource: AVCaptureVideoDataOutputSampleBufferDelegate
 
 extension AVFoundationCameraSource: AVCapturePhotoCaptureDelegate {
     nonisolated func photoOutput(_ output: AVCapturePhotoOutput, didFinishProcessingPhoto photo: AVCapturePhoto, error: Error?) {
+        let requestID = photo.resolvedSettings.uniqueID
         if let error {
             Task { @MainActor [weak self] in
-                self?.stillContinuation?.resume(throwing: error)
-                self?.stillContinuation = nil
+                self?.finishStillCapture(requestID: requestID, result: .failure(error))
             }
             return
         }
         let rawData = photo.fileDataRepresentation()
         Task { @MainActor [weak self] in
             guard let self else { return }
-            defer { stillContinuation = nil }
             guard let data = rawData,
                   let src = CGImageSourceCreateWithData(data as CFData, nil),
                   let raw = CGImageSourceCreateImageAtIndex(src, 0, nil)
             else {
-                stillContinuation?.resume(throwing: CameraError.captureDataMissing)
+                self.finishStillCapture(requestID: requestID, result: .failure(CameraError.captureDataMissing))
                 return
             }
             // CGImageSourceCreateImageAtIndex strips EXIF orientation, so apply it manually.
@@ -294,25 +357,42 @@ extension AVFoundationCameraSource: AVCapturePhotoCaptureDelegate {
             let img: CGImage
             if exifRaw != 1, let orientation = CGImagePropertyOrientation(rawValue: exifRaw) {
                 let ci = CIImage(cgImage: raw).oriented(orientation)
-                img = ciContext.value.createCGImage(ci, from: ci.extent) ?? raw
+                img = self.ciContext.value.createCGImage(ci, from: ci.extent) ?? raw
             } else {
                 img = raw
             }
-            stillContinuation?.resume(returning: img)
+            self.finishStillCapture(requestID: requestID, result: .success(img))
+        }
+    }
+
+    nonisolated func photoOutput(
+        _ output: AVCapturePhotoOutput,
+        didFinishCaptureFor resolvedSettings: AVCaptureResolvedPhotoSettings,
+        error: Error?
+    ) {
+        if let error {
+            let requestID = resolvedSettings.uniqueID
+            Task { @MainActor [weak self] in
+                self?.finishStillCapture(requestID: requestID, result: .failure(error))
+            }
         }
     }
 }
 
 // MARK: - Errors
 
-enum CameraError: LocalizedError {
-    case noDevice, configFailed, notRunning, captureDataMissing
+enum CameraError: LocalizedError, Equatable {
+    case noDevice, configFailed, notRunning, captureDataMissing, captureInProgress, timeout, deviceDisconnected, cancelled
     var errorDescription: String? {
         switch self {
         case .noDevice:           return "No camera device found"
         case .configFailed:       return "Camera configuration failed"
         case .notRunning:         return "Camera is not running"
         case .captureDataMissing: return "Failed to get image data from capture"
+        case .captureInProgress:  return "A capture is already in progress"
+        case .timeout:            return "Camera capture timed out"
+        case .deviceDisconnected: return "Camera device was disconnected during capture"
+        case .cancelled:          return "Camera capture was cancelled"
         }
     }
 }

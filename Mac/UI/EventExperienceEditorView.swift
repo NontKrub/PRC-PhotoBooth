@@ -32,64 +32,48 @@ struct EventExperienceEditorView: View {
     @State private var editingTemplateID: String?
     @State private var previewLoadID = UUID()
     @State private var editingSession: EventExperienceEditingSession?
+    @State private var selectedSection: EditorSection = .templates
+
+    private enum EditorSection: String, CaseIterable, Identifiable {
+        case templates = "Templates"
+        case guestOptions = "Guest Options"
+        case filters = "Filters"
+        case gif = "GIF"
+        case gallery = "Gallery"
+
+        var id: String { rawValue }
+    }
 
     var body: some View {
         Group {
             if isLoading {
                 ProgressView("Loading experience…")
             } else {
-                Form {
-                    if isLoadingPreviews {
-                        ProgressView("Loading previews…")
-                    }
-                    TemplateListView(
-                        templates: $document.templates,
-                        defaultTemplateID: $document.defaultTemplateID,
-                        previews: previews,
-                        onAdd: addTemplate,
-                        onEdit: { editingTemplateID = $0 },
-                        onDuplicate: duplicate,
-                        onDelete: delete,
-                        onMove: move
-                    )
-
-                    Section("Guest Selection") {
-                        Toggle("Allow template selection", isOn: $document.guestTemplateSelectionEnabled)
-                        Toggle("Allow filter selection", isOn: $document.guestFilterSelectionEnabled)
-                        Toggle("Allow language selection", isOn: $document.guestLanguageSelectionEnabled)
-                    }
-
-                    Section("Filters") {
-                        ForEach(PhotoFilterID.allCases) { filter in
-                            Toggle(filter.displayName(for: operatorLanguage), isOn: filterBinding(filter))
-                                .disabled(filter == .original)
+                VStack(alignment: .leading, spacing: 0) {
+                    Picker("Editor section", selection: $selectedSection) {
+                        ForEach(EditorSection.allCases) { section in
+                            Text(section.rawValue).tag(section)
                         }
-                        Picker("Default filter", selection: $document.defaultFilterID) {
-                            ForEach(document.allowedFilterIDs) { filter in
-                                Text(filter.displayName(for: operatorLanguage)).tag(filter)
+                    }
+                    .pickerStyle(.segmented)
+                    .labelsHidden()
+                    .padding(.horizontal, 24)
+                    .padding(.top, 24)
+                    .padding(.bottom, 18)
+
+                    ScrollView {
+                        VStack(alignment: .leading, spacing: 24) {
+                            if isLoadingPreviews {
+                                ProgressView("Loading previews…")
+                            }
+                            editorPage
+                            if let errorMessage {
+                                Text(errorMessage).foregroundStyle(.red)
                             }
                         }
-                    }
-
-                    Section("Language") {
-                        Picker("Default customer language", selection: $document.defaultCustomerLanguage) {
-                            Text("English").tag(CustomerLanguage.english)
-                            Text("ไทย").tag(CustomerLanguage.thai)
-                        }
-                    }
-
-                    Section("GIF quality") {
-                        Picker("GIF quality", selection: $document.gifQualityPreset) {
-                            Text("Compact — Smaller file, fastest guest download").tag(GIFQualityPreset.compact)
-                            Text("Balanced — Recommended").tag(GIFQualityPreset.balanced)
-                            Text("High — Best quality, larger file").tag(GIFQualityPreset.high)
-                        }
-                    }
-
-                    EventGallerySettingsView(configuration: $document.gallery, serverURL: coordinator.serverURL)
-
-                    if let errorMessage {
-                        Text(errorMessage).foregroundStyle(.red)
+                        .frame(maxWidth: 960, alignment: .leading)
+                        .padding(.horizontal, 24)
+                        .padding(.vertical, 24)
                     }
                 }
             }
@@ -183,6 +167,59 @@ struct EventExperienceEditorView: View {
             guard let session = editingSession else { return }
             editingSession = nil
             Task { try? await coordinator.experienceStore.discardEditing(session) }
+        }
+    }
+
+    @ViewBuilder
+    private var editorPage: some View {
+        switch selectedSection {
+        case .templates:
+            TemplateListView(
+                templates: $document.templates,
+                defaultTemplateID: $document.defaultTemplateID,
+                previews: previews,
+                onAdd: addTemplate,
+                onEdit: { editingTemplateID = $0 },
+                onDuplicate: duplicate,
+                onDelete: delete,
+                onMove: move
+            )
+        case .guestOptions:
+            GroupBox("Guest Options") {
+                VStack(alignment: .leading, spacing: 12) {
+                    Toggle("Allow template selection", isOn: $document.guestTemplateSelectionEnabled)
+                    Toggle("Allow filter selection", isOn: $document.guestFilterSelectionEnabled)
+                    Toggle("Allow language selection", isOn: $document.guestLanguageSelectionEnabled)
+                    Picker("Default customer language", selection: $document.defaultCustomerLanguage) {
+                        Text("English").tag(CustomerLanguage.english)
+                        Text("ไทย").tag(CustomerLanguage.thai)
+                    }
+                }
+            }
+        case .filters:
+            GroupBox("Filters") {
+                VStack(alignment: .leading, spacing: 12) {
+                    ForEach(PhotoFilterID.allCases) { filter in
+                        Toggle(filter.displayName(for: operatorLanguage), isOn: filterBinding(filter))
+                            .disabled(filter == .original)
+                    }
+                    Picker("Default filter", selection: $document.defaultFilterID) {
+                        ForEach(document.allowedFilterIDs) { filter in
+                            Text(filter.displayName(for: operatorLanguage)).tag(filter)
+                        }
+                    }
+                }
+            }
+        case .gif:
+            GroupBox("GIF") {
+                Picker("GIF quality", selection: $document.gifQualityPreset) {
+                    Text("Compact — Smaller file, fastest guest download").tag(GIFQualityPreset.compact)
+                    Text("Balanced — Recommended").tag(GIFQualityPreset.balanced)
+                    Text("High — Best quality, larger file").tag(GIFQualityPreset.high)
+                }
+            }
+        case .gallery:
+            EventGallerySettingsView(configuration: $document.gallery, serverURL: coordinator.serverURL)
         }
     }
 
@@ -419,13 +456,14 @@ struct EventExperienceEditorView: View {
     }
 
     private func save() {
+        guard let session = editingSession else { return }
         isSaving = true
         Task {
             do {
                 try await coordinator.saveExperienceDocument(
                     document,
                     for: event,
-                    editingSession: editingSession
+                    editingSession: session
                 )
             } catch {
                 errorMessage = error.localizedDescription
@@ -434,24 +472,7 @@ struct EventExperienceEditorView: View {
             }
 
             editingSession = nil
-            var previewError: Error?
-            for template in document.templates {
-                do {
-                    _ = try await coordinator.experienceStore.rebuildPreview(
-                        eventID: event.id,
-                        templateID: template.id
-                    )
-                } catch {
-                    previewError = previewError ?? error
-                }
-            }
-            coordinator.refreshActiveExperience()
-            if let previewError {
-                errorMessage = "Event saved. Template previews need rebuilding: \(previewError.localizedDescription)"
-                isSaving = false
-            } else {
-                dismiss()
-            }
+            dismiss()
         }
     }
 

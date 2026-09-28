@@ -9,16 +9,19 @@ struct EventSetupView: View {
     // Live query — updates automatically when events are added/deleted
     @Query(sort: \BoothEvent.createdAt, order: .reverse) private var events: [BoothEvent]
 
-    @State private var selectedEventID: String?
+    @State private var selectedEventIDs = Set<String>()
     @State private var showNewEventSheet = false
+    @State private var pendingDeleteIDs = Set<String>()
+    @State private var showDeleteConfirmation = false
 
     private var selectedEvent: BoothEvent? {
-        events.first { $0.id == selectedEventID }
+        guard selectedEventIDs.count == 1, let id = selectedEventIDs.first else { return nil }
+        return events.first { $0.id == id }
     }
 
     var body: some View {
         NavigationSplitView {
-            List(selection: $selectedEventID) {
+            List(selection: $selectedEventIDs) {
                 ForEach(events) { event in
                     VStack(alignment: .leading, spacing: 2) {
                         HStack {
@@ -40,10 +43,17 @@ struct EventSetupView: View {
                     .contextMenu {
                         Button("Set Active") { setActive(event) }
                         Divider()
-                        Button("Delete", role: .destructive) { delete(event) }
+                        Button("Delete", role: .destructive) {
+                            pendingDeleteIDs = EventSelectionLogic.contextMenuDeletionIDs(
+                                clickedID: event.id,
+                                selectedIDs: selectedEventIDs
+                            )
+                            showDeleteConfirmation = true
+                        }
                     }
                 }
             }
+            .onDeleteCommand { requestDeleteSelected() }
             .navigationTitle("Events (\(events.count))")
             .toolbar {
                 ToolbarItem {
@@ -51,10 +61,23 @@ struct EventSetupView: View {
                         Label("New Event", systemImage: "plus")
                     }
                 }
+                if selectedEventIDs.count > 1 {
+                    ToolbarItem {
+                        Button("Delete \(selectedEventIDs.count) Events…", role: .destructive) {
+                            requestDeleteSelected()
+                        }
+                    }
+                }
             }
         } detail: {
             if let event = selectedEvent {
                 EventDetailView(event: event)
+            } else if selectedEventIDs.count > 1 {
+                ContentUnavailableView {
+                    Label("\(selectedEventIDs.count) Events Selected", systemImage: "checkmark.circle")
+                } description: {
+                    Text("Choose Delete to remove the selected events.")
+                }
             } else {
                 ContentUnavailableView {
                     Label("No Event Selected", systemImage: "calendar")
@@ -68,22 +91,54 @@ struct EventSetupView: View {
                 let event = BoothEvent(name: name, photoCount: count, countdownSeconds: seconds)
                 modelContext.insert(event)
                 saveChanges()
-                selectedEventID = event.id
+                selectedEventIDs = [event.id]
             }
+        }
+        .confirmationDialog(
+            "Delete \(pendingDeleteIDs.count) Events?",
+            isPresented: $showDeleteConfirmation,
+            titleVisibility: .visible
+        ) {
+            Button("Cancel", role: .cancel) {}
+            Button("Delete \(pendingDeleteIDs.count) Events", role: .destructive) {
+                deleteEvents(ids: pendingDeleteIDs)
+            }
+        } message: {
+            Text(deleteConfirmationMessage)
         }
     }
 
     private func setActive(_ event: BoothEvent) {
-        events.forEach { $0.isActive = false }
-        event.isActive = true
-        saveChanges()
-        coordinator.activeEvent = event
+        _ = coordinator.setActiveEvent(event)
     }
 
-    private func delete(_ event: BoothEvent) {
-        if selectedEventID == event.id { selectedEventID = nil }
-        if coordinator.activeEvent?.id == event.id { coordinator.activeEvent = nil }
-        modelContext.delete(event)
+    private func requestDeleteSelected() {
+        guard !selectedEventIDs.isEmpty else { return }
+        pendingDeleteIDs = selectedEventIDs
+        showDeleteConfirmation = true
+    }
+
+    private var deleteConfirmationMessage: String {
+        guard let activeID = coordinator.activeEvent?.id,
+              pendingDeleteIDs.contains(activeID) else {
+            return "This permanently deletes the selected events."
+        }
+        return "This permanently deletes the selected events. The active event is included and the booth will have no active event."
+    }
+
+    private func deleteEvents(ids: Set<String>) {
+        let plan = EventSelectionLogic.deletionPlan(
+            selectedIDs: ids,
+            activeID: coordinator.activeEvent?.id
+        )
+        if plan.removesActiveEvent {
+            guard coordinator.setActiveEvent(nil) else { return }
+        }
+        for event in events where plan.ids.contains(event.id) {
+            modelContext.delete(event)
+        }
+        selectedEventIDs.subtract(plan.ids)
+        pendingDeleteIDs = []
         saveChanges()
     }
 
@@ -102,6 +157,7 @@ struct EventDetailView: View {
     @Environment(BoothCoordinator.self) private var coordinator
     @Environment(\.modelContext) private var modelContext
     @AppStorage("publicBaseURL") private var publicBaseURL: String = ""
+    @AppStorage("allowTrustedLocalHTTP") private var allowTrustedLocalHTTP: Bool = false
     @State private var experienceDocument: EventExperienceDocument?
     @State private var experienceError: String?
 
@@ -116,16 +172,38 @@ struct EventDetailView: View {
 
             Section("Status") {
                 LabeledContent("Active") {
-                    Toggle("", isOn: $event.isActive)
-                        .onChange(of: event.isActive) { _, _ in saveChanges() }
+                    Toggle(
+                        "",
+                        isOn: Binding(
+                            get: { event.isActive },
+                            set: { isActive in
+                                if isActive {
+                                    _ = coordinator.setActiveEvent(event)
+                                } else if event.isActive {
+                                    _ = coordinator.setActiveEvent(nil)
+                                }
+                            }
+                        )
+                    )
                 }
             }
 
-            Section("Remote Access") {
-                TextField("Public URL (optional)", text: $publicBaseURL)
+            Section("Guest Downloads") {
+                Text("Global booth guest-delivery setting")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                TextField("Public guest URL (HTTPS)", text: $publicBaseURL)
                     .font(.caption.monospaced())
-                Text("QR codes use this URL after cloud upload succeeds; otherwise they use the LAN server.\nExample: https://photos.yourdomain.com")
+                Text("QR codes use this URL when cloud upload is enabled. Example: https://photos.yourdomain.com")
                     .font(.caption).foregroundStyle(.secondary)
+
+                Toggle("Trusted private LAN HTTP", isOn: $allowTrustedLocalHTTP)
+                Label(
+                    "Guest photos and download links are unencrypted on the local network. Use only on an isolated, operator-controlled network.",
+                    systemImage: "exclamationmark.triangle.fill"
+                )
+                .font(.caption)
+                .foregroundStyle(.orange)
             }
 
             Section("Default Template") {

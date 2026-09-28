@@ -58,6 +58,36 @@ struct DSLRProtocolTests {
         ])) == 2)
     }
 
+    @Test("Sony capture waits until the PC-save object is ready")
+    func sonyCaptureWaitsForPCSaveObject() {
+        #expect(!DSLRCameraSource.sonyObjectInMemoryIsReady(nil))
+        #expect(!DSLRCameraSource.sonyObjectInMemoryIsReady(0x7FFF))
+        #expect(DSLRCameraSource.sonyObjectInMemoryIsReady(0x8000))
+    }
+
+    @Test("Sony buffer images are drained before shutter and downloaded after shutter")
+    func sonyCaptureSeparatesStaleAndCurrentBufferImages() {
+        #expect(DSLRCameraSource.sonyCaptureBufferAction(
+            objectInMemory: 0x8001,
+            shutterIssued: false
+        ) == .discardStale)
+        #expect(DSLRCameraSource.sonyCaptureBufferAction(
+            objectInMemory: 0x8001,
+            shutterIssued: true
+        ) == .downloadCurrent)
+        #expect(DSLRCameraSource.sonyCaptureBufferAction(
+            objectInMemory: 0,
+            shutterIssued: true
+        ) == .wait)
+    }
+
+    @Test("capture fallback ignores files cataloged before the shutter")
+    func captureFallbackIgnoresCatalogedFiles() {
+        let cataloged = Set(["DSC00001.JPG"])
+        #expect(!DSLRCameraSource.isNewCaptureMediaFile(named: "DSC00001.JPG", cataloged: cataloged))
+        #expect(DSLRCameraSource.isNewCaptureMediaFile(named: "DSC00002.JPG", cataloged: cataloged))
+    }
+
     @Test("parses both Sony vendor-code arrays")
     func parsesVendorCodes() {
         // 0x00C8 prefix, then two UInt16 arrays encoded with UInt32 counts.

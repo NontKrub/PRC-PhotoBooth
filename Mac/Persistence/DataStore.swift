@@ -9,13 +9,17 @@ final class DataStore {
     var context: ModelContext { container.mainContext }
     private(set) var lastPersistenceError: String?
     private(set) var persistentStorageAvailable = true
+    private(set) var databaseWasRecreated = false
 
-    private init() {
+    private init(isStoredInMemoryOnly: Bool = false) {
         let schema = Schema([BoothEvent.self, BoothSlot.self, BoothSession.self, CapturedShot.self])
-        let config = ModelConfiguration(schema: schema, isStoredInMemoryOnly: false)
+        let config = ModelConfiguration(schema: schema, isStoredInMemoryOnly: isStoredInMemoryOnly)
         do {
             container = try ModelContainer(for: schema, configurations: config)
         } catch {
+            guard !isStoredInMemoryOnly else {
+                fatalError("SwiftData in-memory test store failed: \(error)")
+            }
             // Schema changed — preserve the old store before starting fresh.
             let base = config.url.deletingPathExtension()
             let backup = base.deletingLastPathComponent()
@@ -36,6 +40,9 @@ final class DataStore {
             }
             do {
                 container = try ModelContainer(for: schema, configurations: config)
+                databaseWasRecreated = true
+                lastPersistenceError = "Database was successfully recreated after corruption evacuation."
+                NSLog("[Persistence] Warning: Database was successfully recreated after corruption evacuation.")
             } catch {
                 let persistenceError = error.localizedDescription
                 persistentStorageAvailable = false
@@ -50,6 +57,12 @@ final class DataStore {
             }
         }
     }
+
+#if DEBUG
+    static func inMemoryForTesting() -> DataStore {
+        DataStore(isStoredInMemoryOnly: true)
+    }
+#endif
 
     // MARK: - Events
 
@@ -73,18 +86,38 @@ final class DataStore {
         catch { record(error); return nil }
     }
 
-    func setActiveEvent(_ event: BoothEvent) {
-        // Deactivate all, then activate this one
+    @discardableResult
+    func setActiveEvent(_ event: BoothEvent?) -> Bool {
         let all = fetchEvents()
-        all.forEach { $0.isActive = false }
-        event.isActive = true
-        save()
+        if let event, !all.contains(where: { $0.id == event.id }) { return false }
+        let previousStates = Dictionary(uniqueKeysWithValues: all.map { ($0.id, $0.isActive) })
+        let activeIDs = EventSelectionLogic.activeIDs(
+            eventIDs: all.map(\.id),
+            selectedID: event?.id
+        )
+        all.forEach { $0.isActive = activeIDs.contains($0.id) }
+        guard saveChanges() else {
+            all.forEach { $0.isActive = previousStates[$0.id] ?? false }
+            return false
+        }
+        return true
     }
 
     // MARK: - Sessions
 
-    func startSession(for event: BoothEvent) -> BoothSession {
-        let session = BoothSession(eventID: event.id, photoCount: event.photoCount)
+    func startSession(
+        for event: BoothEvent,
+        origin: SessionOrigin = .normal,
+        soakRunID: String? = nil,
+        soakCycleIndex: Int? = nil
+    ) -> BoothSession {
+        let session = BoothSession(
+            eventID: event.id,
+            photoCount: event.photoCount,
+            origin: origin,
+            soakRunID: soakRunID,
+            soakCycleIndex: soakCycleIndex
+        )
         event.sessions.append(session)
         context.insert(session)
         save()
@@ -105,6 +138,35 @@ final class DataStore {
     func deleteSession(_ session: BoothSession) {
         context.delete(session)
         save()
+    }
+
+    func deleteSessionRecordIfPresent(sessionID: String) throws {
+        guard persistentStorageAvailable else {
+            throw DataStorePersistenceError.unavailable(
+                lastPersistenceError ?? "Persistent SwiftData storage is unavailable."
+            )
+        }
+        if lastPersistenceError != nil {
+            do {
+                try context.save()
+                lastPersistenceError = nil
+            } catch {
+                record(error)
+                throw error
+            }
+        }
+        var descriptor = FetchDescriptor<BoothSession>(predicate: #Predicate { $0.id == sessionID })
+        descriptor.fetchLimit = 1
+        do {
+            if let session = try context.fetch(descriptor).first {
+                context.delete(session)
+                try context.save()
+                lastPersistenceError = nil
+            }
+        } catch {
+            record(error)
+            throw error
+        }
     }
 
     @discardableResult
@@ -180,6 +242,9 @@ final class DataStore {
         session.startedAt = manifest.startedAt
         session.photoCount = manifest.eventConfig.photoCount
         session.downloadToken = manifest.downloadToken
+        session.origin = manifest.origin ?? .normal
+        session.soakRunID = manifest.origin == .soakTest ? manifest.soakRunID : nil
+        session.soakCycleIndex = manifest.origin == .soakTest ? manifest.soakCycleIndex : nil
         for shot in manifest.shots {
             _ = upsertShot(
                 session: session,
@@ -190,6 +255,20 @@ final class DataStore {
         }
         save()
         return session
+    }
+
+    func backfillSessionOrigin(from manifest: SessionManifest) {
+        guard let session = fetchSession(id: manifest.id) else { return }
+        let origin = manifest.origin ?? .normal
+        let runID = origin == .soakTest ? manifest.soakRunID : nil
+        let cycleIndex = origin == .soakTest ? manifest.soakCycleIndex : nil
+        guard session.originRawValue != origin.rawValue
+                || session.soakRunID != runID
+                || session.soakCycleIndex != cycleIndex else { return }
+        session.origin = origin
+        session.soakRunID = runID
+        session.soakCycleIndex = cycleIndex
+        save()
     }
 
     func fetchSessions(finishedBefore date: Date) -> [BoothSession] {
@@ -221,4 +300,14 @@ final class DataStore {
         NSLog("[Persistence] SwiftData operation failed: %@", error.localizedDescription)
     }
 
+}
+
+private enum DataStorePersistenceError: LocalizedError {
+    case unavailable(String)
+
+    var errorDescription: String? {
+        switch self {
+        case .unavailable(let message): return message
+        }
+    }
 }

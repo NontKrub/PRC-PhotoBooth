@@ -3,13 +3,16 @@ import SwiftUI
 struct CountdownView: View {
     let photoIndex: Int
     let secondsRemaining: Int
-    @Environment(iPadViewModel.self) private var vm
+    @EnvironmentObject private var vm: iPadViewModel
 
     private var isThai: Bool { vm.selectedLanguage == .thai }
 
     var body: some View {
         ZStack {
-            PreviewMirrorView().ignoresSafeArea()
+            PreviewMirrorView(
+                targetAspectRatio: vm.captureFraming(for: photoIndex)?.aspectRatio
+            )
+            .ignoresSafeArea()
             Color.black.opacity(0.25).ignoresSafeArea()
 
             VStack(spacing: 0) {
@@ -76,7 +79,7 @@ struct CountdownView: View {
                         .font(.system(size: 148, weight: .black, design: .rounded))
                         .foregroundStyle(.white)
                         .contentTransition(.numericText(countsDown: true))
-                        .animation(.spring(duration: 0.25), value: secondsRemaining)
+                        .animation(.spring(response: 0.25, dampingFraction: 0.8), value: secondsRemaining)
                 }
 
                 Spacer()
@@ -102,7 +105,7 @@ struct CountdownView: View {
                 RoundedRectangle(cornerRadius: 2)
                     .fill(i < photoIndex ? .white : (i == photoIndex ? .white : .white.opacity(0.2)))
                     .frame(width: i == photoIndex ? 28 : 18, height: 4)
-                    .animation(.spring(duration: 0.3), value: photoIndex)
+                    .animation(.spring(response: 0.3, dampingFraction: 0.8), value: photoIndex)
             }
         }
     }

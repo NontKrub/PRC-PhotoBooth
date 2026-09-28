@@ -47,6 +47,49 @@ struct StateMachineTests {
         #expect(sm.keptShots[0] == nil)
     }
 
+    @Test("continue after failure never returns the photo it just deferred")
+    func continueDoesNotReturnSelf() async {
+        let sm = SessionStateMachine()
+        sm.startSession(config: EventConfig(photoCount: 3, countdownSeconds: 3))
+        sm.beginCountdown(photoIndex: 0)
+        let failure = CaptureFailureSummary(
+            photoIndex: 0, reason: .transferTimeout, message: "t",
+            shutterLikelyFired: true, canRetryReceive: false,
+            canUsePreviousPhoto: false, canContinueSession: true
+        )
+        sm.enterCaptureRecovery(photoIndex: 0, failure: failure)
+        #expect(sm.continueAfterCaptureFailure(photoIndex: 0) == 1)
+
+        sm.enterCaptureRecovery(photoIndex: 1, failure: failure)
+        #expect(sm.continueAfterCaptureFailure(photoIndex: 1) == 2)
+
+        sm.enterReview(photoIndex: 2, thumbnailData: Data([0x01]))
+        sm.keepShot(photoIndex: 2)
+        guard case .countdown(let resumed, _) = sm.phase else {
+            Issue.record("expected countdown, got \(sm.phase)")
+            return
+        }
+        #expect(resumed == 0)
+
+        sm.enterCaptureRecovery(photoIndex: 0, failure: failure)
+        #expect(sm.continueAfterCaptureFailure(photoIndex: 0) == 1)
+    }
+
+    @Test("current review image is separate from synchronized history thumbnail")
+    func currentReviewImageIsSeparate() {
+        let sm = SessionStateMachine()
+        sm.startSession(config: EventConfig(photoCount: 1, countdownSeconds: 3))
+        sm.beginCountdown(photoIndex: 0)
+        let thumbnail = Data([0x01])
+        let review = Data(repeating: 0x02, count: 10)
+        sm.enterReview(photoIndex: 0, thumbnailData: thumbnail, reviewImageData: review)
+
+        #expect(sm.keptShots[0] == thumbnail)
+        #expect(sm.reviewImageData == review)
+        sm.keepShot(photoIndex: 0)
+        #expect(sm.reviewImageData == nil)
+    }
+
     @Test("session preparation waits for an explicit countdown")
     func sessionPreparationWaitsForCountdown() async {
         let sm = SessionStateMachine()
@@ -154,5 +197,26 @@ struct StateMachineTests {
         }
 
         #expect(sm.phase == .processing)
+    }
+
+    @Test("500 sequential one-photo sessions return to idle without state leakage")
+    func sequentialSessionSoak() {
+        let sm = SessionStateMachine()
+        let config = EventConfig(photoCount: 1, countdownSeconds: 1)
+
+        for index in 0..<500 {
+            sm.startSession(config: config, sessionID: "soak-\(index)")
+            sm.beginCountdown(photoIndex: 0)
+            sm.enterReview(photoIndex: 0, thumbnailData: Data([UInt8(index & 0xff)]))
+            sm.keepShot(photoIndex: 0)
+            sm.finishSession(qrPayload: "qr-\(index)")
+
+            #expect(sm.phase == .finished(qrPayload: "qr-\(index)"))
+            sm.reset()
+        }
+
+        #expect(sm.phase == .idle)
+        #expect(sm.currentSessionID.isEmpty)
+        #expect(sm.keptShots.isEmpty)
     }
 }

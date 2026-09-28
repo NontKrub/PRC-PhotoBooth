@@ -1,7 +1,7 @@
 import SwiftUI
 
 struct ExperienceSelectionView: View {
-    @Environment(iPadViewModel.self) private var vm
+    @EnvironmentObject private var vm: iPadViewModel
 
     private var catalog: CustomerExperienceCatalog? { vm.experienceCatalog }
     private var language: CustomerLanguage { vm.selectedLanguage }

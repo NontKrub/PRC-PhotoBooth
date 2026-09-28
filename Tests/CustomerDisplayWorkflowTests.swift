@@ -39,4 +39,71 @@ struct CustomerDisplayWorkflowTests {
         #expect(CustomerDisplayWorkflow.canApply(.usePreviousCapture(photoIndex: 1), in: recovery))
         #expect(!CustomerDisplayWorkflow.canApply(.retryReceive(photoIndex: 0), in: recovery))
     }
+
+    @Test("Review actions require the authoritative review media")
+    func reviewActionsRequireMedia() {
+        #expect(CustomerDisplayWorkflow.canUseReviewActions(
+            in: .review(photoIndex: 1),
+            reviewMediaReady: true
+        ))
+        #expect(!CustomerDisplayWorkflow.canUseReviewActions(
+            in: .review(photoIndex: 1),
+            reviewMediaReady: false
+        ))
+        #expect(!CustomerDisplayWorkflow.canUseReviewActions(
+            in: .processing,
+            reviewMediaReady: true
+        ))
+    }
+
+    @Test("BoothPhase isFinished property accurately matches finished phase")
+    func boothPhaseIsFinished() {
+        #expect(!BoothPhase.idle.isFinished)
+        #expect(!BoothPhase.readyToStart.isFinished)
+        #expect(!BoothPhase.processing.isFinished)
+        #expect(BoothPhase.finished(qrPayload: "qr").isFinished)
+    }
+
+    @Test("evaluates complete customer display authority matrix (Finding A05)")
+    func evaluatesAuthorityMatrix() {
+        // Neither display active
+        let none = CustomerDisplayAuthority.evaluate(
+            isAuthenticatedIPadConnected: false,
+            isExternalViewerActive: false
+        )
+        #expect(none == .none)
+        #expect(!none.isCustomerDisplayReady)
+        #expect(!none.requiresIPadSetupSend)
+        #expect(!none.shouldStartCountdownImmediatelyLocally)
+
+        // iPad only
+        let ipadOnly = CustomerDisplayAuthority.evaluate(
+            isAuthenticatedIPadConnected: true,
+            isExternalViewerActive: false
+        )
+        #expect(ipadOnly == .iPadOnly)
+        #expect(ipadOnly.isCustomerDisplayReady)
+        #expect(ipadOnly.requiresIPadSetupSend)
+        #expect(!ipadOnly.shouldStartCountdownImmediatelyLocally)
+
+        // External viewer only
+        let externalOnly = CustomerDisplayAuthority.evaluate(
+            isAuthenticatedIPadConnected: false,
+            isExternalViewerActive: true
+        )
+        #expect(externalOnly == .externalDisplayOnly)
+        #expect(externalOnly.isCustomerDisplayReady)
+        #expect(!externalOnly.requiresIPadSetupSend)
+        #expect(externalOnly.shouldStartCountdownImmediatelyLocally)
+
+        // Dual display (both active)
+        let dual = CustomerDisplayAuthority.evaluate(
+            isAuthenticatedIPadConnected: true,
+            isExternalViewerActive: true
+        )
+        #expect(dual == .dualDisplay)
+        #expect(dual.isCustomerDisplayReady)
+        #expect(dual.requiresIPadSetupSend)
+        #expect(!dual.shouldStartCountdownImmediatelyLocally)
+    }
 }

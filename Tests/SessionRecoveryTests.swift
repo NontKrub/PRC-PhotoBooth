@@ -103,6 +103,161 @@ struct SessionRecoveryTests {
         }
     }
 
+    @Test("legacy finalization migration is stable and quarantines interrupted print")
+    @MainActor
+    func migratesLegacyFinalizationAndUnknownPrint() async throws {
+        let root = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let manifestStore = SessionManifestStore(baseDirectory: root.appendingPathComponent("Runtime"))
+        let manifest = makeManifest(
+            id: "legacy-session",
+            status: .finalizing,
+            startedAt: Date(timeIntervalSince1970: 20),
+            directory: root
+        )
+        try await manifestStore.create(manifest)
+
+        let queueStore = JobQueueStore(fileURL: root.appendingPathComponent("jobs.json"))
+        var interruptedPrint = try await queueStore.enqueue(sessionID: manifest.id, kind: .autoPrint)
+        interruptedPrint.status = .running
+        interruptedPrint.attemptCount = 1
+        interruptedPrint.lastAttemptAt = Date()
+        try await queueStore.update(interruptedPrint)
+
+        let queue = SessionJobQueue(store: queueStore, executor: RecoveryTestExecutor())
+        queue.pauseWorkersForRecovery()
+        queue.start()
+        await queue.waitUntilReady()
+        let service = SessionRecoveryService(
+            manifestStore: manifestStore,
+            workspace: SessionWorkspace(),
+            jobQueue: queue
+        )
+
+        await service.scanNow()
+        let migrated = try await manifestStore.load(sessionID: manifest.id)
+        let plan = try #require(FinalizationPlan.make(from: migrated))
+        let jobs = try await queueStore.load().filter { $0.sessionID == manifest.id }
+        let migratedPrint = try #require(jobs.first { $0.kind == .autoPrint })
+        #expect(migrated.finalizationTransactionID == "legacy-legacy-session")
+        #expect(migrated.deliveryIntent?.automaticPrintEnabled == true)
+        #expect(plan.jobKinds.contains(.autoPrint))
+        #expect(migratedPrint.finalizationTransactionID == plan.transactionID)
+        #expect(migratedPrint.status == .failed)
+        #expect(migratedPrint.lastFailureDisposition == .sideEffectUnknown)
+        #expect(jobs.filter { $0.kind == .autoPrint }.count == 1)
+
+        await service.scanNow()
+        let rescanned = try await manifestStore.load(sessionID: manifest.id)
+        let rescannedJobs = try await queueStore.load().filter { $0.sessionID == manifest.id }
+        #expect(rescanned.finalizationTransactionID == migrated.finalizationTransactionID)
+        #expect(rescannedJobs.filter { $0.kind == .autoPrint }.count == 1)
+        queue.stop()
+    }
+
+    @Test("legacy finalization with no historical print or cloud evidence creates neither job")
+    @MainActor
+    func doesNotInventLegacyPrintOrCloudIntent() async throws {
+        let root = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let manifestStore = SessionManifestStore(baseDirectory: root.appendingPathComponent("Runtime"))
+        let manifest = makeManifest(
+            id: "legacy-no-delivery-evidence",
+            status: .finalizing,
+            startedAt: Date(),
+            directory: root
+        )
+        try await manifestStore.create(manifest)
+
+        let queue = makeQueue(root: root)
+        let service = SessionRecoveryService(
+            manifestStore: manifestStore,
+            workspace: SessionWorkspace(),
+            jobQueue: queue
+        )
+        let migrated = try await service.prepareFinalizationPlanForRecovery(for: manifest)
+        let plan = try #require(FinalizationPlan.make(from: migrated))
+        let jobs = await queue.snapshotForTesting().filter { $0.sessionID == manifest.id }
+
+        #expect(migrated.deliveryIntent?.automaticPrintEnabled == false)
+        #expect(migrated.deliveryIntent?.cloudUploadEnabled == false)
+        #expect(!plan.jobKinds.contains(.autoPrint))
+        #expect(!plan.jobKinds.contains(.cloudUpload))
+        #expect(!jobs.contains { $0.kind == .autoPrint || $0.kind == .cloudUpload })
+        #expect(service.recoveryErrors.contains { $0.contains("no historical evidence") })
+    }
+
+    @Test("legacy cloud job preserves its saved destination after current settings change")
+    @MainActor
+    func preservesLegacyCloudDestination() async throws {
+        let root = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let manifestStore = SessionManifestStore(baseDirectory: root.appendingPathComponent("Runtime"))
+        var manifest = makeManifest(
+            id: "legacy-cloud-snapshot",
+            status: .finalizing,
+            startedAt: Date(),
+            directory: root
+        )
+        let oldSnapshot = SessionCloudDeliverySnapshot(
+            publicBaseURL: "https://old.example",
+            remoteBasePath: "/srv/old-photos",
+            sshHost: "old-host"
+        )
+        manifest.cloudDelivery = oldSnapshot
+        try await manifestStore.create(manifest)
+
+        let queueStore = JobQueueStore(fileURL: root.appendingPathComponent("jobs.json"))
+        _ = try await queueStore.enqueueBatch(sessionID: manifest.id, kinds: [.cloudUpload])
+        let queue = SessionJobQueue(store: queueStore, executor: RecoveryTestExecutor())
+        queue.pauseWorkersForRecovery()
+        let service = SessionRecoveryService(
+            manifestStore: manifestStore,
+            workspace: SessionWorkspace(),
+            jobQueue: queue
+        )
+        let migrated = try await service.prepareFinalizationPlanForRecovery(for: manifest)
+
+        #expect(migrated.deliveryIntent?.cloudUploadEnabled == true)
+        #expect(migrated.cloudDelivery == oldSnapshot)
+        let configuration = try #require(SessionJobExecutor.cloudUploadConfiguration(for: migrated))
+        #expect(configuration.publicBaseURL == oldSnapshot.publicBaseURL)
+        #expect(configuration.remoteBasePath == oldSnapshot.remoteBasePath)
+        #expect(configuration.sshHost == oldSnapshot.sshHost)
+    }
+
+    @Test("legacy cloud job intent survives without inventing a current destination")
+    @MainActor
+    func legacyCloudIntentWithoutSnapshotFailsClosed() async throws {
+        let root = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let manifestStore = SessionManifestStore(baseDirectory: root.appendingPathComponent("Runtime"))
+        let manifest = makeManifest(
+            id: "legacy-cloud-without-snapshot",
+            status: .finalizing,
+            startedAt: Date(),
+            directory: root
+        )
+        try await manifestStore.create(manifest)
+
+        let queueStore = JobQueueStore(fileURL: root.appendingPathComponent("jobs.json"))
+        _ = try await queueStore.enqueueBatch(sessionID: manifest.id, kinds: [.cloudUpload])
+        let queue = SessionJobQueue(store: queueStore, executor: RecoveryTestExecutor())
+        let service = SessionRecoveryService(
+            manifestStore: manifestStore,
+            workspace: SessionWorkspace(),
+            jobQueue: queue
+        )
+        let migrated = try await service.prepareFinalizationPlanForRecovery(for: manifest)
+        let plan = try #require(FinalizationPlan.make(from: migrated))
+
+        #expect(migrated.deliveryIntent?.cloudUploadEnabled == true)
+        #expect(migrated.cloudDelivery == nil)
+        #expect(plan.jobKinds.contains(.cloudUpload))
+        #expect(SessionJobExecutor.cloudUploadConfiguration(for: migrated) == nil)
+    }
+
     @Test("startup removes abandoned temporary GIF files")
     @MainActor
     func removesAbandonedGIFTemporaries() async throws {
@@ -126,6 +281,67 @@ struct SessionRecoveryTests {
         await service.scanNow()
 
         #expect(!FileManager.default.fileExists(atPath: temporaryGIF.path))
+    }
+
+    @Test("startup preserves cancelled soak diagnostics and still cleans normal cancellations")
+    @MainActor
+    func retainsCancelledSoakDiagnosticsOnRestart() async throws {
+        let root = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let manifestStore = SessionManifestStore(baseDirectory: root.appendingPathComponent("Runtime"))
+        let normalDirectory = root.appendingPathComponent("normal-cancelled")
+        let diagnosticDirectory = root.appendingPathComponent("soak-diagnostic")
+        try FileManager.default.createDirectory(at: normalDirectory, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: diagnosticDirectory, withIntermediateDirectories: true)
+        let normalOutput = normalDirectory.appendingPathComponent("evidence.txt")
+        let diagnosticOutput = diagnosticDirectory.appendingPathComponent("evidence.txt")
+        try Data([1]).write(to: normalOutput)
+        try Data([2]).write(to: diagnosticOutput)
+
+        let now = Date()
+        let normal = makeManifest(
+            id: "cancelled-normal",
+            status: .cancelled,
+            startedAt: now,
+            directory: normalDirectory
+        )
+        var diagnostic = makeManifest(
+            id: "cancelled-soak-diagnostic",
+            status: .cancelled,
+            startedAt: now,
+            directory: diagnosticDirectory
+        )
+        diagnostic.origin = .soakTest
+        diagnostic.soakRunID = "run-retained"
+        diagnostic.soakDiagnosticRetained = true
+        diagnostic.soakAutoCleanupEnabled = true
+        diagnostic.lastError = "Cloud verification failed"
+        try await manifestStore.create(normal)
+        try await manifestStore.create(diagnostic)
+
+        let queue = makeQueue(root: root)
+        queue.pauseWorkersForRecovery()
+        queue.start()
+        await queue.waitUntilReady()
+        let service = SessionRecoveryService(
+            manifestStore: manifestStore,
+            workspace: SessionWorkspace(),
+            jobQueue: queue
+        )
+        await service.scanNow()
+
+        #expect(try await manifestStore.load(sessionID: diagnostic.id).isRetainedSoakDiagnostic)
+        #expect(FileManager.default.fileExists(atPath: diagnosticOutput.path))
+        #expect((await manifestStore.loadAll()).contains { result in
+            if case .loaded(let manifest) = result { return manifest.id == diagnostic.id }
+            return false
+        })
+        #expect(!FileManager.default.fileExists(atPath: normalOutput.path))
+        #expect(!(await manifestStore.loadAll()).contains { result in
+            if case .loaded(let manifest) = result { return manifest.id == normal.id }
+            return false
+        })
+        queue.stop()
     }
 }
 
@@ -166,8 +382,8 @@ private func makeManifest(
         cancelledAt: nil,
         status: status,
         nextPhotoIndex: nextPhotoIndex,
-        outputRootPath: directory.path,
-        relativeDirectoryPath: id,
+        outputRootPath: directory.deletingLastPathComponent().path,
+        relativeDirectoryPath: directory.lastPathComponent,
         absoluteDirectoryPath: directory.path,
         frameSnapshotFileName: nil,
         stripFileName: nil,

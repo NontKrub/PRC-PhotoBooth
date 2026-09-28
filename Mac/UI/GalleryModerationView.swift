@@ -104,18 +104,30 @@ struct GalleryModerationView: View {
             Text("\(entry.templateName.value(for: operatorLanguage)) · \(entry.filterID.displayName(for: operatorLanguage))")
                 .font(.caption)
                 .foregroundStyle(.secondary)
+            if entry.origin == .soakTest {
+                Label(
+                    "Diagnostic soak · run \(entry.soakRunID ?? "unknown") · cycle \(entry.soakCycleIndex.map { String($0) } ?? "unknown")",
+                    systemImage: "stethoscope"
+                )
+                .font(.caption.bold())
+                .foregroundStyle(.purple)
+                Text("This test entry is excluded from the public gallery.")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
             Text(operatorGalleryStatusName(entry.approvalStatus, locale: locale))
                 .font(.caption.bold())
                 .foregroundStyle(entry.approvalStatus == .approved ? .green : entry.approvalStatus == .hidden ? .red : .orange)
             HStack {
                 Button("Open Individual Page") { openIndividualPage(entry) }
+                    .disabled(entry.origin == .soakTest)
                 Button("Open Session Folder") {
                     NSWorkspace.shared.selectFile(nil, inFileViewerRootedAtPath: entry.absoluteSessionDirectoryPath)
                 }
             }
             HStack {
                 Button("Approve") { set(entry, eventID: index.eventID, status: .approved) }
-                    .disabled(entry.approvalStatus == .approved)
+                    .disabled(entry.approvalStatus == .approved || !entry.isNormalProductionSession)
                 Button("Pending") { set(entry, eventID: index.eventID, status: .pending) }
                 Button("Hide") { set(entry, eventID: index.eventID, status: .hidden) }
             }
@@ -127,11 +139,16 @@ struct GalleryModerationView: View {
 
     private func set(_ entry: GallerySessionEntry, eventID: String, status: GalleryApprovalStatus) {
         Task {
-            try? await coordinator.galleryStore.setApproval(
-                eventID: eventID,
-                sessionID: entry.sessionID,
-                status: status
-            )
+            do {
+                try await coordinator.galleryStore.setApproval(
+                    eventID: eventID,
+                    sessionID: entry.sessionID,
+                    status: status
+                )
+            } catch {
+                coordinator.errorMessage = error.localizedDescription
+                return
+            }
             await coordinator.refreshServerRoutes()
             load()
         }
@@ -141,14 +158,25 @@ struct GalleryModerationView: View {
         guard let index = selectedIndex else { return }
         Task {
             let entries = index.sessions.filter { entry in
-                onlyPending ? entry.approvalStatus == .pending : selectedSessionIDs.contains(entry.id)
+                onlyPending
+                    ? entry.isNormalProductionSession && entry.approvalStatus == .pending
+                    : selectedSessionIDs.contains(entry.id)
             }
+            var failureCount = 0
             for entry in entries {
-                try? await coordinator.galleryStore.setApproval(
-                    eventID: index.eventID,
-                    sessionID: entry.sessionID,
-                    status: status
-                )
+                do {
+                    try await coordinator.galleryStore.setApproval(
+                        eventID: index.eventID,
+                        sessionID: entry.sessionID,
+                        status: status
+                    )
+                } catch {
+                    failureCount += 1
+                }
+            }
+            if failureCount > 0 {
+                coordinator.errorMessage = "Failed to update \(failureCount) session(s)."
+                return
             }
             selectedSessionIDs.removeAll()
             await coordinator.refreshServerRoutes()

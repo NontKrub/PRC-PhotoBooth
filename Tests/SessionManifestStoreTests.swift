@@ -34,8 +34,9 @@ struct SessionManifestStoreTests {
         var manifest = makeManifest()
 
         try await store.create(manifest)
+        manifest = try await store.load(sessionID: manifest.id)
         manifest.lastError = "temporary"
-        try await store.save(manifest)
+        try await store.save(manifest, allowedStatuses: [.capturing])
 
         let files = try FileManager.default.contentsOfDirectory(
             at: root.appendingPathComponent("Sessions"),
@@ -94,6 +95,9 @@ struct SessionManifestStoreTests {
         var object = try #require(JSONSerialization.jsonObject(with: encoder.encode(manifest)) as? [String: Any])
         object.removeValue(forKey: "captureAttempts")
         object.removeValue(forKey: "cloudDelivery")
+        object.removeValue(forKey: "deliveryIntent")
+        object.removeValue(forKey: "soakAutoCleanupEnabled")
+        object.removeValue(forKey: "soakDiagnosticRetained")
         if var shots = object["shots"] as? [[String: Any]], var shot = shots.first {
             shot.removeValue(forKey: "previousImageFileName")
             shot.removeValue(forKey: "previousGifFrameFileNames")
@@ -109,7 +113,272 @@ struct SessionManifestStoreTests {
         #expect(decoded.id == manifest.id)
         #expect(decoded.captureAttempts == nil)
         #expect(decoded.cloudDelivery == nil)
+        #expect(decoded.deliveryIntent == nil)
+        #expect(decoded.soakAutoCleanupEnabled == nil)
+        #expect(decoded.soakDiagnosticRetained == nil)
         #expect(decoded.shots[0].previousImageFileName == nil)
+    }
+
+    @Test("cleanup diagnostics persist only for the matching soak run")
+    func soakCleanupDiagnosticIsRunScoped() async throws {
+        let root = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = SessionManifestStore(baseDirectory: root)
+        var manifest = makeManifest()
+        manifest.id = "soak-session"
+        manifest.origin = .soakTest
+        manifest.soakRunID = "run-123"
+        try await store.create(manifest)
+
+        _ = try await store.recordSoakCleanupResult(
+            sessionID: manifest.id,
+            expectedRunID: "run-123",
+            warning: "Remote deletion failed"
+        )
+        let updated = try await store.load(sessionID: manifest.id)
+        #expect(updated.soakCleanupWarning == "Remote deletion failed")
+        #expect(updated.soakCleanupLastAttemptAt != nil)
+
+        do {
+            _ = try await store.recordSoakCleanupResult(
+                sessionID: manifest.id,
+                expectedRunID: "another-run",
+                warning: nil
+            )
+            Issue.record("A different run changed this session's cleanup state.")
+        } catch SessionManifestError.soakCleanupNotAllowed(let sessionID) {
+            #expect(sessionID == manifest.id)
+        }
+        #expect(try await store.load(sessionID: manifest.id).soakCleanupWarning == "Remote deletion failed")
+    }
+
+    @Test("failed soak diagnostics are retained only by the owning run")
+    func soakFailureDiagnosticsAreRunScoped() async throws {
+        let root = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = SessionManifestStore(baseDirectory: root)
+        var manifest = makeManifest()
+        manifest.id = "diagnostic-soak-session"
+        manifest.origin = .soakTest
+        manifest.soakRunID = "run-123"
+        try await store.create(manifest)
+
+        let retained = try await store.retainSoakFailureDiagnostics(
+            sessionID: manifest.id,
+            expectedRunID: "run-123",
+            reason: "QR verification failed"
+        )
+        #expect(retained.lastError == "QR verification failed")
+        #expect(retained.isRetainedSoakDiagnostic)
+
+        do {
+            _ = try await store.retainSoakFailureDiagnostics(
+                sessionID: manifest.id,
+                expectedRunID: "another-run",
+                reason: "wrong owner"
+            )
+            Issue.record("A different run changed this session's diagnostic reason.")
+        } catch SessionManifestError.soakCleanupNotAllowed(let sessionID) {
+            #expect(sessionID == manifest.id)
+        }
+        #expect(try await store.load(sessionID: manifest.id).lastError == "QR verification failed")
+    }
+
+    @Test("cleanup retains soak data when print outcome is unresolved without manifest failure metadata")
+    func cleanupRetainsUnknownPrintDiagnostics() async throws {
+        let root = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        var manifest = makeManifest()
+        manifest.id = "unknown-print-soak-session"
+        manifest.origin = .soakTest
+        manifest.soakRunID = "run-123"
+        manifest.status = .completed
+        manifest.lastError = nil
+        manifest.soakDiagnosticRetained = nil
+
+        let queue = JobQueueStore(fileURL: root.appendingPathComponent("jobs.json"))
+        var printJob = try await queue.enqueue(sessionID: manifest.id, kind: .autoPrint)
+        printJob.status = .failed
+        printJob.lastFailureDisposition = .sideEffectUnknown
+        printJob.lastError = "AppKit completion is unknown"
+
+        #expect(BoothSoakCleanupPolicy.shouldRetainDiagnostics(manifest: manifest, jobs: [printJob]))
+        manifest.origin = .normal
+        #expect(!BoothSoakCleanupPolicy.shouldRetainDiagnostics(manifest: manifest, jobs: [printJob]))
+    }
+
+    @Test("startup cleanup retry can clear only the previous cleanup retention marker")
+    func cleanupRetryClearsTemporaryRetentionMarker() async throws {
+        let root = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = SessionManifestStore(baseDirectory: root)
+        var manifest = makeManifest()
+        manifest.id = "cleanup-retry-soak-session"
+        manifest.origin = .soakTest
+        manifest.soakRunID = "run-123"
+        manifest.status = .completed
+        manifest.soakAutoCleanupEnabled = true
+        manifest.soakDiagnosticRetained = true
+        manifest.soakCleanupWarning = "Remote deletion failed"
+        try await store.create(manifest)
+
+        let prepared = try await store.prepareOrphanedSoakForCleanup(
+            sessionID: manifest.id,
+            expectedRunID: "run-123",
+            retainForDiagnostics: false
+        )
+
+        #expect(prepared.soakDiagnosticRetained == false)
+        #expect(prepared.soakCleanupWarning == "Remote deletion failed")
+        #expect(prepared.lastError == nil)
+    }
+
+    @Test("automatic cleanup warning does not become permanent diagnostic retention")
+    func cleanupWarningRemainsRetryable() {
+        var manifest = makeManifest()
+        manifest.origin = .soakTest
+        manifest.soakRunID = "run-123"
+        manifest.status = .completed
+        manifest.soakAutoCleanupEnabled = true
+        manifest.soakCleanupWarning = "Remote cloud cleanup failed."
+        manifest.soakDiagnosticRetained = true
+
+        #expect(!BoothSoakCleanupPolicy.shouldRetainDiagnostics(manifest: manifest, jobs: []))
+
+        manifest.lastError = "Production pipeline failed."
+        #expect(BoothSoakCleanupPolicy.shouldRetainDiagnostics(manifest: manifest, jobs: []))
+    }
+
+    @Test("startup cleanup removes completed auto-cleanup after a crash before the first attempt")
+    func startupCleanupDoesNotRetainCompletedSoakWithoutPriorAttempt() {
+        var manifest = makeManifest()
+        manifest.origin = .soakTest
+        manifest.soakRunID = "run-before-cleanup"
+        manifest.status = .completed
+        manifest.soakAutoCleanupEnabled = true
+        manifest.soakCleanupLastAttemptAt = nil
+        manifest.soakCleanupWarning = nil
+        manifest.soakDiagnosticRetained = false
+
+        #expect(!BoothSoakCleanupPolicy.shouldRetainOrphanedDiagnostics(manifest: manifest, jobs: []))
+
+        manifest.soakCleanupWarning = "Remote deletion failed"
+        manifest.soakDiagnosticRetained = true
+        #expect(!BoothSoakCleanupPolicy.shouldRetainOrphanedDiagnostics(manifest: manifest, jobs: []))
+
+        manifest.soakCleanupWarning = nil
+        manifest.status = .failed
+        #expect(BoothSoakCleanupPolicy.shouldRetainOrphanedDiagnostics(manifest: manifest, jobs: []))
+    }
+
+    @Test("retained soak diagnostics exclude normal sessions with unknown prints")
+    func retainedDiagnosticsExcludeNormalUnknownPrint() {
+        var normal = makeManifest()
+        normal.id = "normal-unknown-print"
+        normal.origin = .normal
+        var soak = makeManifest()
+        soak.id = "soak-unknown-print"
+        soak.origin = .soakTest
+        soak.soakRunID = "run-unknown-print"
+
+        let diagnostics = BoothSoakCleanupPolicy.retainedDiagnosticManifests(
+            [normal, soak],
+            unresolvedSessionIDs: [normal.id, soak.id]
+        )
+
+        #expect(diagnostics.map(\.id) == [soak.id])
+        #expect(diagnostics.first?.soakDiagnosticRetained == true)
+        #expect(diagnostics.first?.soakCleanupWarning?.contains("Physical print outcome is unknown") == true)
+    }
+
+    @Test("status changes require an explicit compare-and-set transition")
+    func statusTransitionsAreAuthoritative() async throws {
+        let root = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = SessionManifestStore(baseDirectory: root)
+        let manifest = makeManifest()
+        try await store.create(manifest)
+
+        _ = try await store.transition(sessionID: manifest.id, allowedFrom: [.capturing]) {
+            $0.status = .finalizing
+        }
+        var stale = try await store.load(sessionID: manifest.id)
+        stale.updatedAt = Date(timeIntervalSince1970: 1)
+        do {
+            try await store.save(stale, allowedStatuses: [.finalizing])
+            Issue.record("Stale manifest write was accepted")
+        } catch let error as SessionManifestError {
+            guard case .staleWrite = error else {
+                Issue.record("Unexpected stale-write error: \(error)")
+                return
+            }
+        }
+        do {
+            _ = try await store.update(
+                sessionID: manifest.id,
+                allowedStatuses: [.finalizing]
+            ) { $0.status = .capturing }
+            Issue.record("Generic manifest update changed status")
+        } catch let error as SessionManifestError {
+            guard case .invalidTransition = error else {
+                Issue.record("Unexpected manifest error: \(error)")
+                return
+            }
+        }
+
+        _ = try await store.transition(sessionID: manifest.id, allowedFrom: [.finalizing]) {
+            $0.status = .completed
+        }
+        do {
+            _ = try await store.update(
+                sessionID: manifest.id,
+                allowedStatuses: [.capturing]
+            ) { $0.lastError = "late capture" }
+            Issue.record("Completed manifest accepted a capturing mutation")
+        } catch let error as SessionManifestError {
+            guard case .mutationNotAllowed = error else {
+                Issue.record("Unexpected completed-mutation error: \(error)")
+                return
+            }
+        }
+        do {
+            _ = try await store.transition(sessionID: manifest.id, allowedFrom: [.completed]) {
+                $0.status = .capturing
+            }
+            Issue.record("Terminal manifest was resurrected")
+        } catch let error as SessionManifestError {
+            guard case .invalidTransition = error else {
+                Issue.record("Unexpected terminal transition error: \(error)")
+                return
+            }
+        }
+    }
+
+    @Test("cancelled manifest rejects late ordinary mutation")
+    func cancelledManifestRejectsLateMutation() async throws {
+        let root = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = SessionManifestStore(baseDirectory: root)
+        let manifest = makeManifest()
+        try await store.create(manifest)
+        _ = try await store.transition(sessionID: manifest.id, allowedFrom: [.capturing]) {
+            $0.status = .cancelled
+            $0.cancelledAt = Date()
+        }
+        let before = try await store.load(sessionID: manifest.id)
+        do {
+            _ = try await store.update(
+                sessionID: manifest.id,
+                allowedStatuses: [.capturing, .finalizing]
+            ) { $0.lastError = "late work" }
+            Issue.record("Cancelled manifest accepted late mutation")
+        } catch let error as SessionManifestError {
+            guard case .mutationNotAllowed = error else {
+                Issue.record("Unexpected cancelled-mutation error: \(error)")
+                return
+            }
+        }
+        #expect(try await store.load(sessionID: manifest.id) == before)
     }
 
     @Test("persists session-stable cloud delivery settings")
@@ -123,32 +392,80 @@ struct SessionManifestStoreTests {
             remoteBasePath: "/srv/old-photos",
             sshHost: "old-host"
         )
+        manifest.deliveryIntent = SessionDeliveryIntentSnapshot(
+            cloudUploadEnabled: true,
+            automaticPrintEnabled: false
+        )
 
         try await store.create(manifest)
         #expect(try await store.load(sessionID: manifest.id).cloudDelivery == manifest.cloudDelivery)
+        #expect(try await store.load(sessionID: manifest.id).deliveryIntent == manifest.deliveryIntent)
     }
 
     @Test("session cloud snapshot takes precedence over changed Settings")
     @MainActor
     func cloudSnapshotTakesPrecedence() throws {
-        let defaults = try #require(UserDefaults(suiteName: "PRC-Cloud-(UUID().uuidString)"))
+        let suiteName = "PRC-Cloud-\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
         var manifest = makeManifest()
         manifest.cloudDelivery = SessionCloudDeliverySnapshot(
             publicBaseURL: "https://old.example",
             remoteBasePath: "/srv/old-photos",
             sshHost: "old-host"
         )
-        defaults.set(false, forKey: "cloudUploadEnabled")
+        manifest.deliveryIntent = SessionDeliveryIntentSnapshot(
+            cloudUploadEnabled: false,
+            automaticPrintEnabled: false
+        )
+        defaults.set(true, forKey: "cloudUploadEnabled")
         defaults.set("https://new.example", forKey: "publicBaseURL")
         defaults.set("/srv/new-photos", forKey: "cloudRemotePath")
         defaults.set("new-host", forKey: "cloudSSHHost")
 
-        let configuration = try #require(
-            SessionJobExecutor.cloudUploadConfiguration(for: manifest, defaults: defaults)
-        )
+        // The historical manifest resolver has no current-Settings input.
+        #expect(SessionJobExecutor.cloudUploadConfiguration(for: manifest) == nil)
+
+        manifest.deliveryIntent?.cloudUploadEnabled = true
+        let configuration = try #require(SessionJobExecutor.cloudUploadConfiguration(for: manifest))
         #expect(configuration.publicBaseURL == "https://old.example")
         #expect(configuration.remoteBasePath == "/srv/old-photos")
         #expect(configuration.sshHost == "old-host")
+    }
+
+    @Test("current cloud Settings do not create a legacy upload destination")
+    @MainActor
+    func legacyCloudUploadNeedsHistoricalDestination() throws {
+        let suiteName = "PRC-Cloud-Legacy-\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        defaults.set(true, forKey: "cloudUploadEnabled")
+        defaults.set("https://new.example", forKey: "publicBaseURL")
+        defaults.set("/srv/new-photos", forKey: "cloudRemotePath")
+        defaults.set("new-host", forKey: "cloudSSHHost")
+
+        var legacy = makeManifest()
+        legacy.cloudDelivery = nil
+        legacy.deliveryIntent = nil
+        // Today's enabled flag and destination cannot fill missing session history.
+        #expect(SessionJobExecutor.cloudUploadConfiguration(for: legacy) == nil)
+    }
+
+    @Test("soak manifests are never eligible for production guest publication")
+    func soakGuestPublicationIsAlwaysIsolated() {
+        let normal = makeManifest()
+        var soak = normal
+        soak.id = "soak-session"
+        soak.origin = .soakTest
+        soak.soakRunID = "run-123"
+
+        #expect(normal.isEligibleForGuestPublication(activeSoakRunID: nil))
+        #expect(!soak.isEligibleForGuestPublication(activeSoakRunID: "run-123"))
+        #expect(!soak.isEligibleForGuestPublication(activeSoakRunID: nil))
+        #expect(!soak.isEligibleForGuestPublication(activeSoakRunID: "different-run"))
+
+        soak.soakRunID = nil
+        #expect(!soak.isEligibleForGuestPublication(activeSoakRunID: nil))
     }
 }
 
@@ -191,4 +508,39 @@ private func temporaryDirectory() throws -> URL {
     let url = FileManager.default.temporaryDirectory.appendingPathComponent("PRC-Manifest-\(UUID().uuidString)")
     try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
     return url
+}
+
+@Suite("SessionFlowOperationRegistry")
+struct SessionFlowOperationRegistryTests {
+    @Test("non-cooperative session work blocks cleanup until timeout")
+    @MainActor
+    func nonCooperativeWorkReturnsPending() async {
+        let registry = SessionFlowOperationRegistry()
+        let gate = SessionFlowTestGate()
+        registry.start(sessionID: "session", kind: .capture) {
+            await gate.wait()
+        }
+
+        #expect(!(await registry.cancelAndQuiesce(sessionID: "session", timeout: .milliseconds(20))))
+        await gate.open()
+        #expect(await registry.cancelAndQuiesce(sessionID: "session", timeout: .seconds(1)))
+    }
+}
+
+private actor SessionFlowTestGate {
+    private var opened = false
+    private var continuation: CheckedContinuation<Void, Never>?
+
+    func wait() async {
+        if opened { return }
+        await withCheckedContinuation { continuation in
+            self.continuation = continuation
+        }
+    }
+
+    func open() {
+        opened = true
+        continuation?.resume()
+        continuation = nil
+    }
 }

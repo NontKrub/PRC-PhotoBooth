@@ -21,6 +21,18 @@ struct GallerySessionEntry: Codable, Sendable, Equatable, Identifiable {
     var customerLanguage: CustomerLanguage
     var approvalStatus: GalleryApprovalStatus
     var updatedAt: Date
+    // Optional for indexes written before soak-session isolation was added.
+    var originRawValue: String? = SessionOrigin.normal.rawValue
+    var soakRunID: String? = nil
+    var soakCycleIndex: Int? = nil
+
+    var origin: SessionOrigin {
+        SessionOrigin(rawValue: originRawValue ?? SessionOrigin.normal.rawValue) ?? .normal
+    }
+
+    var isNormalProductionSession: Bool {
+        originRawValue == nil || originRawValue == SessionOrigin.normal.rawValue
+    }
 }
 
 struct EventGalleryIndex: Codable, Sendable, Equatable {
@@ -33,6 +45,15 @@ struct EventGalleryIndex: Codable, Sendable, Equatable {
     var showGIFLinks: Bool
     var sessions: [GallerySessionEntry]
     var updatedAt: Date
+
+    // This is the single route-eligible gallery cohort. Soak entries remain persisted for diagnostics.
+    var productionVisibleSessions: [GallerySessionEntry] {
+        sessions.filter { $0.isNormalProductionSession && $0.approvalStatus == .approved }
+    }
+
+    func productionRouteSessions(excludingSessionIDs excluded: Set<String>) -> [GallerySessionEntry] {
+        productionVisibleSessions.filter { !excluded.contains($0.sessionID) }
+    }
 }
 
 enum GalleryIndexLoadResult: Sendable, Equatable {

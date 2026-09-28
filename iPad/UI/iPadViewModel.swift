@@ -1,36 +1,54 @@
 import Foundation
-import Observation
+import Combine
+import CryptoKit
 import CoreImage
 import CoreGraphics
+import SwiftUI
+import UIKit
 
 // iPad-side coordinator — receives messages from Mac, drives local UI state.
 @MainActor
-@Observable
-final class iPadViewModel {
+final class iPadViewModel: ObservableObject {
+    static let assetResponseDeadline: TimeInterval = 5
+
     let multipeer: BoothTransport
     let stateMachine: SessionStateMachine
 
-    var latestPreviewImage: CGImage?
-    var eventConfig: EventConfig = EventConfig()
-    var experienceCatalog: CustomerExperienceCatalog?
-    var experienceAssets: [String: CGImage] = [:]
-    var selectedTemplateID: String?
-    var selectedFilterID: PhotoFilterID?
-    var selectedLanguage: CustomerLanguage = .english
-    var sessionPresentation: SessionPresentation?
-    var promptImages: [String: CGImage] = [:]
-    private(set) var isSessionRequestPending = false
-    private(set) var reviewDecisionPending = false
-    private(set) var recoveryActionPending = false
-    var sessionRequestError: String?
-    var stripThumbImage: CGImage?
-    var isMirrored = false
-    var isBoothPaused = false
+    @Published var latestPreviewImage: CGImage?
+    @Published private(set) var reviewImage: CGImage?
+    @Published private(set) var reviewImageDecodeFailed = false
+    @Published var eventConfig: EventConfig = EventConfig()
+    @Published var experienceCatalog: CustomerExperienceCatalog?
+    @Published var experienceAssets: [String: CGImage] = [:]
+    @Published var selectedTemplateID: String?
+    @Published var selectedFilterID: PhotoFilterID?
+    @Published var selectedLanguage: CustomerLanguage = .english
+    @Published var sessionPresentation: SessionPresentation?
+    @Published var promptImages: [String: CGImage] = [:]
+    @Published private(set) var isSessionRequestPending = false
+    @Published private(set) var reviewDecisionPending = false
+    @Published private(set) var reviewDecisionAwaitingReconciliation = false
+    @Published private(set) var recoveryActionPending = false
+    @Published private(set) var recoveryActionAwaitingReconciliation = false
+    @Published private(set) var finishRequestPending = false
+    @Published var sessionRequestError: String?
+    @Published private(set) var assetRecoveryStatus: BoothAssetRecoveryStatus = .idle
+    @Published var stripThumbImage: CGImage?
+    @Published var isMirrored = false
+    @Published var isBoothPaused = false
 
     private var pendingPreviewJPEG: Data?
     private var previewDecodeTask: Task<Void, Never>?
     private var previewStaleTask: Task<Void, Never>?
     private var lastPreviewFrameAt: Date?
+    private struct ReviewImageCacheKey: Equatable, Sendable {
+        let sessionID: String
+        let photoIndex: Int
+        let digest: Data
+    }
+    private var reviewImageCacheKey: ReviewImageCacheKey?
+    private var reviewImageDecodeTask: Task<Void, Never>?
+    private var reviewImageDecodeGeneration: UInt64 = 0
 #if DEBUG
     private var previewMetricsStartedAt = Date()
     private var previewFramesReceived = 0
@@ -38,23 +56,181 @@ final class iPadViewModel {
     private var previewFramesDisplayed = 0
 #endif
     private var sessionRequestTimeoutTask: Task<Void, Never>?
+    private var pendingSessionStartRequestID: UUID?
+    private var reviewDecisionTimeoutTask: Task<Void, Never>?
+    private var pendingReviewDecision: (state: ReviewStateToken, requestID: UUID, action: ReviewAction)?
+    private var recoveryActionTimeoutTask: Task<Void, Never>?
+    private var currentCaptureRecoveryStateToken: CaptureRecoveryStateToken?
+    private var pendingCaptureRecovery: (state: CaptureRecoveryStateToken, requestID: UUID, action: CaptureRecoveryAction)?
+    private var finishRequestTimeoutTask: Task<Void, Never>?
+    private var transientRequestGeneration: UInt64 = 0
     private var countdownTask: Task<Void, Never>?
+    private var connectionRecoveryTask: Task<Void, Never>?
     private var sessionMessageGate = SessionMessageGate()
+    private let assetReceivePipeline = BoothAssetReceivePipeline()
+    private var assetProcessingGeneration: UInt64 = 0
+    private var assetRequestPump = BoothAssetRequestPump()
+    private var receivedAssets: [String: Data] = [:]
+    private var receivedAssetReferences: [String: BoothAssetReference] = [:]
+    private var expectedAssetReferences: [String: BoothAssetReference] = [:]
+    private var expectedAssetOrder: [BoothAssetReference] = []
+    private var assetRetryTracker = BoothAssetRetryTracker()
+    private var assetReadyAwaitingNewGeneration = false
+    private var reviewAssetIndices: [String: Int] = [:]
+    private var assetResponseDeadlineTasks: [BoothAssetReference: Task<Void, Never>] = [:]
+    private var assetResponseDeadlineTokens: [BoothAssetReference: UInt64] = [:]
+    private var nextAssetResponseDeadlineToken: UInt64 = 0
+    private var assetResponseDeadlines = BoothAssetResponseDeadlineRegistry()
+    private var lastAssetRecycleGeneration: Int?
+    private var recentTransportEvents: [BoothTransportDiagnosticEvent] = []
 #if DEBUG
-    private(set) var demoKioskMode = false
+    @Published private(set) var demoKioskMode = false
 #endif
 
-    init() {
+    private var observationCancellables = Set<AnyCancellable>()
+
+    var reviewActionToRetry: ReviewAction? {
+        guard reviewDecisionAwaitingReconciliation else { return nil }
+        return pendingReviewDecision?.action
+    }
+
+    var recoveryActionToRetry: CaptureRecoveryAction? {
+        guard recoveryActionAwaitingReconciliation else { return nil }
+        return pendingCaptureRecovery?.action
+    }
+
+    var networkTransport: NetworkBoothTransport? { multipeer as? NetworkBoothTransport }
+    var connectionStatus: BoothConnectionStatus { multipeer.connectionStatus }
+    var canChangeConnection: Bool { stateMachine.phase == .idle }
+    var isBoothSessionActive: Bool {
+        if case .idle = stateMachine.phase { return false }
+        return true
+    }
+    var shouldShowReconnectOverlay: Bool {
+        guard isBoothSessionActive, !isAuthoritativeControlReady else { return false }
 #if DEBUG
-        if ProcessInfo.processInfo.arguments.contains("--legacy-multipeer") {
-            multipeer = MultipeerService(role: .iPad)
-        } else {
-            multipeer = NetworkBoothTransport(role: .iPad)
-        }
-#else
-        multipeer = NetworkBoothTransport(role: .iPad)
+        if demoKioskMode { return false }
 #endif
+        return true
+    }
+    var isAuthoritativeControlReady: Bool {
+        guard case .connected = connectionStatus.state else { return false }
+        guard networkTransport != nil else { return true }
+        let isFresh = connectionStatus.lastControlActivityAt.map {
+            Date().timeIntervalSince($0) < 10
+        } ?? false
+        return connectionStatus.isPeerAuthenticated
+            && connectionStatus.isSecureChannelEstablished
+            && isFresh
+    }
+    var isBoothFullyReady: Bool {
+        guard isAuthoritativeControlReady else { return false }
+        guard networkTransport != nil else { return true }
+        return connectionStatus.isPreviewChannelConnected
+            && connectionStatus.isAssetChannelReady
+    }
+    var isReviewMediaReady: Bool {
+        guard case .review = stateMachine.phase else { return false }
+        return reviewImage != nil
+    }
+    var isReviewMediaMissing: Bool {
+        guard case .review = stateMachine.phase else { return false }
+        return !isReviewMediaReady
+    }
+    var isConnectionReady: Bool {
+        isBoothFullyReady
+    }
+
+    func renameDevice(_ name: String) {
+        guard canChangeConnection else { return }
+        networkTransport?.renameLocalDevice(name)
+    }
+
+    func connect(to peerID: String) {
+        guard canChangeConnection else { return }
+        networkTransport?.connectToPeer(peerID)
+    }
+
+    func requestPairing(with peerID: String) {
+        guard canChangeConnection else { return }
+        networkTransport?.requestPairing(with: peerID)
+    }
+
+    func retryPairing(with peerID: String) {
+        guard canChangeConnection else { return }
+        networkTransport?.retryPairing(with: peerID)
+    }
+
+    func pair(peerID: String, pin: String) {
+        guard canChangeConnection else { return }
+        networkTransport?.pairWithPIN(peerID: peerID, pin: pin)
+    }
+
+    func pair(qrPayload: BoothPairingQRCodePayload) {
+        guard canChangeConnection else { return }
+        networkTransport?.pairWithQRCode(qrPayload)
+    }
+
+    func forget(peerID: String) {
+        guard canChangeConnection else { return }
+        networkTransport?.forgetPeer(peerID)
+    }
+
+    func repairPairing(with peerID: String) -> Bool {
+        guard canChangeConnection else { return false }
+        return networkTransport?.repairPairing(with: peerID) ?? false
+    }
+
+    func refreshNearbyMacs() {
+        guard canChangeConnection else { return }
+        networkTransport?.refreshPeerDiscovery()
+    }
+
+    func connectionDiagnosticsReport() -> String {
+        BoothConnectionDiagnosticsReport.make(
+            appVersion: Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "Unknown",
+            appBuild: Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "Unknown",
+            operatingSystem: "\(UIDevice.current.systemName) \(UIDevice.current.systemVersion)",
+            deviceName: networkTransport?.deviceIdentity.displayName ?? UIDevice.current.model,
+            status: connectionStatus,
+            discoveryDiagnostics: networkTransport?.discoveryDiagnostics,
+            recentEvents: recentTransportEvents
+        )
+    }
+
+    func handleScenePhase(_ phase: ScenePhase) {
+        if phase != .active {
+            previewDecodeTask?.cancel()
+            previewDecodeTask = nil
+            latestPreviewImage = nil
+            pendingPreviewJPEG = nil
+            lastPreviewFrameAt = nil
+        }
+        guard phase == .active, connectionRecoveryTask == nil else { return }
+        let recoveryAction = BoothForegroundRecoveryAction.action(
+            controlReady: isAuthoritativeControlReady,
+            previewReady: networkTransport == nil || connectionStatus.isPreviewChannelConnected,
+            assetReady: networkTransport == nil || connectionStatus.isAssetChannelReady
+        )
+        guard recoveryAction == .restartControl else { return }
+        connectionRecoveryTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            self.multipeer.restart()
+            try? await Task.sleep(for: .seconds(2))
+            guard !Task.isCancelled else { return }
+            self.connectionRecoveryTask = nil
+        }
+    }
+
+    init() {
+        multipeer = NetworkBoothTransport(role: .iPad)
         stateMachine = SessionStateMachine()
+        stateMachine.objectWillChange
+            .sink { [weak self] _ in self?.objectWillChange.send() }
+            .store(in: &observationCancellables)
+        multipeer.connectionStatus.objectWillChange
+            .sink { [weak self] _ in self?.objectWillChange.send() }
+            .store(in: &observationCancellables)
         setupHandlers()
         multipeer.start()
         startPreviewStaleMonitor()
@@ -72,17 +248,79 @@ final class iPadViewModel {
         multipeer.onControlMessage = { [weak self] msg in
             self?.handleMessage(msg)
         }
+        multipeer.onAssetChunk = { [weak self] chunk in
+            self?.handleAssetChunk(chunk)
+        }
+        multipeer.onTransportEvent = { [weak self] event in
+            guard let self else { return }
+            self.recordTransportEvent(event)
+            guard event.channel == String(describing: BoothTransportChannel.asset) else { return }
+            switch event.kind {
+            case .transportReady:
+                let transition = self.assetRetryTracker.activate(
+                    generation: self.assetGeneration(for: event),
+                    missing: self.missingExpectedAssets()
+                )
+                guard transition != .stale else { return }
+                self.assetReadyAwaitingNewGeneration = false
+                if transition != .duplicate {
+                    self.cancelAssetResponseDeadlines()
+                    self.assetRequestPump.clearInFlight()
+                    self.lastAssetRecycleGeneration = nil
+                }
+                self.requestMissingExpectedAssets()
+                if transition == .advanced,
+                   !self.missingExpectedAssets().isEmpty,
+                   self.assetRecoveryStatus == .restoring {
+                    self.assetRecoveryStatus = .connectionRecovered
+                }
+            case .transportDisconnected:
+                guard self.assetRetryTracker.acceptsDisconnect(generation: event.generation) else { return }
+                self.cancelAssetResponseDeadlines()
+                self.assetReadyAwaitingNewGeneration = true
+                if !self.missingExpectedAssets().isEmpty,
+                   self.assetRecoveryStatus == .idle {
+                    self.assetRecoveryStatus = .restoring
+                }
+                self.resetAssetProcessing()
+                self.assetRequestPump.clearInFlight()
+            default:
+                break
+            }
+        }
         multipeer.onPreviewFrame = { [weak self] jpegData in
             guard let self else { return }
             self.updatePreview(jpegData)
         }
     }
 
+    private func recordTransportEvent(_ event: BoothTransportDiagnosticEvent) {
+        recentTransportEvents.append(BoothConnectionDiagnosticsReport.redacted(event))
+        if recentTransportEvents.count > 50 {
+            recentTransportEvents.removeFirst(recentTransportEvents.count - 50)
+        }
+    }
+
     private var currentSessionMessageContext: SessionMessageContext? {
-        guard let sessionID = sessionMessageGate.currentSessionID else { return nil }
+        guard let sessionID = sessionMessageGate.currentSessionID,
+              let authorityEpoch = sessionMessageGate.authorityEpoch else { return nil }
         return SessionMessageContext(
             sessionID: sessionID,
-            sequence: sessionMessageGate.latestAcceptedSequence
+            sequence: sessionMessageGate.latestAcceptedSequence,
+            authorityEpoch: authorityEpoch
+        )
+    }
+
+    private func currentReviewStateToken(photoIndex: Int) -> ReviewStateToken? {
+        guard let sessionID = sessionMessageGate.currentSessionID,
+              let authorityEpoch = sessionMessageGate.authorityEpoch,
+              case .review(let currentIndex) = stateMachine.phase,
+              currentIndex == photoIndex else { return nil }
+        return ReviewStateToken(
+            sessionID: sessionID,
+            photoIndex: photoIndex,
+            revision: sessionMessageGate.latestAcceptedSequence,
+            authorityEpoch: authorityEpoch
         )
     }
 
@@ -104,7 +342,7 @@ final class iPadViewModel {
     }
 
     private func acceptSessionChange(_ context: SessionMessageContext, message: String) -> Bool {
-        guard sessionMessageGate.currentSessionID == nil || context.sequence > sessionMessageGate.latestAcceptedSequence else {
+        guard sessionMessageGate.acceptSessionChange(context) else {
 #if DEBUG
             NSLog(
                 "[Session] Ignored stale %@: session=%@ current=%@ sequence=%llu latest=%llu",
@@ -117,15 +355,39 @@ final class iPadViewModel {
 #endif
             return false
         }
-        sessionMessageGate.synchronize(sessionID: context.sessionID, sequence: context.sequence)
         return true
+    }
+
+    private func handleSessionStartResult(
+        requestID: UUID,
+        result: CustomerSessionStartResult
+    ) {
+        guard pendingSessionStartRequestID == requestID else { return }
+        switch result {
+        case .inProgress:
+            isSessionRequestPending = true
+            sessionRequestError = nil
+            armSessionRequestTimeout(generation: transientRequestGeneration)
+        case .accepted:
+            pendingSessionStartRequestID = nil
+            clearTransientRequestState()
+        case .rejected(let reason):
+            pendingSessionStartRequestID = nil
+            clearTransientRequestState()
+            setSessionRequestError(reason)
+            stateMachine.beginSelectingExperience()
+        case .persistenceFailed:
+            pendingSessionStartRequestID = nil
+            clearTransientRequestState()
+            setSessionRequestError(LocalizedText(
+                english: "The booth could not save the session. Please try again.",
+                thai: "บูธไม่สามารถบันทึกเซสชันได้ กรุณาลองอีกครั้ง"
+            ).value(for: selectedLanguage))
+        }
     }
 
     private func handleMessage(_ msg: Message) {
         switch msg {
-        case .hello(let role) where role == .mac:
-            multipeer.sendControl(.hello(role: .iPad))
-
         case .sessionSync(let snapshot):
             applySessionSync(snapshot)
 
@@ -155,7 +417,7 @@ final class iPadViewModel {
                   packet.eventID == catalog.eventID,
                   packet.revision == catalog.revision,
                   packet.kind == .templatePreview,
-                  let image = Self.cgImage(from: packet.jpegData) else { break }
+                  let image = BoothImageDecoder.decode(packet.jpegData, maxPixelSize: 2_048) else { break }
             experienceAssets[packet.assetID] = image
 
         case .setMirrored(let mirrored):
@@ -165,83 +427,169 @@ final class iPadViewModel {
             guard let context,
                   acceptSessionChange(context, message: "sessionStart") else { break }
             cancelCountdown()
-            isSessionRequestPending = false
-            reviewDecisionPending = false
-            recoveryActionPending = false
-            sessionRequestTimeoutTask?.cancel()
-            stateMachine.startSession(config: eventConfig)
+            clearSessionMedia()
+            stateMachine.startSession(config: eventConfig, sessionID: context.sessionID)
 
         case .sessionRequestRejected(let reason):
             cancelCountdown()
-            isSessionRequestPending = false
-            reviewDecisionPending = false
-            recoveryActionPending = false
-            sessionRequestTimeoutTask?.cancel()
-            sessionRequestError = reason
+            clearTransientRequestState()
+            setSessionRequestError(reason)
             stateMachine.beginSelectingExperience()
 
         case .sessionPrepared(let config, let presentation, let context):
             guard acceptSessionChange(context, message: "sessionPrepared") else { break }
             cancelCountdown()
-            isSessionRequestPending = false
-            reviewDecisionPending = false
-            recoveryActionPending = false
-            sessionRequestTimeoutTask?.cancel()
+            clearSessionMedia()
             eventConfig = config
             stateMachine.startSession(config: config, sessionID: presentation.sessionID)
             sessionPresentation = presentation
+            registerExpectedAssets(in: presentation)
+            requestMissingExpectedAssets()
             selectedLanguage = presentation.language
-            promptImages = presentation.prompts.reduce(into: [String: CGImage]()) { result, prompt in
-                if let data = prompt.imageData, let image = Self.cgImage(from: data) {
-                    result[prompt.promptID] = image
-                }
-            }
+            installPresentationImages(presentation)
+
+        case .customerSessionStartResult(let requestID, let result):
+            handleSessionStartResult(requestID: requestID, result: result)
 
         case .beginCountdown(let context, let descriptor):
             guard accept(context, message: "beginCountdown") else { break }
-            recoveryActionPending = false
-            reviewDecisionPending = false
+            clearTransientRequestState()
             stateMachine.applyAuthoritativePhase(
                 .countdown(photoIndex: descriptor.photoIndex, secondsRemaining: max(0, Int(ceil(descriptor.captureAt.timeIntervalSinceNow)))),
                 countdownDeadline: descriptor.captureAt
             )
+            clearReviewImage()
             runCountdown(descriptor)
 
         case .shotCaptured(let context, let index, let thumbData):
             guard accept(context, message: "shotCaptured") else { break }
             cancelCountdown()
-            recoveryActionPending = false
-            reviewDecisionPending = false
+            clearTransientRequestState()
             stateMachine.applyAuthoritativePhase(.captured(photoIndex: index))
-            stateMachine.enterReview(photoIndex: index, thumbnailData: thumbData)
+            stateMachine.enterReview(
+                photoIndex: index,
+                thumbnailData: thumbData,
+                reviewImageData: thumbData
+            )
+            scheduleReviewImageDecode(photoIndex: index)
+
+        case .shotCapturedAsset(let context, let index, let asset):
+            guard accept(context, message: "shotCapturedAsset") else { break }
+            cancelCountdown()
+            clearTransientRequestState()
+            registerExpectedAsset(asset)
+            reviewAssetIndices[asset.assetID] = index
+            stateMachine.applyAuthoritativePhase(.captured(photoIndex: index))
+            if let data = cachedAsset(for: asset) {
+                installReviewAsset(asset, photoIndex: index, data: data)
+            }
+            requestMissingExpectedAssets()
 
         case .captureRecovery(let context, let index, let failure):
             guard accept(context, message: "captureRecovery") else { break }
+            let recoveryState = CaptureRecoveryStateToken(
+                sessionID: context.sessionID,
+                photoIndex: index,
+                revision: context.sequence,
+                authorityEpoch: context.authorityEpoch
+            )
+            let pending = pendingCaptureRecovery
             cancelCountdown()
-            recoveryActionPending = false
-            reviewDecisionPending = false
+            clearTransientRequestState()
+            currentCaptureRecoveryStateToken = recoveryState
+            if pending?.state == recoveryState {
+                pendingCaptureRecovery = pending
+                recoveryActionAwaitingReconciliation = true
+            }
             stateMachine.applyAuthoritativePhase(.captureRecovery(photoIndex: index, failure: failure))
+            clearReviewImage()
 
-        case .reviewDecision(let context, let action):
-            guard accept(context, message: "reviewDecision") else { break }
-            guard case .review(let idx) = stateMachine.phase else { break }
-            let customerAction: CustomerDisplayAction = action == .keep
-                ? .keep(photoIndex: idx)
-                : .retake(photoIndex: idx)
-            guard CustomerDisplayWorkflow.canApply(customerAction, in: stateMachine.phase) else { break }
+        case .captureRecoveryActionResult(let requestID, let result):
+            guard let pending = pendingCaptureRecovery,
+                  pending.requestID == requestID else { break }
+            recoveryActionTimeoutTask?.cancel()
+            recoveryActionTimeoutTask = nil
+            recoveryActionPending = false
+            switch result {
+            case .accepted, .duplicate:
+                pendingCaptureRecovery = nil
+                recoveryActionAwaitingReconciliation = false
+                sessionRequestError = nil
+            case .stale:
+                pendingCaptureRecovery = nil
+                recoveryActionAwaitingReconciliation = false
+                setSessionRequestError("That recovery choice is no longer current. Please wait for the booth to update.")
+            case .wrongPhoto:
+                pendingCaptureRecovery = nil
+                recoveryActionAwaitingReconciliation = false
+                setSessionRequestError("That recovery choice is no longer available.")
+            case .sessionChanged:
+                pendingCaptureRecovery = nil
+                recoveryActionAwaitingReconciliation = false
+                setSessionRequestError("The booth moved to another session. Please wait for the update.")
+            case .persistenceFailed:
+                recoveryActionAwaitingReconciliation = true
+                setSessionRequestError("The booth could not save that recovery choice. Tap the same choice to try again.")
+            }
+
+        case .reviewDecisionResult(let requestID, let result):
+            guard let pending = pendingReviewDecision,
+                  pending.requestID == requestID else { break }
+            reviewDecisionTimeoutTask?.cancel()
+            reviewDecisionTimeoutTask = nil
             reviewDecisionPending = false
-            switch action {
-            case .keep: stateMachine.keepShot(photoIndex: idx)
-            case .retake: stateMachine.retakeShot(photoIndex: idx)
+            switch result {
+            case .accepted, .duplicate:
+                pendingReviewDecision = nil
+                reviewDecisionAwaitingReconciliation = false
+                sessionRequestError = nil
+            case .stale:
+                pendingReviewDecision = nil
+                reviewDecisionAwaitingReconciliation = false
+                setSessionRequestError("That choice is no longer current. Please wait for the booth to update.")
+            case .wrongPhoto:
+                pendingReviewDecision = nil
+                reviewDecisionAwaitingReconciliation = false
+                setSessionRequestError("That photograph is no longer current.")
+            case .sessionChanged:
+                pendingReviewDecision = nil
+                reviewDecisionAwaitingReconciliation = false
+                setSessionRequestError("The booth moved to another session. Please wait for the update.")
+            case .persistenceFailed:
+                reviewDecisionAwaitingReconciliation = true
+                setSessionRequestError("The booth could not save that choice. Please try again.")
             }
 
         case .sessionFinished(let context, let qr, let stripData, _):
             guard accept(context, message: "sessionFinished") else { break }
             cancelCountdown()
-            recoveryActionPending = false
-            reviewDecisionPending = false
-            if let data = stripData { stripThumbImage = Self.cgImage(from: data) }
+            clearTransientRequestState()
+            stripThumbImage = stripData.flatMap {
+                BoothImageDecoder.decode($0, maxPixelSize: 2_048)
+            }
             stateMachine.applyAuthoritativePhase(.finished(qrPayload: qr))
+            clearReviewImage()
+
+        case .sessionFinishedAssets(let context, let qr, let stripAsset, _):
+            guard accept(context, message: "sessionFinishedAssets") else { break }
+            cancelCountdown()
+            clearTransientRequestState()
+            stripThumbImage = nil
+            if let stripAsset { registerExpectedAsset(stripAsset) }
+            if let stripAsset, let data = cachedAsset(for: stripAsset) {
+                stripThumbImage = BoothImageDecoder.decode(data, maxPixelSize: 2_048)
+            }
+            stateMachine.applyAuthoritativePhase(.finished(qrPayload: qr))
+            clearReviewImage()
+            requestMissingExpectedAssets()
+
+        case .assetUnavailable(let reference, _):
+            guard expectedAssetReferences[reference.assetID] == reference else { break }
+            assetRequestPump.markUnavailable(reference)
+            assetRetryTracker.remove(reference)
+            assetRecoveryStatus = .operatorRecoveryRequired
+            sessionRequestError = nil
+            requestMissingExpectedAssets()
 
         case .operatorOverride(let context, let action):
             if let context {
@@ -249,51 +597,568 @@ final class iPadViewModel {
             } else if !stateMachine.currentSessionID.isEmpty {
                 break
             }
-            if case .cancelSession = action { cancelCountdown() }
-            stateMachine.operatorOverride(action)
+            if case .cancelSession = action {
+                guard let authorityEpoch = context?.authorityEpoch ?? sessionMessageGate.authorityEpoch else { break }
+                cancelCountdown()
+                clearSessionMedia()
+                stateMachine.reset()
+                sessionMessageGate.synchronize(
+                    sessionID: nil,
+                    sequence: context?.sequence ?? sessionMessageGate.latestAcceptedSequence,
+                    authorityEpoch: authorityEpoch
+                )
+            } else {
+                clearTransientRequestState()
+            }
+            clearReviewImage()
 
         default: break
         }
     }
 
+    private func clearSessionMedia() {
+        pendingSessionStartRequestID = nil
+        clearTransientRequestState()
+        previewDecodeTask?.cancel()
+        previewDecodeTask = nil
+        clearReviewImage()
+        pendingPreviewJPEG = nil
+        lastPreviewFrameAt = nil
+        latestPreviewImage = nil
+        sessionPresentation = nil
+        promptImages = [:]
+        stripThumbImage = nil
+        receivedAssets = [:]
+        receivedAssetReferences = [:]
+        expectedAssetReferences = [:]
+        expectedAssetOrder = []
+        assetRetryTracker.resetForSession()
+        assetReadyAwaitingNewGeneration = false
+        assetRecoveryStatus = .idle
+        reviewAssetIndices = [:]
+        lastAssetRecycleGeneration = nil
+        resetAssetProcessing()
+        assetRequestPump.reset()
+        currentCaptureRecoveryStateToken = nil
+        pendingCaptureRecovery = nil
+    }
+
+    private func clearTransientRequestState() {
+        transientRequestGeneration &+= 1
+        sessionRequestTimeoutTask?.cancel()
+        reviewDecisionTimeoutTask?.cancel()
+        recoveryActionTimeoutTask?.cancel()
+        finishRequestTimeoutTask?.cancel()
+        sessionRequestTimeoutTask = nil
+        reviewDecisionTimeoutTask = nil
+        recoveryActionTimeoutTask = nil
+        finishRequestTimeoutTask = nil
+        isSessionRequestPending = false
+        reviewDecisionPending = false
+        reviewDecisionAwaitingReconciliation = false
+        pendingReviewDecision = nil
+        recoveryActionPending = false
+        recoveryActionAwaitingReconciliation = false
+        pendingCaptureRecovery = nil
+        finishRequestPending = false
+        sessionRequestError = nil
+    }
+
+    private func setSessionRequestError(_ message: String) {
+        sessionRequestError = message
+        UIAccessibility.post(notification: .announcement, argument: message)
+    }
+
+    private func beginTransientRequest() -> UInt64 {
+        clearTransientRequestState()
+        return transientRequestGeneration
+    }
+
+    private func registerExpectedAsset(_ reference: BoothAssetReference) {
+        if let previous = expectedAssetReferences[reference.assetID], previous != reference {
+            receivedAssets.removeValue(forKey: reference.assetID)
+            receivedAssetReferences.removeValue(forKey: reference.assetID)
+            assetRequestPump.markCompleted(previous)
+            assetRetryTracker.remove(previous)
+        }
+        if let index = expectedAssetOrder.firstIndex(where: { $0.assetID == reference.assetID }) {
+            expectedAssetOrder[index] = reference
+        } else {
+            expectedAssetOrder.append(reference)
+        }
+        expectedAssetReferences[reference.assetID] = reference
+    }
+
+    private func registerExpectedAssets(in presentation: SessionPresentation) {
+        for prompt in presentation.prompts {
+            if let imageAsset = prompt.imageAsset {
+                registerExpectedAsset(imageAsset)
+            }
+        }
+    }
+
+    private func cachedAsset(for reference: BoothAssetReference) -> Data? {
+        guard receivedAssetReferences[reference.assetID] == reference,
+              let data = receivedAssets[reference.assetID],
+              data.count == reference.byteCount else { return nil }
+        return data
+    }
+
+    private func resetAssetProcessing() {
+        cancelAssetResponseDeadlines()
+        assetRequestPump.clearInFlight()
+        assetProcessingGeneration &+= 1
+        let generation = assetProcessingGeneration
+        let pipeline = assetReceivePipeline
+        Task { await pipeline.reset(to: generation) }
+
+        // Re-request assets that are expected but not yet received
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            self.requestMissingExpectedAssets()
+        }
+    }
+
+    private func requestMissingAssets(for snapshot: SessionSyncSnapshot) {
+        var references: [BoothAssetReference] = []
+        var seen = Set<BoothAssetReference>()
+        func append(_ reference: BoothAssetReference) {
+            guard seen.insert(reference).inserted else { return }
+            references.append(reference)
+        }
+
+        if let reviewAsset = snapshot.reviewAsset { append(reviewAsset) }
+        if let stripAsset = snapshot.stripAsset { append(stripAsset) }
+        if let presentation = snapshot.presentation {
+            for reference in presentation.prompts.compactMap(\.imageAsset) {
+                append(reference)
+            }
+        }
+        for index in snapshot.keptShotAssets.keys.sorted() {
+            if let reference = snapshot.keptShotAssets[index] {
+                append(reference)
+            }
+        }
+        replaceExpectedAssets(with: references)
+        requestMissingExpectedAssets()
+    }
+
+    private func assetGeneration(for event: BoothTransportDiagnosticEvent) -> Int {
+        if let generation = event.generation { return generation }
+        if assetReadyAwaitingNewGeneration {
+            return (assetRetryTracker.currentGeneration ?? -1) + 1
+        }
+        return assetRetryTracker.currentGeneration ?? 0
+    }
+
+    private func missingExpectedAssets() -> Set<BoothAssetReference> {
+        Set(expectedAssetOrder.filter { cachedAsset(for: $0) == nil })
+    }
+
+    private func requestMissingExpectedAssets() {
+        let missing = missingExpectedAssets()
+        var cached = Set<BoothAssetReference>()
+        for reference in expectedAssetOrder where cachedAsset(for: reference) != nil {
+            cached.insert(reference)
+        }
+        let requestable = expectedAssetOrder.filter {
+            missing.contains($0) && assetRetryTracker.canRequest($0)
+        }
+        let batch = assetRequestPump.nextBatch(expected: requestable, cached: cached)
+        if missing.isEmpty {
+            cancelAssetResponseDeadlines()
+            assetRecoveryStatus = .idle
+        } else if assetRecoveryStatus != .operatorRecoveryRequired,
+                  requestable.contains(where: { assetRetryTracker.canRequest($0) }) {
+            assetRecoveryStatus = .restoring
+        } else if assetRecoveryStatus != .operatorRecoveryRequired {
+            assetRecoveryStatus = .reconnectRequired
+        }
+        guard !batch.isEmpty else { return }
+        let processingGeneration = assetProcessingGeneration
+        let sessionID = sessionMessageGate.currentSessionID
+        let channelGeneration = assetRetryTracker.currentGeneration ?? 0
+        multipeer.sendControl(.assetRequest(references: batch)) { [weak self] outcome in
+            guard let self else { return }
+            guard self.assetProcessingGeneration == processingGeneration,
+                  self.sessionMessageGate.currentSessionID == sessionID,
+                  self.assetRetryTracker.currentGeneration == channelGeneration else { return }
+            guard outcome == .sent else {
+                self.assetRequestPump.markSendFailed(batch)
+                self.handleAssetFailure(batch, channelGeneration: channelGeneration)
+                return
+            }
+            let outstanding = batch.filter { self.assetRequestPump.inFlight.contains($0) }
+            self.armAssetResponseDeadline(
+                for: outstanding,
+                channelGeneration: channelGeneration,
+                processingGeneration: processingGeneration,
+                sessionID: sessionID
+            )
+        }
+    }
+
+    private func replaceExpectedAssets(with references: [BoothAssetReference]) {
+        var unique: [BoothAssetReference] = []
+        var seen = Set<BoothAssetReference>()
+        for reference in references where seen.insert(reference).inserted {
+            unique.append(reference)
+        }
+        let next = Dictionary(unique.map { ($0.assetID, $0) }, uniquingKeysWith: { _, latest in latest })
+        guard next != expectedAssetReferences || unique != expectedAssetOrder else { return }
+
+        cancelAssetResponseDeadlines()
+        for previous in expectedAssetReferences.values where next[previous.assetID] != previous {
+            receivedAssets.removeValue(forKey: previous.assetID)
+            receivedAssetReferences.removeValue(forKey: previous.assetID)
+            reviewAssetIndices.removeValue(forKey: previous.assetID)
+            assetRequestPump.markCompleted(previous)
+        }
+        expectedAssetReferences = next
+        expectedAssetOrder = unique
+        assetRetryTracker.retain(expected: Set(unique))
+    }
+
+    private func installPresentationImages(_ presentation: SessionPresentation) {
+        promptImages = presentation.prompts.reduce(into: [String: CGImage]()) { result, prompt in
+            if let data = prompt.imageData,
+               let image = BoothImageDecoder.decode(data, maxPixelSize: 2_048) {
+                result[prompt.promptID] = image
+            }
+            if let asset = prompt.imageAsset,
+               let data = cachedAsset(for: asset),
+               let image = BoothImageDecoder.decode(data, maxPixelSize: 2_048) {
+                result[prompt.promptID] = image
+            }
+        }
+    }
+
+    private func handleAssetChunk(_ chunk: BoothAssetChunk) {
+        let activeSessionID = sessionMessageGate.currentSessionID
+        guard chunk.metadata.sessionID == nil || chunk.metadata.sessionID == activeSessionID else { return }
+        if cachedAsset(for: chunk.metadata.reference) != nil { return }
+        if let expected = expectedAssetReferences[chunk.metadata.assetID] {
+            guard expected == chunk.metadata.reference else { return }
+        } else {
+            guard chunk.metadata.sessionID == nil,
+                  chunk.metadata.kind == .templatePreview else { return }
+        }
+        let generation = assetProcessingGeneration
+        let pipeline = assetReceivePipeline
+        Task { [weak self, pipeline] in
+            do {
+                guard let (reference, data) = try await pipeline.append(
+                    chunk,
+                    generation: generation
+                ) else { return }
+                let image = await Task.detached(priority: .userInitiated) {
+                    Self.decodeAsset(data, kind: chunk.metadata.kind)
+                }.value
+                guard let self else { return }
+                guard let image else {
+                    await self.rejectAsset(
+                        chunk.metadata.reference,
+                        generation: generation
+                    )
+                    return
+                }
+                self.applyCompletedAsset(
+                    reference: reference,
+                    data: data,
+                    image: image,
+                    activeSessionID: activeSessionID,
+                    generation: generation
+                )
+            } catch {
+                guard let self else { return }
+                await self.rejectAsset(
+                    chunk.metadata.reference,
+                    generation: generation
+                )
+            }
+        }
+    }
+
+    private func applyCompletedAsset(
+        reference: BoothAssetReference,
+        data: Data,
+        image: CGImage?,
+        activeSessionID: String?,
+        generation: UInt64
+    ) {
+        guard generation == assetProcessingGeneration,
+              reference.sessionID == nil || reference.sessionID == activeSessionID else { return }
+        if let expected = expectedAssetReferences[reference.assetID], expected != reference { return }
+        if cachedAsset(for: reference) != nil { return }
+        assetRequestPump.markCompleted(reference)
+        assetRetryTracker.markCompleted(reference)
+        receivedAssets[reference.assetID] = data
+        receivedAssetReferences[reference.assetID] = reference
+        cancelAssetResponseDeadline(for: reference)
+        switch reference.kind {
+        case .templatePreview:
+            if let image { experienceAssets[reference.assetID] = image }
+        case .promptImage:
+            if let image {
+                for prompt in sessionPresentation?.prompts ?? []
+                where prompt.imageAsset?.assetID == reference.assetID {
+                    promptImages[prompt.promptID] = image
+                }
+            }
+        case .reviewImage:
+            if let index = reviewAssetIndices[reference.assetID] {
+                installReviewAsset(reference, photoIndex: index, data: data)
+            }
+        case .stripThumbnail:
+            guard reference.sessionID == activeSessionID,
+                  case .finished = stateMachine.phase else { break }
+            stripThumbImage = image
+        case .gifThumbnail:
+            break
+        }
+        requestMissingExpectedAssets()
+    }
+
+    private func cancelAssetResponseDeadline(for reference: BoothAssetReference) {
+        assetResponseDeadlines.cancel(reference)
+        assetResponseDeadlineTokens.removeValue(forKey: reference)
+        assetResponseDeadlineTasks.removeValue(forKey: reference)?.cancel()
+    }
+
+    private func cancelAssetResponseDeadlines() {
+        assetResponseDeadlines.reset()
+        assetResponseDeadlineTokens.removeAll()
+        assetResponseDeadlineTasks.values.forEach { $0.cancel() }
+        assetResponseDeadlineTasks.removeAll()
+    }
+
+    private func armAssetResponseDeadline(
+        for references: [BoothAssetReference],
+        channelGeneration: Int,
+        processingGeneration: UInt64,
+        sessionID: String?
+    ) {
+        guard !references.isEmpty else { return }
+        assetResponseDeadlines.arm(references)
+        for reference in references {
+            nextAssetResponseDeadlineToken &+= 1
+            let token = nextAssetResponseDeadlineToken
+            assetResponseDeadlineTasks[reference]?.cancel()
+            assetResponseDeadlineTokens[reference] = token
+            assetResponseDeadlineTasks[reference] = Task { @MainActor [weak self] in
+                do {
+                    try await Task.sleep(for: .seconds(Self.assetResponseDeadline))
+                } catch {
+                    return
+                }
+                guard let self,
+                      !Task.isCancelled,
+                      self.assetResponseDeadlineTokens[reference] == token,
+                      self.assetResponseDeadlines.contains(reference) else { return }
+                self.assetResponseDeadlineTokens.removeValue(forKey: reference)
+                self.assetResponseDeadlines.cancel(reference)
+                self.assetResponseDeadlineTasks.removeValue(forKey: reference)
+                self.handleAssetResponseDeadline(
+                    references: [reference],
+                    channelGeneration: channelGeneration,
+                    processingGeneration: processingGeneration,
+                    sessionID: sessionID
+                )
+            }
+        }
+    }
+
+    private func handleAssetResponseDeadline(
+        references: [BoothAssetReference],
+        channelGeneration: Int,
+        processingGeneration: UInt64,
+        sessionID: String?
+    ) {
+        guard processingGeneration == assetProcessingGeneration,
+              sessionMessageGate.currentSessionID == sessionID,
+              assetRetryTracker.currentGeneration == channelGeneration else { return }
+        let missing = missingExpectedAssets()
+        let timedOut = references.filter {
+            missing.contains($0) && assetRequestPump.inFlight.contains($0)
+        }
+        guard !timedOut.isEmpty else { return }
+        assetRequestPump.markSendFailed(timedOut)
+        handleAssetFailure(timedOut, channelGeneration: channelGeneration)
+    }
+
+    private func handleAssetFailure(
+        _ references: [BoothAssetReference],
+        channelGeneration: Int
+    ) {
+        var canRetryAll = true
+        for reference in references {
+            canRetryAll = assetRetryTracker.recordFailure(
+                reference,
+                generation: channelGeneration
+            ) && canRetryAll
+        }
+        if canRetryAll {
+            assetRecoveryStatus = .restoring
+            requestMissingExpectedAssets()
+            return
+        }
+
+        let canRecycle = references.contains {
+            assetRetryTracker.shouldRecycleCurrentGeneration($0)
+        }
+        guard canRecycle else {
+            assetRecoveryStatus = .operatorRecoveryRequired
+            sessionRequestError = nil
+            return
+        }
+        assetRecoveryStatus = .reconnectRequired
+        guard lastAssetRecycleGeneration != channelGeneration else { return }
+        lastAssetRecycleGeneration = channelGeneration
+        guard networkTransport != nil else {
+            assetRecoveryStatus = .operatorRecoveryRequired
+            return
+        }
+        multipeer.recycleAssetChannel()
+    }
+
+    private func rejectAsset(_ reference: BoothAssetReference, generation: UInt64) async {
+        guard generation == assetProcessingGeneration,
+              reference.sessionID == nil || reference.sessionID == sessionMessageGate.currentSessionID else { return }
+        await assetReceivePipeline.resetCurrent(generation: generation)
+        guard generation == assetProcessingGeneration,
+              reference.sessionID == nil || reference.sessionID == sessionMessageGate.currentSessionID else { return }
+        // ponytail: the assembler is generation-scoped; replay every in-flight reference after a reset. Split per-reference assemblers only if concurrent asset memory is measured as a bottleneck.
+        cancelAssetResponseDeadlines()
+        assetRequestPump.clearInFlight()
+        receivedAssets.removeValue(forKey: reference.assetID)
+        receivedAssetReferences.removeValue(forKey: reference.assetID)
+        let channelGeneration = assetRetryTracker.currentGeneration ?? 0
+        handleAssetFailure([reference], channelGeneration: channelGeneration)
+    }
+
+    private func installReviewAsset(
+        _ reference: BoothAssetReference,
+        photoIndex: Int,
+        data: Data
+    ) {
+        guard reference.sessionID == sessionMessageGate.currentSessionID,
+              let currentSessionID = sessionMessageGate.currentSessionID else { return }
+        let phase: BoothPhase
+        switch stateMachine.phase {
+        case .captured(let index) where index == photoIndex,
+             .review(let index) where index == photoIndex:
+            phase = .review(photoIndex: photoIndex)
+        default:
+            return
+        }
+        var keptShots = stateMachine.keptShots
+        keptShots[photoIndex] = data
+        stateMachine.applyAuthoritativeSnapshot(
+            sessionID: currentSessionID,
+            config: eventConfig,
+            phase: phase,
+            keptShots: keptShots,
+            reviewImageData: data,
+            nextPhotoIndex: stateMachine.nextPhotoIndex,
+            countdownDeadline: nil,
+            acceptedPhotoIndices: stateMachine.acceptedPhotoIndices,
+            deferredPhotoIndices: stateMachine.deferredPhotoIndices
+        )
+        scheduleReviewImageDecode(photoIndex: photoIndex)
+    }
+
     private func applySessionSync(_ snapshot: SessionSyncSnapshot) {
+        let previousSessionID = sessionMessageGate.currentSessionID
+        let acceptance = sessionMessageGate.acceptSnapshot(
+            sessionID: snapshot.sessionID,
+            sequence: snapshot.sequence,
+            authorityEpoch: snapshot.authorityEpoch
+        )
+        guard acceptance == .acceptedSameAuthority || acceptance == .acceptedNewAuthority else {
+#if DEBUG
+            NSLog(
+                "[Session] Ignored stale sessionSync: session=%@ sequence=%llu latest=%llu",
+                snapshot.sessionID ?? "none",
+                snapshot.sequence,
+                sessionMessageGate.latestAcceptedSequence
+            )
+#endif
+            return
+        }
+        let authorityChanged = acceptance == .acceptedNewAuthority
+        let pendingRecovery = pendingCaptureRecovery
+        clearTransientRequestState()
+        if authorityChanged || previousSessionID != snapshot.sessionID || snapshot.sessionID == nil {
+            clearSessionMedia()
+        }
         cancelCountdown()
-        sessionMessageGate.synchronize(sessionID: snapshot.sessionID, sequence: snapshot.sequence)
+        currentCaptureRecoveryStateToken = snapshot.captureRecoveryState
+        if pendingRecovery?.state == snapshot.captureRecoveryState {
+            pendingCaptureRecovery = pendingRecovery
+            recoveryActionAwaitingReconciliation = true
+        }
         eventConfig = snapshot.config
         stateMachine.config = snapshot.config
         selectedLanguage = snapshot.presentation?.language ?? snapshot.config.customerLanguage
         sessionPresentation = snapshot.presentation
-        promptImages = snapshot.presentation?.prompts.reduce(into: [String: CGImage]()) { result, prompt in
-            if let data = prompt.imageData, let image = Self.cgImage(from: data) {
-                result[prompt.promptID] = image
-            }
-        } ?? [:]
+        resetAssetProcessing()
+        requestMissingAssets(for: snapshot)
+        if let presentation = snapshot.presentation { installPresentationImages(presentation) }
         isMirrored = snapshot.isMirrored
         isBoothPaused = snapshot.isBoothPaused
-        recoveryActionPending = false
-        reviewDecisionPending = false
         guard let sessionID = snapshot.sessionID else {
             stateMachine.reset()
             return
         }
         var keptShots = snapshot.keptShots
-        if case .review(let index) = snapshot.phase,
-           let data = snapshot.reviewThumbnailData {
-            keptShots[index] = data
+        var reviewImageData: Data?
+        if case .review(let index) = snapshot.phase {
+            if let reviewAsset = snapshot.reviewAsset {
+                reviewAssetIndices[reviewAsset.assetID] = index
+                if let data = cachedAsset(for: reviewAsset) {
+                    reviewImageData = data
+                    keptShots[index] = data
+                }
+            } else if let data = snapshot.reviewThumbnailData {
+                reviewImageData = data
+                keptShots[index] = data
+            }
+        }
+        for (index, reference) in snapshot.keptShotAssets {
+            if let data = cachedAsset(for: reference) {
+                keptShots[index] = data
+            }
         }
         stateMachine.applyAuthoritativeSnapshot(
             sessionID: sessionID,
             config: snapshot.config,
             phase: snapshot.phase,
             keptShots: keptShots,
+            reviewImageData: reviewImageData,
             nextPhotoIndex: snapshot.nextPhotoIndex,
             countdownDeadline: snapshot.countdown?.captureAt,
             acceptedPhotoIndices: Set(snapshot.acceptedPhotoIndices),
             deferredPhotoIndices: Set(snapshot.deferredPhotoIndices)
         )
-        if case .finished = snapshot.phase,
-           let data = snapshot.stripThumbnailData {
-            stripThumbImage = Self.cgImage(from: data)
+        if case .review(let index) = snapshot.phase, reviewImageData != nil {
+            scheduleReviewImageDecode(photoIndex: index)
+        } else {
+            clearReviewImage()
+        }
+        if case .finished = snapshot.phase {
+            stripThumbImage = nil
+            if let stripAsset = snapshot.stripAsset,
+               let data = cachedAsset(for: stripAsset) {
+                stripThumbImage = BoothImageDecoder.decode(data, maxPixelSize: 2_048)
+            } else if let data = snapshot.stripThumbnailData {
+                stripThumbImage = BoothImageDecoder.decode(data, maxPixelSize: 2_048)
+            }
+        }
+        if let presentation = snapshot.presentation { installPresentationImages(presentation) }
+        if let reviewAsset = snapshot.reviewAsset,
+           let index = reviewAssetIndices[reviewAsset.assetID],
+           let data = cachedAsset(for: reviewAsset) {
+            installReviewAsset(reviewAsset, photoIndex: index, data: data)
         }
         if let countdown = snapshot.countdown {
             runCountdown(countdown)
@@ -320,6 +1185,71 @@ final class iPadViewModel {
         countdownTask = nil
     }
 
+    private func scheduleReviewImageDecode(photoIndex: Int) {
+        guard case .review(let currentPhotoIndex) = stateMachine.phase,
+              currentPhotoIndex == photoIndex,
+              let data = stateMachine.reviewImageData,
+              !stateMachine.currentSessionID.isEmpty else {
+            clearReviewImage()
+            return
+        }
+
+        let key = ReviewImageCacheKey(
+            sessionID: stateMachine.currentSessionID,
+            photoIndex: photoIndex,
+            digest: Data(SHA256.hash(data: data))
+        )
+        guard key != reviewImageCacheKey else { return }
+
+        reviewImageDecodeGeneration &+= 1
+        let generation = reviewImageDecodeGeneration
+        reviewImageDecodeTask?.cancel()
+        reviewImageCacheKey = key
+        reviewImage = nil
+        reviewImageDecodeFailed = false
+        let sessionID = stateMachine.currentSessionID
+        reviewImageDecodeTask = Task { @MainActor [weak self] in
+            let image = await Task.detached(priority: .userInitiated) {
+                BoothImageDecoder.decode(data, maxPixelSize: ReviewImageEncoder.targetLongestDimension)
+            }.value
+            guard let self,
+                  !Task.isCancelled,
+                  self.reviewImageDecodeGeneration == generation,
+                  self.reviewImageCacheKey == key,
+                  self.stateMachine.currentSessionID == sessionID,
+                  case .review(let currentPhotoIndex) = self.stateMachine.phase,
+                  currentPhotoIndex == photoIndex else { return }
+            self.reviewImage = image
+            self.reviewImageDecodeFailed = image == nil
+            if let image,
+               let thumbnail = ReviewImageEncoder.thumbnailData(from: image) {
+                var keptShots = self.stateMachine.keptShots
+                keptShots[photoIndex] = thumbnail
+                self.stateMachine.applyAuthoritativeSnapshot(
+                    sessionID: sessionID,
+                    config: self.eventConfig,
+                    phase: .review(photoIndex: photoIndex),
+                    keptShots: keptShots,
+                    reviewImageData: data,
+                    nextPhotoIndex: self.stateMachine.nextPhotoIndex,
+                    countdownDeadline: nil,
+                    acceptedPhotoIndices: self.stateMachine.acceptedPhotoIndices,
+                    deferredPhotoIndices: self.stateMachine.deferredPhotoIndices
+                )
+            }
+            self.reviewImageDecodeTask = nil
+        }
+    }
+
+    private func clearReviewImage() {
+        reviewImageDecodeGeneration &+= 1
+        reviewImageDecodeTask?.cancel()
+        reviewImageDecodeTask = nil
+        reviewImageCacheKey = nil
+        reviewImage = nil
+        reviewImageDecodeFailed = false
+    }
+
     private func updatePreview(_ jpegData: Data) {
         if pendingPreviewJPEG != nil, previewDecodeTask != nil {
 #if DEBUG
@@ -339,7 +1269,7 @@ final class iPadViewModel {
             while let jpeg = self.pendingPreviewJPEG {
                 self.pendingPreviewJPEG = nil
                 let image = await Task.detached(priority: .userInitiated) {
-                    Self.cgImage(from: jpeg)
+                    BoothImageDecoder.decode(jpeg, maxPixelSize: 1_600)
                 }.value
                 guard !Task.isCancelled else { return }
                 if let image {
@@ -385,27 +1315,35 @@ final class iPadViewModel {
 #endif
     }
 
-    private nonisolated static func cgImage(from data: Data) -> CGImage? {
-        guard let src = CGImageSourceCreateWithData(data as CFData, nil) else { return nil }
-        return CGImageSourceCreateImageAtIndex(src, 0, nil)
+    private nonisolated static func decodeAsset(_ data: Data, kind: BoothAssetKind) -> CGImage? {
+        let maxPixelSize: Int
+        switch kind {
+        case .reviewImage: maxPixelSize = ReviewImageEncoder.targetLongestDimension
+        case .stripThumbnail, .promptImage, .templatePreview, .gifThumbnail: maxPixelSize = 2_048
+        }
+        return BoothImageDecoder.decode(data, maxPixelSize: maxPixelSize)
     }
 
     // MARK: - Customer decisions
 
     func customerTappedToBegin() {
         guard CustomerDisplayWorkflow.canApply(.begin, in: stateMachine.phase) else { return }
-        sessionRequestError = nil
         if requiresExperienceSelection {
             beginExperienceSelection()
         } else {
             applyCatalogDefaults(preserveLanguage: false)
-            stateMachine.startSession(config: eventConfig)
+            requestMacToStartSession()
         }
     }
 
     func customerTappedStart() {
         guard !isSessionRequestPending,
               CustomerDisplayWorkflow.canApply(.start, in: stateMachine.phase) else { return }
+        requestMacToStartSession()
+    }
+
+    private func requestMacToStartSession() {
+        guard !isSessionRequestPending else { return }
 #if DEBUG
         if demoKioskMode {
             DemoKioskDriver.startSession(on: self)
@@ -413,8 +1351,7 @@ final class iPadViewModel {
         }
 #endif
         guard let catalog = experienceCatalog else {
-            isSessionRequestPending = true
-            multipeer.sendControl(.sessionStart(context: nil))
+            sendSessionStartRequest(selection: nil)
             return
         }
         guard let templateID = selectedTemplateID,
@@ -429,18 +1366,47 @@ final class iPadViewModel {
             filterID: filterID,
             language: selectedLanguage
         )
+        sendSessionStartRequest(selection: selection)
+    }
+
+    private func sendSessionStartRequest(selection: CustomerSessionSelection?) {
+        let requestID = pendingSessionStartRequestID ?? UUID()
+        pendingSessionStartRequestID = requestID
+        let generation = beginTransientRequest()
         isSessionRequestPending = true
-        sessionRequestError = nil
-        multipeer.sendControl(.customerSessionRequest(selection: selection))
+        multipeer.sendControl(.customerSessionStartRequest(
+            request: CustomerSessionStartRequest(requestID: requestID, selection: selection)
+        )) { [weak self] outcome in
+            guard let self,
+                  self.transientRequestGeneration == generation,
+                  outcome != .sent else { return }
+            self.isSessionRequestPending = false
+            self.setSessionRequestError(LocalizedText(
+                english: "The booth is not connected. Please try again.",
+                thai: "บูธยังไม่ได้เชื่อมต่อ กรุณาลองอีกครั้ง"
+            ).value(for: self.selectedLanguage))
+        }
+        armSessionRequestTimeout(generation: generation)
+    }
+
+    private func armSessionRequestTimeout(generation: UInt64) {
         sessionRequestTimeoutTask?.cancel()
         sessionRequestTimeoutTask = Task { @MainActor [weak self] in
-            try? await Task.sleep(for: .seconds(8))
-            guard let self, self.isSessionRequestPending else { return }
+            do {
+                try await Task.sleep(for: .seconds(8))
+            } catch {
+                return
+            }
+            guard let self,
+                  !Task.isCancelled,
+                  self.transientRequestGeneration == generation,
+                  self.isSessionRequestPending else { return }
+            self.sessionRequestTimeoutTask = nil
             self.isSessionRequestPending = false
-            self.sessionRequestError = LocalizedText(
-                english: "The operator did not respond. Please try again.",
-                thai: "ผู้ควบคุมไม่ตอบสนอง กรุณาลองอีกครั้ง"
-            ).value(for: self.selectedLanguage)
+            self.setSessionRequestError(LocalizedText(
+                english: "Still checking the booth. Tap Retry to reconnect to this session.",
+                thai: "กำลังตรวจสอบบูธ แตะลองใหม่เพื่อเชื่อมต่อเซสชันนี้อีกครั้ง"
+            ).value(for: self.selectedLanguage))
         }
     }
 
@@ -494,7 +1460,13 @@ final class iPadViewModel {
             customerLanguage: selectedLanguage,
             gifQualityPreset: eventConfig.gifQualityPreset
         )
-        stateMachine.startSession(config: eventConfig)
+#if DEBUG
+        if demoKioskMode {
+            stateMachine.startSession(config: eventConfig)
+            return
+        }
+#endif
+        requestMacToStartSession()
     }
 
     func returnToExperienceSelection() {
@@ -504,6 +1476,10 @@ final class iPadViewModel {
 
     func currentPrompt(for photoIndex: Int) -> SessionPromptPresentation? {
         sessionPresentation?.prompts.first { $0.photoIndex == photoIndex }
+    }
+
+    func captureFraming(for photoIndex: Int) -> CaptureFramingGeometry? {
+        CaptureFramingGeometry.framing(for: photoIndex, in: eventConfig)
     }
 
     private func applyCatalogDefaults(preserveLanguage: Bool) {
@@ -521,8 +1497,90 @@ final class iPadViewModel {
         }
     }
 
+    private func armReviewDecisionTimeout(generation: UInt64) {
+        reviewDecisionTimeoutTask?.cancel()
+        reviewDecisionTimeoutTask = Task { @MainActor [weak self] in
+            do {
+                try await Task.sleep(for: .seconds(8))
+            } catch {
+                return
+            }
+            guard let self,
+                  !Task.isCancelled,
+                  self.transientRequestGeneration == generation,
+                  self.reviewDecisionPending else { return }
+            self.reviewDecisionTimeoutTask = nil
+            self.reviewDecisionPending = false
+            self.reviewDecisionAwaitingReconciliation = true
+            self.setSessionRequestError("The booth did not confirm that choice. Tap the same choice to retry safely.")
+        }
+    }
+
+    private func armRecoveryActionTimeout(generation: UInt64) {
+        recoveryActionTimeoutTask?.cancel()
+        recoveryActionTimeoutTask = Task { @MainActor [weak self] in
+            do {
+                try await Task.sleep(for: .seconds(8))
+            } catch {
+                return
+            }
+            guard let self,
+                  !Task.isCancelled,
+                  self.transientRequestGeneration == generation,
+                  self.recoveryActionPending else { return }
+            self.recoveryActionTimeoutTask = nil
+            self.recoveryActionPending = false
+            self.recoveryActionAwaitingReconciliation = true
+            self.setSessionRequestError("The booth did not confirm that recovery choice. Please try again.")
+        }
+    }
+
+    private func armFinishRequestTimeout(generation: UInt64) {
+        finishRequestTimeoutTask?.cancel()
+        finishRequestTimeoutTask = Task { @MainActor [weak self] in
+            do {
+                try await Task.sleep(for: .seconds(8))
+            } catch {
+                return
+            }
+            guard let self,
+                  !Task.isCancelled,
+                  self.transientRequestGeneration == generation,
+                  self.finishRequestPending else { return }
+            self.finishRequestTimeoutTask = nil
+            self.finishRequestPending = false
+            self.setSessionRequestError("The booth did not confirm the next session. Please try again.")
+        }
+    }
+
+    private func sendReviewDecision(
+        state: ReviewStateToken,
+        requestID: UUID,
+        action: ReviewAction,
+        generation: UInt64
+    ) {
+        reviewDecisionPending = true
+        reviewDecisionAwaitingReconciliation = false
+        cancelCountdown()
+        multipeer.sendControl(.reviewDecision(state: state, requestID: requestID, action: action)) { [weak self] outcome in
+            guard let self,
+                  self.transientRequestGeneration == generation,
+                  self.pendingReviewDecision?.requestID == requestID,
+                  outcome != .sent else { return }
+            self.reviewDecisionPending = false
+            self.reviewDecisionAwaitingReconciliation = true
+            self.setSessionRequestError("The booth did not receive that choice. Tap the same choice to retry safely.")
+        }
+        guard reviewDecisionPending else { return }
+        armReviewDecisionTimeout(generation: generation)
+    }
+
     func customerKeep(photoIndex: Int) {
-        guard !reviewDecisionPending,
+        guard CustomerDisplayWorkflow.canUseReviewActions(
+                  in: stateMachine.phase,
+                  reviewMediaReady: isReviewMediaReady
+              ),
+              !reviewDecisionPending,
               CustomerDisplayWorkflow.canApply(.keep(photoIndex: photoIndex), in: stateMachine.phase) else { return }
 #if DEBUG
         if demoKioskMode {
@@ -530,15 +1588,32 @@ final class iPadViewModel {
             return
         }
 #endif
-        guard let context = currentSessionMessageContext else { return }
+        guard let state = currentReviewStateToken(photoIndex: photoIndex) else { return }
+        if reviewDecisionAwaitingReconciliation {
+            guard let pending = pendingReviewDecision,
+                  pending.action == .keep,
+                  pending.state == state else { return }
+            sendReviewDecision(
+                state: pending.state,
+                requestID: pending.requestID,
+                action: pending.action,
+                generation: transientRequestGeneration
+            )
+            return
+        }
+        let generation = beginTransientRequest()
+        let requestID = UUID()
+        pendingReviewDecision = (state: state, requestID: requestID, action: .keep)
         reviewDecisionPending = true
-        cancelCountdown()
-        multipeer.sendControl(.reviewDecision(context: context, action: .keep))
-        stateMachine.keepShot(photoIndex: photoIndex)
+        sendReviewDecision(state: state, requestID: requestID, action: .keep, generation: generation)
     }
 
     func customerRetake(photoIndex: Int) {
-        guard !reviewDecisionPending,
+        guard CustomerDisplayWorkflow.canUseReviewActions(
+                  in: stateMachine.phase,
+                  reviewMediaReady: isReviewMediaReady
+              ),
+              !reviewDecisionPending,
               CustomerDisplayWorkflow.canApply(.retake(photoIndex: photoIndex), in: stateMachine.phase) else { return }
 #if DEBUG
         if demoKioskMode {
@@ -547,11 +1622,24 @@ final class iPadViewModel {
             return
         }
 #endif
-        guard let context = currentSessionMessageContext else { return }
+        guard let state = currentReviewStateToken(photoIndex: photoIndex) else { return }
+        if reviewDecisionAwaitingReconciliation {
+            guard let pending = pendingReviewDecision,
+                  pending.action == .retake,
+                  pending.state == state else { return }
+            sendReviewDecision(
+                state: pending.state,
+                requestID: pending.requestID,
+                action: pending.action,
+                generation: transientRequestGeneration
+            )
+            return
+        }
+        let generation = beginTransientRequest()
+        let requestID = UUID()
+        pendingReviewDecision = (state: state, requestID: requestID, action: .retake)
         reviewDecisionPending = true
-        cancelCountdown()
-        multipeer.sendControl(.reviewDecision(context: context, action: .retake))
-        stateMachine.retakeShot(photoIndex: photoIndex)
+        sendReviewDecision(state: state, requestID: requestID, action: .retake, generation: generation)
     }
 
     func customerRetryReceive(photoIndex: Int) {
@@ -580,17 +1668,49 @@ final class iPadViewModel {
         case .usePrevious(let index): customerAction = .usePreviousCapture(photoIndex: index)
         }
         guard CustomerDisplayWorkflow.canApply(customerAction, in: stateMachine.phase) else { return }
-        guard let context = currentSessionMessageContext else { return }
+        guard let state = currentCaptureRecoveryStateToken else { return }
+        let requestID: UUID
+        let generation: UInt64
+        if recoveryActionAwaitingReconciliation {
+            guard let pendingCaptureRecovery,
+                  pendingCaptureRecovery.state == state,
+                  pendingCaptureRecovery.action == action else { return }
+            requestID = pendingCaptureRecovery.requestID
+            generation = transientRequestGeneration
+        } else {
+            generation = beginTransientRequest()
+            requestID = UUID()
+            pendingCaptureRecovery = (state: state, requestID: requestID, action: action)
+        }
         recoveryActionPending = true
-        multipeer.sendControl(.captureRecoveryAction(context: context, action: action))
+        recoveryActionAwaitingReconciliation = false
+        multipeer.sendControl(.captureRecoveryAction(state: state, requestID: requestID, action: action)) { [weak self] outcome in
+            guard let self,
+                  self.transientRequestGeneration == generation,
+                  outcome != .sent else { return }
+            self.recoveryActionPending = false
+            self.recoveryActionAwaitingReconciliation = true
+            self.setSessionRequestError("The booth did not receive that recovery choice. Please try again.")
+        }
+        guard recoveryActionPending else { return }
+        armRecoveryActionTimeout(generation: generation)
     }
 
     func customerDone() {
-        guard CustomerDisplayWorkflow.canApply(.back, in: stateMachine.phase) else { return }
+        guard !finishRequestPending, case .finished = stateMachine.phase,
+              let context = currentSessionMessageContext else { return }
         cancelCountdown()
-        recoveryActionPending = false
-        reviewDecisionPending = false
-        stateMachine.reset()
+        let generation = beginTransientRequest()
+        finishRequestPending = true
+        multipeer.sendControl(.customerFinished(context: context)) { [weak self] outcome in
+            guard let self,
+                  self.transientRequestGeneration == generation,
+                  outcome != .sent else { return }
+            self.finishRequestPending = false
+            self.setSessionRequestError("The booth did not receive the next-session request. Please try again.")
+        }
+        guard finishRequestPending else { return }
+        armFinishRequestTimeout(generation: generation)
     }
 
 #if DEBUG
@@ -621,11 +1741,13 @@ final class iPadViewModel {
                   let data = jpegDataForDemo(filtered) else { return }
             self.reviewDecisionPending = false
             self.stateMachine.enterReview(photoIndex: photoIndex, thumbnailData: data)
+            self.scheduleReviewImageDecode(photoIndex: photoIndex)
         }
     }
 
     private func demoAdvance(afterKeeping photoIndex: Int) {
         stateMachine.keepShot(photoIndex: photoIndex)
+        clearReviewImage()
         if photoIndex + 1 < eventConfig.photoCount {
             scheduleDemoShot(photoIndex: photoIndex + 1)
         } else {
@@ -638,4 +1760,223 @@ final class iPadViewModel {
     }
 #endif
 
+}
+
+enum BoothAssetRetryPolicy {
+    static let maximumAutomaticRetries = 2
+    static let maximumRecoveryGenerations = 2
+
+    static func shouldRetry(after failureCount: Int) -> Bool {
+        failureCount < maximumAutomaticRetries
+    }
+}
+
+enum BoothAssetRecoveryStatus: Equatable {
+    case idle
+    case restoring
+    case connectionRecovered
+    case reconnectRequired
+    case operatorRecoveryRequired
+
+    func title(for language: CustomerLanguage) -> String {
+        switch self {
+        case .idle: return ""
+        case .restoring: return LocalizedText(
+            english: "Restoring photo…",
+            thai: "กำลังกู้คืนรูปภาพ…"
+        ).value(for: language)
+        case .connectionRecovered: return LocalizedText(
+            english: "Connection recovered. Retrying image.",
+            thai: "เชื่อมต่อแล้ว กำลังลองกู้คืนรูปภาพอีกครั้ง"
+        ).value(for: language)
+        case .reconnectRequired, .operatorRecoveryRequired: return LocalizedText(
+            english: "Photo couldn't be restored.",
+            thai: "ไม่สามารถกู้คืนรูปภาพได้"
+        ).value(for: language)
+        }
+    }
+
+    func detail(for language: CustomerLanguage) -> String? {
+        switch self {
+        case .idle, .restoring, .connectionRecovered:
+            return nil
+        case .reconnectRequired:
+            return LocalizedText(
+                english: "Reconnect to retry the image.",
+                thai: "เชื่อมต่อใหม่เพื่อลองกู้คืนรูปภาพอีกครั้ง"
+            ).value(for: language)
+        case .operatorRecoveryRequired:
+            return LocalizedText(
+                english: "Please ask the operator to restart recovery for this session.",
+                thai: "โปรดขอให้เจ้าหน้าที่เริ่มการกู้คืนสำหรับเซสชันนี้อีกครั้ง"
+            ).value(for: language)
+        }
+    }
+}
+
+enum BoothAssetRetryGenerationTransition: Equatable {
+    case initial
+    case advanced
+    case duplicate
+    case stale
+}
+
+struct BoothAssetRetryState: Equatable, Sendable {
+    let generation: Int
+    let attemptsInGeneration: Int
+    let recoveryGenerationsUsed: Int
+}
+
+struct BoothAssetRetryTracker: Sendable {
+    private(set) var currentGeneration: Int?
+    private var states: [BoothAssetReference: BoothAssetRetryState] = [:]
+
+    mutating func activate(
+        generation: Int,
+        missing: Set<BoothAssetReference>
+    ) -> BoothAssetRetryGenerationTransition {
+        if let currentGeneration {
+            if generation < currentGeneration { return .stale }
+            if generation == currentGeneration { return .duplicate }
+        }
+
+        let transition: BoothAssetRetryGenerationTransition = currentGeneration == nil
+            ? .initial
+            : .advanced
+        currentGeneration = generation
+
+        for reference in missing {
+            guard let previous = states[reference] else { continue }
+            let recoveryCount = previous.recoveryGenerationsUsed
+            guard recoveryCount < BoothAssetRetryPolicy.maximumRecoveryGenerations else {
+                states[reference] = BoothAssetRetryState(
+                    generation: generation,
+                    attemptsInGeneration: BoothAssetRetryPolicy.maximumAutomaticRetries + 1,
+                    recoveryGenerationsUsed: recoveryCount
+                )
+                continue
+            }
+            states[reference] = BoothAssetRetryState(
+                generation: generation,
+                attemptsInGeneration: 0,
+                recoveryGenerationsUsed: recoveryCount + 1
+            )
+        }
+        return transition
+    }
+
+    func acceptsDisconnect(generation: Int?) -> Bool {
+        guard let generation, let currentGeneration else { return true }
+        return generation >= currentGeneration
+    }
+
+    func canRequest(_ reference: BoothAssetReference) -> Bool {
+        guard let state = states[reference] else { return true }
+        guard let currentGeneration, state.generation == currentGeneration else { return false }
+        return state.attemptsInGeneration <= BoothAssetRetryPolicy.maximumAutomaticRetries
+    }
+
+    mutating func recordFailure(
+        _ reference: BoothAssetReference,
+        generation: Int
+    ) -> Bool {
+        if currentGeneration == nil { currentGeneration = generation }
+        guard currentGeneration == generation else { return false }
+
+        let previous = states[reference] ?? BoothAssetRetryState(
+            generation: generation,
+            attemptsInGeneration: 0,
+            recoveryGenerationsUsed: 0
+        )
+        guard previous.generation == generation else { return false }
+        let attempts = min(
+            previous.attemptsInGeneration + 1,
+            BoothAssetRetryPolicy.maximumAutomaticRetries + 1
+        )
+        states[reference] = BoothAssetRetryState(
+            generation: generation,
+            attemptsInGeneration: attempts,
+            recoveryGenerationsUsed: previous.recoveryGenerationsUsed
+        )
+        return attempts <= BoothAssetRetryPolicy.maximumAutomaticRetries
+    }
+
+    mutating func markCompleted(_ reference: BoothAssetReference) {
+        states.removeValue(forKey: reference)
+    }
+
+    mutating func remove(_ reference: BoothAssetReference) {
+        states.removeValue(forKey: reference)
+    }
+
+    mutating func retain(expected: Set<BoothAssetReference>) {
+        states = states.filter { expected.contains($0.key) }
+    }
+
+    mutating func resetForSession() {
+        currentGeneration = nil
+        states.removeAll()
+    }
+
+    func state(for reference: BoothAssetReference) -> BoothAssetRetryState? {
+        states[reference]
+    }
+
+    func shouldRecycleCurrentGeneration(_ reference: BoothAssetReference) -> Bool {
+        guard let currentGeneration,
+              let state = states[reference],
+              state.generation == currentGeneration,
+              state.attemptsInGeneration > BoothAssetRetryPolicy.maximumAutomaticRetries else {
+            return false
+        }
+        return state.recoveryGenerationsUsed < BoothAssetRetryPolicy.maximumRecoveryGenerations
+    }
+}
+
+struct BoothAssetResponseDeadlineRegistry: Equatable, Sendable {
+    private(set) var pending: Set<BoothAssetReference> = []
+
+    mutating func arm(_ references: [BoothAssetReference]) {
+        pending.formUnion(references)
+    }
+
+    mutating func cancel(_ reference: BoothAssetReference) {
+        pending.remove(reference)
+    }
+
+    func contains(_ reference: BoothAssetReference) -> Bool {
+        pending.contains(reference)
+    }
+
+    mutating func reset() {
+        pending.removeAll()
+    }
+}
+
+actor BoothAssetReceivePipeline {
+    private var assembler = BoothAssetAssembler()
+    private var generation: UInt64 = 0
+
+    func reset(to generation: UInt64) {
+        guard generation > self.generation else { return }
+        self.generation = generation
+        assembler = BoothAssetAssembler()
+    }
+
+    func resetCurrent(generation: UInt64) {
+        guard generation == self.generation else { return }
+        assembler = BoothAssetAssembler()
+    }
+
+    func append(
+        _ chunk: BoothAssetChunk,
+        generation: UInt64
+    ) throws -> (BoothAssetReference, Data)? {
+        guard generation >= self.generation else { return nil }
+        if generation > self.generation {
+            self.generation = generation
+            assembler = BoothAssetAssembler()
+        }
+        return try assembler.append(chunk)
+    }
 }

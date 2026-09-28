@@ -51,7 +51,14 @@ enum PreflightCheckID: String, Sendable, CaseIterable, Identifiable {
     case wifiPath
     case lanPath
     case ipadTransport
+    case authentication
+    case controlChannel
+    case previewChannel
+    case secureTransport
+    case assetChannel
     case networkRoute
+    case networkFreshness
+    case reconnectState
     case outputFolder
     case diskSpace
     case localDownloadServer
@@ -61,6 +68,7 @@ enum PreflightCheckID: String, Sendable, CaseIterable, Identifiable {
     case unfinishedSession
     case queueHealth
     case cloudUpload
+    case guestDeliverySecurity
     case printerConfiguration
     case printerTest
 
@@ -101,6 +109,14 @@ struct BoothPreflightContext: Sendable {
     var previewRequired: Bool
     var customerDisplayReady: Bool
     var ipadConnected: Bool
+    var controlChannelConnected: Bool
+    var ipadPreviewChannelConnected: Bool
+    var secureTransportReady: Bool
+    var assetChannelConnected: Bool
+    var assetChannelVerified: Bool
+    var lastControlActivityAt: Date?
+    var reconnectInProgress: Bool
+    var reconnectAttempt: Int
     var requestedNetwork: BoothNetworkPreference
     var effectiveNetwork: BoothEffectiveNetworkTransport
     var wifiPathAvailable: Bool
@@ -111,13 +127,21 @@ struct BoothPreflightContext: Sendable {
     var localServerStatus: LocalWebServerStatus
     var localServerHealthPassed: Bool
     var localIPAddress: String?
+    var guestDeliveryResolution: GuestDeliveryResolution
     var runtimeDirectoryURL: URL
     var runtimePersistenceAvailable: Bool
     var queuePersistenceAvailable: Bool
     var unfinishedCaptureSession: Bool
     var requiredJobFailed: Bool
     var optionalJobPendingOrFailed: Bool
+    var queuePendingCount: Int
+    var queueRunningCount: Int
+    var queueRetryingCount: Int
+    var queueFailedCount: Int
+    var oldestCriticalJobAge: TimeInterval?
     var cloudUploadEnabled: Bool
+    var allowTrustedLocalHTTP: Bool
+    var publicBaseURL: String?
     var cloudSetupComplete: Bool
     var cloudConnectivityPassed: Bool
     var automaticPrintingEnabled: Bool
@@ -143,6 +167,14 @@ struct BoothPreflightContext: Sendable {
         previewRequired: Bool = false,
         customerDisplayReady: Bool = false,
         ipadConnected: Bool = false,
+        controlChannelConnected: Bool = false,
+        ipadPreviewChannelConnected: Bool = false,
+        secureTransportReady: Bool = false,
+        assetChannelConnected: Bool = false,
+        assetChannelVerified: Bool = false,
+        lastControlActivityAt: Date? = nil,
+        reconnectInProgress: Bool = false,
+        reconnectAttempt: Int = 0,
         requestedNetwork: BoothNetworkPreference = .wifi,
         effectiveNetwork: BoothEffectiveNetworkTransport = .unavailable,
         wifiPathAvailable: Bool = false,
@@ -153,13 +185,21 @@ struct BoothPreflightContext: Sendable {
         localServerStatus: LocalWebServerStatus = LocalWebServerStatus(state: .stopped, registeredTokenCount: 0),
         localServerHealthPassed: Bool = false,
         localIPAddress: String? = nil,
+        guestDeliveryResolution: GuestDeliveryResolution = .unavailable,
         runtimeDirectoryURL: URL = FileManager.default.temporaryDirectory,
         runtimePersistenceAvailable: Bool = true,
         queuePersistenceAvailable: Bool = true,
         unfinishedCaptureSession: Bool = false,
         requiredJobFailed: Bool = false,
         optionalJobPendingOrFailed: Bool = false,
+        queuePendingCount: Int = 0,
+        queueRunningCount: Int = 0,
+        queueRetryingCount: Int = 0,
+        queueFailedCount: Int = 0,
+        oldestCriticalJobAge: TimeInterval? = nil,
         cloudUploadEnabled: Bool = false,
+        allowTrustedLocalHTTP: Bool = false,
+        publicBaseURL: String? = nil,
         cloudSetupComplete: Bool = false,
         cloudConnectivityPassed: Bool = false,
         automaticPrintingEnabled: Bool = false,
@@ -184,6 +224,14 @@ struct BoothPreflightContext: Sendable {
         self.previewRequired = previewRequired
         self.customerDisplayReady = customerDisplayReady
         self.ipadConnected = ipadConnected
+        self.controlChannelConnected = controlChannelConnected
+        self.ipadPreviewChannelConnected = ipadPreviewChannelConnected
+        self.secureTransportReady = secureTransportReady
+        self.assetChannelConnected = assetChannelConnected
+        self.assetChannelVerified = assetChannelVerified
+        self.lastControlActivityAt = lastControlActivityAt
+        self.reconnectInProgress = reconnectInProgress
+        self.reconnectAttempt = reconnectAttempt
         self.requestedNetwork = requestedNetwork
         self.effectiveNetwork = effectiveNetwork
         self.wifiPathAvailable = wifiPathAvailable
@@ -194,13 +242,21 @@ struct BoothPreflightContext: Sendable {
         self.localServerStatus = localServerStatus
         self.localServerHealthPassed = localServerHealthPassed
         self.localIPAddress = localIPAddress
+        self.guestDeliveryResolution = guestDeliveryResolution
         self.runtimeDirectoryURL = runtimeDirectoryURL
         self.runtimePersistenceAvailable = runtimePersistenceAvailable
         self.queuePersistenceAvailable = queuePersistenceAvailable
         self.unfinishedCaptureSession = unfinishedCaptureSession
         self.requiredJobFailed = requiredJobFailed
         self.optionalJobPendingOrFailed = optionalJobPendingOrFailed
+        self.queuePendingCount = queuePendingCount
+        self.queueRunningCount = queueRunningCount
+        self.queueRetryingCount = queueRetryingCount
+        self.queueFailedCount = queueFailedCount
+        self.oldestCriticalJobAge = oldestCriticalJobAge
         self.cloudUploadEnabled = cloudUploadEnabled
+        self.allowTrustedLocalHTTP = allowTrustedLocalHTTP
+        self.publicBaseURL = publicBaseURL
         self.cloudSetupComplete = cloudSetupComplete
         self.cloudConnectivityPassed = cloudConnectivityPassed
         self.automaticPrintingEnabled = automaticPrintingEnabled

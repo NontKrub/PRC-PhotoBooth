@@ -1,0 +1,1090 @@
+import Foundation
+import CryptoKit
+import Testing
+
+@testable import PRC_PhotoBooth_Mac
+
+@Suite("Booth pairing")
+struct BoothPairingTests {
+    @Test("pairing request submission is once per session and connection")
+    func pairingRequestSubmissionGateAllowsOnlyFreshAttempts() {
+        var gate = BoothPairingRequestSubmissionGate()
+
+        let firstClaim = gate.claim(sessionID: "session-1", connectionGeneration: 7)
+        let duplicateClaim = gate.claim(sessionID: "session-1", connectionGeneration: 7)
+        let newConnectionClaim = gate.claim(sessionID: "session-1", connectionGeneration: 8)
+        let duplicateConnectionClaim = gate.claim(sessionID: "session-1", connectionGeneration: 8)
+        let newSessionClaim = gate.claim(sessionID: "session-2", connectionGeneration: 8)
+        #expect(firstClaim)
+        #expect(!duplicateClaim)
+        #expect(newConnectionClaim)
+        #expect(!duplicateConnectionClaim)
+        #expect(newSessionClaim)
+
+        gate.resetIfMatches(sessionID: "session-1", connectionGeneration: 8)
+        let staleResetClaim = gate.claim(sessionID: "session-2", connectionGeneration: 8)
+        #expect(!staleResetClaim)
+        gate.resetIfMatches(sessionID: "session-2", connectionGeneration: 8)
+        let resetClaim = gate.claim(sessionID: "session-2", connectionGeneration: 8)
+        #expect(resetClaim)
+    }
+
+    @Test("iPad pairing diagnostics identify the selected Mac, not the local iPad")
+    func pairingDiagnosticPeerUsesRemoteRole() {
+        let localIPad = BoothDeviceIdentity(
+            id: "ipad-local",
+            displayName: "Customer iPad",
+            role: .iPad
+        )
+        let selectedMac = BoothDeviceIdentity(
+            id: "mac-selected",
+            displayName: "Operator Mac",
+            role: .mac
+        )
+
+        let resolved = BoothPairingDiagnosticPeer.resolve(
+            role: .iPad,
+            connectedPeer: nil,
+            targetMacPeer: selectedMac,
+            pendingIPadPeer: localIPad,
+            fallbackPeer: nil
+        )
+
+        #expect(resolved.id == "mac-selected")
+        #expect(resolved.displayName == "Operator Mac")
+    }
+
+    @Test("pairing intent validates its target, role, protocol, and hello identity")
+    func pairingIntentValidation() throws {
+        let intent = BoothPairingIntent(
+            iPadIdentity: BoothDeviceIdentity(id: "ipad-1", displayName: "PRC-iPad-01", role: .iPad),
+            targetMacDeviceID: "mac-1"
+        )
+        let hello = BoothTransportHello(
+            role: .iPad,
+            deviceID: "ipad-1",
+            deviceName: "PRC-iPad-01"
+        )
+
+        try intent.validate(peerHello: hello, localMacDeviceID: "mac-1")
+
+        #expect(throws: BoothPairingError.wrongDevice) {
+            try intent.validate(peerHello: hello, localMacDeviceID: "other-mac")
+        }
+
+        let mismatchedHello = BoothTransportHello(
+            role: .iPad,
+            deviceID: "other-ipad",
+            deviceName: "Other iPad"
+        )
+        #expect(throws: BoothPairingError.invalidPairingIntent) {
+            try intent.validate(peerHello: mismatchedHello, localMacDeviceID: "mac-1")
+        }
+    }
+
+    @Test("pairing intent policy reuses, rejects, cools down, or starts safely")
+    func pairingIntentPolicy() {
+        let now = Date(timeIntervalSince1970: 60_000)
+
+        #expect(BoothPairingIntentPolicy.decide(
+            iPadID: "ipad-1",
+            activeRequestID: "ipad-1",
+            hasActivePairingSession: true,
+            boothIsIdle: true,
+            hasAuthenticatedPeer: false,
+            lastRequestAt: nil,
+            now: now
+        ) == .reuseSession)
+        #expect(BoothPairingIntentPolicy.decide(
+            iPadID: "ipad-2",
+            activeRequestID: "ipad-1",
+            hasActivePairingSession: true,
+            boothIsIdle: true,
+            hasAuthenticatedPeer: false,
+            lastRequestAt: nil,
+            now: now
+        ) == .reject(reason: "Another iPad is currently being paired."))
+        #expect(BoothPairingIntentPolicy.decide(
+            iPadID: "ipad-1",
+            activeRequestID: nil,
+            hasActivePairingSession: false,
+            boothIsIdle: false,
+            hasAuthenticatedPeer: false,
+            lastRequestAt: nil,
+            now: now
+        ) == .reject(reason: "Pairing is unavailable while a photo session is active."))
+        #expect(BoothPairingIntentPolicy.decide(
+            iPadID: "ipad-1",
+            activeRequestID: nil,
+            hasActivePairingSession: false,
+            boothIsIdle: true,
+            hasAuthenticatedPeer: true,
+            lastRequestAt: nil,
+            now: now
+        ) == .reject(reason: "Another iPad is currently connected."))
+        #expect(BoothPairingIntentPolicy.decide(
+            iPadID: "ipad-1",
+            activeRequestID: nil,
+            hasActivePairingSession: false,
+            boothIsIdle: true,
+            hasAuthenticatedPeer: false,
+            lastRequestAt: now.addingTimeInterval(-1),
+            now: now
+        ) == .reject(reason: "Please wait before trying again."))
+        #expect(BoothPairingIntentPolicy.decide(
+            iPadID: "ipad-1",
+            activeRequestID: nil,
+            hasActivePairingSession: false,
+            boothIsIdle: true,
+            hasAuthenticatedPeer: false,
+            lastRequestAt: now.addingTimeInterval(-5),
+            now: now
+        ) == .startSession)
+    }
+
+    @Test("PIN pairing verification code is deterministic for both peers and transcript-bound")
+    func pairingVerificationCode() throws {
+        let macKey = Curve25519.KeyAgreement.PrivateKey()
+        let iPadKey = Curve25519.KeyAgreement.PrivateKey()
+        let transcript = BoothPairingCrypto.pairingTranscript(
+            sessionID: "pairing-session",
+            macDeviceID: "mac-1",
+            iPadDeviceID: "ipad-1",
+            method: .pin,
+            macEphemeralPublicKey: macKey.publicKey.rawRepresentation,
+            iPadEphemeralPublicKey: iPadKey.publicKey.rawRepresentation
+        )
+        let macSecret = try BoothPairingCrypto.derivePairingSecret(
+            privateKeyData: macKey.rawRepresentation,
+            peerPublicKeyData: iPadKey.publicKey.rawRepresentation,
+            code: "482193",
+            transcript: transcript
+        )
+        let iPadSecret = try BoothPairingCrypto.derivePairingSecret(
+            privateKeyData: iPadKey.rawRepresentation,
+            peerPublicKeyData: macKey.publicKey.rawRepresentation,
+            code: "482193",
+            transcript: transcript
+        )
+        let macCode = BoothPairingCrypto.makeVerificationCode(secret: macSecret, transcript: transcript)
+        let iPadCode = BoothPairingCrypto.makeVerificationCode(secret: iPadSecret, transcript: transcript)
+
+        #expect(macSecret == iPadSecret)
+        #expect(macCode == iPadCode)
+        #expect(macCode.utf8.count == 6)
+        #expect(macCode.utf8.allSatisfy { $0 >= 48 && $0 <= 57 })
+        #expect(macCode != BoothPairingCrypto.makeVerificationCode(
+            secret: macSecret,
+            transcript: Data(transcript.dropLast())
+        ))
+    }
+
+    @Test("SAS confirmation proof requires the paired secret and transcript")
+    func verificationConfirmationProofIsAuthenticated() {
+        let secret = Data(repeating: 0x51, count: 32)
+        let transcript = Data("pairing-transcript".utf8)
+        let proof = BoothPairingCrypto.makeVerificationConfirmationProof(
+            secret: secret,
+            transcript: transcript,
+            role: .mac
+        )
+
+        #expect(proof.count == 32)
+        #expect(BoothPairingCrypto.constantTimeEqual(
+            proof,
+            BoothPairingCrypto.makeVerificationConfirmationProof(
+                secret: secret,
+                transcript: transcript,
+                role: .mac
+            )
+        ))
+        #expect(!BoothPairingCrypto.constantTimeEqual(
+            proof,
+            BoothPairingCrypto.makeVerificationConfirmationProof(
+                secret: Data(repeating: 0x52, count: 32),
+                transcript: transcript,
+                role: .mac
+            )
+        ))
+        #expect(!BoothPairingCrypto.constantTimeEqual(
+            proof,
+            BoothPairingCrypto.makeVerificationConfirmationProof(
+                secret: secret,
+                transcript: Data("different-transcript".utf8),
+                role: .mac
+            )
+        ))
+    }
+
+    @Test("pairing intent alone cannot create trust before a PIN or QR request")
+    func pairingResultTrustGate() {
+        let result = BoothPairingResult(
+            accepted: true,
+            macIdentity: macIdentity,
+            macEphemeralPublicKey: Data(repeating: 0x11, count: 32),
+            keyAgreementProof: Data(repeating: 0x12, count: 32)
+        )
+        let request = BoothPairingRequest(
+            sessionID: "session",
+            targetMacDeviceID: macIdentity.id,
+            iPadIdentity: BoothDeviceIdentity(id: "ipad-1", displayName: "PRC-iPad-01", role: .iPad),
+            method: .pin,
+            iPadEphemeralPublicKey: Data(repeating: 0x13, count: 32),
+            admissionProof: Data(repeating: 0x14, count: 32)
+        )
+
+        #expect(!BoothPairingTrustPolicy.accepts(
+            result: result,
+            pendingPairingRequest: nil,
+            targetPeerID: macIdentity.id
+        ))
+        #expect(BoothPairingTrustPolicy.accepts(
+            result: result,
+            pendingPairingRequest: request,
+            targetPeerID: macIdentity.id
+        ))
+    }
+
+    @Test("installation identity remains stable and rename keeps the ID")
+    func stableIdentity() {
+        let suite = "BoothPairingTests.identity.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let store = BoothDeviceIdentityStore(defaults: defaults, keyPrefix: "test.identity")
+
+        let first = store.load(role: .mac, defaultName: "PRC Booth Mac")
+        let second = store.load(role: .mac, defaultName: "Different Default")
+        let renamed = store.rename(first, to: "PRC-Booth-01")
+        let reloaded = store.load(role: .mac, defaultName: "Ignored")
+
+        #expect(first.id == second.id)
+        #expect(renamed.id == first.id)
+        #expect(reloaded.id == first.id)
+        #expect(reloaded.displayName == "PRC-Booth-01")
+    }
+
+    @Test("valid PIN succeeds once and consumes the pairing session")
+    func validPINIsOneTime() throws {
+        let now = Date(timeIntervalSince1970: 10_000)
+        var session = try BoothPairingSession.make(macIdentity: macIdentity, now: now)
+        let pin = session.pin
+
+        #expect(session.validatePIN(pin, now: now.addingTimeInterval(1)) == .accepted)
+        #expect(session.validatePIN(pin, now: now.addingTimeInterval(2)) == .locked)
+    }
+
+    @Test("PIN validation accepts only six ASCII digits")
+    func pinFormat() {
+        #expect(BoothPairingSession.isValidPIN("482193"))
+        #expect(!BoothPairingSession.isValidPIN("48219"))
+        #expect(!BoothPairingSession.isValidPIN("4821930"))
+        #expect(!BoothPairingSession.isValidPIN("１２３４５６"))
+        #expect(!BoothPairingSession.isValidPIN("48219a"))
+    }
+
+    @Test("advertised pairing session is usable only while complete and unexpired")
+    func advertisedPairingSessionAvailability() {
+        let now = Date(timeIntervalSince1970: 25_000)
+        let active = BoothDiscoveredPeer(
+            id: "mac-1",
+            displayName: "PRC Booth Mac",
+            role: .mac,
+            appVersion: "1.4.2",
+            protocolVersion: BoothTransportHello.currentProtocolVersion,
+            networkPreference: .wifi,
+            availableInterfaces: [.wifi],
+            pairingSessionID: "session-1",
+            pairingExpiresAt: now.addingTimeInterval(1)
+        )
+        let expired = BoothDiscoveredPeer(
+            id: "mac-1",
+            displayName: "PRC Booth Mac",
+            role: .mac,
+            appVersion: "1.4.2",
+            protocolVersion: BoothTransportHello.currentProtocolVersion,
+            networkPreference: .wifi,
+            availableInterfaces: [.wifi],
+            pairingSessionID: "session-1",
+            pairingExpiresAt: now
+        )
+        let incomplete = BoothDiscoveredPeer(
+            id: "mac-1",
+            displayName: "PRC Booth Mac",
+            role: .mac,
+            appVersion: "1.4.2",
+            protocolVersion: BoothTransportHello.currentProtocolVersion,
+            networkPreference: .wifi,
+            availableInterfaces: [.wifi],
+            pairingSessionID: " ",
+            pairingExpiresAt: now.addingTimeInterval(1)
+        )
+
+        #expect(active.hasActivePairingSession(at: now))
+        #expect(!expired.hasActivePairingSession(at: now))
+        #expect(!incomplete.hasActivePairingSession(at: now))
+    }
+
+    @Test("invalid PIN is rejected and five attempts invalidate the session")
+    func invalidPINRateLimit() throws {
+        let now = Date(timeIntervalSince1970: 20_000)
+        var session = try BoothPairingSession.make(macIdentity: macIdentity, now: now)
+        let wrong = session.pin == "000000" ? "000001" : "000000"
+
+        #expect(session.validatePIN(wrong, now: now) == .rejected(remainingAttempts: 4))
+        #expect(session.validatePIN(wrong, now: now) == .rejected(remainingAttempts: 3))
+        #expect(session.validatePIN(wrong, now: now) == .rejected(remainingAttempts: 2))
+        #expect(session.validatePIN(wrong, now: now) == .rejected(remainingAttempts: 1))
+        #expect(session.validatePIN(wrong, now: now) == .locked)
+        #expect(!session.isActive(at: now))
+    }
+
+    @Test("expired PIN is rejected")
+    func expiredPIN() throws {
+        let now = Date(timeIntervalSince1970: 30_000)
+        var session = try BoothPairingSession.make(macIdentity: macIdentity, now: now)
+
+        #expect(session.validatePIN(session.pin, now: now.addingTimeInterval(121)) == .expired)
+    }
+
+    @Test("invalidating a pairing session rejects its PIN")
+    func invalidatedSessionCannotAcceptPIN() throws {
+        let now = Date(timeIntervalSince1970: 35_000)
+        var session = try BoothPairingSession.make(macIdentity: macIdentity, now: now)
+
+        session.invalidate()
+
+        #expect(!session.isActive(at: now))
+        #expect(session.validatePIN(session.pin, now: now) == .locked)
+    }
+
+    @Test("an old pairing expiry cannot match a newer session")
+    func pairingExpiryUsesSessionIDGeneration() {
+        #expect(BoothPairingSession.isCurrentSession("session-a", currentSessionID: "session-a"))
+        #expect(!BoothPairingSession.isCurrentSession("session-a", currentSessionID: "session-b"))
+        #expect(!BoothPairingSession.isCurrentSession("session-a", currentSessionID: nil))
+    }
+
+    @Test("pairing expiry and critical-send callbacks reject stale generations")
+    func stalePairingCallbacksAreIgnored() {
+        #expect(BoothPairingExpiryGate.accepts(
+            sessionID: "session-b",
+            generation: 2,
+            currentGeneration: 2,
+            currentSessionID: "session-b",
+            pendingSessionID: nil,
+            pendingResultSessionID: nil
+        ))
+        #expect(!BoothPairingExpiryGate.accepts(
+            sessionID: "session-a",
+            generation: 1,
+            currentGeneration: 2,
+            currentSessionID: "session-b",
+            pendingSessionID: nil,
+            pendingResultSessionID: nil
+        ))
+        #expect(!BoothPairingExpiryGate.accepts(
+            sessionID: "session-a",
+            generation: 2,
+            currentGeneration: 2,
+            currentSessionID: "session-b",
+            pendingSessionID: nil,
+            pendingResultSessionID: nil
+        ))
+        #expect(BoothPairingExpiryGate.accepts(
+            sessionID: "session-b",
+            generation: 2,
+            currentGeneration: 2,
+            currentSessionID: nil,
+            pendingSessionID: nil,
+            pendingResultSessionID: "session-b"
+        ))
+
+        let current = BoothPairingControlSendContext(
+            connectionGeneration: 4,
+            pairingGeneration: 8,
+            sessionID: "session-b"
+        )
+        #expect(BoothPairingControlSendGate.accepts(
+            current,
+            currentConnectionGeneration: 4,
+            currentPairingGeneration: 8,
+            currentSessionID: "session-b",
+            pendingSessionID: nil,
+            pendingResultSessionID: nil
+        ))
+        #expect(!BoothPairingControlSendGate.accepts(
+            current,
+            currentConnectionGeneration: 3,
+            currentPairingGeneration: 8,
+            currentSessionID: "session-b",
+            pendingSessionID: nil,
+            pendingResultSessionID: nil
+        ))
+        #expect(!BoothPairingControlSendGate.accepts(
+            current,
+            currentConnectionGeneration: 4,
+            currentPairingGeneration: 7,
+            currentSessionID: "session-b",
+            pendingSessionID: nil,
+            pendingResultSessionID: nil
+        ))
+        #expect(!BoothPairingControlSendGate.accepts(
+            current,
+            currentConnectionGeneration: 4,
+            currentPairingGeneration: 8,
+            currentSessionID: "session-a",
+            pendingSessionID: nil,
+            pendingResultSessionID: nil
+        ))
+        #expect(BoothPairingControlSendGate.accepts(
+            current,
+            currentConnectionGeneration: 4,
+            currentPairingGeneration: 8,
+            currentSessionID: nil,
+            pendingSessionID: nil,
+            pendingResultSessionID: "session-b"
+        ))
+    }
+
+    @Test("pairing result remains decodable when optional lifecycle fields are absent")
+    func pairingResultLegacyDecode() throws {
+        let legacy = Data(#"{"accepted":false,"reason":"Pairing rejected."}"#.utf8)
+        let result = try JSONDecoder().decode(BoothPairingResult.self, from: legacy)
+
+        #expect(!result.accepted)
+        #expect(!result.retryable)
+        #expect(result.pairingSessionID == nil)
+    }
+
+    @Test("pairing result session identity must match the active request when supplied")
+    func pairingResultSessionIdentity() {
+        let request = BoothPairingRequest(
+            sessionID: "session-a",
+            targetMacDeviceID: macIdentity.id,
+            iPadIdentity: BoothDeviceIdentity(id: "ipad-1", displayName: "PRC-iPad-01", role: .iPad),
+            method: .pin,
+            iPadEphemeralPublicKey: Data(repeating: 0x13, count: 32),
+            admissionProof: Data(repeating: 0x14, count: 32)
+        )
+        let result = BoothPairingResult(
+            accepted: true,
+            macIdentity: macIdentity,
+            pairingSessionID: "session-b",
+            macEphemeralPublicKey: Data(repeating: 0x22, count: 32),
+            keyAgreementProof: Data(repeating: 0x23, count: 32)
+        )
+
+        #expect(!BoothPairingTrustPolicy.accepts(
+            result: result,
+            pendingPairingRequest: request,
+            targetPeerID: macIdentity.id,
+            expectedSessionID: request.sessionID
+        ))
+        #expect(BoothPairingTrustPolicy.accepts(
+            result: BoothPairingResult(
+                accepted: true,
+                macIdentity: macIdentity,
+                pairingSessionID: request.sessionID,
+                macEphemeralPublicKey: Data(repeating: 0x22, count: 32),
+                keyAgreementProof: Data(repeating: 0x23, count: 32)
+            ),
+            pendingPairingRequest: request,
+            targetPeerID: macIdentity.id,
+            expectedSessionID: request.sessionID
+        ))
+    }
+
+    @Test("manual Mac pairing starts without an incoming intent and cancels cleanly")
+    @MainActor
+    func manualPairingLifecycle() {
+        let status = BoothConnectionStatus(requestedNetwork: .wifi)
+        let transport = NetworkBoothTransport(
+            role: .mac,
+            networkPreference: .wifi,
+            connectionStatus: status
+        )
+
+        #expect(transport.startPairingSession())
+        #expect(transport.currentPairingSessionInfo != nil)
+        let isPairing: Bool
+        if case .pairing = status.pairingState {
+            isPairing = true
+        } else {
+            isPairing = false
+        }
+        #expect(isPairing)
+        #expect(status.pairingStage == .discovering)
+
+        transport.cancelPairingSession()
+
+        #expect(transport.currentPairingSessionInfo == nil)
+        #expect(status.pairingState == .idle)
+        #expect(status.pairingStage == .idle)
+    }
+
+    @Test("QR payload round trips and enforces schema, Mac ID, expiry, and one-time token")
+    func qrPayloadValidation() throws {
+        let now = Date(timeIntervalSince1970: 40_000)
+        var session = try BoothPairingSession.make(macIdentity: macIdentity, now: now)
+        let payload = session.qrPayload
+        let encoded = try payload.encodedString()
+        let decoded = try BoothPairingQRCodePayload.decode(encoded)
+
+        #expect(decoded == payload)
+        #expect(throws: BoothPairingError.wrongDevice) {
+            try decoded.validate(now: now, expectedMacID: "other-mac")
+        }
+        #expect(throws: BoothPairingError.expired) {
+            try decoded.validate(now: now.addingTimeInterval(121))
+        }
+
+        let unsupported = BoothPairingQRCodePayload(
+            schemaVersion: 99,
+            macDeviceID: payload.macDeviceID,
+            macDeviceName: payload.macDeviceName,
+            pairingSessionID: payload.pairingSessionID,
+            oneTimeToken: payload.oneTimeToken,
+            expiresAt: payload.expiresAt
+        )
+        #expect(throws: BoothPairingError.unsupportedQRSchema) {
+            try unsupported.validate(now: now)
+        }
+
+        #expect(session.validateQRToken(payload.oneTimeToken, now: now) == .accepted)
+        #expect(session.validateQRToken(payload.oneTimeToken, now: now) == .locked)
+    }
+
+    @Test("QR payload encoding stays stable across pairing sheet redraws")
+    func qrPayloadEncodingIsStable() throws {
+        let payload = try BoothPairingSession.make(
+            macIdentity: macIdentity,
+            now: Date(timeIntervalSince1970: 40_000)
+        ).qrPayload
+        let encoded = try payload.encodedString()
+
+        for _ in 0..<20 {
+            #expect(try payload.encodedString() == encoded)
+        }
+    }
+
+    @Test("malformed QR payloads return a pairing error")
+    func malformedQRPayload() throws {
+        #expect(throws: BoothPairingError.invalidQRPayload) {
+            try BoothPairingQRCodePayload.decode("prc-photobooth-pairing-v2:not-json")
+        }
+
+        let invalid = BoothPairingQRCodePayload(
+            macDeviceID: "",
+            macDeviceName: "PRC Booth Mac",
+            pairingSessionID: "session",
+            oneTimeToken: "token",
+            expiresAt: Date(timeIntervalSince1970: 40_100)
+        )
+        #expect(throws: BoothPairingError.invalidQRPayload) {
+            try invalid.validate(now: Date(timeIntervalSince1970: 40_000))
+        }
+    }
+
+    @Test("trusted peer store persists metadata, preferred peer, and Keychain secret; forget removes all")
+    func trustedPeerPersistenceAndForget() throws {
+        let suite = "BoothPairingTests.trust.\(UUID().uuidString)"
+        let namespace = "test.trust.\(UUID().uuidString)"
+        let service = "com.nont.prcphoto.tests.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let keychain = InMemoryGenericPasswordKeychain()
+        let store = BoothTrustedPeerStore(
+            defaults: defaults,
+            namespace: namespace,
+            keychainService: service,
+            keychain: keychain
+        )
+        let peer = TrustedBoothPeer(id: "ipad-1", displayName: "PRC-iPad-01", role: .iPad)
+        let secret = Data(repeating: 0x42, count: 32)
+
+        defer { store.forgetAll() }
+        try store.trust(peer, secret: secret)
+        store.preferredPeerID = peer.id
+        store.autoReconnect = true
+
+        #expect(store.trustedPeerIDs == [peer.id])
+        #expect(store.preferredPeerID == peer.id)
+        #expect(store.autoReconnect)
+        #expect(store.secret(for: peer.id) == secret)
+        #expect(keychain.item(service: service, account: peer.id, useDataProtectionKeychain: true) == secret)
+        #expect(keychain.item(service: service, account: peer.id, useDataProtectionKeychain: false) == secret)
+
+        store.forget(peerID: peer.id)
+        #expect(store.trustedPeers.isEmpty)
+        #expect(store.preferredPeerID == nil)
+        #expect(store.secret(for: peer.id) == nil)
+        #expect(!store.autoReconnect)
+    }
+
+    @Test("failed Data Protection updates do not replace an existing legacy pairing secret")
+    func failedDataProtectionUpdatePreservesEffectivePairingSecret() {
+        let suite = "BoothPairingTests.write-failure-conflict.\(UUID().uuidString)"
+        let namespace = "test.write-failure-conflict.\(UUID().uuidString)"
+        let service = "com.nont.prcphoto.tests.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let keychain = InMemoryGenericPasswordKeychain()
+        let store = BoothTrustedPeerStore(
+            defaults: defaults,
+            namespace: namespace,
+            keychainService: service,
+            keychain: keychain
+        )
+        let peer = TrustedBoothPeer(id: "ipad-write-failure", displayName: "PRC-iPad", role: .iPad)
+        let previousSecret = Data(repeating: 0x41, count: 32)
+        let attemptedSecret = Data(repeating: 0x52, count: 32)
+        store.trustedPeers = [peer]
+        store.preferredPeerID = peer.id
+        store.autoReconnect = true
+        keychain.put(previousSecret, service: service, account: peer.id, useDataProtectionKeychain: true)
+        keychain.put(previousSecret, service: service, account: peer.id, useDataProtectionKeychain: false)
+        keychain.failDataProtectionWrites = true
+
+        #expect(throws: BoothPairingError.keychain(errSecIO)) {
+            try store.trust(peer, secret: attemptedSecret)
+        }
+        #expect(store.secret(for: peer.id) == previousSecret)
+        #expect(keychain.item(service: service, account: peer.id, useDataProtectionKeychain: true) == previousSecret)
+        #expect(keychain.item(service: service, account: peer.id, useDataProtectionKeychain: false) == previousSecret)
+        #expect(store.trustedPeerIDs == [peer.id])
+        #expect(store.preferredPeerID == peer.id)
+        #expect(store.autoReconnect)
+    }
+
+    @Test("preferred peer with missing or invalid key requires repair")
+    func preferredPeerNeedsRepair() {
+        let suite = "BoothPairingTests.missing-secret.\(UUID().uuidString)"
+        let service = "com.nont.prcphoto.tests.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let keychain = InMemoryGenericPasswordKeychain()
+        let peerID = "mac-peer"
+        let store = BoothTrustedPeerStore(
+            defaults: defaults,
+            namespace: suite,
+            keychainService: service,
+            keychain: keychain
+        )
+        store.trustedPeers = [TrustedBoothPeer(id: peerID, displayName: "Event Mac", role: .mac)]
+        store.preferredPeerID = peerID
+
+        #expect(store.preferredPeerNeedsRepair)
+        #expect(!store.hasUsableSecret(for: peerID))
+
+        keychain.put(Data(repeating: 1, count: 31), service: service, account: peerID, useDataProtectionKeychain: true)
+        #expect(store.preferredPeerNeedsRepair)
+
+        keychain.put(Data(repeating: 1, count: 32), service: service, account: peerID, useDataProtectionKeychain: true)
+        #expect(!store.preferredPeerNeedsRepair)
+        #expect(store.hasUsableSecret(for: peerID))
+    }
+
+    @Test("Keychain unavailability preserves trusted pairing metadata and reconnect preference")
+    func unavailablePairingKeychainDoesNotMarkPeerForRepair() {
+        let suite = "BoothPairingTests.keychain-unavailable.\(UUID().uuidString)"
+        let service = "com.nont.prcphoto.tests.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let keychain = InMemoryGenericPasswordKeychain()
+        let peerID = "mac-peer"
+        let store = BoothTrustedPeerStore(
+            defaults: defaults,
+            namespace: suite,
+            keychainService: service,
+            keychain: keychain
+        )
+        store.trustedPeers = [TrustedBoothPeer(id: peerID, displayName: "Event Mac", role: .mac)]
+        store.preferredPeerID = peerID
+        store.autoReconnect = true
+        keychain.failDataProtectionReads = true
+        keychain.dataProtectionReadFailureStatus = errSecMissingEntitlement
+        keychain.legacyReadFailureStatus = errSecInteractionNotAllowed
+
+        #expect(store.secretLookup(for: peerID) == .unavailable(errSecMissingEntitlement))
+        #expect(!store.preferredPeerNeedsRepair)
+        #expect(store.trustedPeerIDs == [peerID])
+        #expect(store.preferredPeerID == peerID)
+        #expect(store.autoReconnect)
+
+        keychain.dataProtectionReadFailureStatus = errSecInteractionNotAllowed
+        keychain.legacyReadFailureStatus = nil
+        #expect(store.secretLookup(for: peerID) == .unavailable(errSecInteractionNotAllowed))
+        #expect(store.trustedPeerIDs == [peerID])
+        #expect(store.autoReconnect)
+    }
+
+    @Test("iPad Keychain lookup keeps the newly saved pairing secret")
+    func unifiedKeychainDoesNotDeletePairingSecret() throws {
+        let suite = "BoothPairingTests.unified-keychain.\(UUID().uuidString)"
+        let service = "com.nont.prcphoto.tests.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let keychain = InMemoryGenericPasswordKeychain()
+        keychain.simulatesUnifiedKeychain = true
+        let store = BoothTrustedPeerStore(
+            defaults: defaults,
+            namespace: suite,
+            keychainService: service,
+            keychain: keychain
+        )
+        let peer = TrustedBoothPeer(id: "mac-peer", displayName: "Event Mac", role: .mac)
+        let secret = Data(repeating: 0x42, count: 32)
+
+        try store.trust(peer, secret: secret)
+        store.preferredPeerID = peer.id
+        #expect(store.secret(for: peer.id) == secret)
+        #expect(store.secret(for: peer.id) == secret)
+        #expect(!store.preferredPeerNeedsRepair)
+        #expect(keychain.item(service: service, account: peer.id, useDataProtectionKeychain: true) == secret)
+
+        #expect(store.forget(peerID: peer.id) == errSecSuccess)
+        #expect(store.secret(for: peer.id) == nil)
+    }
+
+    @Test("trusted peer reads retain legacy Keychain secret across rebuilds")
+    func trustedPeerSecretRetainsLegacyCopy() throws {
+        let suite = "BoothPairingTests.migration.\(UUID().uuidString)"
+        let namespace = "test.migration.\(UUID().uuidString)"
+        let service = "com.nont.prcphoto.tests.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let keychain = InMemoryGenericPasswordKeychain()
+        let store = BoothTrustedPeerStore(
+            defaults: defaults,
+            namespace: namespace,
+            keychainService: service,
+            keychain: keychain
+        )
+        let peer = TrustedBoothPeer(id: "ipad-migration", displayName: "PRC-iPad-Migration", role: .iPad)
+        let secret = Data(repeating: 0x57, count: 32)
+        store.trustedPeers = [peer]
+        keychain.put(secret, service: service, account: peer.id, useDataProtectionKeychain: false)
+
+        #expect(store.secret(for: peer.id) == secret)
+        #expect(keychain.item(service: service, account: peer.id, useDataProtectionKeychain: true) == nil)
+        #expect(keychain.item(service: service, account: peer.id, useDataProtectionKeychain: false) == secret)
+    }
+
+    @Test("a Data Protection pairing secret is copied only into an absent legacy store")
+    func dataProtectionPairingSecretPreservesExistingLegacyCopy() {
+        let suite = "BoothPairingTests.migration-conflict.\(UUID().uuidString)"
+        let namespace = "test.migration-conflict.\(UUID().uuidString)"
+        let service = "com.nont.prcphoto.tests.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let keychain = InMemoryGenericPasswordKeychain()
+        let store = BoothTrustedPeerStore(
+            defaults: defaults,
+            namespace: namespace,
+            keychainService: service,
+            keychain: keychain
+        )
+        let peer = TrustedBoothPeer(id: "ipad-migration-conflict", displayName: "PRC-iPad", role: .iPad)
+        let dataProtectionSecret = Data(repeating: 0x57, count: 32)
+        let legacySecret = Data(repeating: 0x68, count: 32)
+        store.trustedPeers = [peer]
+        keychain.put(dataProtectionSecret, service: service, account: peer.id, useDataProtectionKeychain: true)
+        keychain.put(legacySecret, service: service, account: peer.id, useDataProtectionKeychain: false)
+
+        #expect(store.secret(for: peer.id) == dataProtectionSecret)
+        #expect(keychain.item(service: service, account: peer.id, useDataProtectionKeychain: true) == dataProtectionSecret)
+        #expect(keychain.item(service: service, account: peer.id, useDataProtectionKeychain: false) == legacySecret)
+    }
+
+    @Test("a Data Protection-only pairing secret gains a verified legacy copy")
+    func dataProtectionPairingSecretCreatesMissingLegacyCopy() {
+        let suite = "BoothPairingTests.migration-copy.\(UUID().uuidString)"
+        let namespace = "test.migration-copy.\(UUID().uuidString)"
+        let service = "com.nont.prcphoto.tests.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let keychain = InMemoryGenericPasswordKeychain()
+        let store = BoothTrustedPeerStore(
+            defaults: defaults,
+            namespace: namespace,
+            keychainService: service,
+            keychain: keychain
+        )
+        let peer = TrustedBoothPeer(id: "ipad-migration-copy", displayName: "PRC-iPad", role: .iPad)
+        let secret = Data(repeating: 0x79, count: 32)
+        store.trustedPeers = [peer]
+        keychain.put(secret, service: service, account: peer.id, useDataProtectionKeychain: true)
+
+        #expect(store.secret(for: peer.id) == secret)
+        #expect(keychain.item(service: service, account: peer.id, useDataProtectionKeychain: false) == secret)
+        #expect(keychain.item(service: service, account: peer.id, useDataProtectionKeychain: true) == secret)
+    }
+
+    @Test("forget removes Data Protection and legacy trusted peer secrets")
+    func forgetRemovesBothTrustedPeerKeychainCopies() {
+        let suite = "BoothPairingTests.forget-copies.\(UUID().uuidString)"
+        let namespace = "test.forget-copies.\(UUID().uuidString)"
+        let service = "com.nont.prcphoto.tests.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let keychain = InMemoryGenericPasswordKeychain()
+        let store = BoothTrustedPeerStore(
+            defaults: defaults,
+            namespace: namespace,
+            keychainService: service,
+            keychain: keychain
+        )
+        let peer = TrustedBoothPeer(id: "ipad-forget", displayName: "PRC-iPad-Forget", role: .iPad)
+        store.trustedPeers = [peer]
+        keychain.put(Data(repeating: 0x31, count: 32), service: service, account: peer.id, useDataProtectionKeychain: false)
+        keychain.put(Data(repeating: 0x32, count: 32), service: service, account: peer.id, useDataProtectionKeychain: true)
+
+        store.forget(peerID: peer.id)
+
+        #expect(keychain.item(service: service, account: peer.id, useDataProtectionKeychain: false) == nil)
+        #expect(keychain.item(service: service, account: peer.id, useDataProtectionKeychain: true) == nil)
+    }
+
+    @Test("failed trusted-peer Keychain deletion keeps the peer visibly trusted")
+    func failedForgetKeepsPeerMetadataForRetry() throws {
+        let suite = "BoothPairingTests.forget-failure.\(UUID().uuidString)"
+        let namespace = "test.forget-failure.\(UUID().uuidString)"
+        let service = "com.nont.prcphoto.tests.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let keychain = InMemoryGenericPasswordKeychain()
+        let store = BoothTrustedPeerStore(
+            defaults: defaults,
+            namespace: namespace,
+            keychainService: service,
+            keychain: keychain
+        )
+        let peer = TrustedBoothPeer(id: "ipad-forget-failure", displayName: "PRC-iPad-Failure", role: .iPad)
+        let secret = Data(repeating: 0x48, count: 32)
+        try store.trust(peer, secret: secret)
+        keychain.failDataProtectionDeletes = true
+        keychain.failLegacyDeletes = true
+
+        let deletionStatus = store.forget(peerID: peer.id)
+
+        #expect(deletionStatus == errSecIO)
+        #expect(store.trustedPeerIDs.contains(peer.id))
+        #expect(store.secret(for: peer.id) == secret)
+        keychain.failDataProtectionDeletes = false
+        keychain.failLegacyDeletes = false
+        #expect(store.forget(peerID: peer.id) == errSecSuccess)
+        #expect(store.trustedPeerIDs.isEmpty)
+        #expect(store.secret(for: peer.id) == nil)
+    }
+
+    @Test("HMAC proof succeeds with the paired secret and rejects wrong secret, stale challenge, or device")
+    func hmacAuthentication() throws {
+        let now = Date(timeIntervalSince1970: 50_000)
+        let secret = Data(repeating: 0x11, count: 32)
+        let otherSecret = Data(repeating: 0x22, count: 32)
+        let first = BoothAuthChallenge(
+            id: "challenge-1",
+            nonce: Data(repeating: 0x01, count: 32),
+            challengerDeviceID: "mac",
+            responderDeviceID: "ipad",
+            issuedAt: now
+        )
+        let second = BoothAuthChallenge(
+            id: "challenge-2",
+            nonce: Data(repeating: 0x02, count: 32),
+            challengerDeviceID: "mac",
+            responderDeviceID: "ipad",
+            issuedAt: now
+        )
+        let proof = BoothPairingCrypto.makeProof(for: first, responderDeviceID: "ipad", secret: secret)
+        let secondProof = BoothPairingCrypto.makeProof(for: second, responderDeviceID: "ipad", secret: secret)
+
+        #expect(BoothPairingCrypto.verify(proof, for: first, expectedResponderDeviceID: "ipad", secret: secret, now: now))
+        #expect(!BoothPairingCrypto.verify(proof, for: first, expectedResponderDeviceID: "ipad", secret: otherSecret, now: now))
+        #expect(!BoothPairingCrypto.verify(proof, for: first, expectedResponderDeviceID: "other", secret: secret, now: now))
+        #expect(!BoothPairingCrypto.verify(proof, for: first, expectedResponderDeviceID: "ipad", secret: secret, now: now.addingTimeInterval(31)))
+        #expect(!BoothPairingCrypto.verify(proof, for: first, expectedResponderDeviceID: "ipad", secret: secret, now: now.addingTimeInterval(-1)))
+        #expect(!BoothPairingCrypto.verify(proof, for: first, expectedResponderDeviceID: "ipad", secret: Data([0x01]), now: now))
+        #expect(proof.proof != secondProof.proof)
+    }
+
+    @Test("HMAC transcript tolerates cross-runtime Date precision")
+    func hmacAuthenticationIgnoresWireDateRounding() {
+        let secret = Data(repeating: 0x33, count: 32)
+        let original = BoothAuthChallenge(
+            id: "physical-ipad-challenge",
+            nonce: Data(repeating: 0x44, count: 32),
+            challengerDeviceID: "mac",
+            responderDeviceID: "ipad",
+            issuedAt: Date(timeIntervalSince1970: 50_000.0004999)
+        )
+        let decodedOnOlderRuntime = BoothAuthChallenge(
+            id: original.id,
+            nonce: original.nonce,
+            challengerDeviceID: original.challengerDeviceID,
+            responderDeviceID: original.responderDeviceID,
+            issuedAt: Date(timeIntervalSince1970: 50_000.0005001)
+        )
+
+        let proof = BoothPairingCrypto.makeProof(
+            for: decodedOnOlderRuntime,
+            responderDeviceID: "ipad",
+            secret: secret
+        )
+
+        #expect(BoothPairingCrypto.verify(
+            proof,
+            for: original,
+            expectedResponderDeviceID: "ipad",
+            secret: secret,
+            now: original.issuedAt
+        ))
+        #expect(BoothPairingCrypto.transcriptIdentifier(
+            for: original,
+            responderDeviceID: "ipad"
+        ) == BoothPairingCrypto.transcriptIdentifier(
+            for: decodedOnOlderRuntime,
+            responderDeviceID: "ipad"
+        ))
+    }
+
+    @Test("Auth proof diagnostics distinguish transcript checks from HMAC mismatch")
+    func authProofVerificationDiagnostics() {
+        let now = Date(timeIntervalSince1970: 50_000)
+        let secret = Data(repeating: 0x66, count: 32)
+        let challenge = BoothAuthChallenge(
+            id: "diagnostic-challenge",
+            nonce: Data(repeating: 0x77, count: 32),
+            challengerDeviceID: "mac",
+            responderDeviceID: "ipad",
+            issuedAt: now
+        )
+        let proof = BoothPairingCrypto.makeProof(
+            for: challenge,
+            responderDeviceID: "ipad",
+            secret: secret
+        )
+
+        #expect(BoothPairingCrypto.verificationFailure(
+            proof,
+            for: challenge,
+            expectedResponderDeviceID: "ipad",
+            secret: secret,
+            now: now
+        ) == nil)
+        #expect(BoothPairingCrypto.verificationFailure(
+            proof,
+            for: challenge,
+            expectedResponderDeviceID: "ipad",
+            secret: Data(repeating: 0x88, count: 32),
+            now: now
+        ) == .hmacMismatch)
+        #expect(BoothPairingCrypto.verificationFailure(
+            proof,
+            for: challenge,
+            expectedResponderDeviceID: "other",
+            secret: secret,
+            now: now
+        ) == .wrongChallengeTarget)
+
+        let differentlyDescribedChallenge = BoothAuthChallenge(
+            id: challenge.id,
+            nonce: challenge.nonce,
+            challengerDeviceID: "different-mac-description",
+            responderDeviceID: "ipad",
+            issuedAt: challenge.issuedAt
+        )
+        #expect(BoothPairingCrypto.verify(
+            proof,
+            for: differentlyDescribedChallenge,
+            expectedResponderDeviceID: "ipad",
+            secret: secret,
+            now: now
+        ))
+    }
+
+    @Test("Auth challenge receiver validation does not require a synchronized clock")
+    func authChallengeStructureIsIndependentOfReceiverClock() {
+        let challenge = BoothAuthChallenge(
+            id: "isolated-lan-challenge",
+            nonce: Data(repeating: 0x55, count: 32),
+            challengerDeviceID: "mac",
+            responderDeviceID: "ipad",
+            issuedAt: Date(timeIntervalSince1970: 50_000)
+        )
+
+        #expect(challenge.isWellFormed)
+        #expect(!challenge.isFresh(at: Date(timeIntervalSince1970: 60_000)))
+    }
+
+    @Test("only the selected trusted peer is admitted and eligible for automatic reconnect")
+    func selectedPeerPolicy() {
+        let trusted: Set<String> = ["mac-1", "mac-2"]
+
+        #expect(BoothPeerSelectionPolicy.admission(peerID: "mac-1", preferredPeerID: "mac-1", trustedPeerIDs: trusted) == .allowed)
+        #expect(BoothPeerSelectionPolicy.admission(peerID: "mac-2", preferredPeerID: "mac-1", trustedPeerIDs: trusted) == .notSelected)
+        #expect(BoothPeerSelectionPolicy.admission(peerID: "unknown", preferredPeerID: "mac-1", trustedPeerIDs: trusted) == .unpaired)
+        #expect(BoothPeerSelectionPolicy.canAutomaticallyConnect(peerID: "mac-1", preferredPeerID: "mac-1", trustedPeerIDs: trusted, autoReconnect: true))
+        #expect(!BoothPeerSelectionPolicy.canAutomaticallyConnect(peerID: "mac-2", preferredPeerID: "mac-1", trustedPeerIDs: trusted, autoReconnect: true))
+        #expect(!BoothPeerSelectionPolicy.canAutomaticallyConnect(peerID: "mac-1", preferredPeerID: "mac-1", trustedPeerIDs: trusted, autoReconnect: false))
+    }
+
+    @Test("secure negotiation reuses the Mac session and establishes symmetrically")
+    func secureNegotiationIsMacAuthoritative() throws {
+        var mac = BoothSecureChannelNegotiator(
+            role: .mac,
+            localDeviceID: "mac-1",
+            expectedPeerDeviceID: "ipad-1",
+            connectionGeneration: 9
+        )
+        var iPad = BoothSecureChannelNegotiator(
+            role: .iPad,
+            localDeviceID: "ipad-1",
+            expectedPeerDeviceID: "mac-1",
+            connectionGeneration: 9
+        )
+
+        let macHello: BoothSecureChannelHello
+        if case .sendHello(let hello) = try mac.begin(generation: 9) {
+            macHello = hello
+        } else {
+            Issue.record("Mac must send the authoritative hello")
+            return
+        }
+
+        let iPadActions = try iPad.receiveHello(macHello, generation: 9)
+        let iPadHello: BoothSecureChannelHello
+        if case .sendHello(let hello) = iPadActions.first(where: {
+            if case .sendHello = $0 { return true }
+            return false
+        }) {
+            iPadHello = hello
+        } else {
+            Issue.record("iPad must echo the Mac session in its responder hello")
+            return
+        }
+        #expect(iPadHello.sessionID == macHello.sessionID)
+
+        #expect(try mac.receiveHello(iPadHello, generation: 9) == [.configure])
+        try mac.markReadySent(generation: 9)
+        try iPad.markReadySent(generation: 9)
+        #expect(try mac.receiveReady(sessionID: macHello.sessionID, generation: 9) == .established)
+        #expect(try iPad.receiveReady(sessionID: macHello.sessionID, generation: 9) == .established)
+    }
+
+    @Test("secure negotiation ignores a stale connection generation")
+    func secureNegotiationRejectsStaleGeneration() throws {
+        var mac = BoothSecureChannelNegotiator(
+            role: .mac,
+            localDeviceID: "mac-1",
+            expectedPeerDeviceID: "ipad-1",
+            connectionGeneration: 2
+        )
+        #expect(try mac.begin(generation: 2) != .ignored)
+        #expect(try mac.receiveReady(sessionID: "stale", generation: 1) == .ignored)
+    }
+
+    private var macIdentity: BoothDeviceIdentity {
+        BoothDeviceIdentity(id: "mac-1", displayName: "PRC-Booth-01", role: .mac)
+    }
+}

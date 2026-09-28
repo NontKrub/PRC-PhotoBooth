@@ -35,7 +35,14 @@ final class BoothPreflightService {
         checked.append(networkPathResult(.wifiPath, title: "Wi-Fi path", available: context.wifiPathAvailable, now: now))
         checked.append(networkPathResult(.lanPath, title: "LAN path", available: context.lanPathAvailable, now: now))
         checked.append(ipadTransportResult(context, now: now))
+        checked.append(authenticationResult(context, now: now))
+        checked.append(controlChannelResult(context, now: now))
+        checked.append(previewChannelResult(context, now: now))
+        checked.append(secureTransportResult(context, now: now))
+        checked.append(assetChannelResult(context, now: now))
         checked.append(networkRouteResult(context, now: now))
+        checked.append(networkFreshnessResult(context, now: now))
+        checked.append(reconnectStateResult(context, now: now))
 
         let output = outputFolderResult(context.outputFolderURL, now: now)
         checked.append(output)
@@ -49,7 +56,17 @@ final class BoothPreflightService {
             serverDetail = "The local download server is not healthy."
         }
         checked.append(result(.localDownloadServer, "Local download server", serverDetail, context.localServerHealthPassed ? .passed : .failed, .required, now))
-        checked.append(result(.localIPAddress, "Local IP address", context.localIPAddress == nil ? "No LAN address was found." : context.localIPAddress!, context.localIPAddress == nil ? .warning : .passed, .recommended, now))
+        let guestEndpointResult: (detail: String, status: PreflightCheckStatus) = switch context.guestDeliveryResolution {
+        case .ready(let endpoint):
+            (endpoint.diagnosticDescription, .passed)
+        case .ambiguous(let names):
+            ("Multiple private networks detected (\(names.joined(separator: ", "))). Select or verify the guest delivery network.", .warning)
+        case .unavailable where context.localIPAddress != nil:
+            (context.localIPAddress!, .passed)
+        case .unavailable:
+            ("No authoritative guest delivery interface is available.", .warning)
+        }
+        checked.append(result(.localIPAddress, "Guest delivery endpoint", guestEndpointResult.detail, guestEndpointResult.status, .recommended, now))
         checked.append(runtimeResult(context, now: now))
         checked.append(startupResult(.recoveryStorage, component: .recoveryStore, title: "Recovery storage", context: context, now: now))
         checked.append(result(.unfinishedSession, "Unfinished session", context.unfinishedCaptureSession ? "An unfinished capture session awaits Resume or Discard." : "No unfinished capture session is waiting.", context.unfinishedCaptureSession ? .failed : .passed, .required, now))
@@ -57,8 +74,10 @@ final class BoothPreflightService {
         let queueUnavailable = context.startupComponents[.jobQueue]?.status == .unavailable
         let queueStatus: PreflightCheckStatus = queueUnavailable || !context.queuePersistenceAvailable || context.requiredJobFailed ? .failed : (context.optionalJobPendingOrFailed ? .warning : .passed)
         let queueDetail = queueUnavailable ? (context.startupComponents[.jobQueue]?.detail ?? "The persistent job queue is unavailable.") : !context.queuePersistenceAvailable ? "The persistent job queue is unavailable." : context.requiredJobFailed ? "A required queue job has permanently failed." : context.optionalJobPendingOrFailed ? "Optional cloud or print work is waiting or failed." : "Queue persistence and required jobs are healthy."
-        checked.append(result(.queueHealth, "Queue health", queueDetail, queueStatus, .required, now))
+        let queueSummary = "Backlog pending=\(context.queuePendingCount), running=\(context.queueRunningCount), retrying=\(context.queueRetryingCount), failed=\(context.queueFailedCount); oldest critical job=\(ageText(context.oldestCriticalJobAge))."
+        checked.append(result(.queueHealth, "Queue health", "\(queueDetail) \(queueSummary)", queueStatus, .required, now))
         checked.append(cloudResult(context, now: now))
+        checked.append(guestDeliverySecurityResult(context, now: now))
         checked.append(printerConfigurationResult(context, now: now))
         checked.append(printerTestResult(context, now: now))
 
@@ -72,7 +91,7 @@ final class BoothPreflightService {
         using context: BoothPreflightContext,
         runPrinterTest: Bool,
         cameraTest: @escaping @MainActor () async throws -> Void,
-        printerTest: @escaping @MainActor () async throws -> Void
+        printerTest: @escaping @MainActor () async throws -> PrintSubmissionOutcome
     ) async {
         await runSafeChecks(using: context)
         if context.cameraConnected {
@@ -87,8 +106,14 @@ final class BoothPreflightService {
         if runPrinterTest {
             update(.printerTest, status: .running, detail: "Submitting printer test page…")
             do {
-                try await printerTest()
-                update(.printerTest, status: .passed, detail: "Test page submitted.")
+                switch try await printerTest() {
+                case .submitted:
+                    update(.printerTest, status: .passed, detail: "Test page submitted.")
+                case .cancelled:
+                    update(.printerTest, status: .skipped, detail: "Printer test cancelled by operator.")
+                case .unknown:
+                    update(.printerTest, status: .warning, detail: "Printer completion could not be confirmed.")
+                }
             } catch {
                 update(.printerTest, status: .failed, detail: error.localizedDescription)
             }
@@ -136,7 +161,7 @@ final class BoothPreflightService {
         available: Bool,
         now: Date
     ) -> PreflightCheckResult {
-        result(
+        return result(
             id,
             title,
             available ? "Network.framework reports this interface is available." : "This interface is unavailable.",
@@ -159,6 +184,100 @@ final class BoothPreflightService {
             .required,
             now
         )
+    }
+
+    private func authenticationResult(_ context: BoothPreflightContext, now: Date) -> PreflightCheckResult {
+        guard context.ipadConnected else {
+            if context.customerDisplayReady {
+                return result(.authentication, "iPad authentication", "Skipped because the external viewer is active.", .skipped, .recommended, now)
+            }
+            return result(.authentication, "iPad authentication", "No authenticated iPad is connected.", .failed, .required, now)
+        }
+        return result(
+            .authentication,
+            "iPad authentication",
+            "The selected iPad is authenticated.",
+            .passed,
+            .required,
+            now
+        )
+    }
+
+    private func controlChannelResult(_ context: BoothPreflightContext, now: Date) -> PreflightCheckResult {
+        guard context.ipadConnected else {
+            return result(.controlChannel, "Control channel", "Skipped because no iPad is authenticated.", .skipped, .recommended, now)
+        }
+        return result(
+            .controlChannel,
+            "Control channel",
+            context.controlChannelConnected ? "Authenticated control channel is connected." : "Authenticated control channel is disconnected.",
+            context.controlChannelConnected ? .passed : .failed,
+            .required,
+            now
+        )
+    }
+
+    private func previewChannelResult(_ context: BoothPreflightContext, now: Date) -> PreflightCheckResult {
+        guard context.ipadConnected else {
+            return result(.previewChannel, "Preview channel", "Skipped because no iPad is authenticated.", .skipped, .recommended, now)
+        }
+        return result(
+            .previewChannel,
+            "Preview channel",
+            context.ipadPreviewChannelConnected ? "Authenticated preview channel is connected." : "Authenticated preview channel is disconnected.",
+            context.ipadPreviewChannelConnected ? .passed : .failed,
+            .required,
+            now
+        )
+    }
+
+    private func secureTransportResult(_ context: BoothPreflightContext, now: Date) -> PreflightCheckResult {
+        guard context.ipadConnected else {
+            return result(.secureTransport, "Secure transport", "Skipped because no iPad is authenticated.", .skipped, .recommended, now)
+        }
+        return result(
+            .secureTransport,
+            "Secure transport",
+            context.secureTransportReady ? "Authenticated secure channel is established." : "Secure channel negotiation is incomplete.",
+            context.secureTransportReady ? .passed : .failed,
+            .required,
+            now
+        )
+    }
+
+    private func assetChannelResult(_ context: BoothPreflightContext, now: Date) -> PreflightCheckResult {
+        guard context.ipadConnected else {
+            return result(.assetChannel, "Asset channel", "Skipped because no iPad is authenticated.", .skipped, .recommended, now)
+        }
+        let ready = context.assetChannelConnected && context.assetChannelVerified
+        let detail = ready
+            ? "Authenticated asset channel is connected and verified."
+            : context.assetChannelConnected
+                ? "Asset channel is connected but its identity is not verified."
+                : "Authenticated asset channel is disconnected."
+        return result(.assetChannel, "Asset channel", detail, ready ? .passed : .failed, .required, now)
+    }
+
+    private func networkFreshnessResult(_ context: BoothPreflightContext, now: Date) -> PreflightCheckResult {
+        guard context.ipadConnected else {
+            return result(.networkFreshness, "Network freshness", "Skipped because no iPad is authenticated.", .skipped, .recommended, now)
+        }
+        guard let lastActivity = context.lastControlActivityAt else {
+            return result(.networkFreshness, "Network freshness", "No authenticated control activity has been observed.", .failed, .required, now)
+        }
+        let age = max(0, now.timeIntervalSince(lastActivity))
+        let status: PreflightCheckStatus = age <= 8 ? .passed : .failed
+        return result(.networkFreshness, "Network freshness", "Last authenticated control activity was \(Int(age.rounded()))s ago.", status, .required, now)
+    }
+
+    private func reconnectStateResult(_ context: BoothPreflightContext, now: Date) -> PreflightCheckResult {
+        guard context.ipadConnected else {
+            return result(.reconnectState, "Reconnect state", "Skipped because no iPad is authenticated.", .skipped, .recommended, now)
+        }
+        if context.reconnectInProgress {
+            return result(.reconnectState, "Reconnect state", "Reconnect attempt \(context.reconnectAttempt) is in progress.", .warning, .required, now)
+        }
+        return result(.reconnectState, "Reconnect state", "No reconnect is pending.", .passed, .required, now)
     }
 
     private func networkRouteResult(_ context: BoothPreflightContext, now: Date) -> PreflightCheckResult {
@@ -227,7 +346,9 @@ final class BoothPreflightService {
     }
 
     private func diskResult(_ bytes: Int64?, now: Date) -> PreflightCheckResult {
-        let value = bytes ?? 0
+        guard let value = bytes else {
+            return result(.diskSpace, "Disk space", "Available disk space could not be determined.", .warning, .recommended, now)
+        }
         if value < 2_000_000_000 { return result(.diskSpace, "Disk space", "Less than 2 GB is available.", .failed, .required, now) }
         if value < 10_000_000_000 { return result(.diskSpace, "Disk space", "Between 2 GB and 10 GB is available.", .warning, .recommended, now) }
         return result(.diskSpace, "Disk space", "At least 10 GB is available.", .passed, .recommended, now)
@@ -276,6 +397,52 @@ final class BoothPreflightService {
         return result(.cloudUpload, "Cloud upload", context.cloudConnectivityPassed ? "SSH connectivity is ready." : "SSH connectivity failed.", context.cloudConnectivityPassed ? .passed : .failed, .required, now)
     }
 
+    private func guestDeliverySecurityResult(_ context: BoothPreflightContext, now: Date) -> PreflightCheckResult {
+        let policy = SessionQRCodePayloadResolver.evaluatePolicy(
+            publicBaseURL: context.publicBaseURL,
+            cloudUploadEnabled: context.cloudUploadEnabled,
+            allowTrustedLocalHTTP: context.allowTrustedLocalHTTP,
+            localBaseURL: context.guestDeliveryResolution.endpoint?.baseURL ?? ""
+        )
+        switch policy {
+        case .publicHTTPS:
+            let publicBase = context.publicBaseURL.map(SessionQRCodePayloadResolver.trimBaseURL) ?? ""
+            return result(
+                .guestDeliverySecurity,
+                "Guest delivery security",
+                "Guest downloads use public HTTPS (\(publicBase)).",
+                .passed,
+                .recommended,
+                now
+            )
+        case .trustedLocalHTTP:
+            return result(
+                .guestDeliverySecurity,
+                "Guest delivery security",
+                "Guest downloads use plaintext HTTP over private LAN. Ensure the network is isolated.",
+                .warning,
+                .recommended,
+                now
+            )
+        case .unavailable:
+            let hasQRElements = context.event?.qrCodeElements.isEmpty == false
+            let detail: String
+            if context.cloudUploadEnabled {
+                detail = "Cloud upload is enabled but public base URL is missing or not HTTPS."
+            } else {
+                detail = "Guest delivery is disabled: configure a public HTTPS base URL or allow trusted local LAN HTTP in Settings."
+            }
+            return result(
+                .guestDeliverySecurity,
+                "Guest delivery security",
+                detail,
+                hasQRElements ? .failed : .warning,
+                hasQRElements ? .required : .recommended,
+                now
+            )
+        }
+    }
+
     private func printerConfigurationResult(_ context: BoothPreflightContext, now: Date) -> PreflightCheckResult {
         if context.automaticPrintingEnabled {
             return result(.printerConfiguration, "Printer configuration", context.printerConfigured ? "Configured printer is available." : "Configured printer is unavailable.", context.printerConfigured ? .passed : .failed, .required, now)
@@ -285,7 +452,18 @@ final class BoothPreflightService {
 
     private func printerTestResult(_ context: BoothPreflightContext, now: Date) -> PreflightCheckResult {
         guard let test = context.printerTestResult else { return result(.printerTest, "Printer test", "Not run during this application launch.", .notRun, .recommended, now) }
-        return result(.printerTest, "Printer test", test.message, test.isSuccess ? .passed : .failed, .recommended, test.date)
+        let status: PreflightCheckStatus
+        switch test.outcome {
+        case .submitted:
+            status = .passed
+        case .cancelled:
+            status = .skipped
+        case .unknown:
+            status = .warning
+        case nil:
+            status = test.isSuccess ? .passed : .failed
+        }
+        return result(.printerTest, "Printer test", test.message, status, .recommended, test.date)
     }
 
     private func calculateReadiness(from results: [PreflightCheckResult]) -> BoothReadinessStatus {
@@ -293,5 +471,10 @@ final class BoothPreflightService {
         if results.contains(where: { $0.requirement == .required && $0.status == .failed }) { return .notReady }
         if results.contains(where: { $0.status == .warning }) { return .readyWithWarnings }
         return .ready
+    }
+
+    private func ageText(_ age: TimeInterval?) -> String {
+        guard let age else { return "unknown" }
+        return "\(Int(max(0, age).rounded()))s"
     }
 }

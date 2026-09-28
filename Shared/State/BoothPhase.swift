@@ -24,6 +24,11 @@ public enum BoothPhase: Codable, Equatable, Sendable {
         case .finished:         return "Finished"
         }
     }
+
+    public var isFinished: Bool {
+        if case .finished = self { return true }
+        return false
+    }
 }
 
 extension BoothPhase {

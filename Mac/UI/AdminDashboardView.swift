@@ -3,9 +3,32 @@ import SwiftData
 import Charts
 import UniformTypeIdentifiers
 
-struct AdminDashboardView: View {
-    let onPINReset: () -> Void
+@MainActor
+enum AdminDashboardHistory {
+    static func productionSessions(
+        from sessions: [BoothSession],
+        startDate: Date,
+        endDate: Date,
+        eventID: String?,
+        excludingSessionIDs: Set<String> = []
+    ) -> [BoothSession] {
+        let endExclusive = Calendar.current.date(byAdding: .day, value: 1, to: endDate) ?? endDate
+        return sessions.filter {
+            $0.isNormalProductionSession
+                && !excludingSessionIDs.contains($0.id)
+                && $0.startedAt >= startDate
+                && $0.startedAt <= endExclusive
+                && (eventID == nil || $0.eventID == eventID)
+        }
+    }
 
+    static func productionJobs(from jobs: [SessionJob], sessions: [BoothSession]) -> [SessionJob] {
+        let sessionIDs = Set(sessions.filter(\.isNormalProductionSession).map(\.id))
+        return jobs.filter { sessionIDs.contains($0.sessionID) }
+    }
+}
+
+struct AdminDashboardView: View {
     @Environment(BoothCoordinator.self) private var coordinator
     @Environment(\.modelContext) private var modelContext
     @Environment(\.locale) private var locale
@@ -16,19 +39,27 @@ struct AdminDashboardView: View {
     @State private var endDate   = Date()
     @State private var selectedEventFilter: String? = nil   // nil = all events
     @State private var selectedSession: BoothSession? = nil
-    @State private var showClearPIN = false
     @State private var manifests: [String: SessionManifest] = [:]
+    @State private var diagnosticSessionIDs: Set<String> = []
+    @State private var manifestIndexLoaded = false
     @State private var galleryStatuses: [String: GalleryApprovalStatus] = [:]
 
 
     // MARK: - Derived data
 
+    private var productionHistorySessions: [BoothSession] {
+        guard manifestIndexLoaded else { return [] }
+        return AdminDashboardHistory.productionSessions(
+            from: allSessions,
+            startDate: startDate,
+            endDate: endDate,
+            eventID: selectedEventFilter,
+            excludingSessionIDs: diagnosticSessionIDs
+        )
+    }
+
     private var filteredSessions: [BoothSession] {
-        allSessions.filter {
-            $0.startedAt >= startDate && $0.startedAt <= Calendar.current.date(byAdding: .day, value: 1, to: endDate)!
-            && (selectedEventFilter == nil || $0.eventID == selectedEventFilter)
-            && $0.finishedAt != nil
-        }
+        productionHistorySessions.filter { $0.finishedAt != nil }
     }
 
     private var dayStats: [(date: Date, sessions: Int, photos: Int)] {
@@ -126,19 +157,10 @@ struct AdminDashboardView: View {
                 Button(action: exportCSV) {
                     Label("Export CSV", systemImage: "square.and.arrow.up")
                 }
-                Button(action: { showClearPIN = true }) {
-                    Label("Reset PIN", systemImage: "lock.rotation")
-                }
-                .help("Remove the admin PIN (you will be prompted to create a new one next time)")
             }
         }
-        .confirmationDialog("Reset Admin PIN?", isPresented: $showClearPIN) {
-            Button("Reset PIN", role: .destructive, action: onPINReset)
-            Button("Cancel", role: .cancel) {}
-        } message: {
-            Text("You will be asked to create a new PIN now.")
-        }
         .task(id: allSessions.count) {
+            manifestIndexLoaded = false
             await loadExperienceAnalytics()
         }
     }
@@ -215,11 +237,23 @@ struct AdminDashboardView: View {
         let successful = completedAttempts.filter { $0.result == .success || $0.result == .transferRecovered }.count
         let failed = completedAttempts.filter { $0.result == .failed }.count
         let receiveDurations = completedAttempts.compactMap(\.receiveDuration)
-        let started = allSessions.filter {
-            $0.startedAt >= startDate && $0.startedAt <= Calendar.current.date(byAdding: .day, value: 1, to: endDate)!
-                && (selectedEventFilter == nil || $0.eventID == selectedEventFilter)
-        }.count
+        let started = productionHistorySessions.count
         let completionRate = started == 0 ? 0 : Double(filteredSessions.count) / Double(started) * 100
+        let productionJobs = AdminDashboardHistory.productionJobs(
+            from: coordinator.jobQueue.jobs,
+            sessions: productionHistorySessions
+        )
+        let printJobs = productionJobs.filter { $0.kind == .autoPrint }
+        let confirmedPrints = printJobs.filter { $0.status == .succeeded }.count
+        let uncertainPrints = printJobs.filter {
+            $0.status == .running || $0.lastFailureDisposition == .sideEffectUnknown
+        }.count
+        let failedPrints = printJobs.filter {
+            $0.status == .failed && $0.lastFailureDisposition != .sideEffectUnknown
+        }.count
+        let failedCloudJobs = productionJobs.filter {
+            $0.kind == .cloudUpload && $0.status == .failed
+        }.count
         return GroupBox("Reliability") {
             LazyVGrid(columns: [GridItem(.adaptive(minimum: 145))], alignment: .leading, spacing: 12) {
                 ReliabilityMetric(title: "Capture Success", value: percentage(successful, total: successful + failed))
@@ -230,8 +264,8 @@ struct AdminDashboardView: View {
                 ReliabilityMetric(title: "Avg Receive", value: receiveDurations.isEmpty ? "—" : String(format: "%.1fs", receiveDurations.reduce(0, +) / Double(receiveDurations.count)))
                 ReliabilityMetric(title: "Completion Rate", value: String(format: "%.0f%%", completionRate))
                 ReliabilityMetric(title: "Cancelled Sessions", value: String(max(0, started - filteredSessions.count)))
-                ReliabilityMetric(title: "Prints", value: "\(coordinator.printer.printSuccessCount) ok / \(coordinator.printer.printFailureCount) failed")
-                ReliabilityMetric(title: "Cloud Queue", value: "\(coordinator.jobQueue.jobs.filter { $0.kind == .cloudUpload && $0.status == .failed }.count) failed")
+                ReliabilityMetric(title: "Event Prints", value: "\(confirmedPrints) ok / \(failedPrints) failed / \(uncertainPrints) unknown")
+                ReliabilityMetric(title: "Event Cloud Queue", value: "\(failedCloudJobs) failed")
             }
         }
     }
@@ -342,8 +376,15 @@ struct AdminDashboardView: View {
     private func loadExperienceAnalytics() async {
         let loadedManifests = await coordinator.manifestStore.loadAll()
         var byID: [String: SessionManifest] = [:]
+        var excludedIDs = Set<String>()
         for result in loadedManifests {
-            if case .loaded(let manifest) = result { byID[manifest.id] = manifest }
+            switch result {
+            case .loaded(let manifest):
+                byID[manifest.id] = manifest
+                if manifest.origin == .soakTest { excludedIDs.insert(manifest.id) }
+            case .failed(let fileURL, _):
+                excludedIDs.insert(fileURL.deletingPathExtension().lastPathComponent)
+            }
         }
 
         let loadedGalleries = await coordinator.galleryStore.loadAll()
@@ -354,7 +395,9 @@ struct AdminDashboardView: View {
             }
         }
         manifests = byID
+        diagnosticSessionIDs = excludedIDs
         galleryStatuses = statuses
+        manifestIndexLoaded = true
     }
 
     private func sessionDuration(_ s: BoothSession) -> String? {

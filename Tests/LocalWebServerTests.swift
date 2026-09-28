@@ -7,6 +7,205 @@ import CryptoKit
 
 @Suite("Local download server")
 struct LocalWebServerTests {
+    @Test("guest media routes are unavailable by default while health remains available")
+    func guestRoutesAreDisabledByDefault() async throws {
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try Data([1]).write(to: directory.appendingPathComponent("strip.png"))
+        try Data([2]).write(to: directory.appendingPathComponent("booth.gif"))
+        let thumbnail = directory.appendingPathComponent("gallery-thumb.jpg")
+        try Data([3]).write(to: thumbnail)
+
+        let sessionRegistration = SessionRouteRegistration(
+            sessionDirectory: directory,
+            language: .english,
+            eventGalleryPath: "/e/event-token/",
+            gifState: .ready
+        )
+        let galleryRoute = EventGalleryRouteRegistration(
+            eventID: "event-1",
+            eventToken: "event-token",
+            title: "Event",
+            language: .english,
+            showGIFLinks: true,
+            approvedSessions: [GalleryRouteSession(
+                sessionID: "session-1",
+                downloadToken: "token",
+                startedAt: .now,
+                thumbnailURL: thumbnail,
+                gifAvailable: true,
+                templateName: "Classic",
+                filterID: .original
+            )]
+        )
+        let server = LocalWebServer(port: 0)
+        await server.registerToken("token", registration: sessionRegistration)
+        await server.replaceGalleryRoutes(["event-token": galleryRoute])
+        try await server.start()
+        defer { Task { await server.stop() } }
+        let status = await server.waitUntilReady(timeout: 2)
+        guard case .ready(let port) = status.state else {
+            Issue.record("Server did not become ready: \(status)")
+            return
+        }
+
+        func statusCode(_ path: String) async throws -> Int {
+            let url = try #require(URL(string: "http://127.0.0.1:\(port)\(path)"))
+            let (_, response) = try await URLSession.shared.data(from: url)
+            return try #require((response as? HTTPURLResponse)?.statusCode)
+        }
+
+        for path in [
+            "/s/token/",
+            "/s/token/strip.png",
+            "/s/token/booth.gif",
+            "/e/event-token/",
+            "/e/event-token/station",
+            "/e/event-token/thumb/session-1.jpg"
+        ] {
+            #expect(try await statusCode(path) == 404, "Expected guest route \(path) to be closed")
+        }
+        #expect(try await statusCode("/health") == 200)
+        #expect(await server.statusSnapshot().registeredTokenCount == 0)
+
+        await server.setGuestRouteExposure(.trustedLocalHTTP)
+        await server.registerToken("token", registration: sessionRegistration)
+        await server.registerGuestRoute(path: "/s/soak/run-123/session-456", registration: sessionRegistration)
+        await server.replaceGalleryRoutes(["event-token": galleryRoute])
+        for path in [
+            "/s/token/",
+            "/s/token/strip.png",
+            "/s/token/booth.gif",
+            "/e/event-token/",
+            "/e/event-token/station",
+            "/e/event-token/thumb/session-1.jpg"
+        ] {
+            #expect(try await statusCode(path) == 200, "Expected guest route \(path) to open")
+        }
+        #expect(try await statusCode("/s/soak/run-123/session-456/strip.png") == 200)
+        #expect(try await statusCode("/s/session-456/strip.png") == 404)
+
+        await server.setGuestRouteExposure(.disabled)
+        #expect(await server.statusSnapshot().registeredTokenCount == 0)
+        for path in [
+            "/s/token/",
+            "/s/token/strip.png",
+            "/s/token/booth.gif",
+            "/e/event-token/",
+            "/e/event-token/station",
+            "/e/event-token/thumb/session-1.jpg"
+        ] {
+            #expect(try await statusCode(path) == 404, "Expected guest route \(path) to be revoked")
+        }
+        #expect(try await statusCode("/health") == 200)
+    }
+
+    @Test("a hidden soak route cannot be restored by a late job or route refresh")
+    func hiddenSoakRouteCannotBeRestored() async throws {
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try Data("normal guest output".utf8).write(to: directory.appendingPathComponent("strip.png"))
+
+        let registration = SessionRouteRegistration(
+            sessionDirectory: directory,
+            language: .english,
+            eventGalleryPath: nil,
+            gifState: .none
+        )
+        let soakPath = "/s/soak/run-hide/session-hide"
+        let server = LocalWebServer(port: 0)
+        await server.setGuestRouteExposure(.trustedLocalHTTP)
+        await server.registerToken("normal-token", registration: registration)
+        await server.registerGuestRoute(path: soakPath, registration: registration)
+        await server.hideGuestRoute(path: soakPath)
+        await server.registerGuestRoute(path: soakPath, registration: registration)
+        await server.replaceSessionRoutes([
+            "/s/normal-token": registration,
+            soakPath: registration
+        ])
+        try await server.start()
+        defer { Task { await server.stop() } }
+        let status = await server.waitUntilReady(timeout: 2)
+        guard case .ready(let port) = status.state else {
+            Issue.record("Server did not become ready: \(status)")
+            return
+        }
+
+        func statusCode(_ path: String) async throws -> Int {
+            let url = try #require(URL(string: "http://127.0.0.1:\(port)\(path)"))
+            let (_, response) = try await URLSession.shared.data(from: url)
+            return try #require((response as? HTTPURLResponse)?.statusCode)
+        }
+
+        #expect(try await statusCode("/s/normal-token/strip.png") == 200)
+        #expect(try await statusCode("\(soakPath)/strip.png") == 404)
+        #expect(await server.statusSnapshot().registeredTokenCount == 1)
+    }
+
+    @Test("hiding a soak route cancels an in-flight guest transfer")
+    func hidingSoakRouteCancelsInFlightTransfer() async throws {
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let media = Data("soak output being transferred".utf8)
+        try media.write(to: directory.appendingPathComponent("strip.png"))
+
+        let soakPath = "/s/soak/run-transfer/session-transfer"
+        let gate = AsyncTestGate()
+        let server = LocalWebServer(port: 0)
+        await server.setGuestRouteExposure(.trustedLocalHTTP)
+        await server.registerGuestRoute(path: soakPath, registration: SessionRouteRegistration(
+            sessionDirectory: directory,
+            language: .english,
+            eventGalleryPath: nil,
+            gifState: .none
+        ))
+        await server.setBeforeFileResponseForTesting { await gate.pause() }
+        try await server.start()
+        defer { Task { await gate.release(); await server.stop() } }
+        let status = await server.waitUntilReady(timeout: 2)
+        guard case .ready(let port) = status.state else {
+            Issue.record("Server did not become ready: \(status)")
+            return
+        }
+
+        let url = try #require(URL(string: "http://127.0.0.1:\(port)\(soakPath)/strip.png"))
+        let responseTask = Task { try await URLSession.shared.data(from: url) }
+        await gate.waitUntilPaused()
+        await server.hideGuestRoute(path: soakPath)
+        await gate.release()
+
+        if case .success(let (body, response)) = await responseTask.result {
+            let httpResponse = response as? HTTPURLResponse
+            #expect(httpResponse?.statusCode != 200 || body != media)
+        }
+    }
+
+    @Test("operator routes are closed until explicitly enabled")
+    func operatorRoutesAreDisabledByDefault() async throws {
+        let server = LocalWebServer(port: 0)
+        await server.configureOperatorHandlers(OperatorWebHandlers(
+            isEnabled: { false },
+            pair: { _ in nil },
+            authorize: { _ in false },
+            status: { .empty },
+            action: { _ in false },
+            events: { Data("[]".utf8) }
+        ))
+        try await server.start()
+        defer { Task { await server.stop() } }
+        let status = await server.waitUntilReady(timeout: 2)
+        guard case .ready(let port) = status.state else {
+            Issue.record("Server did not become ready: \(status)")
+            return
+        }
+
+        let url = try #require(URL(string: "http://127.0.0.1:\(port)/operator"))
+        let (body, response) = try await URLSession.shared.data(from: url)
+        let httpResponse = try #require(response as? HTTPURLResponse)
+        #expect(httpResponse.statusCode == 404)
+        #expect(String(decoding: body, as: UTF8.self).contains("pair") == false)
+    }
+
     @Test("bind failure is reported without crashing")
     @MainActor
     func bindFailureIsReported() async throws {
@@ -50,6 +249,7 @@ struct LocalWebServerTests {
         try original.write(to: directory.appendingPathComponent("booth.gif"))
 
         let server = LocalWebServer(port: 0)
+        await server.setGuestRouteExposure(.trustedLocalHTTP)
         await server.registerToken("token", registration: SessionRouteRegistration(
             sessionDirectory: directory,
             language: .english,
@@ -69,13 +269,295 @@ struct LocalWebServerTests {
         let httpResponse = try #require(response as? HTTPURLResponse)
         #expect(httpResponse.statusCode == 200)
         #expect(httpResponse.value(forHTTPHeaderField: "Content-Length") == String(original.count))
+        #expect(httpResponse.value(forHTTPHeaderField: "Cache-Control") == "no-store")
+        #expect(httpResponse.value(forHTTPHeaderField: "Referrer-Policy") == "no-referrer")
+        #expect(httpResponse.value(forHTTPHeaderField: "X-Content-Type-Options") == "nosniff")
         #expect(downloaded.count == original.count)
         #expect(Data(SHA256.hash(data: downloaded)) == Data(SHA256.hash(data: original)))
+    }
+
+    @Test("disabling guest routes cancels a selected media response before it is sent")
+    func disablingGuestRoutesCancelsSelectedMediaResponse() async throws {
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let media = Data("private guest media".utf8)
+        try media.write(to: directory.appendingPathComponent("strip.png"))
+
+        let gate = AsyncTestGate()
+        let server = LocalWebServer(port: 0)
+        await server.setGuestRouteExposure(.trustedLocalHTTP)
+        await server.registerToken("token", sessionDirectory: directory)
+        await server.setBeforeFileResponseForTesting { await gate.pause() }
+        try await server.start()
+        defer { Task { await gate.release(); await server.stop() } }
+        let status = await server.waitUntilReady(timeout: 2)
+        guard case .ready(let port) = status.state else {
+            Issue.record("Server did not become ready: \(status)")
+            return
+        }
+
+        let url = try #require(URL(string: "http://127.0.0.1:\(port)/s/token/strip.png"))
+        let responseTask = Task { try await URLSession.shared.data(from: url) }
+        await gate.waitUntilPaused()
+        await server.setGuestRouteExposure(.disabled)
+        await gate.release()
+
+        if case .success(let (body, response)) = await responseTask.result {
+            let httpResponse = response as? HTTPURLResponse
+            #expect(httpResponse?.statusCode != 200 || body != media)
+        }
+    }
+
+    @Test("per-client connection limit throttles excess concurrent requests from same client")
+    func perClientConnectionLimitThrottlesExcessRequests() async throws {
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let media = Data("throttle test".utf8)
+        try media.write(to: directory.appendingPathComponent("strip.png"))
+
+        let server = LocalWebServer(port: 0)
+        await server.setGuestRouteExposure(.trustedLocalHTTP)
+        await server.registerToken("token", sessionDirectory: directory)
+
+        let gate = AsyncTestMultiGate(expectedPauseCount: 8)
+        await server.setBeforeFileResponseForTesting { await gate.pause() }
+        try await server.start()
+        defer { Task { await gate.releaseAll(); await server.stop() } }
+        let status = await server.waitUntilReady(timeout: 2)
+        guard case .ready(let port) = status.state else {
+            Issue.record("Server did not become ready: \(status)")
+            return
+        }
+
+        let url = try #require(URL(string: "http://127.0.0.1:\(port)/s/token/strip.png"))
+        let sessionConfig = URLSessionConfiguration.ephemeral
+        sessionConfig.httpMaximumConnectionsPerHost = 16
+        sessionConfig.timeoutIntervalForRequest = 10
+        let session = URLSession(configuration: sessionConfig)
+
+        var tasks: [Task<Int, Error>] = []
+        for _ in 0..<8 {
+            tasks.append(Task {
+                let (_, response) = try await session.data(from: url)
+                return (response as? HTTPURLResponse)?.statusCode ?? 0
+            })
+        }
+
+        await gate.waitUntilAllPaused()
+
+        let (_, overflowResponse) = try await session.data(from: url)
+        let overflowStatus = (overflowResponse as? HTTPURLResponse)?.statusCode
+        #expect(overflowStatus == 503)
+
+        await gate.releaseAll()
+
+        for task in tasks {
+            let code = try await task.value
+            #expect(code == 200)
+        }
+    }
+
+    @Test("request timeout releases per-client capacity and active client records")
+    func requestTimeoutReleasesAdmissionCapacity() async throws {
+        let server = LocalWebServer(port: 0, requestTimeoutSeconds: 0.15)
+        try await server.start()
+        defer { Task { await server.stop() } }
+        let status = await server.waitUntilReady(timeout: 2)
+        guard case .ready(let port) = status.state else {
+            Issue.record("Server did not become ready: \(status)")
+            return
+        }
+
+        var slowConnections: [NWConnection] = []
+        for _ in 0..<8 {
+            slowConnections.append(try await openSlowConnection(port: port))
+        }
+        defer { slowConnections.forEach { $0.cancel() } }
+        try await waitUntilServer(server) { $0.activeConnections == 8 }
+        #expect(await server.connectionAdmissionSnapshot().perClientCounts.values.first == 8)
+
+        try await waitUntilServer(server) { $0.activeConnections == 0 }
+        let released = await server.connectionAdmissionSnapshot()
+        #expect(released.activeClientCount == 0)
+        #expect(released.perClientCounts.isEmpty)
+
+        let url = try #require(URL(string: "http://127.0.0.1:\(port)/health"))
+        let (_, response) = try await URLSession.shared.data(from: url)
+        #expect((response as? HTTPURLResponse)?.statusCode == 200)
+    }
+
+    @Test("connection admission enforces global cap with exact-once leases")
+    func globalConnectionLimitAndLeaseReleaseAreBounded() {
+        var admission = LocalWebServerConnectionAdmission(maximumConnections: 48, maximumPerClient: 8)
+        var leases: [LocalWebServerConnectionAdmission.Lease] = []
+        for clientIndex in 0..<6 {
+            for _ in 0..<8 {
+                let lease = admission.acquire(clientKey: "client-\(clientIndex)")
+                #expect(lease != nil)
+                if let lease { leases.append(lease) }
+            }
+        }
+
+        #expect(admission.snapshot.activeConnections == 48)
+        #expect(admission.acquire(clientKey: "new-client") == nil)
+        #expect(admission.snapshot.activeClientCount == 6)
+
+        let released = leases.removeFirst()
+        admission.release(released)
+        admission.release(released)
+        #expect(admission.snapshot.activeConnections == 47)
+        #expect(admission.acquire(clientKey: "client-0") != nil)
+
+        for lease in leases {
+            admission.release(lease)
+        }
+        #expect(admission.snapshot.activeConnections == 1)
+        #expect(admission.snapshot.activeClientCount == 1)
+    }
+
+    @Test("IPv6 address spellings share a normalized client identity")
+    func ipv6ClientIdentityIsCanonical() {
+        #expect(LocalWebServerClientIdentity.normalizedHost("2001:0db8:0:0:0:0:0:1")
+            == LocalWebServerClientIdentity.normalizedHost("2001:db8::1"))
+        #expect(LocalWebServerClientIdentity.normalizedHost("::ffff:192.0.2.9")
+            == LocalWebServerClientIdentity.normalizedHost("192.0.2.9"))
+    }
+}
+
+private func openSlowConnection(port: UInt16) async throws -> NWConnection {
+    let connection = NWConnection(
+        to: .hostPort(host: .ipv4(.loopback), port: NWEndpoint.Port(rawValue: port)!),
+        using: .tcp
+    )
+    let ready = ConnectionReadinessGate()
+    connection.stateUpdateHandler = { state in
+        switch state {
+        case .ready:
+            ready.resolve(.success(()))
+        case .failed(let error):
+            ready.resolve(.failure(error))
+        default:
+            break
+        }
+    }
+    connection.start(queue: DispatchQueue(label: "PRC-PhotoBooth.LocalWebServerTests.Client"))
+    let timeout = Task {
+        do {
+            try await Task.sleep(for: .seconds(2))
+            ready.resolve(.failure(TestError.missingPort))
+        } catch {}
+    }
+    defer { timeout.cancel() }
+    do {
+        try await ready.wait()
+    } catch {
+        connection.cancel()
+        throw error
+    }
+    return connection
+}
+
+private func waitUntilServer(
+    _ server: LocalWebServer,
+    timeout: TimeInterval = 2,
+    condition: (LocalWebServerConnectionAdmission.Snapshot) -> Bool
+) async throws {
+    let deadline = Date().addingTimeInterval(timeout)
+    while Date() < deadline {
+        if condition(await server.connectionAdmissionSnapshot()) { return }
+        try await Task.sleep(for: .milliseconds(10))
+    }
+    Issue.record("Timed out waiting for local server admission state.")
+}
+
+private final class ConnectionReadinessGate: @unchecked Sendable {
+    private let lock = NSLock()
+    private var continuation: CheckedContinuation<Void, Error>?
+    private var result: Result<Void, Error>?
+
+    func wait() async throws {
+        try await withCheckedThrowingContinuation { continuation in
+            lock.lock()
+            if let result {
+                lock.unlock()
+                continuation.resume(with: result)
+            } else {
+                self.continuation = continuation
+                lock.unlock()
+            }
+        }
+    }
+
+    func resolve(_ result: Result<Void, Error>) {
+        lock.lock()
+        guard case nil = self.result else {
+            lock.unlock()
+            return
+        }
+        self.result = result
+        let continuation = self.continuation
+        self.continuation = nil
+        lock.unlock()
+        continuation?.resume(with: result)
     }
 }
 
 private enum TestError: Error {
     case missingPort
+}
+
+private actor AsyncTestGate {
+    private var paused = false
+    private var pauseContinuation: CheckedContinuation<Void, Never>?
+    private var releaseContinuation: CheckedContinuation<Void, Never>?
+
+    func pause() async {
+        paused = true
+        pauseContinuation?.resume()
+        await withCheckedContinuation { releaseContinuation = $0 }
+    }
+
+    func waitUntilPaused() async {
+        guard !paused else { return }
+        await withCheckedContinuation { pauseContinuation = $0 }
+    }
+
+    func release() {
+        releaseContinuation?.resume()
+        releaseContinuation = nil
+    }
+}
+
+private actor AsyncTestMultiGate {
+    private let expectedPauseCount: Int
+    private var pausedCount = 0
+    private var allPausedContinuation: CheckedContinuation<Void, Never>?
+    private var releaseContinuations: [CheckedContinuation<Void, Never>] = []
+
+    init(expectedPauseCount: Int) {
+        self.expectedPauseCount = expectedPauseCount
+    }
+
+    func pause() async {
+        pausedCount += 1
+        if pausedCount >= expectedPauseCount {
+            allPausedContinuation?.resume()
+            allPausedContinuation = nil
+        }
+        await withCheckedContinuation { releaseContinuations.append($0) }
+    }
+
+    func waitUntilAllPaused() async {
+        guard pausedCount < expectedPauseCount else { return }
+        await withCheckedContinuation { allPausedContinuation = $0 }
+    }
+
+    func releaseAll() {
+        for cont in releaseContinuations {
+            cont.resume()
+        }
+        releaseContinuations.removeAll()
+    }
 }
 
 private func temporaryDirectory() throws -> URL {

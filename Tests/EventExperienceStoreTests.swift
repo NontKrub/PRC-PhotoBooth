@@ -9,6 +9,160 @@ import UniformTypeIdentifiers
 
 @Suite("EventExperienceStore")
 struct EventExperienceStoreTests {
+    @Test("SwiftData session origin defaults normal and restoration backfills soak metadata")
+    @MainActor
+    func sessionOriginPersistenceAndRestoration() {
+        let normal = BoothSession(eventID: "origin-default", photoCount: 1)
+        #expect(normal.origin == .normal)
+        #expect(normal.soakRunID == nil)
+
+        let legacy = BoothSession(eventID: "origin-legacy", photoCount: 1)
+        legacy.originRawValue = nil
+        #expect(legacy.origin == .normal)
+
+        let now = Date()
+        var manifest = SessionManifest(
+            schemaVersion: SessionManifest.currentSchemaVersion,
+            id: "origin-restore-\(UUID().uuidString)",
+            eventID: "origin-restore-event",
+            eventName: "Origin restore",
+            eventConfig: EventConfig(
+                eventID: "origin-restore-event",
+                eventName: "Origin restore",
+                photoCount: 1,
+                slots: [SharedPhotoSlot(normalizedRect: CGRect(x: 0, y: 0, width: 1, height: 1))]
+            ),
+            startedAt: now,
+            completedAt: nil,
+            cancelledAt: nil,
+            status: .capturing,
+            nextPhotoIndex: 0,
+            outputRootPath: "/tmp",
+            relativeDirectoryPath: "origin-restore",
+            absoluteDirectoryPath: "/tmp/origin-restore",
+            frameSnapshotFileName: nil,
+            stripFileName: nil,
+            gifFileName: nil,
+            downloadToken: "origin-restore-token",
+            shots: [],
+            lastError: nil,
+            updatedAt: now
+        )
+        manifest.origin = .soakTest
+        manifest.soakRunID = "run-restore"
+        manifest.soakCycleIndex = 12
+
+        let store = DataStore.shared
+        let restored = store.restoreSessionRecord(from: manifest)
+        defer { store.deleteSession(restored) }
+        #expect(restored.origin == .soakTest)
+        #expect(restored.originRawValue == SessionOrigin.soakTest.rawValue)
+        #expect(restored.soakRunID == "run-restore")
+        #expect(restored.soakCycleIndex == 12)
+
+        restored.originRawValue = nil
+        restored.soakRunID = nil
+        restored.soakCycleIndex = nil
+        #expect(store.saveChanges())
+        store.backfillSessionOrigin(from: manifest)
+        #expect(restored.origin == .soakTest)
+        #expect(restored.soakRunID == "run-restore")
+        #expect(restored.soakCycleIndex == 12)
+    }
+
+    @Test("dashboard production history excludes soak starts from its shared cohort")
+    @MainActor
+    func dashboardHistoryExcludesSoakStarts() {
+        let start = Date(timeIntervalSince1970: 1_700_000_000)
+        let normal = BoothSession(eventID: "event-history", photoCount: 1)
+        normal.startedAt = start
+        let soak = BoothSession(
+            eventID: "event-history",
+            photoCount: 1,
+            origin: .soakTest,
+            soakRunID: "history-run",
+            soakCycleIndex: 2
+        )
+        soak.startedAt = start
+
+        let cohort = AdminDashboardHistory.productionSessions(
+            from: [normal, soak],
+            startDate: start,
+            endDate: start,
+            eventID: "event-history"
+        )
+        #expect(cohort.map(\.id) == [normal.id])
+        #expect(cohort.filter { $0.finishedAt != nil }.count == 0)
+
+        let legacySoak = BoothSession(eventID: "event-history", photoCount: 1)
+        legacySoak.id = "legacy-soak-session"
+        legacySoak.originRawValue = nil
+        legacySoak.startedAt = start
+        let reconciled = AdminDashboardHistory.productionSessions(
+            from: [normal, legacySoak],
+            startDate: start,
+            endDate: start,
+            eventID: "event-history",
+            excludingSessionIDs: [legacySoak.id]
+        )
+        #expect(reconciled.map(\.id) == [normal.id])
+    }
+
+    @Test("dashboard event jobs exclude soak print and cloud work")
+    @MainActor
+    func dashboardJobsExcludeSoakActivity() {
+        let now = Date()
+        let normal = BoothSession(eventID: "event-jobs", photoCount: 1)
+        let soak = BoothSession(
+            eventID: "event-jobs",
+            photoCount: 1,
+            origin: .soakTest,
+            soakRunID: "run-jobs",
+            soakCycleIndex: 1
+        )
+        func job(_ session: BoothSession, _ kind: SessionJobKind, _ status: SessionJobStatus) -> SessionJob {
+            SessionJob(
+                id: UUID().uuidString,
+                sessionID: session.id,
+                kind: kind,
+                status: status,
+                createdAt: now,
+                updatedAt: now,
+                lastAttemptAt: nil,
+                nextAttemptAt: nil,
+                attemptCount: 0,
+                lastError: nil
+            )
+        }
+        let jobs = [
+            job(normal, .autoPrint, .succeeded),
+            job(normal, .cloudUpload, .failed),
+            job(soak, .autoPrint, .failed),
+            job(soak, .cloudUpload, .failed)
+        ]
+
+        let productionJobs = AdminDashboardHistory.productionJobs(from: jobs, sessions: [normal, soak])
+        #expect(productionJobs.count == 2)
+        #expect(productionJobs.allSatisfy { $0.sessionID == normal.id })
+    }
+
+    @Test("cleanup record deletion is safe to retry after the record is absent")
+    @MainActor
+    func cleanupSessionRecordDeletionIsIdempotent() throws {
+        let store = DataStore.shared
+        let event = store.createEvent(name: "Soak cleanup \(UUID().uuidString)", photoCount: 1)
+        let session = store.startSession(
+            for: event,
+            origin: .soakTest,
+            soakRunID: "cleanup-retry-\(UUID().uuidString)",
+            soakCycleIndex: 1
+        )
+        let sessionID = session.id
+        try store.deleteSessionRecordIfPresent(sessionID: sessionID)
+        try store.deleteSessionRecordIfPresent(sessionID: sessionID)
+        #expect(store.fetchSession(id: sessionID) == nil)
+    }
+
     @Test("new events without legacy slots receive usable template slots")
     func createsDefaultSlotsForNewEvent() async throws {
         let root = try temporaryDirectory()
@@ -536,6 +690,60 @@ struct EventExperienceStoreTests {
         #expect((try await store.load(eventID: "event-1")).templates[0].frameFileName == "frame.png")
     }
 
+    @Test("committed editor state survives a later preview rebuild failure")
+    func committedStateSurvivesPreviewFailure() async throws {
+        let root = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = EventExperienceStore(baseDirectory: root)
+        let original = document(for: validTemplate())
+        try await store.save(original)
+
+        var committed = original
+        committed.templates[0].name = LocalizedText(english: "Saved", thai: "")
+        let session = try await store.beginEditing(eventID: "event-1")
+        try await store.commitEditing(session, document: committed)
+
+        let templateDirectory = root.appendingPathComponent(
+            "EventExperiences/event-1/Templates/\(committed.templates[0].id)"
+        )
+        try FileManager.default.createDirectory(at: templateDirectory, withIntermediateDirectories: true)
+        try FileManager.default.removeItem(at: templateDirectory)
+        try Data([1]).write(to: templateDirectory)
+
+        let result = try await store.rebuildPreviews(eventID: "event-1")
+
+        #expect(result.failures.count == 1)
+        #expect((try await store.load(eventID: "event-1")).templates[0].name.english == "Saved")
+        #expect(!FileManager.default.fileExists(atPath: root.appendingPathComponent(
+            "EventExperiences/.editor-staging/\(session.id)"
+        ).path))
+    }
+
+    @Test("rebuilding previews makes a newly added second template publishable")
+    func rebuildsPreviewBeforePublishingSecondTemplate() async throws {
+        let root = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = EventExperienceStore(baseDirectory: root)
+        let first = validTemplate(id: "template-1")
+        let original = document(for: first)
+        try await store.save(original)
+
+        var edited = original
+        edited.templates.append(validTemplate(id: "template-2"))
+        let session = try await store.beginEditing(eventID: "event-1")
+        try await store.commitEditing(session, document: edited)
+
+        let result = try await store.rebuildPreviews(eventID: "event-1")
+        let previews = try await store.readTemplatePreviews(
+            eventID: "event-1",
+            templates: result.document.templates
+        )
+
+        #expect(result.failures.isEmpty)
+        #expect(result.document.templates.allSatisfy { $0.previewFileName == "preview.jpg" })
+        #expect(previews.keys.count == 2)
+    }
+
     @Test("new staged frame disappears when editing is cancelled")
     func discardsNewStagedFrame() async throws {
         let root = try temporaryDirectory()
@@ -599,10 +807,14 @@ struct EventExperienceStoreTests {
     @Test("bulk preview reads honor cancellation")
     func cancelsPreviewReads() async throws {
         let store = EventExperienceStore(baseDirectory: try temporaryDirectory())
+        let (stream, continuation) = AsyncStream<Void>.makeStream()
         let task = Task {
-            try await store.readTemplatePreviews(eventID: "event-1", templates: [])
+            for await _ in stream { break }
+            _ = try await store.readTemplatePreviews(eventID: "event-1", templates: [])
         }
         task.cancel()
+        continuation.yield(())
+        continuation.finish()
 
         do {
             _ = try await task.value

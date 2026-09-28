@@ -5,6 +5,36 @@ import Foundation
 
 @Suite("LocalDownloadRouter")
 struct LocalDownloadRouterTests {
+    @Test("disabled exposure blocks normalized guest routes before file streaming")
+    func disabledExposureBlocksGuestRoutes() throws {
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try Data([1]).write(to: directory.appendingPathComponent("strip.png"))
+        let router = LocalDownloadRouter(
+            sessionRoutes: [
+                "token": SessionRouteRegistration(
+                    sessionDirectory: directory,
+                    language: .english,
+                    eventGalleryPath: nil,
+                    gifState: .none
+                )
+            ],
+            galleryRoutes: [:]
+        )
+
+        #expect(router.response(for: "/health").statusCode == 200)
+        #expect(router.response(for: "/s/token/").statusCode == 404)
+        #expect(router.route(for: "/s/token/strip.png") == .response(LocalDownloadResponse(
+            statusCode: 404,
+            reason: "Not Found",
+            contentType: "text/plain; charset=utf-8",
+            headers: [:],
+            body: Data("Not found".utf8)
+        )))
+        #expect(router.route(for: "//s/token/strip.png") == router.route(for: "/s/token/strip.png"))
+        #expect(router.route(for: "/%252Fs%252Ftoken%252Fstrip.png") == router.route(for: "/s/token/strip.png"))
+    }
+
     @Test("serves health, HTML, and strip routes")
     func servesKnownRoutes() throws {
         let directory = try temporaryDirectory()
@@ -19,7 +49,7 @@ struct LocalDownloadRouterTests {
                 eventGalleryPath: nil,
                 gifState: .none
             )
-        ], galleryRoutes: [:])
+        ], galleryRoutes: [:], guestRouteExposure: .trustedLocalHTTP)
         let health = router.response(for: "/health")
         let page = router.response(for: "/s/token/")
         let image = router.response(for: "/s/token/strip.png")
@@ -34,6 +64,34 @@ struct LocalDownloadRouterTests {
         #expect(image.body == Data([1, 2, 3]))
     }
 
+    @Test("serves run-scoped soak routes without exposing the normal token route")
+    func servesRunScopedSoakRoute() throws {
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try Data([8, 9, 10]).write(to: directory.appendingPathComponent("strip.png"))
+        let route = "/s/soak/run-123/session-456"
+        let router = LocalDownloadRouter(
+            sessionRoutes: [
+                route: SessionRouteRegistration(
+                    sessionDirectory: directory,
+                    language: .english,
+                    eventGalleryPath: nil,
+                    gifState: .none
+                )
+            ],
+            galleryRoutes: [:],
+            guestRouteExposure: .trustedLocalHTTP
+        )
+
+        let page = router.response(for: route + "/")
+        let strip = router.response(for: route + "/strip.png")
+        #expect(page.statusCode == 200)
+        #expect(String(decoding: page.body, as: UTF8.self).contains(route + "/strip.png"))
+        #expect(strip.statusCode == 200)
+        #expect(strip.body == Data([8, 9, 10]))
+        #expect(router.response(for: "/s/session-456/strip.png").statusCode == 404)
+    }
+
     @Test("shows GIF only when file exists and returns 404 for unknown files")
     func handlesOptionalGIF() throws {
         let directory = try temporaryDirectory()
@@ -45,7 +103,7 @@ struct LocalDownloadRouterTests {
                 eventGalleryPath: nil,
                 gifState: .ready
             )
-        ], galleryRoutes: [:])
+        ], galleryRoutes: [:], guestRouteExposure: .trustedLocalHTTP)
 
         let withoutGIF = router.response(for: "/s/token/")
         #expect(!String(decoding: withoutGIF.body, as: UTF8.self).contains("booth.gif"))
@@ -70,7 +128,7 @@ struct LocalDownloadRouterTests {
                 eventGalleryPath: nil,
                 gifState: .ready
             )
-        ], galleryRoutes: [:])
+        ], galleryRoutes: [:], guestRouteExposure: .trustedLocalHTTP)
 
         guard case .file(let response) = router.route(for: "/s/token/booth.gif") else {
             Issue.record("Expected a streaming file route")
@@ -89,7 +147,7 @@ struct LocalDownloadRouterTests {
         try Data(repeating: 1, count: 11 * 1024 * 1024).write(to: directory.appendingPathComponent("booth.gif"))
         let router = LocalDownloadRouter(sessionRoutes: [
             "token": SessionRouteRegistration(sessionDirectory: directory, language: .english, eventGalleryPath: nil, gifState: .ready)
-        ], galleryRoutes: [:])
+        ], galleryRoutes: [:], guestRouteExposure: .trustedLocalHTTP)
 
         let page = String(decoding: router.response(for: "/s/token/").body, as: UTF8.self)
         #expect(page.contains("Download GIF ·"))
@@ -102,7 +160,7 @@ struct LocalDownloadRouterTests {
         defer { try? FileManager.default.removeItem(at: directory) }
         let router = LocalDownloadRouter(sessionRoutes: [
             "token": SessionRouteRegistration(sessionDirectory: directory, language: .english, eventGalleryPath: nil, gifState: .preparing)
-        ], galleryRoutes: [:])
+        ], galleryRoutes: [:], guestRouteExposure: .trustedLocalHTTP)
         let page = String(decoding: router.response(for: "/s/token/").body, as: UTF8.self)
         #expect(page.contains("Preparing GIF"))
         #expect(page.contains("strip.png"))
@@ -120,7 +178,7 @@ struct LocalDownloadRouterTests {
                 eventGalleryPath: nil,
                 gifState: .failed
             )
-        ], galleryRoutes: [:])
+        ], galleryRoutes: [:], guestRouteExposure: .trustedLocalHTTP)
 
         let page = String(decoding: router.response(for: "/s/token/").body, as: UTF8.self)
         #expect(page.contains("GIF unavailable"))
@@ -133,7 +191,7 @@ struct LocalDownloadRouterTests {
         let directory = try temporaryDirectory()
         defer { try? FileManager.default.removeItem(at: directory) }
         try Data([1]).write(to: directory.appendingPathComponent("strip.png"))
-        let router = LocalDownloadRouter(tokenMap: ["token": directory])
+        let router = LocalDownloadRouter(tokenMap: ["token": directory], guestRouteExposure: .trustedLocalHTTP)
 
         for path in [
             "/s/token/../strip.png",

@@ -12,6 +12,111 @@ public enum BoothNetworkInterfacePolicy: String, Equatable, Hashable, Sendable {
     case wiredEthernet
 }
 
+enum BoothRouteCandidateProvenance: String, Codable, Equatable, Hashable, Sendable {
+    case localNetworkBonjour = "Wi-Fi Bonjour"
+    case ethernetConstrainedBonjour = "Ethernet-constrained Bonjour"
+    case ethernetCompatibilityBonjour = "Ethernet compatibility Bonjour"
+    case directStaticLAN = "Direct Ethernet static"
+
+    var interface: BoothNetworkInterfacePolicy {
+        switch self {
+        case .localNetworkBonjour:
+            return .wifi
+        case .ethernetConstrainedBonjour, .ethernetCompatibilityBonjour, .directStaticLAN:
+            return .wiredEthernet
+        }
+    }
+}
+
+enum BoothRouteDiscoveryMechanism: Equatable, Sendable {
+    case wifiBonjour
+    case wiredEthernetBonjour
+    case wiredEthernetCompatibilityBonjour
+}
+
+struct BoothRouteDiscoveryPlan: Equatable, Sendable {
+    let mechanisms: [BoothRouteDiscoveryMechanism]
+
+    init(preference: BoothNetworkPreference) {
+        switch preference {
+        case .wifi:
+            mechanisms = [.wifiBonjour]
+        case .lan:
+            mechanisms = [
+                .wiredEthernetBonjour,
+                .wiredEthernetCompatibilityBonjour,
+                .wifiBonjour
+            ]
+        }
+    }
+}
+
+struct BoothBonjourServiceIdentity: Equatable, Sendable {
+    let channel: BoothTransportChannel
+    let deviceID: String
+
+    static func serviceName(channel: BoothTransportChannel, deviceID: String) -> String {
+        let channelName: String
+        switch channel {
+        case .control: channelName = "Control"
+        case .preview: channelName = "Preview"
+        case .asset: channelName = "Asset"
+        case .heartbeat: channelName = "Control"
+        }
+        return "PRC PhotoBooth \(channelName) \(deviceID)"
+    }
+
+    static func parse(_ serviceName: String) -> Self? {
+        let prefix = "PRC PhotoBooth "
+        guard serviceName.hasPrefix(prefix) else { return nil }
+        let components = serviceName.dropFirst(prefix.count).split(separator: " ", maxSplits: 1)
+        guard components.count == 2,
+              let channel = channel(for: String(components[0])) else {
+            return nil
+        }
+
+        var deviceID = String(components[1])
+        if let collisionStart = deviceID.range(of: " (", options: .backwards),
+           deviceID.hasSuffix(")") {
+            deviceID.removeSubrange(collisionStart.lowerBound..<deviceID.endIndex)
+        }
+        guard UUID(uuidString: deviceID) != nil else { return nil }
+        return Self(channel: channel, deviceID: deviceID)
+    }
+
+    static func deviceID(from serviceName: String) -> String? {
+        parse(serviceName)?.deviceID
+    }
+
+    private static func channel(for name: String) -> BoothTransportChannel? {
+        switch name {
+        case "Control": return .control
+        case "Preview": return .preview
+        case "Asset": return .asset
+        default: return nil
+        }
+    }
+}
+
+enum BoothRouteCandidatePolicy {
+    static func discoveryProvenance(
+        interface: BoothNetworkInterfacePolicy,
+        isLANCompatibilityFallback: Bool
+    ) -> BoothRouteCandidateProvenance {
+        if isLANCompatibilityFallback { return .ethernetCompatibilityBonjour }
+        return interface == .wifi
+            ? .localNetworkBonjour
+            : .ethernetConstrainedBonjour
+    }
+
+    static func shouldRejectNonEthernetPath(
+        provenance: BoothRouteCandidateProvenance
+    ) -> Bool {
+        provenance == .ethernetConstrainedBonjour
+            || provenance == .ethernetCompatibilityBonjour
+    }
+}
+
 public enum BoothEffectiveNetworkTransport: String, Codable, Equatable, Sendable {
     case wifi
     case lan
@@ -45,6 +150,21 @@ public enum BoothNetworkRouteCommand: Equatable, Sendable {
     case none
 }
 
+enum BoothPreviewIdentityMatch: Equatable, Sendable {
+    case awaitingHello
+    case matched
+    case mismatched
+}
+
+func comparePreviewPeerWithControlPeer(
+    previewPeerID: String?,
+    controlPeerID: String?
+) -> BoothPreviewIdentityMatch {
+    guard let previewPeerID else { return .awaitingHello }
+    guard let controlPeerID else { return .mismatched }
+    return previewPeerID == controlPeerID ? .matched : .mismatched
+}
+
 struct BoothRouteDiscoverySelection: Equatable, Sendable {
     enum Decision: Equatable, Sendable {
         case accepted
@@ -58,12 +178,13 @@ struct BoothRouteDiscoverySelection: Equatable, Sendable {
     mutating func consider(
         _ interface: BoothNetworkInterfacePolicy,
         preferredPreference: BoothNetworkPreference,
-        advertisedPreference: BoothNetworkPreference? = nil
+        advertisedPreference _: BoothNetworkPreference? = nil
     ) -> Decision {
         guard selectedInterface == nil else { return .ignored }
 
-        let preference = advertisedPreference ?? preferredPreference
-        let preferredInterface: BoothNetworkInterfacePolicy = preference == .lan ? .wiredEthernet : .wifi
+        let preferredInterface: BoothNetworkInterfacePolicy = preferredPreference == .lan
+            ? .wiredEthernet
+            : .wifi
         guard interface != preferredInterface else {
             selectedInterface = interface
             pendingInterface = nil
@@ -84,6 +205,28 @@ struct BoothRouteDiscoverySelection: Equatable, Sendable {
     mutating func reset() {
         selectedInterface = nil
         pendingInterface = nil
+    }
+}
+
+enum BoothRouteDiscoveryDecision: Equatable, Sendable {
+    case reuse
+    case restart
+}
+
+enum BoothRouteDiscoveryPolicy {
+    static func decision(
+        targetPeerID: String?,
+        requestedPreference: BoothNetworkPreference,
+        activeTargetPeerID: String?,
+        activePreference: BoothNetworkPreference?,
+        hasActiveDiscovery: Bool,
+        hasActiveControlAttempt: Bool
+    ) -> BoothRouteDiscoveryDecision {
+        guard hasActiveDiscovery || hasActiveControlAttempt,
+              requestedPreference == activePreference else {
+            return .restart
+        }
+        return .reuse
     }
 }
 
@@ -155,10 +298,41 @@ public struct BoothNetworkRouteMachine: Equatable, Sendable {
         startWiFiIfAvailable(wifiAvailable, fallback: true)
     }
 
-    public mutating func lanPathChanged(isAvailable: Bool, wifiAvailable: Bool) -> BoothNetworkRouteCommand {
-        guard !isAvailable else { return .none }
+    public mutating func manualPreferredLANRetry(
+        lanAvailable _: Bool,
+        wifiAvailable _: Bool,
+        boothIsIdle: Bool
+    ) -> BoothNetworkRouteCommand {
+        guard preference == .lan,
+              case .fallbackWiFi = state,
+              boothIsIdle else { return .none }
+        state = .connectingLAN
+        return .startLAN
+    }
+
+    public mutating func lanPathChanged(
+        isAvailable: Bool,
+        wifiAvailable: Bool,
+        boothIsIdle: Bool = true
+    ) -> BoothNetworkRouteCommand {
+        if isAvailable {
+            switch state {
+            case .disconnected where preference == .lan:
+                state = .connectingLAN
+                return .startLAN
+            case .fallbackWiFi where boothIsIdle:
+                state = .connectingLAN
+                return .startLAN
+            default:
+                return .none
+            }
+        }
         switch state {
-        case .connectingLAN, .connectedLAN:
+        case .connectingLAN:
+            // A first monitor sample can arrive before a direct Ethernet route is ready.
+            // The connection/hello result is authoritative while this attempt is probing.
+            return .none
+        case .connectedLAN:
             return startWiFiIfAvailable(wifiAvailable, fallback: true)
         case .disconnected, .connectingWiFi, .connectedWiFi, .fallbackWiFi:
             return .none
@@ -166,7 +340,15 @@ public struct BoothNetworkRouteMachine: Equatable, Sendable {
     }
 
     public mutating func wifiPathChanged(isAvailable: Bool, lanAvailable: Bool) -> BoothNetworkRouteCommand {
-        guard !isAvailable else { return .none }
+        if isAvailable {
+            guard case .disconnected = state else { return .none }
+            switch preference {
+            case .wifi:
+                return startWiFiIfAvailable(true, fallback: false)
+            case .lan:
+                return lanAvailable ? .none : startWiFiIfAvailable(true, fallback: true)
+            }
+        }
         switch state {
         case .connectingWiFi, .connectedWiFi, .fallbackWiFi:
             if preference == .lan, lanAvailable {

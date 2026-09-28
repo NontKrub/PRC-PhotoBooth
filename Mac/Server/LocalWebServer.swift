@@ -1,5 +1,6 @@
 import Foundation
 import Network
+import Darwin
 
 enum LocalWebServerState: Sendable, Equatable {
     case stopped
@@ -8,13 +9,18 @@ enum LocalWebServerState: Sendable, Equatable {
     case failed(message: String)
 }
 
+enum LocalGuestRouteExposure: Sendable, Equatable {
+    case disabled
+    case trustedLocalHTTP
+}
+
 struct LocalWebServerStatus: Sendable, Equatable {
     var state: LocalWebServerState
     var registeredTokenCount: Int
 }
 
 struct OperatorWebHandlers: Sendable {
-    var pairingURL: @MainActor @Sendable () -> String
+    var isEnabled: @MainActor @Sendable () -> Bool
     var pair: @MainActor @Sendable (String) -> String?
     var authorize: @MainActor @Sendable (String) -> Bool
     var status: @MainActor @Sendable () async -> BoothHealthSnapshot
@@ -23,17 +29,46 @@ struct OperatorWebHandlers: Sendable {
 }
 
 actor LocalWebServer {
+    private struct ActiveGuestConnection {
+        let connection: NWConnection
+        let sessionRoute: String?
+    }
+
+    private static let maximumActiveConnections = 48
+    private static let maximumActiveConnectionsPerClient = 8
+    private static let fileChunkTimeoutNanoseconds: UInt64 = 15_000_000_000
+    private static let securityHeaders = [
+        "Cache-Control": "no-store",
+        "Referrer-Policy": "no-referrer",
+        "X-Content-Type-Options": "nosniff",
+        "Content-Security-Policy": "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; img-src 'self' data:; base-uri 'none'; frame-ancestors 'none'"
+    ]
+
     private var listener: NWListener?
     let port: UInt16
     private var sessionRoutes: [String: SessionRouteRegistration] = [:]
+    private var hiddenGuestRoutes = Set<String>()
     private var galleryRoutes: [String: EventGalleryRouteRegistration] = [:]
+    private var guestRouteExposure: LocalGuestRouteExposure = .disabled
+    private var guestRouteGeneration: UInt64 = 0
+    private var activeGuestConnections: [UUID: ActiveGuestConnection] = [:]
     private var operatorHandlers: OperatorWebHandlers?
     private var activePort: UInt16?
+    private var connectionAdmission = LocalWebServerConnectionAdmission(
+        maximumConnections: maximumActiveConnections,
+        maximumPerClient: maximumActiveConnectionsPerClient
+    )
+    private let requestTimeoutNanoseconds: UInt64
+#if DEBUG
+    private var beforeFileResponseForTesting: (@Sendable () async -> Void)?
+#endif
+    private let ioQueue = DispatchQueue(label: "PRC-PhotoBooth.LocalWebServer", qos: .utility, attributes: .concurrent)
 
     private var state: LocalWebServerState = .stopped
 
-    init(port: UInt16 = 8585) {
+    init(port: UInt16 = 8585, requestTimeoutSeconds: TimeInterval = 10) {
         self.port = port
+        requestTimeoutNanoseconds = UInt64(max(0.001, requestTimeoutSeconds) * 1_000_000_000)
     }
 
     func registerToken(_ token: String, sessionDirectory: URL) {
@@ -47,18 +82,46 @@ actor LocalWebServer {
     }
 
     func registerToken(_ token: String, registration: SessionRouteRegistration) {
-        guard !token.isEmpty else { return }
-        sessionRoutes[token] = registration
+        registerGuestRoute(path: "/s/\(token)", registration: registration)
+    }
+
+    func registerGuestRoute(path: String, registration: SessionRouteRegistration) {
+        guard guestRouteExposure == .trustedLocalHTTP,
+              let route = LocalDownloadRouter.canonicalSessionRouteKey(path),
+              !hiddenGuestRoutes.contains(route) else { return }
+        sessionRoutes[route] = registration
+    }
+
+    /// Permanently hides a session route for this server lifetime. This also
+    /// prevents an already-running finalization job from restoring it after
+    /// cleanup has removed the current registration.
+    func hideGuestRoute(path: String) {
+        guard let route = LocalDownloadRouter.canonicalSessionRouteKey(path) else { return }
+        hiddenGuestRoutes.insert(route)
+        sessionRoutes.removeValue(forKey: route)
+        for active in activeGuestConnections.values where active.sessionRoute == route {
+            active.connection.cancel()
+        }
     }
 
     func unregisterToken(_ token: String) {
-        sessionRoutes.removeValue(forKey: token)
+        unregisterGuestRoute(path: "/s/\(token)")
+    }
+
+    func unregisterGuestRoute(path: String) {
+        guard let route = LocalDownloadRouter.canonicalSessionRouteKey(path) else { return }
+        sessionRoutes.removeValue(forKey: route)
     }
 
     func replaceTokenMap(_ mappings: [String: URL]) {
+        guard guestRouteExposure == .trustedLocalHTTP else {
+            sessionRoutes.removeAll()
+            return
+        }
         sessionRoutes = mappings.reduce(into: [:]) { result, mapping in
-            guard !mapping.key.isEmpty else { return }
-            result[mapping.key] = SessionRouteRegistration(
+            guard let route = LocalDownloadRouter.canonicalSessionRouteKey(mapping.key),
+                  !hiddenGuestRoutes.contains(route) else { return }
+            result[route] = SessionRouteRegistration(
                 sessionDirectory: mapping.value.standardizedFileURL,
                 language: .english,
                 eventGalleryPath: nil,
@@ -68,25 +131,58 @@ actor LocalWebServer {
     }
 
     func replaceSessionRoutes(_ mappings: [String: SessionRouteRegistration]) {
+        guard guestRouteExposure == .trustedLocalHTTP else {
+            sessionRoutes.removeAll()
+            return
+        }
         sessionRoutes = mappings.reduce(into: [:]) { result, mapping in
-            guard !mapping.key.isEmpty else { return }
-            result[mapping.key] = mapping.value
+            guard let route = LocalDownloadRouter.canonicalSessionRouteKey(mapping.key),
+                  !hiddenGuestRoutes.contains(route) else { return }
+            result[route] = mapping.value
         }
     }
 
     func replaceGalleryRoutes(_ mappings: [String: EventGalleryRouteRegistration]) {
+        guard guestRouteExposure == .trustedLocalHTTP else {
+            galleryRoutes.removeAll()
+            return
+        }
         galleryRoutes = mappings.reduce(into: [:]) { result, mapping in
             guard !mapping.key.isEmpty else { return }
             result[mapping.key] = mapping.value
         }
     }
 
+    func setGuestRouteExposure(_ exposure: LocalGuestRouteExposure) {
+        if guestRouteExposure != exposure {
+            guestRouteGeneration &+= 1
+        }
+        guestRouteExposure = exposure
+        guard exposure == .disabled else { return }
+        sessionRoutes.removeAll()
+        galleryRoutes.removeAll()
+        for active in activeGuestConnections.values {
+            active.connection.cancel()
+        }
+        activeGuestConnections.removeAll()
+    }
+
     func configureOperatorHandlers(_ handlers: OperatorWebHandlers) {
         operatorHandlers = handlers
     }
 
+#if DEBUG
+    func setBeforeFileResponseForTesting(_ handler: (@Sendable () async -> Void)?) {
+        beforeFileResponseForTesting = handler
+    }
+#endif
+
     func statusSnapshot() -> LocalWebServerStatus {
         LocalWebServerStatus(state: state, registeredTokenCount: sessionRoutes.count)
+    }
+
+    func connectionAdmissionSnapshot() -> LocalWebServerConnectionAdmission.Snapshot {
+        connectionAdmission.snapshot
     }
 
     func waitUntilReady(timeout: TimeInterval = 5) async -> LocalWebServerStatus {
@@ -127,7 +223,7 @@ actor LocalWebServer {
             listener.newConnectionHandler = { [weak self] connection in
                 Task { await self?.handle(connection) }
             }
-            listener.start(queue: .global(qos: .utility))
+            listener.start(queue: ioQueue)
             self.listener = listener
         } catch {
             state = .failed(message: error.localizedDescription)
@@ -159,53 +255,134 @@ actor LocalWebServer {
         }
     }
 
+    private func clientHost(for connection: NWConnection) -> String? {
+        switch connection.endpoint {
+        case .hostPort(let host, _):
+            return LocalWebServerClientIdentity.normalizedHost("\(host)")
+        default:
+            return connection.endpoint.debugDescription
+        }
+    }
+
     private func handle(_ connection: NWConnection) async {
+        let clientKey = clientHost(for: connection)
+        guard let admission = connectionAdmission.acquire(clientKey: clientKey) else {
+            connection.start(queue: ioQueue)
+            _ = await send(connection, data: secured(busy()).httpData, timeoutNanoseconds: Self.fileChunkTimeoutNanoseconds)
+            connection.cancel()
+            return
+        }
+        defer { connectionAdmission.release(admission) }
         defer { connection.cancel() }
-        connection.start(queue: .global(qos: .utility))
+        connection.start(queue: ioQueue)
         var parser = HTTPServerRequestParser()
         var request: HTTPServerRequest?
+        let deadline = DispatchTime.now().uptimeNanoseconds + requestTimeoutNanoseconds
         do {
-            while request == nil, let data = await receive(from: connection) {
+            while request == nil, let data = await receive(from: connection, deadline: deadline) {
                 request = try parser.append(data)
             }
         } catch {
-            _ = await send(connection, data: errorResponse(for: error).httpData)
+            _ = await send(connection, data: secured(errorResponse(for: error)).httpData, timeoutNanoseconds: Self.fileChunkTimeoutNanoseconds)
             return
         }
         guard let request else {
-            _ = await send(connection, data: errorResponse(for: HTTPServerRequestError.malformed).httpData)
+            _ = await send(connection, data: secured(errorResponse(for: HTTPServerRequestError.malformed)).httpData, timeoutNanoseconds: Self.fileChunkTimeoutNanoseconds)
             return
+        }
+        let isGuestRequest = LocalDownloadRouter.isGuestMediaPath(request.path)
+        let guestGeneration = guestRouteGeneration
+        let guestConnectionID = isGuestRequest ? UUID() : nil
+        if let guestConnectionID {
+            activeGuestConnections[guestConnectionID] = ActiveGuestConnection(
+                connection: connection,
+                sessionRoute: LocalDownloadRouter.canonicalSessionRouteKey(forRequestPath: request.path)
+            )
+        }
+        defer {
+            if let guestConnectionID {
+                activeGuestConnections.removeValue(forKey: guestConnectionID)
+            }
         }
         switch await route(for: request) {
         case .response(let response):
-            _ = await send(connection, data: response.httpData)
+            guard !isGuestRequest || guestGeneration == guestRouteGeneration else {
+                connection.cancel()
+                return
+            }
+            _ = await send(connection, data: secured(response).httpData, timeoutNanoseconds: Self.fileChunkTimeoutNanoseconds)
         case .file(let response):
+#if DEBUG
+            await beforeFileResponseForTesting?()
+#endif
+            guard !isGuestRequest
+                    || (guestGeneration == guestRouteGeneration && guestRouteExposure == .trustedLocalHTTP) else {
+                connection.cancel()
+                return
+            }
             await send(connection, file: response)
         }
     }
 
-    private func receive(from connection: NWConnection) async -> Data? {
-        await withCheckedContinuation { continuation in
-            connection.receive(minimumIncompleteLength: 1, maximumLength: 64 * 1024) { data, _, isComplete, error in
-                guard error == nil, let data, !data.isEmpty else {
-                    continuation.resume(returning: nil)
-                    return
+    private func receive(from connection: NWConnection, deadline: UInt64) async -> Data? {
+        let now = DispatchTime.now().uptimeNanoseconds
+        guard deadline > now else {
+            connection.cancel()
+            return nil
+        }
+        let remaining = deadline - now
+        return await withTaskGroup(of: Data?.self) { group in
+            group.addTask {
+                await withCheckedContinuation { continuation in
+                    connection.receive(minimumIncompleteLength: 1, maximumLength: 64 * 1024) { data, _, _, error in
+                        guard error == nil, let data, !data.isEmpty else {
+                            continuation.resume(returning: nil)
+                            return
+                        }
+                        continuation.resume(returning: data)
+                    }
                 }
-                continuation.resume(returning: data)
             }
+            group.addTask {
+                try? await Task.sleep(nanoseconds: remaining)
+                guard !Task.isCancelled else { return nil }
+                connection.cancel()
+                return nil
+            }
+            let result = await group.next() ?? nil
+            group.cancelAll()
+            return result
         }
     }
 
-    private func send(_ connection: NWConnection, data: Data) async -> Bool {
-        await withCheckedContinuation { (continuation: CheckedContinuation<Bool, Never>) in
-            connection.send(content: data, completion: .contentProcessed { error in
-                continuation.resume(returning: error == nil)
-            })
+    private func send(
+        _ connection: NWConnection,
+        data: Data,
+        timeoutNanoseconds: UInt64
+    ) async -> Bool {
+        await withTaskGroup(of: Bool.self) { group in
+            group.addTask {
+                await withCheckedContinuation { (continuation: CheckedContinuation<Bool, Never>) in
+                    connection.send(content: data, completion: .contentProcessed { error in
+                        continuation.resume(returning: error == nil)
+                    })
+                }
+            }
+            group.addTask {
+                try? await Task.sleep(nanoseconds: timeoutNanoseconds)
+                guard !Task.isCancelled else { return false }
+                connection.cancel()
+                return false
+            }
+            let result = await group.next() ?? false
+            group.cancelAll()
+            return result
         }
     }
 
     private func send(_ connection: NWConnection, file response: LocalDownloadFileResponse) async {
-        guard await send(connection, data: response.httpHeaderData) else { return }
+        let response = secured(response)
+        guard await send(connection, data: response.httpHeaderData, timeoutNanoseconds: Self.fileChunkTimeoutNanoseconds) else { return }
         let chunkSize = 128 * 1024
         var bytesSent: Int64 = 0
         do {
@@ -216,7 +393,7 @@ actor LocalWebServer {
                 guard let chunk = try handle.read(upToCount: min(chunkSize, Int(remaining))), !chunk.isEmpty else {
                     return
                 }
-                guard await send(connection, data: chunk) else { return }
+                guard await send(connection, data: chunk, timeoutNanoseconds: Self.fileChunkTimeoutNanoseconds) else { return }
                 bytesSent += Int64(chunk.count)
             }
         } catch {
@@ -230,14 +407,20 @@ actor LocalWebServer {
             return .response(await operatorResponse(for: request))
         }
         guard request.method == "GET" else { return .response(methodNotAllowed()) }
-        return LocalDownloadRouter(sessionRoutes: sessionRoutes, galleryRoutes: galleryRoutes).route(for: request.path)
+        return LocalDownloadRouter(
+            sessionRoutes: sessionRoutes,
+            galleryRoutes: galleryRoutes,
+            guestRouteExposure: guestRouteExposure
+        ).route(for: request.path)
     }
 
     private func operatorResponse(for request: HTTPServerRequest) async -> LocalDownloadResponse {
+        guard RemoteOperatorAuth.isAvailableInCurrentBuild else { return notFound() }
         guard let handlers = operatorHandlers else { return notFound() }
+        guard await handlers.isEnabled() else { return notFound() }
         let path = request.path.split(separator: "?", maxSplits: 1, omittingEmptySubsequences: false).first.map(String.init) ?? request.path
         if request.method == "GET", (path == "/operator/" || path == "/operator") {
-            return operatorLanding(pairingURL: await handlers.pairingURL())
+            return operatorLanding()
         }
         if request.method == "GET", path.hasPrefix("/operator/pair/") {
             let token = String(path.dropFirst("/operator/pair/".count))
@@ -299,13 +482,12 @@ actor LocalWebServer {
         )
     }
 
-    private func operatorLanding(pairingURL: String) -> LocalDownloadResponse {
-        let escaped = pairingURL.htmlEscaped
+    private func operatorLanding() -> LocalDownloadResponse {
         let html = """
         <!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><title>PRC PhotoBooth Operator</title></head>
         <body style="font-family:-apple-system,sans-serif;background:#101010;color:#fff;padding:2rem;max-width:42rem;margin:auto">
-        <h1>PRC PHOTOBOOTH</h1><p>Pairing link is generated on the Mac Operations screen.</p>
-        <p><a style="color:#fff" href="\(escaped)">Open pairing link</a></p></body></html>
+        <h1>PRC PHOTOBOOTH</h1><p>Pairing links are generated explicitly from the Mac Operations screen.</p>
+        <p>This page never contains a pairing credential.</p></body></html>
         """
         return htmlResponse(html)
     }
@@ -323,7 +505,7 @@ actor LocalWebServer {
     }
 
     private func htmlResponse(_ html: String) -> LocalDownloadResponse {
-        LocalDownloadResponse(statusCode: 200, reason: "OK", contentType: "text/html; charset=utf-8", headers: ["Cache-Control": "no-store"], body: Data(html.utf8))
+        LocalDownloadResponse(statusCode: 200, reason: "OK", contentType: "text/html; charset=utf-8", headers: Self.securityHeaders, body: Data(html.utf8))
     }
 
     private func errorResponse(for error: Error) -> LocalDownloadResponse {
@@ -333,45 +515,39 @@ actor LocalWebServer {
         }
     }
 
+    private func busy() -> LocalDownloadResponse { LocalDownloadResponse(statusCode: 503, reason: "Service Unavailable", contentType: "text/plain; charset=utf-8", headers: ["Retry-After": "1"], body: Data("Server busy".utf8)) }
+    private func secured(_ response: LocalDownloadResponse) -> LocalDownloadResponse {
+        var response = response
+        for (name, value) in Self.securityHeaders where response.headers[name] == nil {
+            response.headers[name] = value
+        }
+        return response
+    }
+    private func secured(_ response: LocalDownloadFileResponse) -> LocalDownloadFileResponse {
+        var response = response
+        for (name, value) in Self.securityHeaders where response.headers[name] == nil {
+            response.headers[name] = value
+        }
+        return response
+    }
     private func badRequest() -> LocalDownloadResponse { LocalDownloadResponse(statusCode: 400, reason: "Bad Request", contentType: "text/plain; charset=utf-8", headers: [:], body: Data("Bad request".utf8)) }
     private func unauthorized() -> LocalDownloadResponse { LocalDownloadResponse(statusCode: 401, reason: "Unauthorized", contentType: "text/plain; charset=utf-8", headers: ["WWW-Authenticate": "Bearer"], body: Data("Unauthorized".utf8)) }
     private func methodNotAllowed() -> LocalDownloadResponse { LocalDownloadResponse(statusCode: 405, reason: "Method Not Allowed", contentType: "text/plain; charset=utf-8", headers: ["Allow": "GET, POST"], body: Data("Method not allowed".utf8)) }
     private func serverError() -> LocalDownloadResponse { LocalDownloadResponse(statusCode: 500, reason: "Internal Server Error", contentType: "text/plain; charset=utf-8", headers: [:], body: Data("Internal server error".utf8)) }
     private func notFound() -> LocalDownloadResponse { LocalDownloadResponse(statusCode: 404, reason: "Not Found", contentType: "text/plain; charset=utf-8", headers: [:], body: Data("Not found".utf8)) }
 
-    static func lanIPAddress() -> String? {
-        var address: String?
-        var ifaddr: UnsafeMutablePointer<ifaddrs>?
-        guard getifaddrs(&ifaddr) == 0 else { return nil }
-        defer { freeifaddrs(ifaddr) }
-        var pointer = ifaddr
-        while let current = pointer {
-            let flags = Int32(current.pointee.ifa_flags)
-            let isUp = (flags & IFF_UP) != 0
-            let isLoopback = (flags & IFF_LOOPBACK) != 0
-            if isUp && !isLoopback,
-               current.pointee.ifa_addr.pointee.sa_family == UInt8(AF_INET) {
-                var hostname = [CChar](repeating: 0, count: Int(NI_MAXHOST))
-                getnameinfo(
-                    current.pointee.ifa_addr,
-                    socklen_t(current.pointee.ifa_addr.pointee.sa_len),
-                    &hostname,
-                    socklen_t(hostname.count),
-                    nil,
-                    0,
-                    NI_NUMERICHOST
-                )
-                let ip = hostname.withUnsafeBufferPointer { buffer in
-                    String(decoding: buffer.prefix(while: { $0 != 0 }).map(UInt8.init), as: UTF8.self)
-                }
-                if ip.hasPrefix("192.168") || ip.hasPrefix("10.") || ip.hasPrefix("172.") {
-                    address = ip
-                    break
-                }
-            }
-            pointer = current.pointee.ifa_next
-        }
-        return address
+    static func guestDeliveryEndpoint(
+        selection: GuestDeliveryInterfaceSelection = .automatic,
+        port: UInt16 = 8585
+    ) -> GuestDeliveryResolution {
+        GuestDeliveryEndpointResolver.resolveSystem(selection: selection, port: port)
+    }
+
+    static func lanIPAddress(
+        selection: GuestDeliveryInterfaceSelection = .automatic,
+        port: UInt16 = 8585
+    ) -> String? {
+        guestDeliveryEndpoint(selection: selection, port: port).endpoint?.address
     }
 }
 

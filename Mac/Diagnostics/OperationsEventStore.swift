@@ -1,6 +1,14 @@
 import Foundation
 
 enum OperationsEventKind: String, Codable, Sendable, CaseIterable {
+    case routeDiscoveryStarted
+    case routeDiscoveryRestarted, routeDiscoveryReused, routeCandidateDiscovered
+    case routeDiscoveryResult, targetSelected, targetMatched, routeSelected
+    case browserReady, browserFailed, browserCancelled
+    case controlConnectionCreated, controlConnectionPreparing, controlHelloReceived
+    case helloSent, authenticated
+    case pairingIntentSent, pairingSessionReceived, pairingRequestSent, pairingResultReceived
+    case pairingRequestSubmitted
     case sessionStarted, sessionCompleted, sessionCancelled
     case captureStarted, captureSucceeded, captureFailed, captureRecovered
     case captureDeferred, captureRetried, previousPhotoUsed
@@ -8,6 +16,18 @@ enum OperationsEventKind: String, Codable, Sendable, CaseIterable {
     case ipadConnected, ipadDisconnected, ipadReconnected
     case printSucceeded, printFailed
     case cloudUploadSucceeded, cloudUploadFailed, jobRetried
+    case transportDiscoveryStarted, transportConnecting, transportReady
+    case transportWaiting, transportDisconnected, transportReconnectScheduled
+    case transportReconnectSucceeded, heartbeatTimedOut, routeChanged
+    case controlSendFailed, controlPayloadRejected
+    case previewDisconnected, previewReconnected, sessionSyncSent, sessionSyncFailed
+    case criticalSendQueued, criticalSendCompleted
+    case assetSent, assetRejected, assetChannelConnected, assetChannelVerified, assetChannelDisconnected
+    case secureChannelEstablished, secureChannelFailed
+    case previewReady, assetReady
+    case routeViabilityChanged, pathHintUnavailableIgnored, secondaryCandidateRejected
+    case waitingRecoveryScheduled, waitingRecoveryCancelled
+    case ipadAppForegrounded, ipadAppBackgrounded
 }
 
 struct OperationsEvent: Codable, Sendable, Equatable, Identifiable {
@@ -18,6 +38,14 @@ struct OperationsEvent: Codable, Sendable, Equatable, Identifiable {
     var photoIndex: Int?
     var duration: Double?
     var reason: String?
+    var channel: String?
+    var route: String?
+    var attempt: Int?
+    var byteCount: Int?
+    var targetPeerID: String?
+    var routeGeneration: Int?
+    var networkPreference: BoothNetworkPreference?
+    var candidateSource: String?
 }
 
 actor OperationsEventStore {
@@ -36,7 +64,15 @@ actor OperationsEventStore {
         sessionID: String? = nil,
         photoIndex: Int? = nil,
         duration: Double? = nil,
-        reason: String? = nil
+        reason: String? = nil,
+        channel: String? = nil,
+        route: String? = nil,
+        attempt: Int? = nil,
+        byteCount: Int? = nil,
+        targetPeerID: String? = nil,
+        routeGeneration: Int? = nil,
+        networkPreference: BoothNetworkPreference? = nil,
+        candidateSource: String? = nil
     ) {
         loadIfNeeded()
         let now = Date()
@@ -47,7 +83,15 @@ actor OperationsEventStore {
             sessionID: sessionID,
             photoIndex: photoIndex,
             duration: duration,
-            reason: reason
+            reason: OperationsEventRedactor.text(reason),
+            channel: OperationsEventRedactor.text(channel),
+            route: OperationsEventRedactor.text(route),
+            attempt: attempt,
+            byteCount: byteCount,
+            targetPeerID: OperationsEventRedactor.text(targetPeerID),
+            routeGeneration: routeGeneration,
+            networkPreference: networkPreference,
+            candidateSource: OperationsEventRedactor.text(candidateSource)
         ))
         trim(now: now)
         save()
@@ -85,7 +129,7 @@ actor OperationsEventStore {
 
     private func trim(now: Date) {
         let cutoff = now.addingTimeInterval(-retention)
-        events = Array(events.filter { $0.timestamp >= cutoff }.suffix(10_000))
+        events = Array(events.filter { $0.timestamp >= cutoff }.suffix(5_000))
     }
 
     private func save() {
@@ -102,5 +146,22 @@ actor OperationsEventStore {
     private func recordError(_ error: Error) {
         lastError = error.localizedDescription
         NSLog("[Operations] Event storage failed: %@", error.localizedDescription)
+    }
+}
+
+enum OperationsEventRedactor {
+    private static let sensitiveWords = [
+        "token", "password", "secret", "private key", "credential",
+        "authorization", "bearer", "pin", "keychain", "access_token",
+        "pairing-v2:"
+    ]
+
+    static func text(_ value: String?) -> String? {
+        guard let value, !value.isEmpty else { return nil }
+        let normalized = value.lowercased()
+        guard !sensitiveWords.contains(where: normalized.contains) else { return "[redacted]" }
+        return value
+            .replacingOccurrences(of: "\n", with: " ")
+            .replacingOccurrences(of: "\r", with: " ")
     }
 }

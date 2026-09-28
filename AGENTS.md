@@ -4,10 +4,11 @@
 
 PRC-PhotoBooth is a Swift 6 Xcode project generated from `project.yml`. Edit `project.yml` for target, signing, dependency, and build setting changes; avoid hand-editing `PRC-PhotoBooth.xcodeproj/project.pbxproj`.
 
-- `Mac/`: macOS operator app, including camera capture, SwiftData persistence, local web server, output rendering, and operator UI.
+- `Mac/`: macOS operator app, including camera capture, SwiftData persistence, local web server, printing, jobs, diagnostic reports, and operator UI.
 - `iPad/`: iPad customer-facing app and phase-specific SwiftUI screens.
-- `Shared/`: code shared by both apps, including models, MultipeerConnectivity messaging, and booth state.
+- `Shared/`: code shared by both apps, including models, Network.framework transport, secure pairing, image filters, and booth state.
 - `Tests/`: Swift Testing unit tests hosted by the Mac target.
+- `iPadTests/`: Swift Testing unit tests hosted by the iPad target.
 - `run.sh`: builds and launches the Mac app plus a configured iPad simulator.
 
 ## Build, Test, and Development Commands
@@ -17,10 +18,15 @@ xcodegen generate
 xcodebuild -project PRC-PhotoBooth.xcodeproj -scheme PRC-PhotoBooth-Mac -destination "platform=macOS" build
 xcodebuild -project PRC-PhotoBooth.xcodeproj -scheme PRC-PhotoBooth-iPad -destination "platform=iOS Simulator,id=<simulator-uuid>" build
 xcodebuild -project PRC-PhotoBooth.xcodeproj -scheme PRC-PhotoBoothTests -destination "platform=macOS" test
+xcodebuild -project PRC-PhotoBooth.xcodeproj -scheme PRC-PhotoBooth-iPadTests -destination "platform=iOS Simulator,id=<simulator-uuid>" test
 bash run.sh
 ```
 
-Use `xcodegen generate` after changing `project.yml`. Use the Mac and iPad build commands to validate each app separately. Run the test command before submitting behavior changes. `bash run.sh` is useful for manual end-to-end checks, but it contains a machine-specific simulator UUID and DerivedData path.
+Use `xcodegen generate` after changing `project.yml`. Use the Mac and iPad build commands to validate each app separately. Run the test commands before submitting behavior changes. `bash run.sh` is useful for manual end-to-end checks, but it contains a machine-specific simulator UUID and DerivedData path.
+
+Xcode 27 uses Device Hub for simulated and physical iPad devices. Keep
+`platform=iOS Simulator` in command-line simulator destinations; Device Hub is an
+Xcode UI/device-management surface, not an `xcodebuild` platform destination.
 
 ## Coding Style & Naming Conventions
 

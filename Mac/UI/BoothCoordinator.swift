@@ -1,12 +1,14 @@
 import Foundation
 import AppKit
 import SwiftUI
+import UniformTypeIdentifiers
 import CoreGraphics
 import ImageIO
 import SwiftData
 import Observation
 import AVFoundation
 import Network
+import CryptoKit
 
 enum CameraSourceKind: String, CaseIterable, Identifiable {
     case avFoundation = "Built-in / USB / Continuity"
@@ -28,16 +30,34 @@ func shouldScheduleAutomaticCloudRetry(previous: Bool?, isSatisfied: Bool) -> Bo
     isSatisfied && previous != true
 }
 
-enum SelphyPaperSize: String, CaseIterable {
-    case postcard   = "Postcard (4×6\")"
-    case lSize      = "L-size (3.5×5\")"
-    case creditCard = "Credit Card"
+enum JobRecoveryError: LocalizedError, Sendable, Equatable {
+    case jobNotFound(String)
+    case sessionCancelled(String)
+    case manualPrintResolutionRequired(String)
+    case manifestNotFound(String)
+    case manifestCancelled(String)
+    case manifestNotRetryable(String, RuntimeSessionStatus)
+    case retryAlreadyInProgress(String)
+    case obsoleteTransaction(String)
 
-    var pointSize: NSSize {
+    var errorDescription: String? {
         switch self {
-        case .postcard:    return NSSize(width: 288, height: 432) // 4×6 in at 72 pt/in
-        case .lSize:       return NSSize(width: 252, height: 360)
-        case .creditCard:  return NSSize(width: 153, height: 244)
+        case .jobNotFound(let id):
+            return "Job \(id) was not found."
+        case .sessionCancelled(let id):
+            return "Session \(id) has been cancelled and cannot be retried."
+        case .manualPrintResolutionRequired:
+            return "Print outcome is unknown. Please verify the printer before retrying."
+        case .manifestNotFound(let id):
+            return "Manifest for session \(id) was not found."
+        case .manifestCancelled(let id):
+            return "Session \(id) is cancelled and cannot be retried."
+        case .manifestNotRetryable(let id, let status):
+            return "Required job for session \(id) cannot be retried while the manifest is \(status.rawValue)."
+        case .retryAlreadyInProgress(let id):
+            return "A recovery operation is already running for session \(id)."
+        case .obsoleteTransaction(let id):
+            return "Job \(id) belongs to an obsolete finalization transaction and cannot be retried."
         }
     }
 }
@@ -52,14 +72,32 @@ final class BoothCoordinator {
         publicBaseURL: String?,
         localBaseURL: String,
         token: String,
-        cloudUploadEnabled: Bool
+        cloudUploadEnabled: Bool,
+        allowTrustedLocalHTTP: Bool = false
     ) -> String {
         (try? SessionQRCodePayloadResolver.resolve(
             token: token,
             localBaseURL: localBaseURL,
             publicBaseURL: publicBaseURL,
-            cloudUploadEnabled: cloudUploadEnabled
-        )) ?? "\(localBaseURL.trimmingCharacters(in: .whitespacesAndNewlines))/s/\(token)/"
+            cloudUploadEnabled: cloudUploadEnabled,
+            allowTrustedLocalHTTP: allowTrustedLocalHTTP
+        )) ?? ""
+    }
+
+    nonisolated static func downloadURL(
+        publicBaseURL: String?,
+        localBaseURL: String,
+        manifest: SessionManifest,
+        cloudUploadEnabled: Bool,
+        allowTrustedLocalHTTP: Bool = false
+    ) -> String {
+        (try? SessionQRCodePayloadResolver.resolve(
+            manifest: manifest,
+            localBaseURL: localBaseURL,
+            publicBaseURL: publicBaseURL,
+            cloudUploadEnabled: cloudUploadEnabled,
+            allowTrustedLocalHTTP: allowTrustedLocalHTTP
+        )) ?? ""
     }
 
     let multipeer: BoothTransport
@@ -68,6 +106,8 @@ final class BoothCoordinator {
     let stateMachine: SessionStateMachine
     let server: LocalWebServer
     let operatorAuth: RemoteOperatorAuth
+    private(set) var isRemoteOperatorEnabled = false
+    private var eventActivity: NSObjectProtocol?
     let store: DataStore
     let cloudSSHSetup: CloudSSHSetupService
     let manifestStore: SessionManifestStore
@@ -84,7 +124,12 @@ final class BoothCoordinator {
 
     var activeEvent: BoothEvent? {
         didSet {
+            updateEventActivity()
             capture.captureRotationDegrees = activeEvent?.cameraRotationDegrees ?? 0
+            if activeEvent == nil {
+                activeExperienceDocument = nil
+                experienceCatalog = nil
+            }
             let snapshot = activeEvent.map { makeEventSnapshot($0) }
             Task { @MainActor [weak self] in
                 guard let self, let snapshot else { return }
@@ -98,6 +143,14 @@ final class BoothCoordinator {
     private(set) var reviewDecisionPending = false
     private(set) var startupComponents: [StartupComponent: StartupComponentHealth] = [:]
     var serverURL: String = ""
+    private(set) var isLocalServerReady = false
+
+    private var guestDeliveryInterfaceSelection: GuestDeliveryInterfaceSelection {
+        .forBoothNetwork(
+            requested: connectionStatus.requestedNetwork,
+            effective: connectionStatus.effectiveNetwork
+        )
+    }
     var cameraSourceKind: CameraSourceKind = .avFoundation {
         didSet {
             if cameraSourceKind == .avFoundation {
@@ -114,6 +167,35 @@ final class BoothCoordinator {
             multipeer.requestedNetworkPreference = newValue
         }
     }
+    private(set) var ethernetTestInProgress = false
+    private(set) var ethernetProbeResult: EthernetProbeResult?
+
+    var isCaptureSessionActive: Bool {
+        switch stateMachine.phase {
+        case .idle, .selectingExperience, .readyToStart, .finished:
+            return false
+        default:
+            return true
+        }
+    }
+
+    var operationsSessionStatus: String? {
+        switch sessionLifecycleOperation {
+        case .cancelling:
+            return "Cancelling"
+        case .finalizing, .completing:
+            return "Finalizing"
+        case .idle:
+            guard currentSession != nil else { return nil }
+            switch stateMachine.phase {
+            case .processing: return "Finalizing"
+            case .captureRecovery: return "Capture recovery"
+            case .finished: return "Finished"
+            case .idle, .selectingExperience, .readyToStart: return "Ready"
+            case .countdown, .captured, .review: return "Capturing"
+            }
+        }
+    }
     var previewFrameRate: PreviewFrameRate {
         get { PreviewFrameRate(rawValue: UserDefaults.standard.integer(forKey: "previewFrameRate")) ?? .standard }
         set {
@@ -122,20 +204,105 @@ final class BoothCoordinator {
         }
     }
 
+    var previewQualityPreset: PreviewQualityPreset {
+        get { PreviewQualityPreset(rawValue: UserDefaults.standard.string(forKey: "previewQuality") ?? "auto") ?? .auto }
+        set {
+            UserDefaults.standard.set(newValue.rawValue, forKey: "previewQuality")
+            previewQualityPolicy.setPreset(newValue)
+            applyPreviewQuality()
+        }
+    }
+
     private var currentSession: BoothSession?
     private var currentManifest: SessionManifest?
     private var currentManifestID: String?
+    private var activeSoakRunID: String?
+    private(set) var retainedSoakDiagnostics: [SessionManifest] = []
+    @ObservationIgnored private var soakFailureDiagnosticSessionIDs: Set<String> = []
+    @ObservationIgnored private var hiddenSoakRouteSessionIDs: Set<String> = []
+    @ObservationIgnored private var deferredSoakCleanupSessionIDs: Set<String> = []
+    private var soakAutoCleanupWorkingFiles = true
+    private var soakCloudUploadOverride: Bool?
+    private var soakAutomaticPrintOverride: Bool?
+    @ObservationIgnored private var recoveryInFlightSessionIDs: Set<String> = []
+    @ObservationIgnored private var jobReconciliationDirty = false
+    @ObservationIgnored private var jobReconciliationTask: Task<Void, Never>?
+    @ObservationIgnored private var serverRouteRefreshGeneration: UInt64 = 0
+    @ObservationIgnored private var guestDeliveryConfigurationDirty = false
+    @ObservationIgnored private var guestDeliveryConfigurationTask: Task<Void, Never>?
+    @ObservationIgnored private var deferredAutomaticCloudRetrySessionIDs: Set<String> = []
+#if DEBUG
+    @ObservationIgnored var beforeManualRetryQueueMutationForTesting: (@MainActor () async -> Void)?
+    @ObservationIgnored var beforeCloudRetryQueueMutationForTesting: (@MainActor (String) async -> Void)?
+    @ObservationIgnored var beforeCancellationQueueBarrierForTesting: (@MainActor (String) async -> Void)?
+    @ObservationIgnored private var stopCancellationAfterJobBarrierForTesting = false
+#endif
     private(set) var lastCompletedSessionID: String?
     private var retakeCounts: [Int: Int] = [:]
     private var gifFrames: [Int: [CGImage]] = [:]
     private var countdownTask: Task<Void, Never>?
+    private let sessionFlowOperations = SessionFlowOperationRegistry()
     private var currentCountdown: CountdownDescriptor?
     private var sessionMessageSequence: UInt64 = 0
+    private let authorityEpoch = UUID()
+    private var sessionLifecycleGeneration: UInt64 = 0
+    private struct ActiveSessionStart {
+        let requestID: UUID
+        let generation: UInt64
+        var sessionID: String?
+    }
+    private var activeSessionStart: ActiveSessionStart?
+    private var lastSessionStartRequestID: UUID?
+    private var lastSessionStartSessionID: String?
+    private enum SessionLifecycleOperation: Equatable {
+        case idle
+        case cancelling(sessionID: String, token: UUID)
+        case finalizing(sessionID: String, token: UUID)
+        case completing(sessionID: String, token: UUID)
+
+        var token: UUID? {
+            switch self {
+            case .idle: return nil
+            case .cancelling(_, let token), .finalizing(_, let token), .completing(_, let token):
+                return token
+            }
+        }
+
+        var allowsCancellation: Bool {
+            switch self {
+            case .idle, .finalizing:
+                return true
+            case .cancelling, .completing:
+                return false
+            }
+        }
+    }
+    private var sessionLifecycleOperation: SessionLifecycleOperation = .idle
+    private var currentReviewStateToken: ReviewStateToken?
+    private var currentCaptureRecoveryStateToken: CaptureRecoveryStateToken?
+    private struct ReviewRequestRecord {
+        let state: ReviewStateToken
+        let action: ReviewAction
+        let result: ReviewDecisionResult
+    }
+    private var recentReviewRequests: [UUID: ReviewRequestRecord] = [:]
+    private var recentReviewRequestOrder: [UUID] = []
+    private struct CaptureRecoveryRequestRecord {
+        let state: CaptureRecoveryStateToken
+        let action: CaptureRecoveryAction
+        let result: CaptureRecoveryActionResult
+    }
+    private var recentCaptureRecoveryRequests: [UUID: CaptureRecoveryRequestRecord] = [:]
+    private var recentCaptureRecoveryRequestOrder: [UUID] = []
+    private var activeReviewRequestID: UUID?
     private var currentCaptureAttempt: CaptureAttempt?
     private var hasSeenDSLRConnection = false
     private let networkMonitor = NWPathMonitor()
     private var lastNetworkSatisfied: Bool?
     private var automaticCloudRetryTask: Task<Void, Never>?
+    private var ethernetTestTask: Task<Void, Never>?
+    private var previewQualityTask: Task<Void, Never>?
+    private var previewQualityPolicy = PreviewQualityPolicy()
     private var lastAutomaticCloudRetryAt: Date?
     private var wasDSLRConnected = false
     private(set) var cameraReconnectCount = 0
@@ -143,6 +310,14 @@ final class BoothCoordinator {
     private(set) var currentFilteredReviewImages: [Int: CGImage] = [:]
     private(set) var currentSessionPresentation: SessionPresentation?
     private var lastSessionPresentation: SessionPresentation?
+    private var finishedAwaitingCustomerAckSessionID: String?
+    private var completionInFlightSessionID: String?
+    private var customerFinishedInFlightSessionID: String?
+    private var sessionAssetReferences: [Int: BoothAssetReference] = [:]
+    private var stripAssetReference: BoothAssetReference?
+    private var pendingPromptAssets: [String: (reference: BoothAssetReference, data: Data)] = [:]
+    private var assetSources: [BoothAssetReference: Data] = [:]
+    private var assetAssembler = BoothAssetAssembler()
     var externalSelection = CustomerSessionSelectionDraft()
 
     // MARK: - External display viewer
@@ -153,15 +328,7 @@ final class BoothCoordinator {
     init() {
         let networkPreference = Self.loadNetworkPreference()
         let status = BoothConnectionStatus(requestedNetwork: networkPreference)
-#if DEBUG
-        if ProcessInfo.processInfo.arguments.contains("--legacy-multipeer") {
-            multipeer = MultipeerService(role: .mac, connectionStatus: status)
-        } else {
-            multipeer = NetworkBoothTransport(role: .mac, networkPreference: networkPreference, connectionStatus: status)
-        }
-#else
         multipeer = NetworkBoothTransport(role: .mac, networkPreference: networkPreference, connectionStatus: status)
-#endif
         connectionStatus = status
         capture = CaptureService()
         stateMachine = SessionStateMachine()
@@ -201,7 +368,10 @@ final class BoothCoordinator {
             server: server,
             cloudUpload: cloudUpload,
             printer: printer,
-            galleryStore: galleryStore
+            galleryStore: galleryStore,
+            guestDeliverySelection: {
+                .forBoothNetwork(requested: status.requestedNetwork, effective: status.effectiveNetwork)
+            }
         )
         jobQueue = SessionJobQueue(store: jobStore, executor: executor)
         recoveryService = SessionRecoveryService(
@@ -210,25 +380,45 @@ final class BoothCoordinator {
             jobQueue: jobQueue
         )
         preflight = BoothPreflightService()
+        recoveryService.quiesceSessionOperations = { [weak self] sessionID in
+            guard let self else { return true }
+            return await self.sessionFlowOperations.cancelAndQuiesce(
+                sessionID: sessionID,
+                timeout: .seconds(10)
+            )
+        }
         initialStartupComponents[.dataStore] = store.lastPersistenceError.map {
             StartupComponentHealth(
-                status: .unavailable,
-                detail: "Persistent event data is unavailable: \($0)"
+                status: store.databaseWasRecreated ? .degraded : .unavailable,
+                detail: store.databaseWasRecreated
+                    ? "Database was recreated after corruption. Previous event data moved to backup (Finding 19)."
+                    : "Persistent event data is unavailable: \($0)"
             )
         } ?? StartupComponentHealth(
             status: .ready,
             detail: "SwiftData store is available."
         )
         self.startupComponents = initialStartupComponents
+        recoveryService.isSessionRecoveryInFlight = { [weak self] sessionID in
+            self?.recoveryInFlightSessionIDs.contains(sessionID) ?? false
+        }
+        recoveryService.claimSessionRecovery = { [weak self] sessionID in
+            self?.claimSessionRecovery(sessionID) ?? false
+        }
+        recoveryService.releaseSessionRecovery = { [weak self] sessionID in
+            self?.releaseSessionRecovery(sessionID)
+        }
+        recoveryService.onRecoveryScanFinished = { [weak self] in
+            self?.scheduleJobReconciliation()
+        }
         jobQueue.onJobsChanged = { [weak self] in
-            self?.reconcileCurrentSessionJobs()
-            self?.reconcileRecoveredSessions()
+            self?.scheduleJobReconciliation()
             self?.cleanupCompletedWorkingFiles()
             Task { @MainActor [weak self] in
                 guard let self else { return }
-                await refreshServerRoutes()
-                if jobQueue.lastQueueError != nil {
-                    await runSafePreflight()
+                await self.refreshServerRoutes()
+                if self.jobQueue.lastQueueError != nil {
+                    await self.runSafePreflight()
                 }
             }
         }
@@ -262,11 +452,10 @@ final class BoothCoordinator {
 #endif
             await checkCameraPermission()
             if cameraPermissionGranted { startCamera() }
-            if let ip = LocalWebServer.lanIPAddress() {
-                serverURL = "http://\(ip):8585"
-            }
+            serverURL = LocalWebServer.guestDeliveryEndpoint(selection: guestDeliveryInterfaceSelection)
+                .endpoint?.baseURL ?? ""
             await server.configureOperatorHandlers(OperatorWebHandlers(
-                pairingURL: { [weak self] in self?.operatorPairingURL ?? "" },
+                isEnabled: { [weak self] in self?.operatorAuth.isEnabled ?? false },
                 pair: { [weak self] token in self?.operatorAuth.pair(token) },
                 authorize: { [weak self] token in self?.operatorAuth.isValidOperatorToken(token) ?? false },
                 status: { [weak self] in await self?.healthSnapshot() ?? .empty },
@@ -284,17 +473,20 @@ final class BoothCoordinator {
             }
             let serverStatus = await server.waitUntilReady()
             if case .failed(let message) = serverStatus.state {
+                isLocalServerReady = false
                 startupComponents[.localServer] = StartupComponentHealth(
                     status: .unavailable,
                     detail: "Local download server failed: \(message)"
                 )
                 errorMessage = startupComponents[.localServer]?.detail
             } else if case .ready = serverStatus.state {
+                isLocalServerReady = true
                 startupComponents[.localServer] = .ready
             }
 
             let runtimeReady = startupComponents[.runtimeDirectory]?.status == .ready
             if runtimeReady {
+                jobQueue.pauseWorkersForRecovery()
                 jobQueue.start()
                 startupComponents[.jobQueue] = .ready
             } else {
@@ -311,6 +503,8 @@ final class BoothCoordinator {
             if runtimeReady {
                 await restoreDownloadTokens()
                 await recoveryService.scanNow()
+                await refreshRetainedSoakDiagnostics()
+                jobQueue.resumeWorkersAfterRecovery()
                 startupComponents[.recoveryStore] = StartupComponentHealth(
                     status: recoveryService.recoveryErrors.isEmpty ? .ready : .degraded,
                     detail: recoveryService.recoveryErrors.first ?? "Recovery storage scanned."
@@ -321,6 +515,16 @@ final class BoothCoordinator {
         }
 
         setupMultipeerHandlers()
+        if let networkTransport = multipeer as? NetworkBoothTransport {
+            networkTransport.canAttemptPreferredLANRecovery = { [weak self] in
+                guard let self else { return false }
+                return !self.isCaptureSessionActive
+            }
+            networkTransport.canAcceptIncomingPairing = { [weak self] in
+                guard let self else { return false }
+                return !self.isCaptureSessionActive
+            }
+        }
         multipeer.start()
         networkMonitor.pathUpdateHandler = { [weak self] path in
             Task { @MainActor [weak self] in
@@ -335,19 +539,119 @@ final class BoothCoordinator {
         }
     }
 
-    var operatorPairingURL: String {
-        let base = serverURL.isEmpty
-            ? "http://\(LocalWebServer.lanIPAddress() ?? "localhost"):8585"
-            : serverURL
-        return "\(base)/operator/pair/\(operatorAuth.pairingTokenValue())"
+#if DEBUG
+    init(
+        testingManifestStore: SessionManifestStore,
+        testingJobQueue: SessionJobQueue,
+        runtimeDirectory: URL,
+        testingRecoveryService: SessionRecoveryService? = nil,
+        testingWorkspace: SessionWorkspace? = nil,
+        testingDataStore: DataStore? = nil,
+        testingCloudUpload: CloudUploadService? = nil
+    ) {
+        let networkPreference = Self.loadNetworkPreference()
+        let status = BoothConnectionStatus(requestedNetwork: networkPreference)
+        multipeer = NetworkBoothTransport(role: .mac, networkPreference: networkPreference, connectionStatus: status)
+        connectionStatus = status
+        capture = CaptureService()
+        stateMachine = SessionStateMachine()
+        server = LocalWebServer(port: 8585)
+        operatorAuth = RemoteOperatorAuth()
+        store = testingDataStore ?? DataStore.shared
+        cloudSSHSetup = CloudSSHSetupService()
+        experienceStore = EventExperienceStore(baseDirectory: runtimeDirectory)
+        filterPipeline = PhotoFilterPipeline()
+        galleryStore = EventGalleryStore(baseDirectory: runtimeDirectory)
+        self.manifestStore = testingManifestStore
+        let ws = testingWorkspace ?? SessionWorkspace()
+        self.workspace = ws
+        operationsEvents = OperationsEventStore(fileURL: runtimeDirectory.appendingPathComponent("operations-events.json"))
+        printer = PrinterService()
+        cloudUpload = testingCloudUpload ?? CloudUploadService()
+        self.jobQueue = testingJobQueue
+        self.recoveryService = testingRecoveryService ?? SessionRecoveryService(
+            manifestStore: testingManifestStore,
+            workspace: ws,
+            jobQueue: testingJobQueue
+        )
+        preflight = BoothPreflightService()
+        startupComponents = [:]
+        recoveryService.isSessionRecoveryInFlight = { [weak self] sessionID in
+            self?.recoveryInFlightSessionIDs.contains(sessionID) ?? false
+        }
+        recoveryService.claimSessionRecovery = { [weak self] sessionID in
+            self?.claimSessionRecovery(sessionID) ?? false
+        }
+        recoveryService.releaseSessionRecovery = { [weak self] sessionID in
+            self?.releaseSessionRecovery(sessionID)
+        }
+        jobQueue.onJobsChanged = { [weak self] in
+            self?.scheduleJobReconciliation()
+            self?.cleanupCompletedWorkingFiles()
+        }
+    }
+#endif
+
+    var operatorPairingURL: String? {
+        guard operatorAuth.isEnabled,
+              isLocalServerReady,
+              !serverURL.isEmpty else { return nil }
+        return "\(serverURL)/operator/pair/\(operatorAuth.pairingTokenValue())"
+    }
+
+    func enableRemoteOperator() {
+        guard RemoteOperatorAuth.isAvailableInCurrentBuild,
+              isLocalServerReady,
+              !serverURL.isEmpty else { return }
+        operatorAuth.enable()
+        isRemoteOperatorEnabled = true
+    }
+
+    func disableRemoteOperator() {
+        operatorAuth.disable()
+        isRemoteOperatorEnabled = false
     }
 
     var sharingStationURL: String? {
-        guard let gallery = activeExperienceDocument?.gallery, gallery.mode != .disabled else { return nil }
-        let base = serverURL.isEmpty
-            ? "http://\(LocalWebServer.lanIPAddress() ?? "localhost"):8585"
-            : serverURL
+        let defaults = UserDefaults.standard
+        let allowTrustedLocalHTTP = defaults.bool(forKey: "allowTrustedLocalHTTP")
+        let localBaseURL = LocalWebServer.guestDeliveryEndpoint(selection: guestDeliveryInterfaceSelection)
+            .endpoint?.baseURL
+        let policy = SessionQRCodePayloadResolver.evaluatePolicy(
+            publicBaseURL: defaults.string(forKey: "publicBaseURL"),
+            cloudUploadEnabled: defaults.bool(forKey: "cloudUploadEnabled"),
+            allowTrustedLocalHTTP: allowTrustedLocalHTTP,
+            localBaseURL: localBaseURL
+        )
+        guard policy.permitsLocalGuestHTTP(allowTrustedLocalHTTP: allowTrustedLocalHTTP),
+              let gallery = activeExperienceDocument?.gallery,
+              gallery.mode != .disabled else { return nil }
+        let base: String
+        if !serverURL.isEmpty && SessionQRCodePayloadResolver.isRoutableLocalBase(serverURL) {
+            base = serverURL
+        } else if let localBaseURL {
+            base = localBaseURL
+        } else {
+            return nil
+        }
         return "\(base)/e/\(gallery.eventToken)/station"
+    }
+
+    func guestDeliveryConfigurationDidChange() {
+        serverRouteRefreshGeneration &+= 1
+        serverURL = LocalWebServer.guestDeliveryEndpoint(selection: guestDeliveryInterfaceSelection)
+            .endpoint?.baseURL ?? ""
+        guestDeliveryConfigurationDirty = true
+        guard guestDeliveryConfigurationTask == nil else { return }
+        guestDeliveryConfigurationTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            defer { guestDeliveryConfigurationTask = nil }
+            while guestDeliveryConfigurationDirty {
+                guestDeliveryConfigurationDirty = false
+                await refreshServerRoutes()
+                await runSafePreflight()
+            }
+        }
     }
 
     func performRemoteOperatorAction(_ action: RemoteOperatorAction) async -> Bool {
@@ -357,7 +661,13 @@ final class BoothCoordinator {
         case .resume:
             resumeBooth(); return true
         case .retryFailedJobs:
-            jobQueue.retryAllFailed(); return true
+            do {
+                _ = try await retryAllFailedJobs()
+                return true
+            } catch {
+                recoveryService.recordError("Remote operator retry failed: \(error.localizedDescription)")
+                return false
+            }
         case .safeChecks:
             await runSafePreflight(); return true
         case .reconnectCamera:
@@ -398,6 +708,7 @@ final class BoothCoordinator {
     private func loadExperience(for snapshot: BoothEventSnapshot) async {
         do {
             let document = try await experienceStore.ensureDocument(for: snapshot)
+            guard activeEvent?.id == snapshot.id else { return }
             activeExperienceDocument = document
             experienceCatalog = CustomerExperienceCatalogBuilder().build(event: snapshot, document: document)
             if let event = activeEvent, event.id == snapshot.id {
@@ -425,6 +736,22 @@ final class BoothCoordinator {
         }
     }
 
+    @discardableResult
+    func setActiveEvent(_ event: BoothEvent?) -> Bool {
+        if activeSoakRunID != nil,
+           event?.id != activeEvent?.id {
+            errorMessage = "The active event cannot change during a production soak run."
+            return false
+        }
+        guard store.setActiveEvent(event) else {
+            let detail = store.lastPersistenceError ?? "unknown error"
+            errorMessage = "Event changes could not be saved: \(detail)"
+            return false
+        }
+        activeEvent = event
+        return true
+    }
+
     func loadExperienceDocument(for event: BoothEvent) async throws -> EventExperienceDocument {
         let snapshot = makeEventSnapshot(event)
         return try await experienceStore.ensureDocument(for: snapshot)
@@ -450,7 +777,21 @@ final class BoothCoordinator {
         } else {
             try await experienceStore.save(normalized)
         }
-        try LegacyEventMirrorService().updateLegacyEvent(event, using: normalized, modelContext: store.context)
+        var previewErrorMessage: String?
+        do {
+            let result = try await experienceStore.rebuildPreviews(eventID: normalized.eventID)
+            normalized = result.document
+            if !result.failures.isEmpty {
+                previewErrorMessage = "Event saved. Template previews need rebuilding: \(result.failures.joined(separator: "; "))"
+            }
+        } catch {
+            previewErrorMessage = "Event saved, but template previews could not be rebuilt: \(error.localizedDescription)"
+        }
+        do {
+            try LegacyEventMirrorService().updateLegacyEvent(event, using: normalized, modelContext: store.context)
+        } catch {
+            errorMessage = "Event saved, but compatibility fields could not be updated: \(error.localizedDescription)"
+        }
         if activeEvent?.id == event.id {
             activeExperienceDocument = normalized
             let snapshot = makeEventSnapshot(event)
@@ -458,63 +799,338 @@ final class BoothCoordinator {
             sendExperienceCatalog()
             await refreshServerRoutes()
         }
+        if let previewErrorMessage { errorMessage = previewErrorMessage }
     }
 
     func retryCloudUpload(sessionID: String) {
-        guard jobQueue.jobs.contains(where: {
-            $0.sessionID == sessionID && $0.kind == .cloudUpload
-        }) else {
-            errorMessage = "No cloud upload job exists for this session."
-            return
-        }
         Task { @MainActor [weak self] in
             guard let self else { return }
-            let manifest: SessionManifest?
+            guard claimSessionRecovery(sessionID) else {
+                errorMessage = JobRecoveryError.retryAlreadyInProgress(sessionID).localizedDescription
+                return
+            }
+            defer { releaseSessionRecovery(sessionID, scheduleReconciliation: true) }
+
+            var manifest: SessionManifest
             do {
                 manifest = try await manifestStore.load(sessionID: sessionID)
             } catch {
                 errorMessage = "Cloud upload could not load the session: \(error.localizedDescription)"
                 return
             }
-            let snapshot = manifest?.cloudDelivery
-            if snapshot == nil && !UserDefaults.standard.bool(forKey: "cloudUploadEnabled") {
+            guard manifest.status != .cancelled else {
+                errorMessage = "This session is cancelled and cannot be requeued."
+                return
+            }
+            if FinalizationPlan.make(from: manifest) == nil {
+                do {
+                    manifest = try await recoveryService.prepareFinalizationPlanForRecovery(for: manifest)
+                } catch {
+                    errorMessage = "Cloud upload recovery plan could not be migrated: \(error.localizedDescription)"
+                    return
+                }
+            }
+            guard let plan = FinalizationPlan.make(from: manifest),
+                  plan.jobKinds.contains(.cloudUpload),
+                  jobQueue.jobs.contains(where: {
+                      $0.sessionID == sessionID
+                          && $0.kind == .cloudUpload
+                          && $0.finalizationTransactionID == plan.transactionID
+                  }) else {
+                errorMessage = "No cloud upload job exists for the active finalization transaction."
+                return
+            }
+            guard let snapshot = manifest.cloudDelivery else {
+                errorMessage = "This session has no saved cloud destination. Current Settings cannot redirect it."
+                return
+            }
+            let cloudEnabled = manifest.deliveryIntent?.cloudUploadEnabled ?? true
+            if !cloudEnabled {
                 errorMessage = "Cloud upload is disabled."
                 return
             }
 
-            let sshHost = (snapshot?.sshHost ?? UserDefaults.standard.string(forKey: "cloudSSHHost") ?? "")
-                .trimmingCharacters(in: .whitespacesAndNewlines)
+            let sshHost = snapshot.sshHost.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !sshHost.isEmpty else {
                 errorMessage = "Cloud upload is not configured: SSH host is missing."
                 return
             }
-            let publicBase = (snapshot?.publicBaseURL ?? UserDefaults.standard.string(forKey: "publicBaseURL") ?? "")
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-            guard let url = URL(string: publicBase),
-                  ["http", "https"].contains(url.scheme?.lowercased() ?? ""),
-                  url.host != nil else {
+            let publicBase = snapshot.publicBaseURL.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard ValidatedPublicGuestBaseURL(string: publicBase) != nil else {
                 errorMessage = "Cloud upload is not configured: public URL is missing or invalid."
                 return
             }
 
-            jobQueue.forceRequeueCloudUpload(sessionID: sessionID) { [weak self] result in
-                self?.errorMessage = switch result {
+#if DEBUG
+            await beforeCloudRetryQueueMutationForTesting?(sessionID)
+#endif
+            do {
+                let result = try await jobQueue.forceRequeueCloudUpload(
+                    sessionID: sessionID,
+                    finalizationTransactionID: plan.transactionID
+                )
+                errorMessage = switch result {
                 case .queued: "Web upload queued."
                 case .alreadyQueued: "Web upload is already waiting."
                 case .alreadyRunning: "Web upload is already running."
                 case .notFound: "No web upload job exists for this session."
+                case .sessionCancelled: "This session is cancelled and cannot be requeued."
                 }
+            } catch {
+                errorMessage = "Cloud upload could not be requeued: \(error.localizedDescription)"
             }
         }
     }
 
-    private func currentCloudDeliverySnapshot() -> SessionCloudDeliverySnapshot? {
-        guard UserDefaults.standard.bool(forKey: "cloudUploadEnabled") else { return nil }
+    func resolveUnknownPrint(jobID: String, printed: Bool) {
+        let resolution: UnknownPrintResolution = printed ? .printed : .notPrinted
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            do {
+                try await jobQueue.resolveUnknownPrint(jobID: jobID, resolution: resolution)
+            } catch {
+                errorMessage = "Printer outcome could not be recorded: \(error.localizedDescription)"
+            }
+        }
+    }
+
+    func retryJob(jobID: String) async throws {
+        guard let job = jobQueue.jobs.first(where: { $0.id == jobID }) else {
+            throw JobRecoveryError.jobNotFound(jobID)
+        }
+        let eligibility = try await jobQueue.manualRetryEligibility(jobID: jobID)
+        if eligibility == .sideEffectUnknown {
+            throw JobRecoveryError.manualPrintResolutionRequired(jobID)
+        }
+        guard eligibility == .eligible else {
+            if eligibility == .sessionCancelled {
+                throw JobRecoveryError.sessionCancelled(job.sessionID)
+            }
+            throw JobQueueStoreError.manualRetryRejected(jobID, eligibility)
+        }
+        guard claimSessionRecovery(job.sessionID) else {
+            throw JobRecoveryError.retryAlreadyInProgress(job.sessionID)
+        }
+        defer {
+            releaseSessionRecovery(job.sessionID, scheduleReconciliation: true)
+        }
+
+        var manifest: SessionManifest
+        do {
+            manifest = try await manifestStore.load(sessionID: job.sessionID)
+        } catch {
+            throw JobRecoveryError.manifestNotFound(job.sessionID)
+        }
+
+        if manifest.status == .cancelled {
+            _ = try? await jobQueue.cancelAndQuiesceJobs(sessionID: job.sessionID)
+            throw JobRecoveryError.manifestCancelled(job.sessionID)
+        }
+        if FinalizationPlan.make(from: manifest) == nil {
+            manifest = try await recoveryService.prepareFinalizationPlanForRecovery(for: manifest)
+            if currentManifestID == job.sessionID {
+                currentManifest = manifest
+            }
+        }
+        let currentJob = jobQueue.jobs.first(where: { $0.id == jobID }) ?? job
+        guard let plan = FinalizationPlan.make(from: manifest),
+              plan.authorizes(currentJob, for: manifest) else {
+            throw JobRecoveryError.obsoleteTransaction(job.id)
+        }
+
+        var restoredManifest: SessionManifest?
+        let isRequired = !job.kind.isOptional
+        if isRequired {
+            switch manifest.status {
+            case .failed:
+                let restored = try await manifestStore.transition(
+                    sessionID: job.sessionID,
+                    allowedFrom: [.failed]
+                ) { durable in
+                    durable.status = .finalizing
+                    durable.lastError = nil
+                }
+                restoredManifest = restored
+                if currentManifestID == job.sessionID {
+                    currentManifest = restored
+                }
+            case .finalizing:
+                break
+            case .capturing, .completed, .cancelled:
+                throw JobRecoveryError.manifestNotRetryable(job.sessionID, manifest.status)
+            }
+        }
+
+        do {
+#if DEBUG
+            await beforeManualRetryQueueMutationForTesting?()
+#endif
+            try await jobQueue.retry(jobID: jobID)
+        } catch {
+            if restoredManifest != nil {
+                do {
+                    let rolledBack = try await manifestStore.transition(
+                        sessionID: job.sessionID,
+                        allowedFrom: [.finalizing]
+                    ) { durable in
+                        durable.status = .failed
+                        durable.lastError = "Queue retry failed: \(error.localizedDescription)"
+                    }
+                    if currentManifestID == job.sessionID {
+                        currentManifest = rolledBack
+                    }
+                } catch {
+                    recoveryService.recordError("HIGH SEVERITY: Manifest rollback failed for \(job.sessionID): \(error.localizedDescription)")
+                }
+            }
+            throw error
+        }
+    }
+
+    @discardableResult
+    func retryAllFailedJobs() async throws -> [SessionJob] {
+        let requestedIDs = Set(jobQueue.jobs.filter {
+            ManualJobRetryEligibility.evaluate($0) == .eligible
+        }.map(\.id))
+        guard !requestedIDs.isEmpty else { return [] }
+
+        let eligibleCandidates = try await jobQueue.eligibleManualRetryJobs(jobIDs: requestedIDs)
+        guard !eligibleCandidates.isEmpty else { return [] }
+
+        let candidateSessionIDs = Set(eligibleCandidates.map(\.sessionID))
+        let sessionsToClaim = Set(candidateSessionIDs.filter(claimSessionRecovery))
+        guard !sessionsToClaim.isEmpty else { return [] }
+        defer {
+            for sessionID in sessionsToClaim {
+                releaseSessionRecovery(sessionID, scheduleReconciliation: true)
+            }
+        }
+
+        var retryJobIDs = Set<String>()
+        var restoredSessionIDs = Set<String>()
+        for sessionID in sessionsToClaim.sorted() {
+            let sessionCandidates = eligibleCandidates.filter { $0.sessionID == sessionID }
+            do {
+                var manifest = try await manifestStore.load(sessionID: sessionID)
+                if manifest.status == .cancelled {
+                    _ = try? await jobQueue.cancelAndQuiesceJobs(sessionID: sessionID)
+                    continue
+                }
+                if FinalizationPlan.make(from: manifest) == nil {
+                    manifest = try await recoveryService.prepareFinalizationPlanForRecovery(for: manifest)
+                    if currentManifestID == sessionID {
+                        currentManifest = manifest
+                    }
+                }
+                guard let plan = FinalizationPlan.make(from: manifest) else {
+                    recoveryService.recordError("Retry skipped for \(sessionID): finalization transaction is missing.")
+                    continue
+                }
+                let currentSessionCandidates = jobQueue.jobs.filter {
+                    $0.sessionID == sessionID
+                        && ManualJobRetryEligibility.evaluate($0) == .eligible
+                }
+                let activeCandidates = currentSessionCandidates.filter { plan.authorizes($0, for: manifest) }
+                let obsoleteIDs = Set(sessionCandidates.map(\.id)).subtracting(activeCandidates.map(\.id))
+                if !obsoleteIDs.isEmpty {
+                    recoveryService.recordError("Retry skipped obsolete finalization jobs for \(sessionID): \(obsoleteIDs.sorted().joined(separator: ", ")).")
+                }
+                guard !activeCandidates.isEmpty else { continue }
+                let hasRequiredCandidate = activeCandidates.contains { !$0.kind.isOptional }
+                if hasRequiredCandidate {
+                    switch manifest.status {
+                    case .failed:
+                        let restored = try await manifestStore.transition(
+                            sessionID: sessionID,
+                            allowedFrom: [.failed]
+                        ) { durable in
+                            durable.status = .finalizing
+                            durable.lastError = nil
+                        }
+                        restoredSessionIDs.insert(sessionID)
+                        if currentManifestID == sessionID {
+                            currentManifest = restored
+                        }
+                    case .finalizing:
+                        break
+                    case .capturing, .completed, .cancelled:
+                        recoveryService.recordError("Required retry skipped for session \(sessionID): manifest is \(manifest.status.rawValue).")
+                        continue
+                    }
+                }
+                retryJobIDs.formUnion(activeCandidates.map(\.id))
+            } catch {
+                recoveryService.recordError("Could not inspect/restore manifest \(sessionID): \(error.localizedDescription)")
+            }
+        }
+        guard !retryJobIDs.isEmpty else { return [] }
+
+        let result: ManualRetryBatchResult
+        do {
+            #if DEBUG
+            await beforeManualRetryQueueMutationForTesting?()
+            #endif
+            result = try await jobQueue.retryAllFailed(jobIDs: retryJobIDs)
+        } catch {
+            for sessionID in restoredSessionIDs {
+                await rollbackRetryManifest(sessionID: sessionID, message: error.localizedDescription)
+            }
+            throw error
+        }
+
+        for sessionID in restoredSessionIDs where !result.retried.contains(where: {
+            $0.sessionID == sessionID && !$0.kind.isOptional
+        }) {
+            await rollbackRetryManifest(sessionID: sessionID, message: "No required queue job was durably requeued.")
+        }
+        for skipped in result.skipped {
+            recoveryService.recordError("Manual retry skipped \(skipped.jobID): \(skipped.reason).")
+        }
+        return result.retried
+    }
+
+    private func rollbackRetryManifest(sessionID: String, message: String) async {
+        do {
+            let rolledBack = try await manifestStore.transition(
+                sessionID: sessionID,
+                allowedFrom: [.finalizing]
+            ) { durable in
+                durable.status = .failed
+                durable.lastError = "Queue retry failed: \(message)"
+            }
+            if currentManifestID == sessionID {
+                currentManifest = rolledBack
+            }
+        } catch {
+            recoveryService.recordError("HIGH SEVERITY: Retry manifest rollback failed for \(sessionID): \(error.localizedDescription)")
+        }
+    }
+
+    private func currentCloudDeliverySnapshot(enabledOverride: Bool? = nil) -> SessionCloudDeliverySnapshot? {
+        guard enabledOverride ?? UserDefaults.standard.bool(forKey: "cloudUploadEnabled") else { return nil }
         return SessionCloudDeliverySnapshot(
             publicBaseURL: UserDefaults.standard.string(forKey: "publicBaseURL") ?? "",
             remoteBasePath: UserDefaults.standard.string(forKey: "cloudRemotePath")
                 ?? CloudUploadConfiguration.defaultRemoteBasePath,
             sshHost: UserDefaults.standard.string(forKey: "cloudSSHHost") ?? ""
+        )
+    }
+
+    private func currentDeliveryIntentSnapshot(
+        updateGalleryEnabled: Bool? = nil,
+        renderGIFEnabled: Bool? = nil,
+        cloudUploadEnabled: Bool? = nil,
+        automaticPrintEnabled: Bool? = nil
+    ) -> SessionDeliveryIntentSnapshot {
+        SessionDeliveryIntentSnapshot(
+            cloudUploadEnabled: cloudUploadEnabled
+                ?? soakCloudUploadOverride
+                ?? UserDefaults.standard.bool(forKey: "cloudUploadEnabled"),
+            automaticPrintEnabled: automaticPrintEnabled
+                ?? soakAutomaticPrintOverride
+                ?? UserDefaults.standard.bool(forKey: "selphyAutoPrintAfterSession"),
+            updateGalleryEnabled: updateGalleryEnabled,
+            renderGIFEnabled: renderGIFEnabled
         )
     }
 
@@ -539,7 +1155,40 @@ final class BoothCoordinator {
             guard let self, !Task.isCancelled, self.lastNetworkSatisfied == true else { return }
             self.lastAutomaticCloudRetryAt = Date()
             self.automaticCloudRetryTask = nil
-            self.jobQueue.retryFailedCloudUploads()
+            await self.retryFailedCloudUploadsSafely()
+        }
+    }
+
+    private func retryFailedCloudUploadsSafely(sessionIDs requestedSessionIDs: Set<String>? = nil) async {
+        let sessionIDs = requestedSessionIDs ?? Set(jobQueue.jobs.compactMap { job in
+            job.kind == .cloudUpload
+                && job.status == .failed
+                && job.lastFailureDisposition == .retryable
+                ? job.sessionID
+                : nil
+        })
+
+        for sessionID in sessionIDs.sorted() {
+            guard claimSessionRecovery(sessionID) else {
+                deferredAutomaticCloudRetrySessionIDs.insert(sessionID)
+                continue
+            }
+            do {
+                defer { releaseSessionRecovery(sessionID, scheduleReconciliation: true) }
+                var manifest = try await manifestStore.load(sessionID: sessionID)
+                guard manifest.status != .cancelled else { continue }
+                if FinalizationPlan.make(from: manifest) == nil {
+                    manifest = try await recoveryService.prepareFinalizationPlanForRecovery(for: manifest)
+                }
+                guard let plan = FinalizationPlan.make(from: manifest),
+                      plan.jobKinds.contains(.cloudUpload) else { continue }
+                _ = try await jobQueue.retryFailedCloudUploads(
+                    sessionIDs: [sessionID],
+                    finalizationTransactionIDs: [sessionID: plan.transactionID]
+                )
+            } catch {
+                recoveryService.recordError("Automatic cloud retry was skipped for \(sessionID): \(error.localizedDescription)")
+            }
         }
     }
 
@@ -570,19 +1219,74 @@ final class BoothCoordinator {
                     self.errorMessage = "Template preview unavailable: \(template.id)"
                     continue
                 }
-                guard data.count <= 350_000 else {
+                guard data.count <= BoothAssetTransfer.maximumAssetBytes else {
                     self.errorMessage = "Template preview is too large: \(template.id)"
                     continue
                 }
-                self.multipeer.sendControl(.eventExperienceAsset(packet: ExperienceAssetPacket(
-                    eventID: document.eventID,
-                    revision: document.revision,
+                let reference = self.makeAssetReference(
+                    data: data,
                     assetID: template.id,
-                    kind: .templatePreview,
-                    jpegData: data
-                )))
+                    sessionID: nil,
+                    revision: document.revision,
+                    kind: .templatePreview
+                )
+                _ = self.sendAsset(data: data, reference: reference)
             }
         }
+    }
+
+    private func makeAssetReference(
+        data: Data,
+        assetID: String,
+        sessionID: String?,
+        revision: String,
+        kind: BoothAssetKind
+    ) -> BoothAssetReference {
+        BoothAssetReference(
+            assetID: assetID,
+            sessionID: sessionID,
+            revision: revision,
+            kind: kind,
+            byteCount: data.count,
+            sha256: Data(SHA256.hash(data: data))
+        )
+    }
+
+    @discardableResult
+    private func sendAsset(data: Data, reference: BoothAssetReference) -> Bool {
+        assetSources[reference] = data
+        guard connectionStatus.isAssetChannelReady else { return false }
+        guard data.count <= BoothAssetTransfer.maximumAssetBytes else {
+            errorMessage = "Asset could not be prepared for transfer: \(reference.assetID)"
+            return false
+        }
+        let transport = multipeer
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            guard await transport.sendAsset(data: data, reference: reference) else {
+                self.errorMessage = "Asset transfer is unavailable: \(reference.assetID)"
+                return
+            }
+        }
+        return true
+    }
+
+    private func sendReviewAsset(
+        context: SessionMessageContext,
+        photoIndex: Int,
+        data: Data
+    ) {
+        let reference = makeAssetReference(
+            data: data,
+            assetID: "review-\(context.sessionID)-\(photoIndex)-\(context.sequence)",
+            sessionID: context.sessionID,
+            revision: "review-v1",
+            kind: .reviewImage
+        )
+        sessionAssetReferences[photoIndex] = reference
+        assetSources[reference] = data
+        multipeer.sendControl(.shotCapturedAsset(context: context, index: photoIndex, asset: reference))
+        _ = sendAsset(data: data, reference: reference)
     }
 
     private func makeEventSnapshot(_ event: BoothEvent) -> BoothEventSnapshot {
@@ -682,12 +1386,25 @@ final class BoothCoordinator {
         config: EventConfig,
         document: EventExperienceDocument
     ) async -> SessionPresentation {
+        pendingPromptAssets = [:]
         var prompts: [SessionPromptPresentation] = []
         for prompt in config.posePrompts {
             let imageData: Data?
+            var imageAsset: BoothAssetReference?
             if let assetID = prompt.assetID,
                let data = try? await experienceStore.readPromptImage(eventID: document.eventID, fileName: assetID) {
                 imageData = sessionPromptImageData(data)
+                if let imageData {
+                    let reference = makeAssetReference(
+                        data: imageData,
+                        assetID: "prompt-\(sessionID)-\(prompt.id)",
+                        sessionID: sessionID,
+                        revision: document.revision,
+                        kind: .promptImage
+                    )
+                    imageAsset = reference
+                    pendingPromptAssets[reference.assetID] = (reference, imageData)
+                }
             } else {
                 imageData = nil
             }
@@ -696,7 +1413,8 @@ final class BoothCoordinator {
                 photoIndex: prompt.photoIndex,
                 title: prompt.title.value(for: config.customerLanguage),
                 subtitle: localizedOptional(prompt.subtitle, language: config.customerLanguage),
-                imageData: imageData
+                imageData: imageData,
+                imageAsset: imageAsset
             ))
         }
         return SessionPresentation(
@@ -740,10 +1458,109 @@ final class BoothCoordinator {
 
     // MARK: - External display viewer
 
+    var customerDisplayAuthority: CustomerDisplayAuthority {
+        CustomerDisplayAuthority.evaluate(
+            isAuthenticatedIPadConnected: isAuthenticatedIPadConnected && connectionStatus.isPreviewChannelConnected,
+            isExternalViewerActive: isExternalViewerActive
+        )
+    }
+
     var isCustomerDisplayReady: Bool {
-        if isExternalViewerActive { return true }
-        if case .connected = connectionStatus.state { return true }
-        return false
+        customerDisplayAuthority.isCustomerDisplayReady
+    }
+
+    var isAuthenticatedIPadReadyForSoak: Bool {
+        isAuthenticatedIPadConnected && connectionStatus.isPreviewChannelConnected
+    }
+
+    var activeSoakCaptureCounts: (attempted: Int, succeeded: Int) {
+        let attempts = currentManifest?.captureAttempts ?? []
+        return (
+            attempted: BoothSoakCaptureMetrics.physicalCaptureAttemptCount(attempts),
+            succeeded: attempts.filter { $0.result == .success || $0.result == .transferRecovered }.count
+        )
+    }
+
+    var activeSoakQueueCounts: (queued: Int, running: Int, failed: Int) {
+        guard let manifest = currentManifest,
+              manifest.origin == .soakTest,
+              let plan = FinalizationPlan.make(from: manifest) else {
+            return (0, 0, 0)
+        }
+        let jobs = jobQueue.jobs.filter { plan.authorizes($0, for: manifest) }
+        return (
+            queued: jobs.filter { $0.status == .pending || $0.status == .waitingRetry }.count,
+            running: jobs.filter { $0.status == .running }.count,
+            failed: jobs.filter { $0.status == .failed }.count
+        )
+    }
+
+    func refreshRetainedSoakDiagnostics() async {
+        let results = await manifestStore.loadAll()
+        let unresolvedPrintSessionIDs = Set(jobQueue.jobs.compactMap { job in
+            job.kind == .autoPrint
+                && (job.status == .running || job.lastFailureDisposition == .sideEffectUnknown)
+                ? job.sessionID
+                : nil
+        }).union(soakFailureDiagnosticSessionIDs)
+        retainedSoakDiagnostics = BoothSoakCleanupPolicy.retainedDiagnosticManifests(
+            results.compactMap { result in
+                guard case .loaded(let manifest) = result else { return nil }
+                return manifest
+            },
+            unresolvedSessionIDs: unresolvedPrintSessionIDs
+        )
+    }
+
+    func soakEnvironmentSnapshot() -> [String: String] {
+        let cameraName: String
+        if cameraSourceKind == .dslr {
+            cameraName = capture.dslr.selectedDeviceName ?? "Unknown DSLR"
+        } else {
+            cameraName = capture.camera.availableDevices.first {
+                $0.id == capture.camera.selectedDeviceID
+            }?.name ?? "Unknown camera"
+        }
+        let ipad: String = switch connectionStatus.state {
+        case .connected(let peerName):
+            isAuthenticatedIPadConnected ? "Authenticated: \(peerName)" : "Connected, authentication unverified: \(peerName)"
+        case .connecting: "Connecting"
+        case .disconnected: "Disconnected"
+        }
+        return [
+            "Camera model": cameraName,
+            "Camera source": cameraSourceKind.rawValue,
+            "Printer": printerLabel,
+            "iPad connection": ipad,
+            "iPad secure channel": connectionStatus.isSecureChannelEstablished ? "Established" : "NOT TESTED",
+            "Network requested": connectionStatus.requestedNetwork.rawValue,
+            "Network effective": connectionStatus.effectiveNetwork.rawValue,
+            "Event": activeEvent?.name ?? "No active event"
+        ]
+    }
+
+    func soakTransportReconnectCount() async -> Int {
+        let events = await operationsEvents.load()
+        return events.filter { $0.kind == .transportReconnectSucceeded }.count
+    }
+
+    func failedSoakQueueJobCount(runID: String) -> Int? {
+        guard let manifest = currentManifest,
+              manifest.origin == .soakTest,
+              manifest.soakRunID == runID,
+              let transactionID = manifest.finalizationTransactionID else { return nil }
+        return jobQueue.jobs.filter {
+            $0.sessionID == manifest.id
+                && $0.finalizationTransactionID == transactionID
+                && $0.status == .failed
+        }.count
+    }
+
+    var isAuthenticatedIPadConnected: Bool {
+        guard case .connected = connectionStatus.state else { return false }
+        guard multipeer is NetworkBoothTransport else { return true }
+        return connectionStatus.isPeerAuthenticated
+            && connectionStatus.peerID == connectionStatus.preferredPeerID
     }
 
     func refreshExternalScreens() {
@@ -781,7 +1598,26 @@ final class BoothCoordinator {
         multipeer.disconnect()
         capture.stop()
         jobQueue.stop()
+        endEventActivity()
         Task { await server.stop() }
+    }
+
+    private func updateEventActivity() {
+        guard activeEvent != nil else {
+            endEventActivity()
+            return
+        }
+        guard eventActivity == nil else { return }
+        eventActivity = ProcessInfo.processInfo.beginActivity(
+            options: .userInitiated,
+            reason: "PRC PhotoBooth active event"
+        )
+    }
+
+    private func endEventActivity() {
+        guard let eventActivity else { return }
+        ProcessInfo.processInfo.endActivity(eventActivity)
+        self.eventActivity = nil
     }
 
     func pauseBooth() {
@@ -823,8 +1659,10 @@ final class BoothCoordinator {
 
     func startCamera() {
         do {
-            capture.setPreviewFrameRate(previewFrameRate.rawValue)
+            previewQualityPolicy.setPreset(previewQualityPreset)
+            applyPreviewQuality()
             try capture.start()
+            startPreviewQualityMonitor()
             capture.onPreviewJPEG = { [weak self] jpeg in
                 guard let self else { return }
                 multipeer.sendPreviewFrame(jpeg)
@@ -832,6 +1670,156 @@ final class BoothCoordinator {
         } catch {
             errorMessage = "Camera error: \(error.localizedDescription)"
         }
+    }
+
+    private func applyPreviewQuality() {
+        let profile = previewQualityPolicy.update(
+            effectiveNetwork: connectionStatus.effectiveNetwork
+        )
+        capture.setPreviewQuality(profile)
+        let requestedRate = previewFrameRate.rawValue
+        capture.setPreviewFrameRate(profile.allows60FPS ? requestedRate : min(requestedRate, 30))
+    }
+
+    private func startPreviewQualityMonitor() {
+        previewQualityTask?.cancel()
+        previewQualityTask = Task { @MainActor [weak self] in
+            while !Task.isCancelled {
+                self?.applyPreviewQuality()
+                try? await Task.sleep(for: .seconds(1))
+            }
+        }
+    }
+
+    func testEthernetConnection() {
+        guard !isCaptureSessionActive, !ethernetTestInProgress else { return }
+        ethernetTestInProgress = true
+        ethernetProbeResult = nil
+        ethernetTestTask?.cancel()
+        ethernetTestTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            defer {
+                self.ethernetTestInProgress = false
+                self.ethernetTestTask = nil
+            }
+            if let networkTransport = self.multipeer as? NetworkBoothTransport {
+                self.ethernetProbeResult = await networkTransport.probeEthernet()
+            } else {
+                self.ethernetProbeResult = EthernetProbeResult(
+                    interfaceAvailable: false,
+                    peerDiscovered: false,
+                    controlConnected: false,
+                    handshakeSucceeded: false,
+                    previewConnected: false,
+                    duration: 0,
+                    error: "Production Ethernet transport is unavailable."
+                )
+            }
+        }
+    }
+
+    func reconnectIPad() {
+        guard !isCaptureSessionActive else { return }
+        multipeer.restart()
+    }
+
+    func retryLANNow() {
+        guard !isCaptureSessionActive else { return }
+        _ = (multipeer as? NetworkBoothTransport)?.retryPreferredLANNow()
+    }
+
+    func copyDiagnostics() {
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            let report = await self.diagnosticsReport()
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString(report, forType: .string)
+        }
+    }
+
+    func exportDiagnostics() {
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            let report = await self.diagnosticsReport()
+            let panel = NSSavePanel()
+            panel.allowedContentTypes = [.plainText]
+            panel.nameFieldStringValue = "PRC-PhotoBooth-diagnostics.txt"
+            guard panel.runModal() == .OK, let url = panel.url else { return }
+            do {
+                try report.write(to: url, atomically: true, encoding: .utf8)
+            } catch {
+                errorMessage = "Could not export diagnostics: \(error.localizedDescription)"
+            }
+        }
+    }
+
+    private func diagnosticsReport() async -> String {
+        let printerDefaultStatus: String = switch printer.configuredPrinterStatus() {
+            case .systemDefault: "System Default"
+            case .unavailable(let name): "Unavailable: \(name)"
+        }
+#if arch(arm64)
+        let architecture = "arm64"
+#elseif arch(x86_64)
+        let architecture = "x86_64"
+#else
+        let architecture = "unknown"
+#endif
+        let jobs = jobQueue.jobs
+        let allEvents = await operationsEvents.load()
+        let criticalJobs = jobs.filter {
+            !$0.kind.isOptional && ($0.status == .pending || $0.status == .running || $0.status == .waitingRetry)
+        }
+        let discoveryDiagnostics = (multipeer as? NetworkBoothTransport)?.discoveryDiagnostics
+        let snapshot = BoothDiagnosticsReport.Snapshot(
+            appVersion: Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "Unknown",
+            appBuild: Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "Unknown",
+            macOS: ProcessInfo.processInfo.operatingSystemVersionString,
+            architecture: architecture,
+            generatedAt: Date(),
+            requestedNetwork: connectionStatus.requestedNetwork,
+            effectiveNetwork: connectionStatus.effectiveNetwork,
+            connectionState: connectionStatus.state,
+            fallbackReason: connectionStatus.isFallbackActive
+                ? connectionStatus.fallbackReason ?? "Active"
+                : nil,
+            peerName: connectionStatus.peerDisplayName,
+            ethernetPath: connectionStatus.lanPathObservation,
+            wifiPath: connectionStatus.wifiPathObservation,
+            lanHandshake: connectionStatus.lanHandshake,
+            controlConnected: {
+                if case .connected = connectionStatus.state { return true }
+                return false
+            }(),
+            previewConnected: connectionStatus.isPreviewChannelConnected,
+            lastNetworkError: connectionStatus.lastNetworkError,
+            previewDiagnostics: connectionStatus.previewDiagnostics,
+            printerDefaultStatus: printerDefaultStatus,
+            printerName: printerLabel,
+            lastPrinterTest: printer.lastTestResult,
+            printRequestCount: printer.printRequestCount,
+            printSuccessCount: printer.printSuccessCount,
+            printFailureCount: printer.printFailureCount,
+            lastPrintError: printer.lastPrintError,
+            preflightReadiness: preflight.readiness,
+            preflightResults: preflight.results,
+            authenticated: connectionStatus.isPeerAuthenticated,
+            reconnectCount: allEvents.filter { $0.kind == .transportReconnectSucceeded }.count,
+            heartbeatTimeoutCount: allEvents.filter { $0.kind == .heartbeatTimedOut }.count,
+            controlSendFailureCount: allEvents.filter { $0.kind == .controlSendFailed || $0.kind == .controlPayloadRejected }.count,
+            queuePendingCount: jobs.filter { $0.status == .pending }.count,
+            queueRunningCount: jobs.filter { $0.status == .running }.count,
+            queueRetryingCount: jobs.filter { $0.status == .waitingRetry }.count,
+            queueFailedCount: jobs.filter { $0.status == .failed }.count,
+            oldestCriticalJobAge: criticalJobs.map { Date().timeIntervalSince($0.createdAt) }.max(),
+            recentEvents: Array(allEvents.suffix(50)),
+            discoveryDiagnostics: discoveryDiagnostics
+        )
+        return BoothDiagnosticsReport.make(snapshot)
+    }
+
+    private func attemptPendingLANRecoveryIfIdle() {
+        (multipeer as? NetworkBoothTransport)?.attemptPendingLANRecoveryIfIdle()
     }
 
     func setMirrored(_ isMirrored: Bool) {
@@ -872,6 +1860,10 @@ final class BoothCoordinator {
     func testCameraCapture() {
         Task { @MainActor [weak self] in
             guard let self else { return }
+            guard stateMachine.phase == .idle || stateMachine.phase == .readyToStart else {
+                errorMessage = "Camera test is unavailable during an active session."
+                return
+            }
             do {
                 _ = try await capture.captureDiagnosticStill()
                 errorMessage = nil
@@ -882,6 +1874,8 @@ final class BoothCoordinator {
     }
 
     func runSafePreflight() async {
+        printer.refreshPrinters()
+        attemptPendingLANRecoveryIfIdle()
         let context = await makePreflightContext()
         await preflight.runSafeChecks(using: context)
     }
@@ -893,11 +1887,14 @@ final class BoothCoordinator {
             runPrinterTest: runPrinterTest,
             cameraTest: { [weak self] in
                 guard let self else { return }
+                guard self.stateMachine.phase == .idle || self.stateMachine.phase == .readyToStart else {
+                    throw CameraError.captureInProgress
+                }
                 _ = try await self.capture.captureDiagnosticStill()
             },
             printerTest: { [weak self] in
-                guard let self else { return }
-                try await self.printer.printTestPage()
+                guard let self else { throw CancellationError() }
+                return try await self.printer.printTestPage()
             }
         )
     }
@@ -905,13 +1902,17 @@ final class BoothCoordinator {
     private func makePreflightContext() async -> BoothPreflightContext {
         let serverStatus = await server.statusSnapshot()
         let serverHealthy = await localServerHealthCheck(status: serverStatus)
-        let ipadConnected: Bool = {
-            if case .connected = connectionStatus.state { return true }
-            return false
-        }()
+        let ipadConnected = isAuthenticatedIPadConnected
         let output = picturesOutputDir()
         let capacity = output.flatMap { try? $0.resourceValues(forKeys: [.volumeAvailableCapacityKey]).volumeAvailableCapacity }.map(Int64.init)
         let jobs = jobQueue.jobs
+        let controlChannelConnected: Bool = {
+            guard case .connected = connectionStatus.state else { return false }
+            return multipeer is NetworkBoothTransport ? connectionStatus.isPeerAuthenticated : true
+        }()
+        let criticalJobs = jobs.filter {
+            !$0.kind.isOptional && ($0.status == .pending || $0.status == .running || $0.status == .waitingRetry)
+        }
         let requiredFailed = jobs.contains {
             !$0.kind.isOptional && $0.status == .failed
         }
@@ -973,10 +1974,8 @@ final class BoothCoordinator {
         }()
         let printerConfigured: Bool = {
             switch printer.configuredPrinterStatus() {
-            case .available: return true
+            case .systemDefault: return true
             case .unavailable: return false
-            case .systemDefault:
-                return NSPrinter.printerNames.contains(NSPrintInfo.shared.printer.name)
             }
         }()
         var startupHealth = startupComponents
@@ -1008,8 +2007,16 @@ final class BoothCoordinator {
             previewPermissionGranted: cameraPermissionGranted,
             previewConnected: capture.isRunning,
             previewRequired: false,
-            customerDisplayReady: isCustomerDisplayReady,
+            customerDisplayReady: isAuthenticatedIPadConnected && connectionStatus.isPreviewChannelConnected,
             ipadConnected: ipadConnected,
+            controlChannelConnected: controlChannelConnected,
+            ipadPreviewChannelConnected: connectionStatus.isPreviewChannelConnected,
+            secureTransportReady: connectionStatus.isSecureChannelEstablished,
+            assetChannelConnected: connectionStatus.isAssetChannelConnected,
+            assetChannelVerified: connectionStatus.isAssetChannelVerified,
+            lastControlActivityAt: connectionStatus.lastControlActivityAt,
+            reconnectInProgress: connectionStatus.isReconnectInProgress,
+            reconnectAttempt: connectionStatus.reconnectAttempt,
             requestedNetwork: connectionStatus.requestedNetwork,
             effectiveNetwork: connectionStatus.effectiveNetwork,
             wifiPathAvailable: connectionStatus.isWiFiPathAvailable,
@@ -1019,14 +2026,22 @@ final class BoothCoordinator {
             availableDiskBytes: capacity,
             localServerStatus: serverStatus,
             localServerHealthPassed: serverHealthy,
-            localIPAddress: LocalWebServer.lanIPAddress(),
+            localIPAddress: LocalWebServer.lanIPAddress(selection: guestDeliveryInterfaceSelection),
+            guestDeliveryResolution: LocalWebServer.guestDeliveryEndpoint(selection: guestDeliveryInterfaceSelection),
             runtimeDirectoryURL: Self.runtimeDirectoryURL(),
             runtimePersistenceAvailable: startupComponents[.runtimeDirectory]?.status == .ready,
             queuePersistenceAvailable: jobQueue.lastQueueError == nil,
             unfinishedCaptureSession: recoveryService.recoverableCaptureSession != nil,
             requiredJobFailed: requiredFailed || jobs.contains(where: { !$0.kind.isOptional && $0.status == .cancelled }),
             optionalJobPendingOrFailed: optionalPendingOrFailed,
+            queuePendingCount: jobs.filter { $0.status == .pending }.count,
+            queueRunningCount: jobs.filter { $0.status == .running }.count,
+            queueRetryingCount: jobs.filter { $0.status == .waitingRetry }.count,
+            queueFailedCount: jobs.filter { $0.status == .failed }.count,
+            oldestCriticalJobAge: criticalJobs.map { max(0, Date().timeIntervalSince($0.createdAt)) }.max(),
             cloudUploadEnabled: cloudUploadEnabled,
+            allowTrustedLocalHTTP: UserDefaults.standard.bool(forKey: "allowTrustedLocalHTTP"),
+            publicBaseURL: UserDefaults.standard.string(forKey: "publicBaseURL"),
             cloudSetupComplete: cloudSetupComplete,
             cloudConnectivityPassed: cloudConnectivityPassed,
             automaticPrintingEnabled: UserDefaults.standard.bool(forKey: "selphyAutoPrintAfterSession"),
@@ -1098,20 +2113,110 @@ final class BoothCoordinator {
 
     // MARK: - Session control
 
-    func startSession(selection requestedSelection: CustomerSessionSelection? = nil) {
-        guard !isBoothPaused else {
-            errorMessage = "The booth is paused by the operator."
+    private func sendSessionStartResult(
+        requestID: UUID?,
+        result: CustomerSessionStartResult
+    ) {
+        guard let requestID else { return }
+        multipeer.sendControl(.customerSessionStartResult(requestID: requestID, result: result))
+    }
+
+    private func releaseSessionStart(_ requestID: UUID) {
+        guard activeSessionStart?.requestID == requestID else { return }
+        activeSessionStart = nil
+    }
+
+    func startSession(
+        selection requestedSelection: CustomerSessionSelection? = nil,
+        requestID requestedRequestID: UUID? = nil,
+        origin: SessionOrigin = .normal,
+        soakRunID: String? = nil,
+        soakCycleIndex: Int? = nil
+    ) {
+        let startRequestID = requestedRequestID ?? UUID()
+        let respondsToRequest = requestedRequestID != nil
+        let customerLanguage = requestedSelection?.language ?? .english
+        func startMessage(english: String, thai: String) -> String {
+            LocalizedText(english: english, thai: thai).value(for: customerLanguage)
+        }
+        guard activeSessionStart == nil else {
+            if respondsToRequest { sendSessionStartResult(requestID: requestedRequestID, result: .inProgress) }
             return
         }
-        guard currentSession == nil, let event = activeEvent else { return }
+        guard activeSoakRunID == nil
+                || (origin == .soakTest && soakRunID == activeSoakRunID) else {
+            let reason = "A production soak run currently owns the booth."
+            errorMessage = reason
+            sendSessionStartResult(requestID: requestedRequestID, result: .rejected(reason: reason))
+            return
+        }
+        guard !isBoothPaused else {
+            errorMessage = startMessage(
+                english: "The booth is paused by the operator.",
+                thai: "บูธถูกหยุดชั่วคราวโดยผู้ดูแล"
+            )
+            sendSessionStartResult(requestID: requestedRequestID, result: .rejected(reason: errorMessage!))
+            return
+        }
+        guard currentSession == nil, finishedAwaitingCustomerAckSessionID == nil else {
+            let reason = startMessage(
+                english: "A session is already in progress.",
+                thai: "มีเซสชันกำลังดำเนินการอยู่แล้ว"
+            )
+            errorMessage = reason
+            sendSessionStartResult(requestID: requestedRequestID, result: .rejected(reason: reason))
+            return
+        }
+        guard let event = activeEvent else {
+            let reason = startMessage(
+                english: "No active event is available.",
+                thai: "ไม่มีอีเวนต์ที่กำลังใช้งาน"
+            )
+            errorMessage = reason
+            sendSessionStartResult(requestID: requestedRequestID, result: .rejected(reason: reason))
+            return
+        }
+        sessionLifecycleGeneration &+= 1
+        let lifecycleGeneration = sessionLifecycleGeneration
+        activeSessionStart = ActiveSessionStart(
+            requestID: startRequestID,
+            generation: lifecycleGeneration,
+            sessionID: nil
+        )
+        func failBeforeTransaction(_ message: String, result: CustomerSessionStartResult = .rejected(reason: "")) {
+            self.releaseSessionStart(startRequestID)
+            self.errorMessage = message
+            switch result {
+            case .rejected:
+                self.sendSessionStartResult(
+                    requestID: requestedRequestID,
+                    result: .rejected(reason: message)
+                )
+            default:
+                self.sendSessionStartResult(requestID: requestedRequestID, result: result)
+            }
+        }
         reviewDecisionPending = false
+        currentReviewStateToken = nil
+        recentReviewRequests.removeAll(keepingCapacity: true)
+        recentReviewRequestOrder.removeAll(keepingCapacity: true)
+        activeReviewRequestID = nil
+        sessionAssetReferences = [:]
+        stripAssetReference = nil
+        assetSources = [:]
+        assetAssembler = BoothAssetAssembler()
         guard recoveryService.recoverableCaptureSession == nil else {
-            errorMessage = "Resume or discard the unfinished session in Operations."
+            failBeforeTransaction(startMessage(
+                english: "Resume or discard the unfinished session in Operations.",
+                thai: "ดำเนินการต่อหรือละทิ้งเซสชันที่ค้างอยู่ใน Operations"
+            ))
             return
         }
         guard let document = activeExperienceDocument else {
-            errorMessage = "Event experience is still loading."
-            if requestedSelection != nil { multipeer.sendControl(.sessionRequestRejected(reason: errorMessage!)) }
+            failBeforeTransaction(startMessage(
+                english: "Event experience is still loading.",
+                thai: "กำลังโหลดประสบการณ์ของอีเวนต์"
+            ))
             return
         }
         let snapshot = makeEventSnapshot(event)
@@ -1129,9 +2234,11 @@ final class BoothCoordinator {
                     : "/e/\(document.gallery.eventToken)/"
             )
         } catch {
-            if requestedSelection != nil {
+            // Always release the start latch so subsequent starts are not blocked (Finding 17).
+            releaseSessionStart(startRequestID)
+            if respondsToRequest {
                 let reason = (error as? CustomerSelectionError)?.message(for: selection.language) ?? error.localizedDescription
-                multipeer.sendControl(.sessionRequestRejected(reason: reason))
+                sendSessionStartResult(requestID: requestedRequestID, result: .rejected(reason: reason))
                 if let selectionError = error as? CustomerSelectionError,
                    selectionError == .staleCatalog {
                     sendExperienceCatalog()
@@ -1141,21 +2248,30 @@ final class BoothCoordinator {
             return
         }
         guard isCustomerDisplayReady else {
-            errorMessage = "Connect an iPad or activate the external viewer before starting a session."
+            failBeforeTransaction(startMessage(
+                english: "Connect an iPad or activate the external viewer before starting a session.",
+                thai: "เชื่อมต่อ iPad หรือเปิดหน้าจอภายนอกก่อนเริ่มเซสชัน"
+            ))
             return
         }
         if let health = startupComponents[.localServer], health.status == .unavailable {
-            errorMessage = health.detail
+            failBeforeTransaction(health.detail)
             return
         }
         guard startupComponents[.runtimeDirectory]?.status == .ready,
               startupComponents[.dataStore]?.status == .ready,
               jobQueue.lastQueueError == nil else {
-            errorMessage = "Required runtime persistence is unavailable. Resolve Preflight errors before starting."
+            failBeforeTransaction(startMessage(
+                english: "Required runtime persistence is unavailable. Resolve Preflight errors before starting.",
+                thai: "พื้นที่จัดเก็บที่จำเป็นไม่พร้อมใช้งาน แก้ไขข้อผิดพลาด Preflight ก่อนเริ่ม"
+            ))
             return
         }
         guard selectedCaptureSourceReady else {
-            errorMessage = "The selected camera is not ready."
+            failBeforeTransaction(startMessage(
+                english: "The selected camera is not ready.",
+                thai: "กล้องที่เลือกยังไม่พร้อมใช้งาน"
+            ))
             return
         }
         guard config.photoCount > 0,
@@ -1164,15 +2280,27 @@ final class BoothCoordinator {
               config.canvasWidth > 0,
               config.canvasHeight > 0,
               let outputRoot = picturesOutputDir() else {
-            errorMessage = "The active event layout is not valid."
+            failBeforeTransaction(startMessage(
+                english: "The active event layout is not valid.",
+                thai: "เลย์เอาต์อีเวนต์ที่ใช้งานไม่ถูกต้อง"
+            ))
             return
         }
-        let session = store.startSession(for: event)
+        let session = store.startSession(
+            for: event,
+            origin: origin,
+            soakRunID: soakRunID,
+            soakCycleIndex: soakCycleIndex
+        )
+        if var activeSessionStart {
+            activeSessionStart.sessionID = session.id
+            self.activeSessionStart = activeSessionStart
+        }
         session.photoCount = config.photoCount
         guard store.saveChanges() else {
             store.deleteSession(session)
             let detail = store.lastPersistenceError ?? "unknown error"
-            errorMessage = "Session persistence is unavailable: \(detail)"
+            failBeforeTransaction("Session persistence is unavailable: \(detail)", result: .persistenceFailed)
             return
         }
         let frameURL = selectedTemplateFrameURL(validated.template, eventID: event.id)
@@ -1180,6 +2308,12 @@ final class BoothCoordinator {
 
         Task { @MainActor [weak self] in
             guard let self else { return }
+            guard self.sessionLifecycleGeneration == lifecycleGeneration,
+                  self.activeSessionStart?.requestID == startRequestID else {
+                self.store.deleteSession(session)
+                self.releaseSessionStart(startRequestID)
+                return
+            }
             var createdDirectory: URL?
             do {
                 let descriptor = try workspace.createWorkspace(
@@ -1219,11 +2353,24 @@ final class BoothCoordinator {
                             acceptedAt: nil
                         )
                     },
-                    cloudDelivery: currentCloudDeliverySnapshot(),
+                    cloudDelivery: currentCloudDeliverySnapshot(enabledOverride: soakCloudUploadOverride),
+                    deliveryIntent: currentDeliveryIntentSnapshot(),
+                    origin: origin,
+                    soakRunID: soakRunID,
+                    soakCycleIndex: soakCycleIndex,
+                    soakAutoCleanupEnabled: origin == .soakTest ? soakAutoCleanupWorkingFiles : nil,
                     lastError: nil,
                     updatedAt: Date()
                 )
                 try await manifestStore.create(manifest)
+                guard self.sessionLifecycleGeneration == lifecycleGeneration,
+                      self.activeSessionStart?.requestID == startRequestID else {
+                    try? await manifestStore.delete(sessionID: manifest.id)
+                    try? workspace.removeEntireSession(manifest: manifest)
+                    store.deleteSession(session)
+                    self.releaseSessionStart(startRequestID)
+                    return
+                }
                 currentSession = session
                 currentManifest = manifest
                 currentManifestID = manifest.id
@@ -1232,17 +2379,21 @@ final class BoothCoordinator {
                 currentCaptureAttempt = nil
                 currentFilteredReviewImages = [:]
                 capture.resetStills()
-                stateMachine.startSession(config: config, sessionID: session.id)
                 let presentation = await makePresentation(
                     sessionID: session.id,
                     config: config,
                     document: document
                 )
+                guard self.sessionLifecycleGeneration == lifecycleGeneration,
+                      self.activeSessionStart?.requestID == startRequestID else {
+                    throw CancellationError()
+                }
                 try workspace.savePresentationSnapshot(
                     presentation: presentation,
                     prompts: config.posePrompts,
                     workspace: descriptor
                 )
+                stateMachine.startSession(config: config, sessionID: session.id)
                 currentSessionPresentation = presentation
                 lastSessionPresentation = presentation
                 recordOperation(.sessionStarted, sessionID: session.id)
@@ -1250,19 +2401,746 @@ final class BoothCoordinator {
                       let preparedContext = nextSessionMessageContext() else {
                     throw NSError(domain: "PRCPhotoBooth.Session", code: 1, userInfo: [NSLocalizedDescriptionKey: "Session identity could not be issued."])
                 }
-                multipeer.sendControl(.sessionStart(context: startContext))
-                multipeer.sendControl(.eventConfig(config: config))
-                multipeer.sendControl(.sessionPrepared(
-                    config: config,
-                    presentation: presentation,
-                    context: preparedContext
-                ))
-                beginCountdown(photoIndex: 0)
+                let sessionID = session.id
+                let authority = customerDisplayAuthority
+                for asset in pendingPromptAssets.values {
+                    assetSources[asset.reference] = asset.data
+                }
+                if authority.requiresIPadSetupSend {
+                    multipeer.sendControl(.sessionStart(context: startContext))
+                    multipeer.sendControl(.eventConfig(config: config))
+                    multipeer.sendControl(.sessionPrepared(
+                        config: config,
+                        presentation: presentation,
+                        context: preparedContext
+                    )) { [weak self] outcome in
+                        guard let self else { return }
+                        guard outcome == .sent,
+                              self.currentSession?.id == sessionID,
+                              self.stateMachine.currentSessionID == sessionID else {
+                            // Only show error if an iPad was expected (Finding 6).
+                            if self.isAuthenticatedIPadConnected {
+                                self.errorMessage = "The iPad did not receive session setup. Reconnect before retrying."
+                            }
+                            return
+                        }
+                        self.beginCountdown(photoIndex: 0)
+                    }
+                }
+                // External-display-only: no iPad to acknowledge, begin countdown directly (Finding 6).
+                if authority.shouldStartCountdownImmediatelyLocally {
+                    beginCountdown(photoIndex: 0)
+                }
+                self.lastSessionStartRequestID = startRequestID
+                self.lastSessionStartSessionID = sessionID
+                self.releaseSessionStart(startRequestID)
+                self.sendSessionStartResult(
+                    requestID: requestedRequestID,
+                    result: .accepted(sessionID: sessionID)
+                )
             } catch {
                 if let createdDirectory { try? FileManager.default.removeItem(at: createdDirectory) }
+                if let persisted = try? await manifestStore.load(sessionID: session.id),
+                   persisted.status == .capturing {
+                    try? await manifestStore.delete(sessionID: session.id)
+                }
                 store.deleteSession(session)
-                errorMessage = "Session start failed: \(error.localizedDescription)"
+                if currentSession?.id == session.id {
+                    cancelCountdown()
+                    currentSession = nil
+                    currentManifest = nil
+                    currentManifestID = nil
+                    currentSessionPresentation = nil
+                    lastSessionPresentation = nil
+                    sessionAssetReferences = [:]
+                    stripAssetReference = nil
+                    assetSources = [:]
+                    pendingPromptAssets = [:]
+                    currentFilteredReviewImages = [:]
+                    currentCaptureRecoveryStateToken = nil
+                    currentReviewStateToken = nil
+                    stateMachine.reset()
+                }
+                self.releaseSessionStart(startRequestID)
+                if !(error is CancellationError) {
+                    errorMessage = "Session start failed: \(error.localizedDescription)"
+                    self.sendSessionStartResult(
+                        requestID: requestedRequestID,
+                        result: .persistenceFailed
+                    )
+                }
             }
+        }
+    }
+
+    var productionSoakPhotoCount: Int? {
+        guard let document = activeExperienceDocument else { return nil }
+        return document.templates.first(where: { $0.id == document.defaultTemplateID })?.photoCount
+    }
+
+    func productionSoakReadinessIssues(config: BoothSoakTestConfig) -> [String] {
+        var issues: [String] = []
+        if activeEvent == nil { issues.append("An active event is required.") }
+        if activeEvent != nil, productionSoakPhotoCount == nil {
+            issues.append("The active event’s default photo template is not ready.")
+        }
+        if !selectedCaptureSourceReady { issues.append("The selected physical camera is not ready.") }
+        if !isCustomerDisplayReady { issues.append("Connect the paired iPad or activate the external customer display.") }
+        if currentSession != nil || currentManifest != nil || activeSessionStart != nil
+                || finishedAwaitingCustomerAckSessionID != nil {
+            issues.append("Finish or cancel the active customer session before starting a production soak.")
+        }
+        if recoveryService.recoverableCaptureSession != nil {
+            issues.append("Resolve the unfinished capture session before starting a production soak.")
+        }
+        if jobQueue.lastQueueError != nil { issues.append("The persistent job queue is unavailable.") }
+        if jobQueue.jobs.contains(where: { $0.status == .pending || $0.status == .running || $0.status == .waitingRetry }) {
+            issues.append("Wait for existing production jobs to settle before starting a soak.")
+        }
+        if jobQueue.jobs.contains(where: {
+            $0.kind == .autoPrint && $0.lastFailureDisposition == .sideEffectUnknown
+        }) {
+            issues.append("Resolve the uncertain print outcome in Operations before starting a production soak.")
+        }
+        if startupComponents[.runtimeDirectory]?.status != .ready
+                || startupComponents[.dataStore]?.status != .ready {
+            issues.append("Runtime and session persistence must be healthy.")
+        }
+        guard let outputRoot = picturesOutputDir() else {
+            issues.append("The production session output volume is unavailable.")
+            return issues
+        }
+        do {
+            try FileManager.default.createDirectory(at: outputRoot, withIntermediateDirectories: true)
+            let probe = outputRoot.appendingPathComponent(".soak-preflight-\(UUID().uuidString)")
+            try Data([0x53]).write(to: probe, options: [.atomic])
+            try FileManager.default.removeItem(at: probe)
+        } catch {
+            issues.append("The production session output volume is not writable: \(error.localizedDescription)")
+        }
+        if !isLocalServerReady {
+            issues.append("The local download server is unavailable.")
+        }
+
+        let localAllowed = UserDefaults.standard.bool(forKey: "allowTrustedLocalHTTP")
+        let localEndpoint = LocalWebServer.guestDeliveryEndpoint(selection: guestDeliveryInterfaceSelection).endpoint
+        let publicBase = UserDefaults.standard.string(forKey: "publicBaseURL")
+        let publicConfigured = ValidatedPublicGuestBaseURL(string: publicBase ?? "") != nil
+        if localAllowed && localEndpoint == nil && !(config.testCloudUpload && publicConfigured) {
+            issues.append("Trusted local HTTP is enabled, but the selected guest network is unavailable or ambiguous.")
+        } else if !localAllowed && !(config.testCloudUpload && publicConfigured) {
+            issues.append("Enable trusted local HTTP on one selected interface or enable cloud testing with a valid public HTTPS URL.")
+        }
+        if config.testCloudUpload {
+            if !UserDefaults.standard.bool(forKey: "cloudUploadEnabled") {
+                issues.append("Cloud testing uses the current production configuration; cloud upload is disabled in Settings.")
+            }
+            if !publicConfigured
+                    || (UserDefaults.standard.string(forKey: "cloudSSHHost") ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                issues.append("Cloud testing requires a valid public HTTPS URL and configured SSH host.")
+            }
+        }
+        if config.enablePhysicalPrint {
+            if case .unavailable = printer.configuredPrinterStatus() {
+                issues.append("Physical print verification requires a configured printer.")
+            }
+            if !printer.isIdle {
+                issues.append("Wait for the configured printer to become idle before enabling physical soak printing.")
+            }
+        }
+        return issues
+    }
+
+    func beginAutomatedSoakRun(runID: String, config: BoothSoakTestConfig) throws {
+        guard activeSoakRunID == nil else {
+            throw BoothSoakTestError.productionRunUnavailable("another soak run already owns the booth")
+        }
+        let issues = productionSoakReadinessIssues(config: config)
+        guard issues.isEmpty else {
+            throw BoothSoakTestError.productionRunUnavailable(issues.joined(separator: " "))
+        }
+        activeSoakRunID = runID
+        hiddenSoakRouteSessionIDs.removeAll(keepingCapacity: true)
+        soakAutoCleanupWorkingFiles = config.autoCleanupWorkingFiles
+    }
+
+    func runAutomatedSoakCycle(
+        runID: String,
+        cycleIndex: Int,
+        config: BoothSoakTestConfig,
+        printEnabled: Bool,
+        progressHandler: @escaping @Sendable (String) async -> Void
+    ) async throws -> BoothAutomatedSoakCycleResult {
+        guard activeSoakRunID == runID else {
+            throw BoothSoakTestError.productionRunUnavailable("the soak run no longer owns the booth")
+        }
+        guard currentSession == nil, currentManifest == nil, finishedAwaitingCustomerAckSessionID == nil else {
+            throw BoothSoakTestError.productionRunUnavailable("a previous session has not reached its safe boundary")
+        }
+
+        soakCloudUploadOverride = config.testCloudUpload
+        soakAutomaticPrintOverride = printEnabled
+        errorMessage = nil
+        startSession(origin: .soakTest, soakRunID: runID, soakCycleIndex: cycleIndex)
+        var lastPublishedStage: String?
+        func publishStage(_ stage: String) async {
+            guard stage != lastPublishedStage else { return }
+            lastPublishedStage = stage
+            await progressHandler(stage)
+        }
+
+        let sessionDeadline = Date().addingTimeInterval(45)
+        var manifest: SessionManifest?
+        await publishStage("Preparing session")
+        while Date() < sessionDeadline {
+            try Task.checkCancellation()
+            if let currentManifest,
+               currentManifest.origin == .soakTest,
+               currentManifest.soakRunID == runID,
+               currentManifest.soakCycleIndex == cycleIndex {
+                manifest = currentManifest
+                break
+            }
+            if let errorMessage, !errorMessage.isEmpty {
+                throw BoothSoakTestError.productionRunUnavailable(errorMessage)
+            }
+            try await Task.sleep(for: .milliseconds(50))
+        }
+        guard let startedManifest = manifest else {
+            throw BoothSoakTestError.stageTimeout("session creation")
+        }
+        guard startedManifest.eventConfig.photoCount > 0 else {
+            throw BoothSoakTestError.productionRunUnavailable("the event has no photo slots to retake")
+        }
+        var generator = SystemRandomNumberGenerator()
+        let retakePlan = BoothSoakRetakePlan.random(
+            photoCount: startedManifest.eventConfig.photoCount,
+            using: &generator
+        )
+        var requestedRetakes = Array(repeating: 0, count: startedManifest.eventConfig.photoCount)
+        let planDescription = retakePlan.countsByPhoto.enumerated()
+            .filter { $0.element > 0 }
+            .map { "photo \($0.offset + 1) × \($0.element)" }
+            .joined(separator: ", ")
+        NSLog("%@", "[Soak] Run \(runID), cycle \(cycleIndex): \(retakePlan.totalCount) retakes (\(planDescription))")
+        await publishStage("Planned \(retakePlan.totalCount) retakes: \(planDescription)")
+
+        let completionDeadline = Date().addingTimeInterval(300)
+        var finalizingAt: Date?
+        var completedManifest: SessionManifest?
+        var finalJobs: [SessionJob] = []
+        while Date() < completionDeadline {
+            try Task.checkCancellation()
+            let latest = (try? await manifestStore.load(sessionID: startedManifest.id))
+                ?? currentManifest.flatMap { $0.id == startedManifest.id ? $0 : nil }
+                ?? startedManifest
+            await publishStage(soakStage(for: latest, config: config))
+            if latest.status == .failed || latest.status == .cancelled {
+                if latest.status == .cancelled {
+                    throw CancellationError()
+                }
+                throw BoothSoakTestError.productionRunUnavailable(
+                    latest.lastError ?? "session entered \(latest.status.rawValue)"
+                )
+            }
+            if latest.status == .finalizing, finalizingAt == nil { finalizingAt = Date() }
+
+            if case .review(let photoIndex) = stateMachine.phase,
+               currentManifest?.id == latest.id,
+               currentCaptureAttempt == nil,
+               !reviewDecisionPending {
+                let persistedRetakes = currentManifest?.shots.first(where: { $0.photoIndex == photoIndex })?.retakeCount ?? 0
+                guard persistedRetakes == requestedRetakes[photoIndex] else {
+                    throw BoothSoakTestError.productionRunUnavailable(
+                        "retake count for photo \(photoIndex + 1) did not match the soak plan"
+                    )
+                }
+                if requestedRetakes[photoIndex] < retakePlan.countsByPhoto[photoIndex] {
+                    requestedRetakes[photoIndex] += 1
+                    await publishStage("Retaking photo \(photoIndex + 1) (\(requestedRetakes[photoIndex])/\(retakePlan.countsByPhoto[photoIndex]))")
+                    handleReviewDecision(photoIndex: photoIndex, action: .retake)
+                } else {
+                    handleReviewDecision(photoIndex: photoIndex, action: .keep)
+                }
+            }
+            if case .captureRecovery = stateMachine.phase {
+                throw BoothSoakTestError.productionRunUnavailable(
+                    currentManifest?.lastError ?? "camera capture entered recovery"
+                )
+            }
+
+            if latest.status == .completed,
+               let plan = FinalizationPlan.make(from: latest) {
+                let matching = jobQueue.jobs.filter { plan.authorizes($0, for: latest) }
+                let isTerminal = matching.count == plan.jobKinds.count && matching.allSatisfy {
+                    $0.status == .succeeded || $0.status == .failed || $0.status == .cancelled
+                }
+                if isTerminal {
+                    guard matching.allSatisfy({ $0.status == .succeeded }) else {
+                        if matching.contains(where: {
+                            $0.kind == .autoPrint
+                                && $0.lastFailureDisposition == .sideEffectUnknown
+                        }) {
+                            throw BoothSoakTestError.productionRunUnavailable(
+                                "Physical Print: UNKNOWN — operator verification required. The print job will not be retried automatically."
+                            )
+                        }
+                        let failures = matching.filter { $0.status != .succeeded }
+                            .map { "\($0.kind.rawValue): \($0.lastError ?? $0.status.rawValue)" }
+                        throw BoothSoakTestError.productionRunUnavailable(failures.joined(separator: "; "))
+                    }
+                    completedManifest = latest
+                    finalJobs = matching
+                    break
+                }
+            }
+            try await Task.sleep(for: .milliseconds(75))
+        }
+        guard let completedManifest else {
+            throw BoothSoakTestError.stageTimeout("production finalization and queue drain")
+        }
+        if config.testCloudUpload,
+           !finalJobs.contains(where: { $0.kind == .cloudUpload && $0.status == .succeeded }) {
+            throw BoothSoakTestError.productionRunUnavailable("the configured cloud upload job did not succeed")
+        }
+        if printEnabled,
+           !finalJobs.contains(where: { $0.kind == .autoPrint && $0.status == .succeeded }) {
+            throw BoothSoakTestError.productionRunUnavailable("the scheduled physical print job did not succeed")
+        }
+
+        let guestRoute = try CloudGuestRoute.resolve(for: completedManifest)
+        let cloudUploadVerified = finalJobs.contains { $0.kind == .cloudUpload && $0.status == .succeeded }
+        var cloudQRRouteVerified = false
+        if config.testCloudUpload && completedManifest.eventConfig.qrCodeElements.isEmpty {
+            throw BoothSoakTestError.productionRunUnavailable(
+                "Cloud QR route was not tested because the event layout has no QR element."
+            )
+        }
+        if !completedManifest.eventConfig.qrCodeElements.isEmpty {
+            await publishStage("Verifying QR route")
+            let localEndpoint = LocalWebServer.guestDeliveryEndpoint(
+                selection: guestDeliveryInterfaceSelection,
+                port: server.port
+            ).endpoint
+            let localBase = localEndpoint?.baseURL ?? ""
+            let allowTrustedLocalHTTP = UserDefaults.standard.bool(forKey: "allowTrustedLocalHTTP")
+            let encodedPayload = try SessionQRCodePayloadResolver.resolve(
+                manifest: completedManifest,
+                localBaseURL: localBase,
+                publicBaseURL: completedManifest.cloudDelivery?.publicBaseURL,
+                cloudUploadEnabled: completedManifest.deliveryIntent?.cloudUploadEnabled ?? false,
+                allowTrustedLocalHTTP: allowTrustedLocalHTTP
+            )
+            let expectedBaseURL: URL?
+            if config.testCloudUpload,
+               let publicBaseURL = completedManifest.cloudDelivery?.publicBaseURL,
+               let validatedBase = ValidatedPublicGuestBaseURL(string: publicBaseURL) {
+                expectedBaseURL = validatedBase.url
+            } else if allowTrustedLocalHTTP, let localBaseURL = URL(string: localBase) {
+                expectedBaseURL = localBaseURL
+            } else {
+                expectedBaseURL = nil
+            }
+            let expectedPayloadURL = expectedBaseURL.flatMap { guestRoute.guestURL(baseURL: $0) }
+            guard let expectedPayloadURL,
+                  encodedPayload == expectedPayloadURL.absoluteString else {
+                if config.testCloudUpload {
+                    throw BoothSoakTestError.productionRunUnavailable(
+                        "The production QR payload does not match the run-scoped cloud guest route."
+                    )
+                }
+                if allowTrustedLocalHTTP {
+                    throw BoothSoakTestError.productionRunUnavailable(
+                        "The production QR payload does not match the selected local guest route."
+                    )
+                }
+                throw BoothSoakTestError.productionRunUnavailable("The production QR payload has no verified guest route.")
+            }
+            guard let stripName = completedManifest.stripFileName,
+                  let expectedBaseURL,
+                  let actualQRStripURL = guestRoute.childURL(stripName, baseURL: expectedBaseURL) else {
+                throw BoothSoakTestError.productionRunUnavailable(
+                    "The production QR strip URL could not be constructed."
+                )
+            }
+            let (qrRouteData, qrRouteResponse) = try await URLSession.shared.data(from: actualQRStripURL)
+            guard (qrRouteResponse as? HTTPURLResponse)?.statusCode == 200,
+                  !qrRouteData.isEmpty else {
+                throw BoothSoakTestError.productionRunUnavailable(
+                    "The production QR destination did not return a non-empty strip with HTTP 200."
+                )
+            }
+            if config.testCloudUpload {
+                guard cloudUploadVerified else {
+                    throw BoothSoakTestError.productionRunUnavailable("Cloud QR destination was reachable, but the production upload job did not succeed.")
+                }
+                cloudQRRouteVerified = true
+            } else if allowTrustedLocalHTTP {
+                let stripPath = URL(fileURLWithPath: completedManifest.absoluteDirectoryPath)
+                    .appendingPathComponent(stripName)
+                let expectedBytes = try Data(contentsOf: stripPath)
+                guard qrRouteData == expectedBytes else {
+                    throw BoothSoakTestError.productionRunUnavailable("The production QR destination returned different strip bytes.")
+                }
+            }
+        }
+
+        var localDeliveryVerified = false
+        if UserDefaults.standard.bool(forKey: "allowTrustedLocalHTTP"),
+           let endpoint = LocalWebServer.guestDeliveryEndpoint(
+                selection: guestDeliveryInterfaceSelection,
+                port: server.port
+            ).endpoint {
+            guard let stripName = completedManifest.stripFileName else {
+                throw BoothSoakTestError.productionRunUnavailable("the real strip output is missing")
+            }
+            await publishStage("Verifying local guest delivery")
+            let stripURL = URL(fileURLWithPath: completedManifest.absoluteDirectoryPath)
+                .appendingPathComponent(stripName)
+            let expectedBytes = try Data(contentsOf: stripURL)
+            guard let baseURL = URL(string: endpoint.baseURL),
+                  let guestURL = guestRoute.childURL(stripName, baseURL: baseURL) else {
+                throw BoothSoakTestError.productionRunUnavailable("the local guest URL is invalid")
+            }
+            let (downloadedBytes, response) = try await URLSession.shared.data(from: guestURL)
+            guard (response as? HTTPURLResponse)?.statusCode == 200,
+                  downloadedBytes == expectedBytes else {
+                throw BoothSoakTestError.productionRunUnavailable("local guest download did not match the rendered strip")
+            }
+            localDeliveryVerified = true
+        } else if UserDefaults.standard.bool(forKey: "allowTrustedLocalHTTP"),
+                  !finalJobs.contains(where: { $0.kind == .cloudUpload && $0.status == .succeeded }) {
+            throw BoothSoakTestError.productionRunUnavailable("local guest delivery became ambiguous and no cloud delivery completed")
+        }
+
+        let captureAttempts = completedManifest.captureAttempts ?? []
+        let recordedRetakeCounts = retakePlan.countsByPhoto.indices.map { photoIndex in
+            completedManifest.shots.first(where: { $0.photoIndex == photoIndex })?.retakeCount ?? 0
+        }
+        guard retakePlan.verified(recordedCounts: recordedRetakeCounts, attempts: captureAttempts) else {
+            throw BoothSoakTestError.productionRunUnavailable(
+                "the planned \(retakePlan.totalCount) retakes (\(planDescription)) and replacement captures were not verified"
+            )
+        }
+        let captureLatencies = captureAttempts.compactMap { attempt -> Double? in
+            guard attempt.result == .success || attempt.result == .transferRecovered,
+                  let completedAt = attempt.completedAt else { return nil }
+            return completedAt.timeIntervalSince(attempt.startedAt)
+        }
+        let renderLatency = finalJobs.first(where: { $0.kind == .renderStrip }).map {
+            max(0, $0.updatedAt.timeIntervalSince($0.lastAttemptAt ?? $0.createdAt))
+        }
+        let queueDrain = finalizingAt.map { max(0, Date().timeIntervalSince($0)) }
+        let galleryUpdateVerified = finalJobs.contains { $0.kind == .updateGallery && $0.status == .succeeded }
+        let galleryIsolationVerified: Bool
+        if galleryUpdateVerified,
+           let index = try? await galleryStore.load(eventID: completedManifest.eventID),
+           let entry = index.sessions.first(where: { $0.sessionID == completedManifest.id }) {
+            galleryIsolationVerified = entry.origin == .soakTest
+                && !index.productionVisibleSessions.contains(where: { $0.sessionID == completedManifest.id })
+        } else {
+            galleryIsolationVerified = false
+        }
+
+        await publishStage("Depublishing test session")
+        await publishStage("Cleaning test artifacts")
+        let cleanupWarnings = await cleanupSoakSession(
+            completedManifest,
+            expectedRunID: runID,
+            removeArtifacts: config.autoCleanupWorkingFiles
+        )
+        if stateMachine.phase.isFinished {
+            resetToIdleAfterCompletion()
+        }
+        soakCloudUploadOverride = nil
+        soakAutomaticPrintOverride = nil
+        return BoothAutomatedSoakCycleResult(
+            captureLatencies: captureLatencies,
+            retakeCount: retakePlan.totalCount,
+            captureAttemptCount: BoothSoakCaptureMetrics.physicalCaptureAttemptCount(captureAttempts),
+            captureFailureCount: captureAttempts.filter { $0.result == .failed }.count,
+            cameraRecoveryCount: captureAttempts.filter {
+                $0.result == .transferRecovered || $0.result == .retaken || $0.result == .deferred
+            }.count,
+            queueFailureCount: finalJobs.filter { $0.status == .failed }.count,
+            renderLatency: renderLatency,
+            queueDrainSeconds: queueDrain,
+            localDeliveryVerified: localDeliveryVerified,
+            cloudUploadVerified: cloudUploadVerified,
+            cloudQRRouteVerified: cloudQRRouteVerified,
+            printJobCompleted: finalJobs.contains { $0.kind == .autoPrint && $0.status == .succeeded },
+            galleryUpdateVerified: galleryUpdateVerified,
+            galleryIsolationVerified: galleryIsolationVerified,
+            cleanupWarnings: cleanupWarnings
+        )
+    }
+
+    func endAutomatedSoakRun(runID: String) async -> [String] {
+        guard activeSoakRunID == runID else { return [] }
+        if let manifest = currentManifest,
+           manifest.origin == .soakTest,
+           manifest.soakRunID == runID,
+           (manifest.status == .capturing || manifest.status == .finalizing || manifest.status == .failed) {
+            await cancelCurrentSession(preservingDiagnosticFiles: true)
+        }
+        activeSoakRunID = nil
+        soakCloudUploadOverride = nil
+        soakAutomaticPrintOverride = nil
+        var warnings: [String] = []
+        for result in await manifestStore.loadAll() {
+            guard case .loaded(let manifest) = result,
+                  manifest.origin == .soakTest,
+                  manifest.soakRunID == runID else {
+                if case .failed(let fileURL, let message) = result {
+                    warnings.append("Soak manifest could not be inspected at \(fileURL.path): \(message)")
+                }
+                continue
+            }
+            let durableJobs = try? await jobQueue.loadJobsForCleanup(sessionID: manifest.id)
+            let retainFailureDiagnostics = (durableJobs.map {
+                BoothSoakCleanupPolicy.shouldRetainDiagnostics(manifest: manifest, jobs: $0)
+            } ?? true) || soakFailureDiagnosticSessionIDs.contains(manifest.id)
+            let cleanupWarnings = await cleanupSoakSession(
+                manifest,
+                expectedRunID: runID,
+                removeArtifacts: soakAutoCleanupWorkingFiles && !retainFailureDiagnostics
+            )
+            warnings.append(contentsOf: cleanupWarnings)
+            if retainFailureDiagnostics && cleanupWarnings.isEmpty {
+                warnings.append("Diagnostic artifacts were retained for soak session \(manifest.id); its guest routes were removed.")
+            }
+        }
+        if stateMachine.phase.isFinished { resetToIdleAfterCompletion() }
+        await refreshServerRoutes()
+        await refreshRetainedSoakDiagnostics()
+        return warnings
+    }
+
+    func retainFailedSoakDiagnostics(runID: String, reason: String) async {
+        guard let manifest = currentManifest,
+              manifest.origin == .soakTest,
+              manifest.soakRunID == runID else { return }
+        soakFailureDiagnosticSessionIDs.insert(manifest.id)
+        do {
+            currentManifest = try await manifestStore.retainSoakFailureDiagnostics(
+                sessionID: manifest.id,
+                expectedRunID: runID,
+                reason: String(reason.prefix(1_000))
+            )
+        } catch {
+            recoveryService.recordError(
+                "Soak failure diagnostics could not be retained for \(manifest.id): \(error.localizedDescription)"
+            )
+        }
+    }
+
+    private func soakStage(for manifest: SessionManifest, config: BoothSoakTestConfig) -> String {
+        let photoCount = max(1, config.photosPerSession)
+        switch stateMachine.phase {
+        case .countdown(let photoIndex, _):
+            return "Countdown — photo \(photoIndex + 1)/\(photoCount)"
+        case .captured(let photoIndex), .review(let photoIndex):
+            return "Review / auto-Keep photo \(photoIndex + 1)/\(photoCount)"
+        case .captureRecovery(let photoIndex, _):
+            return "Camera recovery for photo \(photoIndex + 1)/\(photoCount)"
+        default:
+            break
+        }
+
+        if manifest.status == .finalizing || manifest.status == .completed {
+            let jobs = jobQueue.jobs.filter { $0.sessionID == manifest.id }
+            let pending = jobs.filter { $0.status != .succeeded && $0.status != .failed && $0.status != .cancelled }
+            if let job = pending.first {
+                switch job.kind {
+                case .renderStrip: return "Rendering strip"
+                case .registerDownload: return "Verifying local guest route"
+                case .updateGallery: return "Persisting gallery entry"
+                case .cloudUpload: return "Uploading test cloud output"
+                case .autoPrint: return "Printing test copy"
+                case .renderGIF: return "Rendering animated output"
+                }
+            }
+            return "Finalizing"
+        }
+
+        if manifest.status == .capturing {
+            return "Capturing photo \(min(manifest.nextPhotoIndex + 1, photoCount))/\(photoCount)"
+        }
+        return "Preparing session"
+    }
+
+    func cancelAutomatedSoakCycle(runID: String) async {
+        guard activeSoakRunID == runID else { return }
+        if activeSessionStart != nil {
+            await cancelCurrentSession()
+            return
+        }
+        guard let manifest = currentManifest,
+              manifest.origin == .soakTest,
+              manifest.soakRunID == runID,
+              manifest.status == .capturing || manifest.status == .finalizing else { return }
+        await cancelCurrentSession()
+    }
+
+    func cleanupSoakSession(
+        _ manifest: SessionManifest,
+        expectedRunID: String,
+        removeArtifacts: Bool
+    ) async -> [String] {
+        guard manifest.origin == .soakTest,
+              manifest.soakRunID == expectedRunID,
+              (try? CloudGuestRoute.resolve(for: manifest)) != nil else {
+            return ["Refused cleanup for a non-soak session or mismatched run ID."]
+        }
+
+        var warnings: [String] = []
+        let flowQuiesced = await sessionFlowOperations.cancelAndQuiesce(
+            sessionID: manifest.id,
+            timeout: .seconds(10)
+        )
+        var jobsQuiesced = false
+        do {
+            jobsQuiesced = try await jobQueue.cancelAndQuiesceJobs(sessionID: manifest.id) == .quiesced
+        } catch {
+            warnings.append("Jobs could not be quiesced: \(error.localizedDescription)")
+        }
+        jobsQuiesced = jobsQuiesced && flowQuiesced
+        let durableJobs = try? await jobQueue.loadJobsForCleanup(sessionID: manifest.id)
+        let unresolvedPrint = durableJobs.map {
+            BoothSoakCleanupPolicy.hasUnresolvedPhysicalPrint(sessionID: manifest.id, jobs: $0)
+        } ?? true
+        if durableJobs == nil {
+            warnings.append("Durable print and job state could not be inspected; local artifacts were retained.")
+            jobsQuiesced = false
+        } else if unresolvedPrint {
+            warnings.append("Physical print outcome is unresolved; its job and local artifacts were retained for operator resolution.")
+        }
+        let retainDiagnosticState = (durableJobs.map {
+            BoothSoakCleanupPolicy.shouldRetainDiagnostics(manifest: manifest, jobs: $0)
+        } ?? true) || soakFailureDiagnosticSessionIDs.contains(manifest.id)
+        let shouldRemoveArtifacts = removeArtifacts
+            && jobsQuiesced
+            && !unresolvedPrint
+            && !retainDiagnosticState
+        if !jobsQuiesced {
+            warnings.append("Background work is still active; local artifacts and records were retained.")
+            recoveryService.markCleanupPending(sessionID: manifest.id)
+        }
+
+        hiddenSoakRouteSessionIDs.insert(manifest.id)
+        if let route = try? CloudGuestRoute.resolve(for: manifest) {
+            await server.hideGuestRoute(path: route.relativePath)
+        }
+        await server.hideGuestRoute(path: "/s/\(manifest.downloadToken)")
+        do {
+            try await galleryStore.removeSession(eventID: manifest.eventID, sessionID: manifest.id)
+        } catch {
+            warnings.append("Gallery entry removal failed: \(error.localizedDescription)")
+        }
+        await refreshServerRoutes()
+
+        let cloudEnabled = manifest.deliveryIntent?.cloudUploadEnabled ?? (manifest.cloudDelivery != nil)
+        if cloudEnabled {
+            if let snapshot = manifest.cloudDelivery {
+                do {
+                    let configuration = CloudUploadConfiguration(snapshot: snapshot)
+                    if shouldRemoveArtifacts {
+                        try await cloudUpload.removeSoakArtifacts(manifest: manifest, configuration: configuration)
+                    } else {
+                        try await cloudUpload.hideSoakAlias(manifest: manifest, configuration: configuration)
+                    }
+                } catch {
+                    warnings.append("Remote cloud cleanup failed: \(error.localizedDescription)")
+                }
+            } else {
+                warnings.append("Cloud cleanup could not run because the manifest has no saved cloud destination.")
+            }
+        }
+
+        if shouldRemoveArtifacts {
+            do {
+                try workspace.removeEntireSession(manifest: manifest)
+            } catch {
+                warnings.append("Local artifact cleanup failed: \(error.localizedDescription)")
+            }
+            do {
+                try await jobQueue.deleteJobsAndForgetCancellationBarrier(sessionID: manifest.id)
+            } catch {
+                warnings.append("Completed job cleanup failed: \(error.localizedDescription)")
+            }
+        }
+
+        var manifestDeleted = false
+        if shouldRemoveArtifacts && warnings.isEmpty {
+            do {
+                try store.deleteSessionRecordIfPresent(sessionID: manifest.id)
+            } catch {
+                warnings.append("SwiftData soak record cleanup failed: \(error.localizedDescription)")
+            }
+            if warnings.isEmpty {
+                do {
+                    try await manifestStore.delete(sessionID: manifest.id)
+                    manifestDeleted = true
+                } catch {
+                    warnings.append("Soak manifest cleanup failed: \(error.localizedDescription)")
+                }
+            }
+        }
+
+        let warning = warnings.isEmpty ? nil : warnings.joined(separator: " ")
+        var cleanupStatePersisted = false
+        do {
+            _ = try await manifestStore.recordSoakCleanupResult(
+                sessionID: manifest.id,
+                expectedRunID: expectedRunID,
+                warning: warning,
+                retainedForDiagnostics: shouldRemoveArtifacts && warnings.isEmpty ? false : true
+            )
+            cleanupStatePersisted = true
+        } catch {
+            if !manifestDeleted {
+                warnings.append("Cleanup warning could not be saved to the soak manifest: \(error.localizedDescription)")
+            }
+        }
+        if cleanupStatePersisted || (shouldRemoveArtifacts && warnings.isEmpty) {
+            soakFailureDiagnosticSessionIDs.remove(manifest.id)
+        }
+        for message in warnings {
+            recoveryService.recordError("Soak cleanup \(manifest.id): \(message)")
+        }
+        await refreshServerRoutes()
+        await refreshRetainedSoakDiagnostics()
+        if !jobsQuiesced {
+            scheduleDeferredSoakCleanup(
+                manifest: manifest,
+                expectedRunID: expectedRunID,
+                // Preserve the caller's cleanup policy. A failed quiescence
+                // check must defer deletion, not silently turn auto-cleanup
+                // into permanent diagnostic retention.
+                removeArtifacts: removeArtifacts
+            )
+        }
+        return warnings
+    }
+
+    private func scheduleDeferredSoakCleanup(
+        manifest: SessionManifest,
+        expectedRunID: String,
+        removeArtifacts: Bool
+    ) {
+        guard deferredSoakCleanupSessionIDs.insert(manifest.id).inserted else { return }
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            let flowStopped = await sessionFlowOperations.waitUntilQuiescent(sessionID: manifest.id)
+            let jobsStopped = await jobQueue.waitUntilQuiescent(sessionID: manifest.id)
+            if flowStopped && jobsStopped {
+                _ = await cleanupSoakSession(
+                    manifest,
+                    expectedRunID: expectedRunID,
+                    removeArtifacts: removeArtifacts
+                )
+            }
+            deferredSoakCleanupSessionIDs.remove(manifest.id)
         }
     }
 
@@ -1273,6 +3151,8 @@ final class BoothCoordinator {
         )
         stateMachine.beginCountdown(photoIndex: photoIndex, captureAt: descriptor.captureAt)
         guard case .countdown(let index, _) = stateMachine.phase, index == photoIndex else { return }
+        currentReviewStateToken = nil
+        currentCaptureRecoveryStateToken = nil
         currentCountdown = descriptor
         if let context = nextSessionMessageContext() {
             multipeer.sendControl(.beginCountdown(context: context, descriptor: descriptor))
@@ -1289,7 +3169,13 @@ final class BoothCoordinator {
                 guard descriptor.captureAt > Date() else {
                     currentCountdown = nil
                     countdownTask = nil
-                    await captureShot(photoIndex: descriptor.photoIndex)
+                    guard let sessionID = currentManifest?.id else { return }
+                    sessionFlowOperations.start(
+                        sessionID: sessionID,
+                        kind: .capture
+                    ) { [weak self] in
+                        await self?.captureShot(photoIndex: descriptor.photoIndex)
+                    }
                     return
                 }
                 try? await Task.sleep(for: .milliseconds(100))
@@ -1306,7 +3192,9 @@ final class BoothCoordinator {
     private func captureShot(photoIndex: Int) async {
         guard !Task.isCancelled,
               case .countdown(let currentIndex, _) = stateMachine.phase,
-              currentIndex == photoIndex else { return }
+              currentIndex == photoIndex,
+              let sessionID = currentManifest?.id else { return }
+        let lifecycleGeneration = sessionLifecycleGeneration
         let attempt = CaptureAttempt()
         currentCaptureAttempt = attempt
         recordOperation(.captureStarted, sessionID: currentManifest?.id, photoIndex: photoIndex)
@@ -1318,15 +3206,40 @@ final class BoothCoordinator {
             reason: "in_progress",
             receiveDuration: nil
         )
+        guard sessionLifecycleGeneration == lifecycleGeneration,
+              currentManifest?.id == sessionID else {
+            currentCaptureAttempt = nil
+            return
+        }
         do {
             gifFrames[photoIndex] = capture.drainBufferForGIF()
             let image = try await capture.captureStill(for: photoIndex)
             let filtered = try await filterPipeline.apply(stateMachine.config.selectedFilterID, to: image)
+            guard sessionLifecycleGeneration == lifecycleGeneration,
+                  currentManifest?.id == sessionID else {
+                currentCaptureAttempt = nil
+                return
+            }
             currentFilteredReviewImages[photoIndex] = filtered
             guard let thumbData = capture.thumbnail(for: filtered) else {
                 throw PhotoFilterError.failedToCreateOutput(stateMachine.config.selectedFilterID)
             }
-            stateMachine.enterReview(photoIndex: photoIndex, thumbnailData: thumbData)
+            let context = nextSessionMessageContext()
+            let reviewData: Data
+            if let context {
+                reviewData = try ReviewImageEncoder.encode(image: filtered, context: context, index: photoIndex)
+            } else {
+                reviewData = thumbData
+            }
+            stateMachine.enterReview(photoIndex: photoIndex, thumbnailData: thumbData, reviewImageData: reviewData)
+            if let context {
+                currentReviewStateToken = ReviewStateToken(
+                    sessionID: context.sessionID,
+                    photoIndex: photoIndex,
+                    revision: context.sequence,
+                    authorityEpoch: context.authorityEpoch
+                )
+            }
             reviewDecisionPending = false
             await recordCaptureAttempt(
                 attempt,
@@ -1336,13 +3249,22 @@ final class BoothCoordinator {
                 reason: nil,
                 receiveDuration: Date().timeIntervalSince(attempt.startedAt)
             )
+            guard sessionLifecycleGeneration == lifecycleGeneration,
+                  currentManifest?.id == sessionID,
+                  stateMachine.phase == .review(photoIndex: photoIndex) else {
+                currentCaptureAttempt = nil
+                return
+            }
             recordOperation(.captureSucceeded, sessionID: currentManifest?.id, photoIndex: photoIndex, duration: Date().timeIntervalSince(attempt.startedAt))
             currentCaptureAttempt = nil
-            if let context = nextSessionMessageContext() {
-                multipeer.sendControl(.shotCaptured(context: context, index: photoIndex, thumbnailData: thumbData))
-            }
+            if let context { sendReviewAsset(context: context, photoIndex: photoIndex, data: reviewData) }
             updateStripPreview()
         } catch {
+            guard sessionLifecycleGeneration == lifecycleGeneration,
+                  currentManifest?.id == sessionID else {
+                currentCaptureAttempt = nil
+                return
+            }
             let summary = captureFailureSummary(photoIndex: photoIndex, error: error)
             await recordCaptureAttempt(
                 attempt,
@@ -1353,11 +3275,30 @@ final class BoothCoordinator {
                 receiveDuration: Date().timeIntervalSince(attempt.startedAt)
             )
             recordOperation(.captureFailed, sessionID: currentManifest?.id, photoIndex: photoIndex, duration: Date().timeIntervalSince(attempt.startedAt), reason: summary.reason.rawValue)
-            await persistCaptureFailure(photoIndex: photoIndex, error: error)
+            guard sessionLifecycleGeneration == lifecycleGeneration,
+                  currentManifest?.id == sessionID else {
+                currentCaptureAttempt = nil
+                return
+            }
+            let persistSucceeded = await persistCaptureFailure(photoIndex: photoIndex, error: error)
+            // Enter recovery regardless — the operator needs a way out (Finding 20).
             currentCaptureAttempt = nil
             stateMachine.enterCaptureRecovery(photoIndex: photoIndex, failure: summary)
+            if !persistSucceeded {
+                recoveryService.recordError(
+                    "Capture failure for photo \(photoIndex) could not be persisted. "
+                    + "Recovery UI is shown but the failure is not durable."
+                )
+            }
+            currentReviewStateToken = nil
             reviewDecisionPending = false
             if let context = nextSessionMessageContext() {
+                currentCaptureRecoveryStateToken = CaptureRecoveryStateToken(
+                    sessionID: context.sessionID,
+                    photoIndex: photoIndex,
+                    revision: context.sequence,
+                    authorityEpoch: context.authorityEpoch
+                )
                 multipeer.sendControl(.captureRecovery(context: context, photoIndex: photoIndex, failure: summary))
             }
         }
@@ -1371,9 +3312,10 @@ final class BoothCoordinator {
         reason: String?,
         receiveDuration: Double?
     ) async {
-        guard var manifest = currentManifest,
+        guard let manifest = currentManifest,
               currentManifestID == manifest.id else { return }
-        var records = manifest.captureAttempts ?? []
+        let lifecycleGeneration = sessionLifecycleGeneration
+        let sessionID = manifest.id
         let record = CaptureAttemptRecord(
             id: attempt.id.uuidString,
             photoIndex: photoIndex,
@@ -1383,35 +3325,51 @@ final class BoothCoordinator {
             reason: reason,
             receiveDuration: receiveDuration
         )
-        if let index = records.firstIndex(where: { $0.id == record.id }) {
-            records[index] = record
-        } else {
-            records.append(record)
-        }
-        manifest.captureAttempts = records
-        manifest.updatedAt = Date()
         do {
-            try await manifestStore.save(manifest)
-            currentManifest = manifest
+            let saved = try await manifestStore.update(
+                sessionID: sessionID,
+                allowedStatuses: [.capturing]
+            ) { durable in
+                var records = durable.captureAttempts ?? []
+                if let index = records.firstIndex(where: { $0.id == record.id }) {
+                    records[index] = record
+                } else {
+                    records.append(record)
+                }
+                durable.captureAttempts = records
+            }
+            guard sessionLifecycleGeneration == lifecycleGeneration,
+                  currentManifest?.id == sessionID else { return }
+            currentManifest = saved
         } catch {
             recoveryService.recordError("Capture attempt could not be persisted: \(error.localizedDescription)")
             errorMessage = "Capture diagnostics could not be persisted: \(error.localizedDescription)"
         }
     }
 
-    private func persistCaptureFailure(photoIndex: Int, error: Error) async {
-        guard var manifest = currentManifest,
-              currentManifestID == manifest.id else { return }
-        manifest.lastError = error.localizedDescription
-        manifest.nextPhotoIndex = photoIndex
-        manifest.updatedAt = Date()
+    private func persistCaptureFailure(photoIndex: Int, error: Error) async -> Bool {
+        guard let manifest = currentManifest,
+              currentManifestID == manifest.id else { return false }
+        let lifecycleGeneration = sessionLifecycleGeneration
+        let sessionID = manifest.id
+        let persistedErrorMessage = error.localizedDescription
         do {
-            try await manifestStore.save(manifest)
-            currentManifest = manifest
+            let saved = try await manifestStore.update(
+                sessionID: sessionID,
+                allowedStatuses: [.capturing]
+            ) { durable in
+                durable.lastError = persistedErrorMessage
+                durable.nextPhotoIndex = photoIndex
+            }
+            guard sessionLifecycleGeneration == lifecycleGeneration,
+                  currentManifest?.id == sessionID else { return false }
+            currentManifest = saved
         } catch {
             recoveryService.recordError("Capture failure could not be persisted: \(error.localizedDescription)")
+            return false
         }
         errorMessage = error.localizedDescription
+        return true
     }
 
     private func captureFailureSummary(photoIndex: Int, error: Error) -> CaptureFailureSummary {
@@ -1473,17 +3431,29 @@ final class BoothCoordinator {
         }
         let images = currentFilteredReviewImages
         let compositor = Compositor(config: config, framePNG: framePNG)
+        let cloudUploadEnabled = manifest.deliveryIntent?.cloudUploadEnabled ?? (manifest.cloudDelivery != nil)
+        let allowTrustedLocalHTTP = UserDefaults.standard.bool(forKey: "allowTrustedLocalHTTP")
+        let localBaseURL = LocalWebServer.guestDeliveryEndpoint(selection: guestDeliveryInterfaceSelection)
+            .endpoint?.baseURL ?? ""
         let qrPayload = config.qrCodeElements.isEmpty ? nil : try? SessionQRCodePayloadResolver.resolve(
-            token: manifest.downloadToken,
-            localBaseURL: "http://\(LocalWebServer.lanIPAddress() ?? "localhost"):8585",
-            publicBaseURL: manifest.cloudDelivery?.publicBaseURL
-                ?? UserDefaults.standard.string(forKey: "publicBaseURL"),
-            cloudUploadEnabled: manifest.cloudDelivery != nil
-                || UserDefaults.standard.bool(forKey: "cloudUploadEnabled")
+            manifest: manifest,
+            localBaseURL: localBaseURL,
+            publicBaseURL: manifest.cloudDelivery?.publicBaseURL,
+            cloudUploadEnabled: cloudUploadEnabled,
+            allowTrustedLocalHTTP: allowTrustedLocalHTTP
         )
+        let expectedSessionID = manifest.id
+        let expectedGeneration = sessionLifecycleGeneration
         Task.detached(priority: .utility) { [compositor, images, qrPayload] in
             let img = try? compositor.render(images: images, qrPayload: qrPayload)
-            await MainActor.run { [weak self] in self?.currentStripPreview = img }
+            await MainActor.run { [weak self] in
+                guard let self,
+                      self.currentManifest?.id == expectedSessionID,
+                      self.sessionLifecycleGeneration == expectedGeneration else {
+                    return  // session changed — discard stale render (Finding 21)
+                }
+                self.currentStripPreview = img
+            }
         }
     }
 
@@ -1494,26 +3464,83 @@ final class BoothCoordinator {
         guard !reviewDecisionPending,
               CustomerDisplayWorkflow.canApply(customerAction, in: stateMachine.phase) else { return }
         reviewDecisionPending = true
-        if let context = nextSessionMessageContext() {
-            multipeer.sendControl(.reviewDecision(context: context, action: action))
-        }
         switch action {
         case .keep:
-            Task { @MainActor [weak self] in
+            guard let sessionID = currentManifest?.id else {
+                reviewDecisionPending = false
+                return
+            }
+            sessionFlowOperations.start(sessionID: sessionID, kind: .reviewDecision) { [weak self] in
                 guard let self else { return }
                 defer { self.reviewDecisionPending = false }
-                await self.acceptShot(photoIndex: photoIndex)
+                let result = await self.acceptShot(photoIndex: photoIndex)
+                if result == .accepted { self.sendAuthoritativeReviewDecision() }
             }
         case .retake:
-            Task { @MainActor [weak self] in
+            guard let sessionID = currentManifest?.id else {
+                reviewDecisionPending = false
+                return
+            }
+            sessionFlowOperations.start(sessionID: sessionID, kind: .reviewDecision) { [weak self] in
                 guard let self else { return }
                 defer { self.reviewDecisionPending = false }
-                await self.requestRetake(photoIndex: photoIndex, source: .guest)
+                let result = await self.requestRetake(photoIndex: photoIndex, source: .guest)
+                if result == .accepted { self.sendAuthoritativeReviewDecision() }
             }
         }
     }
 
     func handleCaptureRecoveryAction(_ action: CaptureRecoveryAction) {
+        guard let state = currentCaptureRecoveryStateToken else { return }
+        handleCaptureRecoveryAction(state: state, requestID: UUID(), action: action)
+    }
+
+    private func handleCaptureRecoveryAction(
+        state: CaptureRecoveryStateToken,
+        requestID: UUID,
+        action: CaptureRecoveryAction
+    ) {
+        if activeSoakRunID != nil {
+            rememberCaptureRecoveryRequest(requestID, state: state, action: action, result: .stale)
+            multipeer.sendControl(.captureRecoveryActionResult(requestID: requestID, result: .stale))
+            return
+        }
+        if let record = recentCaptureRecoveryRequests[requestID] {
+            guard record.state == state, record.action == action else {
+                multipeer.sendControl(.captureRecoveryActionResult(requestID: requestID, result: .stale))
+                return
+            }
+            let result = record.result == .accepted ? .duplicate : record.result
+            multipeer.sendControl(.captureRecoveryActionResult(requestID: requestID, result: result))
+            if record.result == .accepted { resynciPad() }
+            return
+        }
+
+        guard let current = currentCaptureRecoveryStateToken else {
+            rememberCaptureRecoveryRequest(requestID, state: state, action: action, result: .stale)
+            multipeer.sendControl(.captureRecoveryActionResult(requestID: requestID, result: .stale))
+            return
+        }
+        guard current.sessionID == state.sessionID else {
+            rememberCaptureRecoveryRequest(requestID, state: state, action: action, result: .sessionChanged)
+            multipeer.sendControl(.captureRecoveryActionResult(requestID: requestID, result: .sessionChanged))
+            return
+        }
+        let requestedPhotoIndex: Int = switch action {
+        case .retryReceive(let index), .retake(let index), .continueSession(let index), .usePrevious(let index): index
+        }
+        guard current.photoIndex == state.photoIndex,
+              requestedPhotoIndex == state.photoIndex else {
+            rememberCaptureRecoveryRequest(requestID, state: state, action: action, result: .wrongPhoto)
+            multipeer.sendControl(.captureRecoveryActionResult(requestID: requestID, result: .wrongPhoto))
+            return
+        }
+        guard current == state else {
+            rememberCaptureRecoveryRequest(requestID, state: state, action: action, result: .stale)
+            multipeer.sendControl(.captureRecoveryActionResult(requestID: requestID, result: .stale))
+            return
+        }
+
         let customerAction: CustomerDisplayAction
         switch action {
         case .retryReceive(let photoIndex):
@@ -1525,10 +3552,31 @@ final class BoothCoordinator {
         case .usePrevious(let photoIndex):
             customerAction = .usePreviousCapture(photoIndex: photoIndex)
         }
-        guard !reviewDecisionPending,
-              CustomerDisplayWorkflow.canApply(customerAction, in: stateMachine.phase) else { return }
+        guard case .idle = sessionLifecycleOperation,
+              !reviewDecisionPending,
+              CustomerDisplayWorkflow.canApply(customerAction, in: stateMachine.phase) else {
+            rememberCaptureRecoveryRequest(requestID, state: state, action: action, result: .stale)
+            multipeer.sendControl(.captureRecoveryActionResult(requestID: requestID, result: .stale))
+            return
+        }
+        if case .continueSession(let photoIndex) = action {
+            // The iPad decides which buttons to show; the Mac decides what is
+            // legal. Without this the client can request a deferral that has
+            // nowhere to go.
+            let hasOtherMissing = currentManifest?.shots.contains {
+                $0.photoIndex != photoIndex && $0.imageFileName == nil
+            } ?? false
+            guard hasOtherMissing else {
+                rememberCaptureRecoveryRequest(requestID, state: state, action: action, result: .wrongPhoto)
+                multipeer.sendControl(.captureRecoveryActionResult(requestID: requestID, result: .wrongPhoto))
+                return
+            }
+        }
         reviewDecisionPending = true
-        Task { @MainActor [weak self] in
+        sessionFlowOperations.start(
+            sessionID: state.sessionID,
+            kind: .captureRecovery
+        ) { [weak self] in
             guard let self else { return }
             defer { self.reviewDecisionPending = false }
             switch action {
@@ -1541,12 +3589,40 @@ final class BoothCoordinator {
             case .usePrevious(let photoIndex):
                 await self.usePreviousCapture(photoIndex: photoIndex)
             }
+            let result: CaptureRecoveryActionResult = self.currentCaptureRecoveryStateToken == state
+                ? .persistenceFailed
+                : .accepted
+            self.rememberCaptureRecoveryRequest(requestID, state: state, action: action, result: result)
+            self.multipeer.sendControl(.captureRecoveryActionResult(requestID: requestID, result: result))
+            if result == .accepted { self.resynciPad() }
+        }
+    }
+
+    private func rememberCaptureRecoveryRequest(
+        _ requestID: UUID,
+        state: CaptureRecoveryStateToken,
+        action: CaptureRecoveryAction,
+        result: CaptureRecoveryActionResult
+    ) {
+        guard result != .persistenceFailed else { return }
+        recentCaptureRecoveryRequests[requestID] = CaptureRecoveryRequestRecord(
+            state: state,
+            action: action,
+            result: result
+        )
+        recentCaptureRecoveryRequestOrder.removeAll { $0 == requestID }
+        recentCaptureRecoveryRequestOrder.append(requestID)
+        if recentCaptureRecoveryRequestOrder.count > 32 {
+            let expired = recentCaptureRecoveryRequestOrder.removeFirst()
+            recentCaptureRecoveryRequests.removeValue(forKey: expired)
         }
     }
 
     private func retryReceive(photoIndex: Int) async {
         guard case .captureRecovery(let currentIndex, _) = stateMachine.phase,
-              currentIndex == photoIndex else { return }
+              currentIndex == photoIndex,
+              let sessionID = currentManifest?.id else { return }
+        let lifecycleGeneration = sessionLifecycleGeneration
         let attempt = CaptureAttempt()
         currentCaptureAttempt = attempt
         do {
@@ -1555,9 +3631,27 @@ final class BoothCoordinator {
             guard let thumbData = capture.thumbnail(for: filtered) else {
                 throw PhotoFilterError.failedToCreateOutput(stateMachine.config.selectedFilterID)
             }
+            guard sessionLifecycleGeneration == lifecycleGeneration,
+                  currentManifest?.id == sessionID else { return }
+            let context = nextSessionMessageContext()
+            let reviewData: Data
+            if let context {
+                reviewData = try ReviewImageEncoder.encode(image: filtered, context: context, index: photoIndex)
+            } else {
+                reviewData = thumbData
+            }
             capture.storeStill(image, for: photoIndex)
             currentFilteredReviewImages[photoIndex] = filtered
-            stateMachine.enterReview(photoIndex: photoIndex, thumbnailData: thumbData)
+            stateMachine.enterReview(photoIndex: photoIndex, thumbnailData: thumbData, reviewImageData: reviewData)
+            currentCaptureRecoveryStateToken = nil
+            if let context {
+                currentReviewStateToken = ReviewStateToken(
+                    sessionID: context.sessionID,
+                    photoIndex: photoIndex,
+                    revision: context.sequence,
+                    authorityEpoch: context.authorityEpoch
+                )
+            }
             await recordCaptureAttempt(
                 attempt,
                 photoIndex: photoIndex,
@@ -1566,13 +3660,19 @@ final class BoothCoordinator {
                 reason: nil,
                 receiveDuration: Date().timeIntervalSince(attempt.startedAt)
             )
+            guard sessionLifecycleGeneration == lifecycleGeneration,
+                  currentManifest?.id == sessionID,
+                  stateMachine.phase == .review(photoIndex: photoIndex) else {
+                currentCaptureAttempt = nil
+                return
+            }
             recordOperation(.captureRecovered, sessionID: currentManifest?.id, photoIndex: photoIndex, duration: Date().timeIntervalSince(attempt.startedAt))
             currentCaptureAttempt = nil
-            if let context = nextSessionMessageContext() {
-                multipeer.sendControl(.shotCaptured(context: context, index: photoIndex, thumbnailData: thumbData))
-            }
+            if let context { sendReviewAsset(context: context, photoIndex: photoIndex, data: reviewData) }
             updateStripPreview()
         } catch {
+            guard sessionLifecycleGeneration == lifecycleGeneration,
+                  currentManifest?.id == sessionID else { return }
             let summary = captureFailureSummary(photoIndex: photoIndex, error: error)
             await recordCaptureAttempt(
                 attempt,
@@ -1582,10 +3682,21 @@ final class BoothCoordinator {
                 reason: error.localizedDescription,
                 receiveDuration: Date().timeIntervalSince(attempt.startedAt)
             )
-            await persistCaptureFailure(photoIndex: photoIndex, error: error)
+            guard sessionLifecycleGeneration == lifecycleGeneration,
+                  currentManifest?.id == sessionID,
+                  await persistCaptureFailure(photoIndex: photoIndex, error: error) else {
+                currentCaptureAttempt = nil
+                return
+            }
             stateMachine.enterCaptureRecovery(photoIndex: photoIndex, failure: summary)
             currentCaptureAttempt = nil
             if let context = nextSessionMessageContext() {
+                currentCaptureRecoveryStateToken = CaptureRecoveryStateToken(
+                    sessionID: context.sessionID,
+                    photoIndex: photoIndex,
+                    revision: context.sequence,
+                    authorityEpoch: context.authorityEpoch
+                )
                 multipeer.sendControl(.captureRecovery(context: context, photoIndex: photoIndex, failure: summary))
             }
         }
@@ -1594,28 +3705,36 @@ final class BoothCoordinator {
     private func retakeFailedCapture(photoIndex: Int) async {
         guard case .captureRecovery(let currentIndex, _) = stateMachine.phase,
               currentIndex == photoIndex,
-              var manifest = currentManifest else { return }
-        let current = manifest.shots.first(where: { $0.photoIndex == photoIndex })
-        let count = incrementRetakeCount(in: &retakeCounts, photoIndex: photoIndex)
-        upsertManifestShot(
-            &manifest,
-            photoIndex: photoIndex,
-            imageFileName: nil,
-            gifFrameFileNames: [],
-            retakeCount: count,
-            acceptedAt: nil,
-            previousImageFileName: current?.imageFileName ?? current?.previousImageFileName,
-            previousGifFrameFileNames: current?.gifFrameFileNames.isEmpty == false
-                ? current?.gifFrameFileNames
-                : current?.previousGifFrameFileNames,
-            previousAcceptedAt: current?.acceptedAt ?? current?.previousAcceptedAt
-        )
-        manifest.nextPhotoIndex = photoIndex
-        manifest.status = .capturing
-        manifest.lastError = nil
+              let manifest = currentManifest else { return }
+        capture.invalidateCaptureRecovery()
+        let lifecycleGeneration = sessionLifecycleGeneration
+        let count = retakeCounts[photoIndex, default: 0] + 1
         do {
-            try await manifestStore.save(manifest)
-            currentManifest = manifest
+            let committedManifest = try await manifestStore.update(
+                sessionID: manifest.id,
+                allowedStatuses: [.capturing]
+            ) { durable in
+                let current = durable.shots.first(where: { $0.photoIndex == photoIndex })
+                upsertRuntimeShot(
+                    in: &durable.shots,
+                    photoIndex: photoIndex,
+                    imageFileName: nil,
+                    gifFrameFileNames: [],
+                    retakeCount: max(count, (current?.retakeCount ?? 0) + 1),
+                    acceptedAt: nil,
+                    previousImageFileName: current?.imageFileName ?? current?.previousImageFileName,
+                    previousGifFrameFileNames: current?.gifFrameFileNames.isEmpty == false
+                        ? current?.gifFrameFileNames
+                        : current?.previousGifFrameFileNames,
+                    previousAcceptedAt: current?.acceptedAt ?? current?.previousAcceptedAt
+                )
+                durable.nextPhotoIndex = photoIndex
+                durable.lastError = nil
+            }
+            guard sessionLifecycleGeneration == lifecycleGeneration,
+                  currentManifest?.id == committedManifest.id else { return }
+            currentManifest = committedManifest
+            retakeCounts[photoIndex] = count
             await recordCaptureAttempt(
                 CaptureAttempt(),
                 photoIndex: photoIndex,
@@ -1624,9 +3743,11 @@ final class BoothCoordinator {
                 reason: "retaken",
                 receiveDuration: nil
             )
-            recordOperation(.captureRetried, sessionID: manifest.id, photoIndex: photoIndex)
+            guard sessionLifecycleGeneration == lifecycleGeneration,
+                  currentManifest?.id == committedManifest.id else { return }
+            recordOperation(.captureRetried, sessionID: committedManifest.id, photoIndex: photoIndex)
             currentCaptureAttempt = nil
-            stateMachine.retakeShot(photoIndex: photoIndex)
+            stateMachine.retakeFailedCapture(photoIndex: photoIndex)
             beginCountdown(photoIndex: photoIndex)
         } catch {
             errorMessage = "Could not start retake: \(error.localizedDescription)"
@@ -1636,18 +3757,27 @@ final class BoothCoordinator {
     private func continueAfterCaptureFailure(photoIndex: Int) async {
         guard case .captureRecovery(let currentIndex, _) = stateMachine.phase,
               currentIndex == photoIndex,
-              var manifest = currentManifest else { return }
-        let next = stateMachine.continueAfterCaptureFailure(photoIndex: photoIndex)
+              let manifest = currentManifest else { return }
+        let lifecycleGeneration = sessionLifecycleGeneration
+        let next = stateMachine.nextPhotoAfterCaptureFailure(photoIndex: photoIndex)
         guard let next else {
             errorMessage = "Cannot continue while a required photograph is missing."
             return
         }
-        manifest.nextPhotoIndex = next
-        manifest.status = .capturing
-        manifest.updatedAt = Date()
+        capture.invalidateCaptureRecovery()
         do {
-            try await manifestStore.save(manifest)
-            currentManifest = manifest
+            let committedManifest = try await manifestStore.update(
+                sessionID: manifest.id,
+                allowedStatuses: [.capturing]
+            ) { durable in
+                durable.nextPhotoIndex = next
+            }
+            guard case .captureRecovery(let current, _) = stateMachine.phase,
+                  current == photoIndex,
+                  sessionLifecycleGeneration == lifecycleGeneration,
+                  currentManifest?.id == committedManifest.id else { return }
+            guard stateMachine.continueAfterCaptureFailure(photoIndex: photoIndex) == next else { return }
+            currentManifest = committedManifest
             await recordCaptureAttempt(
                 CaptureAttempt(),
                 photoIndex: photoIndex,
@@ -1656,7 +3786,9 @@ final class BoothCoordinator {
                 reason: "deferred",
                 receiveDuration: nil
             )
-            recordOperation(.captureDeferred, sessionID: manifest.id, photoIndex: photoIndex)
+            guard sessionLifecycleGeneration == lifecycleGeneration,
+                  currentManifest?.id == committedManifest.id else { return }
+            recordOperation(.captureDeferred, sessionID: committedManifest.id, photoIndex: photoIndex)
             currentCaptureAttempt = nil
             beginCountdown(photoIndex: next)
         } catch {
@@ -1667,39 +3799,56 @@ final class BoothCoordinator {
     private func usePreviousCapture(photoIndex: Int) async {
         guard case .captureRecovery(let currentIndex, _) = stateMachine.phase,
               currentIndex == photoIndex,
-              var manifest = currentManifest,
+              let manifest = currentManifest,
               let previous = manifest.shots.first(where: { $0.photoIndex == photoIndex }),
               let imageFileName = previous.previousImageFileName else { return }
+        let lifecycleGeneration = sessionLifecycleGeneration
         let directory = URL(fileURLWithPath: manifest.absoluteDirectoryPath, isDirectory: true)
         guard let image = loadCGImage(from: directory.appendingPathComponent(imageFileName)) else {
             errorMessage = "The previous photograph is no longer available."
             return
         }
+        capture.invalidateCaptureRecovery()
         do {
             let filtered = try await filterPipeline.apply(stateMachine.config.selectedFilterID, to: image)
             guard let thumbData = capture.thumbnail(for: filtered) else {
                 throw PhotoFilterError.failedToCreateOutput(stateMachine.config.selectedFilterID)
             }
-            let gifs = previous.previousGifFrameFileNames ?? []
-            upsertManifestShot(
-                &manifest,
-                photoIndex: photoIndex,
-                imageFileName: imageFileName,
-                gifFrameFileNames: gifs,
-                retakeCount: previous.retakeCount,
-                acceptedAt: previous.previousAcceptedAt ?? Date()
+            let reviewData = try? ReviewImageEncoder.encode(
+                image: filtered,
+                context: SessionMessageContext(
+                    sessionID: stateMachine.currentSessionID,
+                    sequence: 0,
+                    authorityEpoch: authorityEpoch
+                ),
+                index: photoIndex
             )
-            manifest.nextPhotoIndex = (0..<manifest.eventConfig.photoCount)
-                .first { index in
-                    manifest.shots.first(where: { $0.photoIndex == index })?.imageFileName == nil
-                } ?? manifest.eventConfig.photoCount
-            manifest.status = manifest.nextPhotoIndex == manifest.eventConfig.photoCount ? .finalizing : .capturing
-            manifest.lastError = nil
-            try await manifestStore.save(manifest)
-            currentManifest = manifest
+            let gifs = previous.previousGifFrameFileNames ?? []
+            let committedManifest = try await manifestStore.update(
+                sessionID: manifest.id,
+                allowedStatuses: [.capturing]
+            ) { durable in
+                upsertRuntimeShot(
+                    in: &durable.shots,
+                    photoIndex: photoIndex,
+                    imageFileName: imageFileName,
+                    gifFrameFileNames: gifs,
+                    retakeCount: previous.retakeCount,
+                    acceptedAt: previous.previousAcceptedAt ?? Date()
+                )
+                durable.nextPhotoIndex = (0..<durable.eventConfig.photoCount)
+                    .first { index in
+                        durable.shots.first(where: { $0.photoIndex == index })?.imageFileName == nil
+                    } ?? durable.eventConfig.photoCount
+                durable.lastError = nil
+            }
+            guard sessionLifecycleGeneration == lifecycleGeneration,
+                  currentManifest?.id == committedManifest.id else { return }
+            currentManifest = committedManifest
             capture.storeStill(image, for: photoIndex)
             currentFilteredReviewImages[photoIndex] = filtered
-            stateMachine.usePreviousCapture(photoIndex: photoIndex, thumbnailData: thumbData)
+            currentCaptureRecoveryStateToken = nil
+            let completesSession = committedManifest.nextPhotoIndex >= committedManifest.eventConfig.photoCount
             await recordCaptureAttempt(
                 CaptureAttempt(),
                 photoIndex: photoIndex,
@@ -1708,41 +3857,92 @@ final class BoothCoordinator {
                 reason: "previous_photo_used",
                 receiveDuration: nil
             )
-            recordOperation(.previousPhotoUsed, sessionID: manifest.id, photoIndex: photoIndex)
+            guard sessionLifecycleGeneration == lifecycleGeneration,
+                  currentManifest?.id == committedManifest.id else { return }
+            recordOperation(.previousPhotoUsed, sessionID: committedManifest.id, photoIndex: photoIndex)
             currentCaptureAttempt = nil
-            if case .processing = stateMachine.phase {
-                await finalizeSession()
-            } else if case .countdown(let next, _) = stateMachine.phase {
-                beginCountdown(photoIndex: next)
+            if completesSession {
+                guard await finalizeSession(),
+                      sessionLifecycleGeneration == lifecycleGeneration,
+                      currentManifest?.id == committedManifest.id else { return }
             }
+            stateMachine.usePreviousCapture(photoIndex: photoIndex, thumbnailData: thumbData, reviewImageData: reviewData)
+            if case .countdown(let next, _) = stateMachine.phase { beginCountdown(photoIndex: next) }
         } catch {
             errorMessage = "Could not restore the previous photograph: \(error.localizedDescription)"
         }
     }
 
     func operatorOverride(_ action: OperatorAction) {
-        multipeer.sendControl(.operatorOverride(context: nextSessionMessageContext(), action: action))
         switch action {
         case .forceStart:
-            if stateMachine.phase == .idle || stateMachine.phase == .readyToStart { startSession() }
+            guard stateMachine.phase == .idle || stateMachine.phase == .readyToStart else { return }
+            startSession()
         case .forceRetake:
-            if case .review(let idx) = stateMachine.phase,
-               !reviewDecisionPending,
-               CustomerDisplayWorkflow.canApply(.retake(photoIndex: idx), in: stateMachine.phase) {
-                reviewDecisionPending = true
-                Task { @MainActor [weak self] in
-                    guard let self else { return }
-                    defer { self.reviewDecisionPending = false }
-                    await self.requestRetake(photoIndex: idx, source: .operatorSource)
-                }
+            guard case .review(let idx) = stateMachine.phase,
+                  !reviewDecisionPending,
+                  CustomerDisplayWorkflow.canApply(.retake(photoIndex: idx), in: stateMachine.phase) else { return }
+            reviewDecisionPending = true
+            guard let sessionID = currentManifest?.id else {
+                reviewDecisionPending = false
+                return
+            }
+            sessionFlowOperations.start(sessionID: sessionID, kind: .reviewDecision) { [weak self] in
+                guard let self else { return }
+                defer { self.reviewDecisionPending = false }
+                let result = await self.requestRetake(photoIndex: idx, source: .operatorSource)
+                if result == .accepted { self.sendAuthoritativeReviewDecision() }
             }
         case .skip:
-            if case .review(let idx) = stateMachine.phase { handleReviewDecision(photoIndex: idx, action: .keep) }
+            guard case .review(let idx) = stateMachine.phase,
+                  !reviewDecisionPending,
+                  CustomerDisplayWorkflow.canApply(.keep(photoIndex: idx), in: stateMachine.phase) else { return }
+            handleReviewDecision(photoIndex: idx, action: .keep)
         case .cancelSession:
-            Task { @MainActor [weak self] in
-                await self?.cancelCurrentSession()
+            if currentSession != nil {
+                Task { @MainActor [weak self] in
+                    await self?.cancelCurrentSession()
+                }
+            } else if finishedAwaitingCustomerAckSessionID != nil
+                      || stateMachine.phase.isFinished {
+                // Post-completion reset — session already cleared (Finding 7).
+                resetToIdleAfterCompletion()
             }
         }
+    }
+
+    /// Resets the booth to idle from a post-completion state where `currentSession` has
+    /// already been cleared but `finishedAwaitingCustomerAckSessionID` or `.finished` phase
+    /// are still active (Finding 7).
+    private func resetToIdleAfterCompletion() {
+        customerFinishedInFlightSessionID = nil
+        finishedAwaitingCustomerAckSessionID = nil
+        completionInFlightSessionID = nil
+        sessionLifecycleGeneration &+= 1
+        currentManifest = nil
+        currentManifestID = nil
+        currentSession = nil
+        currentSessionPresentation = nil
+        currentStripPreview = nil
+        currentFilteredReviewImages = [:]
+        sessionAssetReferences = [:]
+        stripAssetReference = nil
+        assetSources = [:]
+        pendingPromptAssets = [:]
+        assetAssembler = BoothAssetAssembler()
+        capture.resetStills()
+        retakeCounts = [:]
+        gifFrames = [:]
+        currentCaptureAttempt = nil
+        currentCountdown = nil
+        reviewDecisionPending = false
+        currentReviewStateToken = nil
+        activeReviewRequestID = nil
+        recentReviewRequests.removeAll(keepingCapacity: true)
+        recentReviewRequestOrder.removeAll(keepingCapacity: true)
+        stateMachine.reset()
+        resynciPad()
+        attemptPendingLANRecoveryIfIdle()
     }
 
     private enum RetakeSource {
@@ -1750,15 +3950,18 @@ final class BoothCoordinator {
         case operatorSource
     }
 
-    private func acceptShot(photoIndex: Int) async {
+    private func acceptShot(photoIndex: Int) async -> ReviewDecisionResult {
         guard case .review(let currentIndex) = stateMachine.phase,
               currentIndex == photoIndex,
-              var manifest = currentManifest,
+              case .idle = sessionLifecycleOperation,
+              let manifest = currentManifest,
               currentManifestID == manifest.id,
               let image = capture.capturedStills[photoIndex] else {
             errorMessage = "Cannot keep this photograph because its review state is unavailable."
-            return
+            return .wrongPhoto
         }
+        let lifecycleGeneration = sessionLifecycleGeneration
+        let retakeCount = retakeCounts[photoIndex] ?? 0
 
         do {
             let saved = try workspace.saveAcceptedCapture(
@@ -1767,105 +3970,318 @@ final class BoothCoordinator {
                 photoIndex: photoIndex,
                 workspace: workspaceDescriptor(from: manifest)
             )
-            upsertManifestShot(
-                &manifest,
-                photoIndex: photoIndex,
-                imageFileName: saved.imageFileName,
-                gifFrameFileNames: saved.gifFrameFileNames,
-                retakeCount: retakeCounts[photoIndex] ?? 0,
-                acceptedAt: Date()
-            )
-            manifest.nextPhotoIndex = (0..<manifest.eventConfig.photoCount)
-                .first { index in
-                    manifest.shots.first(where: { $0.photoIndex == index })?.imageFileName == nil
-                } ?? manifest.eventConfig.photoCount
-            let isComplete = manifest.nextPhotoIndex == manifest.eventConfig.photoCount
-            manifest.status = isComplete ? .finalizing : .capturing
-            manifest.lastError = nil
-            try await manifestStore.save(manifest)
-            currentManifest = manifest
-            let session = currentSession ?? store.restoreSessionRecord(from: manifest)
+            let committedManifest = try await manifestStore.update(
+                sessionID: manifest.id,
+                allowedStatuses: [.capturing]
+            ) { durable in
+                upsertRuntimeShot(
+                    in: &durable.shots,
+                    photoIndex: photoIndex,
+                    imageFileName: saved.imageFileName,
+                    gifFrameFileNames: saved.gifFrameFileNames,
+                    retakeCount: retakeCount,
+                    acceptedAt: Date()
+                )
+                durable.nextPhotoIndex = (0..<durable.eventConfig.photoCount)
+                    .first { index in
+                        durable.shots.first(where: { $0.photoIndex == index })?.imageFileName == nil
+                    } ?? durable.eventConfig.photoCount
+                durable.lastError = nil
+            }
+            guard sessionLifecycleGeneration == lifecycleGeneration,
+                  currentManifest?.id == committedManifest.id else { return .stale }
+            currentManifest = committedManifest
+            try? workspace.pruneUnreferencedCaptureFiles(manifest: committedManifest)
+            let session = currentSession ?? store.restoreSessionRecord(from: committedManifest)
             store.upsertShot(
                 session: session,
                 photoIndex: photoIndex,
                 imagePath: saved.imageFileName,
-                retakeCount: retakeCounts[photoIndex] ?? 0
+                retakeCount: retakeCount
             )
 
-            stateMachine.keepShot(photoIndex: photoIndex)
-            if case .processing = stateMachine.phase {
-                await finalizeSession()
-            } else if case .countdown(let next, _) = stateMachine.phase {
-                beginCountdown(photoIndex: next)
+            let completesSession = committedManifest.nextPhotoIndex >= committedManifest.eventConfig.photoCount
+            if completesSession {
+                guard await finalizeSession(),
+                      sessionLifecycleGeneration == lifecycleGeneration,
+                      currentManifest?.id == committedManifest.id else { return .stale }
+                stateMachine.keepShot(photoIndex: photoIndex)
+            } else {
+                stateMachine.keepShot(photoIndex: photoIndex)
+                if case .countdown(let next, _) = stateMachine.phase {
+                    beginCountdown(photoIndex: next)
+                }
             }
+            currentReviewStateToken = nil
+            return .accepted
         } catch {
+            if let currentManifest {
+                try? workspace.pruneUnreferencedCaptureFiles(manifest: currentManifest)
+            }
             errorMessage = "Could not save photograph \(photoIndex + 1): \(error.localizedDescription)"
+            return .persistenceFailed
         }
     }
 
-    private func requestRetake(photoIndex: Int, source: RetakeSource) async {
+    private func sendAuthoritativeReviewDecision() {
+        resynciPad()
+    }
+
+    private func rememberReviewRequest(
+        _ requestID: UUID,
+        state: ReviewStateToken,
+        action: ReviewAction,
+        result: ReviewDecisionResult
+    ) {
+        // Don't cache transient failures — allow retries to re-attempt the save (Finding 9).
+        guard result != .persistenceFailed else { return }
+        recentReviewRequests[requestID] = ReviewRequestRecord(state: state, action: action, result: result)
+        recentReviewRequestOrder.removeAll { $0 == requestID }
+        recentReviewRequestOrder.append(requestID)
+        if recentReviewRequestOrder.count > 32 {
+            let expired = recentReviewRequestOrder.removeFirst()
+            recentReviewRequests.removeValue(forKey: expired)
+        }
+    }
+
+    private func sendReviewDecisionResult(_ requestID: UUID, _ result: ReviewDecisionResult) {
+        multipeer.sendControl(.reviewDecisionResult(requestID: requestID, result: result))
+    }
+
+    private func handleClientReviewDecision(
+        state: ReviewStateToken,
+        requestID: UUID,
+        action: ReviewAction
+    ) {
+        if activeSoakRunID != nil {
+            rememberReviewRequest(requestID, state: state, action: action, result: .stale)
+            sendReviewDecisionResult(requestID, .stale)
+            return
+        }
+        if let record = recentReviewRequests[requestID] {
+            guard record.state == state, record.action == action else {
+                sendReviewDecisionResult(requestID, .stale)
+                return
+            }
+            sendReviewDecisionResult(
+                requestID,
+                record.result == .accepted ? .duplicate : record.result
+            )
+            if record.result == .accepted { sendAuthoritativeReviewDecision() }
+            return
+        }
+
+        let phasePhotoIndex: Int? = if case .review(let photoIndex) = stateMachine.phase {
+            photoIndex
+        } else {
+            nil
+        }
+        let validation = ReviewDecisionGate.validate(
+            current: currentReviewStateToken,
+            phasePhotoIndex: phasePhotoIndex,
+            requested: state
+        )
+        guard validation == .accepted else {
+            rememberReviewRequest(requestID, state: state, action: action, result: validation)
+            sendReviewDecisionResult(requestID, validation)
+            return
+        }
+        if reviewDecisionPending {
+            guard activeReviewRequestID != requestID else { return }
+            rememberReviewRequest(requestID, state: state, action: action, result: .stale)
+            sendReviewDecisionResult(requestID, .stale)
+            return
+        }
+
+        reviewDecisionPending = true
+        activeReviewRequestID = requestID
+        let lifecycleGeneration = sessionLifecycleGeneration
+        sessionFlowOperations.start(
+            sessionID: state.sessionID,
+            kind: .reviewDecision
+        ) { [weak self] in
+            guard let self,
+                  !Task.isCancelled,
+                  self.sessionLifecycleGeneration == lifecycleGeneration,
+                  self.currentManifest?.id == state.sessionID else { return }
+            let result: ReviewDecisionResult = switch action {
+            case .keep: await self.acceptShot(photoIndex: state.photoIndex)
+            case .retake: await self.requestRetake(photoIndex: state.photoIndex, source: .guest)
+            }
+            guard !Task.isCancelled,
+                  self.sessionLifecycleGeneration == lifecycleGeneration,
+                  self.currentManifest?.id == state.sessionID else { return }
+            self.reviewDecisionPending = false
+            self.activeReviewRequestID = nil
+            self.rememberReviewRequest(requestID, state: state, action: action, result: result)
+            self.sendReviewDecisionResult(requestID, result)
+            if result == .accepted { self.sendAuthoritativeReviewDecision() }
+        }
+    }
+
+    private func requestRetake(photoIndex: Int, source: RetakeSource) async -> ReviewDecisionResult {
         _ = source
         guard case .review(let currentIndex) = stateMachine.phase,
               currentIndex == photoIndex,
-              var manifest = currentManifest else { return }
+              case .idle = sessionLifecycleOperation,
+              let manifest = currentManifest else { return .wrongPhoto }
+        let lifecycleGeneration = sessionLifecycleGeneration
 
-        let count = incrementRetakeCount(in: &retakeCounts, photoIndex: photoIndex)
-        let previous = manifest.shots.first(where: { $0.photoIndex == photoIndex })
-        upsertManifestShot(
-            &manifest,
-            photoIndex: photoIndex,
-            imageFileName: nil,
-            gifFrameFileNames: [],
-            retakeCount: count,
-            acceptedAt: nil,
-            previousImageFileName: previous?.imageFileName ?? previous?.previousImageFileName,
-            previousGifFrameFileNames: previous?.gifFrameFileNames.isEmpty == false
-                ? previous?.gifFrameFileNames
-                : previous?.previousGifFrameFileNames,
-            previousAcceptedAt: previous?.acceptedAt ?? previous?.previousAcceptedAt
-        )
+        let count = retakeCounts[photoIndex, default: 0] + 1
+        let previousImagePath = manifest.shots.first(where: { $0.photoIndex == photoIndex })?.imageFileName
         do {
-            try await manifestStore.save(manifest)
-            currentManifest = manifest
+            let committedManifest = try await manifestStore.update(
+                sessionID: manifest.id,
+                allowedStatuses: [.capturing]
+            ) { durable in
+                let previous = durable.shots.first(where: { $0.photoIndex == photoIndex })
+                upsertRuntimeShot(
+                    in: &durable.shots,
+                    photoIndex: photoIndex,
+                    imageFileName: nil,
+                    gifFrameFileNames: [],
+                    retakeCount: max(count, (previous?.retakeCount ?? 0) + 1),
+                    acceptedAt: nil,
+                    previousImageFileName: previous?.imageFileName ?? previous?.previousImageFileName,
+                    previousGifFrameFileNames: previous?.gifFrameFileNames.isEmpty == false
+                        ? previous?.gifFrameFileNames
+                        : previous?.previousGifFrameFileNames,
+                    previousAcceptedAt: previous?.acceptedAt ?? previous?.previousAcceptedAt
+                )
+                durable.nextPhotoIndex = photoIndex
+                durable.lastError = nil
+            }
+            guard sessionLifecycleGeneration == lifecycleGeneration,
+                  currentManifest?.id == committedManifest.id else { return .stale }
+            currentManifest = committedManifest
+            retakeCounts[photoIndex] = committedManifest.shots.first(where: { $0.photoIndex == photoIndex })?.retakeCount ?? count
+            sessionAssetReferences.removeValue(forKey: photoIndex)
+            currentFilteredReviewImages.removeValue(forKey: photoIndex)
             if let session = currentSession {
                 store.upsertShot(
                     session: session,
                     photoIndex: photoIndex,
-                    imagePath: previous?.imageFileName,
+                    imagePath: previousImagePath,
                     retakeCount: count
                 )
             }
             stateMachine.retakeShot(photoIndex: photoIndex)
             beginCountdown(photoIndex: photoIndex)
+            currentReviewStateToken = nil
+            return .accepted
         } catch {
-            retakeCounts[photoIndex] = max(0, count - 1)
             errorMessage = "Could not save retake count: \(error.localizedDescription)"
+            return .persistenceFailed
         }
     }
 
-    private func cancelCurrentSession() async {
-        cancelCountdown()
-        guard currentSession != nil, var manifest = currentManifest else {
+    private func cancelCurrentSession(preservingDiagnosticFiles: Bool = false) async {
+        guard sessionLifecycleOperation.allowsCancellation else { return }
+        capture.invalidateCaptureRecovery()
+        guard let session = currentSession, let manifest = currentManifest else {
+            if activeSessionStart != nil {
+                sessionLifecycleGeneration &+= 1
+                activeSessionStart = nil
+            }
             reviewDecisionPending = false
+            currentReviewStateToken = nil
+            currentCaptureRecoveryStateToken = nil
+            activeReviewRequestID = nil
+            recentReviewRequests.removeAll(keepingCapacity: true)
+            recentReviewRequestOrder.removeAll(keepingCapacity: true)
+            recentCaptureRecoveryRequests.removeAll(keepingCapacity: true)
+            recentCaptureRecoveryRequestOrder.removeAll(keepingCapacity: true)
+            sessionAssetReferences = [:]
+            stripAssetReference = nil
+            assetSources = [:]
+            pendingPromptAssets = [:]
+            currentStripPreview = nil
+            currentFilteredReviewImages = [:]
+            currentSessionPresentation = nil
+            lastSessionPresentation = nil
             stateMachine.reset()
+            attemptPendingLANRecoveryIfIdle()
+            resynciPad()
             return
         }
-        manifest.status = .cancelled
-        manifest.cancelledAt = Date()
-        recordOperation(.sessionCancelled, sessionID: manifest.id)
+        guard claimSessionRecovery(manifest.id) else {
+            errorMessage = JobRecoveryError.retryAlreadyInProgress(manifest.id).localizedDescription
+            return
+        }
+        defer { releaseSessionRecovery(manifest.id, scheduleReconciliation: true) }
+
+        let lifecycleToken = UUID()
+        sessionLifecycleOperation = .cancelling(sessionID: manifest.id, token: lifecycleToken)
+        let cancelledManifest: SessionManifest
         do {
-            try await manifestStore.save(manifest)
+            cancelledManifest = try await manifestStore.transition(
+                sessionID: manifest.id,
+                allowedFrom: [.capturing, .finalizing, .failed]
+            ) { durable in
+                durable.status = .cancelled
+                durable.cancelledAt = Date()
+                if preservingDiagnosticFiles, manifest.origin == .soakTest {
+                    durable.lastError = durable.lastError
+                        ?? "Automated soak cycle stopped before completion; retained for diagnostics."
+                    durable.soakDiagnosticRetained = true
+                } else if !preservingDiagnosticFiles {
+                    durable.lastError = nil
+                }
+            }
         } catch {
+            sessionLifecycleOperation = .idle
             recoveryService.recordError("Cancelled session could not be persisted: \(error.localizedDescription)")
             errorMessage = "Session cancellation could not be persisted: \(error.localizedDescription)"
+            return
         }
-        jobQueue.cancelJobs(sessionID: manifest.id)
+
+        sessionLifecycleGeneration &+= 1
+        let lifecycleGeneration = sessionLifecycleGeneration
+        guard sessionLifecycleGeneration == lifecycleGeneration,
+              sessionLifecycleOperation == .cancelling(sessionID: manifest.id, token: lifecycleToken) else { return }
+        currentManifest = cancelledManifest
+        cancelCountdown()
+        reviewDecisionPending = false
+        let flowQuiesced = await sessionFlowOperations.cancelAndQuiesce(
+            sessionID: manifest.id,
+            timeout: .seconds(10)
+        )
+#if DEBUG
+        await beforeCancellationQueueBarrierForTesting?(manifest.id)
+#endif
         do {
-            try workspace.removeEntireSession(manifest: manifest)
+            let result = try await jobQueue.cancelAndQuiesceJobs(sessionID: manifest.id)
+            guard sessionLifecycleGeneration == lifecycleGeneration,
+                  sessionLifecycleOperation == .cancelling(sessionID: manifest.id, token: lifecycleToken) else { return }
+            if !flowQuiesced || result == .cleanupPending {
+                recoveryService.markCleanupPending(sessionID: manifest.id)
+                errorMessage = "Session cancellation was saved; its files were retained while background work stops."
+            } else {
+                recordOperation(.sessionCancelled, sessionID: manifest.id)
+                if !preservingDiagnosticFiles {
+                    do {
+                        try workspace.removeEntireSession(manifest: cancelledManifest)
+                    } catch {
+                        recoveryService.recordError("Cancelled session files could not be removed: \(error.localizedDescription)")
+                    }
+                }
+            }
         } catch {
-            recoveryService.recordError("Cancelled session files could not be removed: \(error.localizedDescription)")
+            recoveryService.markCleanupPending(sessionID: manifest.id)
+            recoveryService.recordError("Cancelled session jobs could not be quiesced: \(error.localizedDescription)")
+            errorMessage = "Session cancellation was saved; files were retained because background work could not be stopped."
         }
-        if let session = currentSession { store.deleteSession(session) }
+
+#if DEBUG
+        if stopCancellationAfterJobBarrierForTesting { return }
+#endif
+
+        // Keep the durable cancelled manifest when cleanup is pending so a
+        // later startup can retry the retained workspace without making the
+        // session recoverable to the customer.
+        if !(preservingDiagnosticFiles && manifest.origin == .soakTest) {
+            store.deleteSession(session)
+        }
         currentManifest = nil
         currentManifestID = nil
         currentSession = nil
@@ -1874,9 +4290,25 @@ final class BoothCoordinator {
         gifFrames = [:]
         currentCaptureAttempt = nil
         currentFilteredReviewImages = [:]
+        sessionAssetReferences = [:]
+        stripAssetReference = nil
+        assetSources = [:]
+        pendingPromptAssets = [:]
+        assetAssembler = BoothAssetAssembler()
+        currentStripPreview = nil
         capture.resetStills()
         reviewDecisionPending = false
+        currentReviewStateToken = nil
+        currentCaptureRecoveryStateToken = nil
+        activeReviewRequestID = nil
+        recentReviewRequests.removeAll(keepingCapacity: true)
+        recentReviewRequestOrder.removeAll(keepingCapacity: true)
+        recentCaptureRecoveryRequests.removeAll(keepingCapacity: true)
+        recentCaptureRecoveryRequestOrder.removeAll(keepingCapacity: true)
         stateMachine.reset()
+        sessionLifecycleOperation = .idle
+        attemptPendingLANRecoveryIfIdle()
+        resynciPad()
     }
 
     private func resumeRecoveredSession(manifest: SessionManifest, images: [Int: CGImage]) {
@@ -1892,8 +4324,25 @@ final class BoothCoordinator {
         currentManifest = manifest
         currentManifestID = manifest.id
         currentSession = store.restoreSessionRecord(from: manifest)
-        currentSessionPresentation = (try? workspace.loadPresentationSnapshot(manifest: manifest))
+        var recoveredPresentation = (try? workspace.loadPresentationSnapshot(manifest: manifest))
             ?? presentation(for: manifest.eventConfig, sessionID: manifest.id)
+        assetSources = [:]
+        pendingPromptAssets = [:]
+        recoveredPresentation.prompts = recoveredPresentation.prompts.map { prompt in
+            guard let data = prompt.imageData, !data.isEmpty else { return prompt }
+            let reference = makeAssetReference(
+                data: data,
+                assetID: "prompt-\(manifest.id)-\(prompt.promptID)",
+                sessionID: manifest.id,
+                revision: manifest.eventConfig.experienceRevision,
+                kind: .promptImage
+            )
+            pendingPromptAssets[reference.assetID] = (reference, data)
+            var prompt = prompt
+            prompt.imageAsset = reference
+            return prompt
+        }
+        currentSessionPresentation = recoveredPresentation
         lastSessionPresentation = currentSessionPresentation
         retakeCounts = manifest.shots.reduce(into: [:]) { result, shot in
             result[shot.photoIndex] = shot.retakeCount
@@ -1916,14 +4365,35 @@ final class BoothCoordinator {
             errorMessage = "Recovered session identity could not be synchronized."
             return
         }
-        multipeer.sendControl(.sessionStart(context: startContext))
-        multipeer.sendControl(.eventConfig(config: manifest.eventConfig))
-        multipeer.sendControl(.sessionPrepared(
-            config: manifest.eventConfig,
-            presentation: presentation,
-            context: preparedContext
-        ))
-        beginCountdown(photoIndex: manifest.nextPhotoIndex)
+        let recoveredSessionID = manifest.id
+        let recoveredPhotoIndex = manifest.nextPhotoIndex
+        let authority = customerDisplayAuthority
+        for asset in pendingPromptAssets.values {
+            assetSources[asset.reference] = asset.data
+        }
+        if authority.requiresIPadSetupSend {
+            multipeer.sendControl(.sessionStart(context: startContext))
+            multipeer.sendControl(.eventConfig(config: manifest.eventConfig))
+            multipeer.sendControl(.sessionPrepared(
+                config: manifest.eventConfig,
+                presentation: presentation,
+                context: preparedContext
+            )) { [weak self] outcome in
+                guard let self else { return }
+                guard outcome == .sent,
+                      self.currentSession?.id == recoveredSessionID,
+                      self.stateMachine.currentSessionID == recoveredSessionID else {
+                    if self.isAuthenticatedIPadConnected {
+                        self.errorMessage = "The iPad did not receive recovered session setup. Reconnect before retrying."
+                    }
+                    return
+                }
+                self.beginCountdown(photoIndex: recoveredPhotoIndex)
+            }
+        }
+        if authority.shouldStartCountdownImmediatelyLocally {
+            beginCountdown(photoIndex: recoveredPhotoIndex)
+        }
     }
 
     private func finishDiscardingRecoveredSession(_ manifest: SessionManifest) {
@@ -1933,6 +4403,9 @@ final class BoothCoordinator {
             currentManifestID = nil
             currentSession = nil
             currentSessionPresentation = nil
+            assetSources = [:]
+            pendingPromptAssets = [:]
+            assetAssembler = BoothAssetAssembler()
             capture.resetStills()
             retakeCounts = [:]
             gifFrames = [:]
@@ -1942,50 +4415,193 @@ final class BoothCoordinator {
 
     // MARK: - Finalize session
 
-    private func finalizeSession() async {
-        guard var manifest = currentManifest else { return }
-        guard (0..<manifest.eventConfig.photoCount).allSatisfy({ index in
-            manifest.shots.first(where: { $0.photoIndex == index })?.imageFileName != nil
-        }) else {
-            errorMessage = "Session cannot finish until every photograph is accepted."
-            return
+    private func finalizeSession() async -> Bool {
+        guard case .idle = sessionLifecycleOperation,
+              let current = currentManifest else { return false }
+        let sessionID = current.id
+        let lifecycleToken = UUID()
+        sessionLifecycleOperation = .finalizing(sessionID: sessionID, token: lifecycleToken)
+        let lifecycleGeneration = sessionLifecycleGeneration
+        defer {
+            if sessionLifecycleOperation == .finalizing(sessionID: sessionID, token: lifecycleToken) {
+                sessionLifecycleOperation = .idle
+            }
         }
 
-        manifest.status = .finalizing
-        manifest.lastError = nil
+        let transactionID = UUID().uuidString
+        let galleryEnabled = activeExperienceDocument.map { $0.gallery.mode != .disabled }
+            ?? (current.eventConfig.eventGalleryPath != nil)
+        let finalGalleryPath: String? = if galleryEnabled {
+            activeExperienceDocument.map { "/e/\($0.gallery.eventToken)/" }
+                ?? current.eventConfig.eventGalleryPath
+        } else {
+            nil
+        }
+        let hasGIFFrames = current.shots.contains { !$0.gifFrameFileNames.isEmpty }
+        let finalizationIntent = currentDeliveryIntentSnapshot(
+            updateGalleryEnabled: galleryEnabled,
+            renderGIFEnabled: hasGIFFrames,
+            cloudUploadEnabled: soakCloudUploadOverride,
+            automaticPrintEnabled: soakAutomaticPrintOverride
+        )
+        let cloudDelivery = currentCloudDeliverySnapshot(enabledOverride: soakCloudUploadOverride)
+        let manifest: SessionManifest
         do {
-            try await manifestStore.save(manifest)
+            manifest = try await manifestStore.transition(
+                sessionID: sessionID,
+                allowedFrom: [.capturing]
+            ) { durable in
+                guard (0..<durable.eventConfig.photoCount).allSatisfy({ index in
+                    durable.shots.first(where: { $0.photoIndex == index })?.imageFileName != nil
+                }) else {
+                    throw SessionManifestError.invalidTransition(
+                        sessionID: durable.id,
+                        from: durable.status,
+                        to: .finalizing
+                    )
+                }
+                durable.status = .finalizing
+                durable.finalizationTransactionID = transactionID
+                durable.deliveryIntent = finalizationIntent
+                durable.cloudDelivery = cloudDelivery
+                durable.eventConfig.eventGalleryPath = finalGalleryPath
+                durable.lastError = nil
+            }
         } catch {
             errorMessage = "Could not start session processing: \(error.localizedDescription)"
-            return
+            return false
         }
+        guard sessionLifecycleGeneration == lifecycleGeneration,
+              currentManifest?.id == sessionID,
+              sessionLifecycleOperation == .finalizing(sessionID: sessionID, token: lifecycleToken) else { return false }
         currentManifest = manifest
-        jobQueue.enqueueFinalizationJobs(for: manifest)
-        if manifest.cloudDelivery != nil || UserDefaults.standard.bool(forKey: "cloudUploadEnabled") {
-            jobQueue.enqueueCloudUpload(for: manifest)
+        stateMachine.applyAuthoritativePhase(.processing)
+        do {
+            try await jobQueue.enqueueFinalizationJobs(for: manifest)
+        } catch {
+            // Error logged and displayed.
+            // Do not roll back manifest to .capturing. Reconciliation repairs
+            // the full bundle from the durable finalization plan.
+            recoveryService.recordError(
+                "Job enqueue failed for finalizing session \(sessionID): \(error.localizedDescription)"
+            )
+            errorMessage = "Processing recovery required. The session is safe and job initialization will retry: \(error.localizedDescription)"
+            scheduleJobReconciliation()
+            return true
         }
-        if UserDefaults.standard.bool(forKey: "selphyAutoPrintAfterSession") &&
-            UserDefaults.standard.bool(forKey: "selphySkipPrintDialog") {
-            jobQueue.enqueueAutoPrint(for: manifest)
+        return true
+    }
+
+    private func scheduleJobReconciliation() {
+        jobReconciliationDirty = true
+        guard jobReconciliationTask == nil else { return }
+        jobReconciliationTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            defer { jobReconciliationTask = nil }
+            while jobReconciliationDirty {
+                jobReconciliationDirty = false
+                await reconcileJobState()
+            }
         }
     }
 
-    private func reconcileCurrentSessionJobs() {
-        guard let manifest = currentManifest,
+    private func claimSessionRecovery(_ sessionID: String) -> Bool {
+        recoveryInFlightSessionIDs.insert(sessionID).inserted
+    }
+
+    private func releaseSessionRecovery(_ sessionID: String, scheduleReconciliation: Bool = false) {
+        guard recoveryInFlightSessionIDs.remove(sessionID) != nil else { return }
+        if deferredAutomaticCloudRetrySessionIDs.remove(sessionID) != nil {
+            Task { @MainActor [weak self] in
+                await self?.retryFailedCloudUploadsSafely(sessionIDs: [sessionID])
+            }
+        }
+        if scheduleReconciliation {
+            scheduleJobReconciliation()
+        }
+    }
+
+    private func reconcileJobState() async {
+        await reconcileCurrentSessionJobs()
+        await reconcileRecoveredSessions()
+    }
+
+#if DEBUG
+    func reconcileJobsNowForTesting() async {
+        await reconcileJobState()
+    }
+
+    func cancelSessionForTesting(manifest: SessionManifest) async {
+        let session = BoothSession(eventID: manifest.eventID, photoCount: manifest.eventConfig.photoCount)
+        session.id = manifest.id
+        currentSession = session
+        currentManifest = manifest
+        currentManifestID = manifest.id
+        stopCancellationAfterJobBarrierForTesting = true
+        await cancelCurrentSession()
+    }
+
+    func retryFailedCloudUploadsNowForTesting() async {
+        await retryFailedCloudUploadsSafely()
+    }
+#endif
+
+    private func reconcileCurrentSessionJobs() async {
+        guard var manifest = currentManifest,
               currentSession != nil,
-              stateMachine.phase == .processing else { return }
-        let jobs = jobQueue.jobs.filter { $0.sessionID == manifest.id }
-        if let failed = jobs.first(where: {
-            ($0.kind == .renderStrip || $0.kind == .registerDownload) && $0.status == .failed
-        }) {
-            Task { await markCurrentSessionFailed(message: failed.lastError ?? "Required job failed.") }
-            return
+              stateMachine.phase == .processing,
+              !recoveryInFlightSessionIDs.contains(manifest.id) else { return }
+        if manifest.status == .finalizing, FinalizationPlan.make(from: manifest) == nil {
+            do {
+                manifest = try await recoveryService.prepareFinalizationPlanForRecovery(for: manifest)
+                currentManifest = manifest
+            } catch {
+                recoveryService.recordError("Could not migrate current finalization plan: \(error.localizedDescription)")
+                return
+            }
         }
-        guard jobs.first(where: { $0.kind == .renderStrip })?.status == .succeeded,
-              jobs.first(where: { $0.kind == .registerDownload })?.status == .succeeded else {
-            return
+        let jobs = jobQueue.jobs.filter {
+            $0.sessionID == manifest.id
+                && $0.finalizationTransactionID == manifest.finalizationTransactionID
         }
-        Task { await completeCurrentSessionIfReady() }
+        let decision = SessionJobReconciliationDecision.evaluate(
+            manifest: manifest,
+            jobs: jobs
+        )
+        switch decision {
+        case .none:
+            return
+        case .enqueueMissingRequiredJobs:
+            do {
+                guard claimSessionRecovery(manifest.id) else { return }
+                defer { releaseSessionRecovery(manifest.id) }
+                do {
+                    try await jobQueue.enqueueFinalizationJobs(for: manifest)
+                } catch {
+                    recoveryService.recordError("Required finalization jobs could not be repaired: \(error.localizedDescription)")
+                }
+            }
+        case .restoreFinalizing:
+            do {
+                guard claimSessionRecovery(manifest.id) else { return }
+                defer { releaseSessionRecovery(manifest.id) }
+                let restored = try await manifestStore.transition(
+                    sessionID: manifest.id,
+                    allowedFrom: [.failed]
+                ) { durable in
+                    durable.status = .finalizing
+                    durable.lastError = nil
+                }
+                currentManifest = restored
+                scheduleJobReconciliation()
+            } catch {
+                recoveryService.recordError("Runtime recovery could not restore \(manifest.id): \(error.localizedDescription)")
+            }
+        case .fail(let message):
+            await markCurrentSessionFailed(message: message)
+        case .complete:
+            await completeCurrentSessionIfReady()
+        }
     }
 
     private func cleanupCompletedWorkingFiles() {
@@ -1993,7 +4609,10 @@ final class BoothCoordinator {
             guard let self else { return }
             for result in await manifestStore.loadAll() {
                 guard case .loaded(let manifest) = result, manifest.status == .completed else { continue }
-                let jobs = jobQueue.jobs.filter { $0.sessionID == manifest.id }
+                let jobs = jobQueue.jobs.filter {
+                    $0.sessionID == manifest.id
+                        && $0.finalizationTransactionID == manifest.finalizationTransactionID
+                }
                 // Keep failed GIF inputs available for an operator retry; explicit cancellation permits cleanup.
                 guard jobs.first(where: { $0.kind == .renderStrip })?.status == .succeeded,
                       jobs.filter({ $0.kind == .renderGIF }).allSatisfy({
@@ -2008,113 +4627,190 @@ final class BoothCoordinator {
         }
     }
 
-    private func reconcileRecoveredSessions() {
+    private func reconcileRecoveredSessions() async {
         guard currentSession == nil else { return }
-        Task { @MainActor [weak self] in
-            guard let self else { return }
-            let results = await manifestStore.loadAll()
-            for result in results {
-                guard case .loaded(let manifest) = result, manifest.status == .finalizing else { continue }
-                let jobs = jobQueue.jobs.filter { $0.sessionID == manifest.id }
-                if let failed = jobs.first(where: {
-                    ($0.kind == .renderStrip || $0.kind == .registerDownload) && $0.status == .failed
-                }) {
-                    var failedManifest = manifest
-                    failedManifest.status = .failed
-                    failedManifest.lastError = failed.lastError ?? "Required job failed."
-                    failedManifest.updatedAt = Date()
-                    do {
-                        try await manifestStore.save(failedManifest)
-                    } catch {
-                        recoveryService.recordError("Failed recovery manifest update: \(error.localizedDescription)")
-                    }
-                    continue
-                }
-                guard jobs.first(where: { $0.kind == .renderStrip })?.status == .succeeded,
-                      jobs.first(where: { $0.kind == .registerDownload })?.status == .succeeded else {
-                    continue
-                }
-                var completed = manifest
-                completed.status = .completed
-                completed.completedAt = Date()
-                completed.lastError = nil
+        let results = await manifestStore.loadAll()
+        for result in results {
+            guard case .loaded(var manifest) = result,
+                  !recoveryInFlightSessionIDs.contains(manifest.id) else { continue }
+            if (manifest.status == .finalizing || manifest.status == .failed),
+               FinalizationPlan.make(from: manifest) == nil {
                 do {
-                    try await manifestStore.save(completed)
+                    manifest = try await recoveryService.prepareFinalizationPlanForRecovery(for: manifest)
+                } catch {
+                    recoveryService.recordError("Could not migrate recovered finalization plan for \(manifest.id): \(error.localizedDescription)")
+                    continue
+                }
+            }
+            let jobs = jobQueue.jobs.filter {
+                $0.sessionID == manifest.id
+                    && $0.finalizationTransactionID == manifest.finalizationTransactionID
+            }
+            let decision = SessionJobReconciliationDecision.evaluate(
+                manifest: manifest,
+                jobs: jobs
+            )
+            switch decision {
+            case .none:
+                continue
+            case .restoreFinalizing:
+                guard claimSessionRecovery(manifest.id) else { continue }
+                do {
+                    defer { releaseSessionRecovery(manifest.id) }
+                    _ = try await manifestStore.transition(
+                        sessionID: manifest.id,
+                        allowedFrom: [.failed]
+                    ) { durable in
+                        durable.status = .finalizing
+                        durable.lastError = nil
+                    }
+                    scheduleJobReconciliation()
+                } catch {
+                    recoveryService.recordError("Runtime Case A reconciliation failed for \(manifest.id): \(error.localizedDescription)")
+                }
+            case .enqueueMissingRequiredJobs:
+                guard claimSessionRecovery(manifest.id) else { continue }
+                do {
+                    defer { releaseSessionRecovery(manifest.id) }
+                    try await jobQueue.enqueueFinalizationJobs(for: manifest)
+                } catch {
+                    recoveryService.recordError("Required finalization jobs could not be repaired for \(manifest.id): \(error.localizedDescription)")
+                }
+            case .fail(let message):
+                guard claimSessionRecovery(manifest.id) else { continue }
+                do {
+                    defer { releaseSessionRecovery(manifest.id) }
+                    _ = try await manifestStore.transition(
+                        sessionID: manifest.id,
+                        allowedFrom: [.finalizing]
+                    ) { durable in
+                        durable.status = .failed
+                        durable.lastError = message
+                    }
+                } catch {
+                    recoveryService.recordError("Runtime Case B reconciliation failed for \(manifest.id): \(error.localizedDescription)")
+                }
+            case .complete:
+                guard claimSessionRecovery(manifest.id) else { continue }
+                do {
+                    defer { releaseSessionRecovery(manifest.id) }
+                    let completed = try await manifestStore.transition(
+                        sessionID: manifest.id,
+                        allowedFrom: [.finalizing]
+                    ) { durable in
+                        durable.status = .completed
+                        durable.completedAt = Date()
+                        durable.lastError = nil
+                    }
+                    _ = store.restoreSessionRecord(from: completed)
+                    store.finishSession(
+                        sessionID: completed.id,
+                        stripPath: completed.stripFileName.map { "\(completed.relativeDirectoryPath)/\($0)" },
+                        gifPath: completed.gifFileName.map { "\(completed.relativeDirectoryPath)/\($0)" }
+                    )
+                    if jobs.filter({ $0.kind == .renderGIF }).allSatisfy({
+                        $0.status == .succeeded || $0.status == .cancelled
+                    }) {
+                        do {
+                            try workspace.removeWorkingFiles(manifest: completed)
+                        } catch {
+                            recoveryService.recordError("Recovered working files could not be removed: \(error.localizedDescription)")
+                        }
+                    }
                 } catch {
                     recoveryService.recordError("Failed recovered-session completion update: \(error.localizedDescription)")
-                    continue
-                }
-                _ = store.restoreSessionRecord(from: completed)
-                store.finishSession(
-                    sessionID: completed.id,
-                    stripPath: completed.stripFileName.map { "\(completed.relativeDirectoryPath)/\($0)" },
-                    gifPath: completed.gifFileName.map { "\(completed.relativeDirectoryPath)/\($0)" }
-                )
-                if jobs.filter({ $0.kind == .renderGIF }).allSatisfy({
-                    $0.status == .succeeded || $0.status == .cancelled
-                }) {
-                    do {
-                        try workspace.removeWorkingFiles(manifest: completed)
-                    } catch {
-                        recoveryService.recordError("Recovered working files could not be removed: \(error.localizedDescription)")
-                    }
                 }
             }
         }
     }
 
     private func markCurrentSessionFailed(message: String) async {
-        guard let current = currentManifest, current.status != .failed else { return }
-        let manifest: SessionManifest
+        guard let current = currentManifest,
+              current.status != .failed,
+              claimSessionRecovery(current.id) else { return }
+        defer { releaseSessionRecovery(current.id) }
         do {
-            manifest = try await manifestStore.load(sessionID: current.id)
+            let updated = try await manifestStore.transition(
+                sessionID: current.id,
+                allowedFrom: [.finalizing]
+            ) { durable in
+                durable.status = .failed
+                durable.lastError = message
+            }
+            currentManifest = updated
         } catch {
             recoveryService.recordError("Failed to reload session after queue failure: \(error.localizedDescription)")
-            manifest = current
-        }
-        var updated = manifest
-        updated.status = .failed
-        updated.lastError = message
-        do {
-            try await manifestStore.save(updated)
-            currentManifest = updated
-        } catch {
-            recoveryService.recordError("Failed to persist session failure: \(error.localizedDescription)")
-            currentManifest = updated
+            errorMessage = "Session failure could not be persisted: \(error.localizedDescription)"
         }
     }
 
     private func completeCurrentSessionIfReady() async {
         guard let original = currentManifest,
               currentSession != nil,
-              stateMachine.phase == .processing else { return }
-        let jobs = jobQueue.jobs.filter { $0.sessionID == original.id }
+              stateMachine.phase == .processing,
+              case .idle = sessionLifecycleOperation,
+              !recoveryInFlightSessionIDs.contains(original.id),
+              completionInFlightSessionID != original.id,
+              finishedAwaitingCustomerAckSessionID != original.id,
+              claimSessionRecovery(original.id) else { return }
+        let lifecycleGeneration = sessionLifecycleGeneration
+        let lifecycleToken = UUID()
+        // Claimed synchronously, before the first suspension point, so a
+        // second job-change task cannot overtake this one mid-await.
+        completionInFlightSessionID = original.id
+        sessionLifecycleOperation = .completing(sessionID: original.id, token: lifecycleToken)
+        defer {
+            releaseSessionRecovery(original.id)
+            completionInFlightSessionID = nil
+            if sessionLifecycleOperation == .completing(sessionID: original.id, token: lifecycleToken) {
+                sessionLifecycleOperation = .idle
+            }
+        }
+        guard let plan = FinalizationPlan.make(from: original) else { return }
+        let jobs = jobQueue.jobs.filter {
+            $0.sessionID == original.id
+                && $0.finalizationTransactionID == plan.transactionID
+        }
         guard jobs.first(where: { $0.kind == .renderStrip })?.status == .succeeded,
               jobs.first(where: { $0.kind == .registerDownload })?.status == .succeeded else {
             return
         }
+        switch plan.cloudPublicationReadiness(in: jobs, for: original) {
+        case .pending:
+            return
+        case .failed:
+            errorMessage = "Cloud publication failed. The guest QR was withheld until the run-scoped route is verified."
+            return
+        case .notRequired, .published:
+            break
+        }
         let serverStatus = await server.statusSnapshot()
+        guard sessionLifecycleGeneration == lifecycleGeneration,
+              currentManifest?.id == original.id,
+              sessionLifecycleOperation == .completing(sessionID: original.id, token: lifecycleToken) else { return }
         guard case .ready = serverStatus.state else {
             errorMessage = "Session finished, but the local download server is unavailable. QR/download links were not published."
             return
         }
-        let latest: SessionManifest
+        let manifest: SessionManifest
         do {
-            latest = try await manifestStore.load(sessionID: original.id)
-        } catch {
-            recoveryService.recordError("Failed to reload session before completion: \(error.localizedDescription)")
-            latest = original
-        }
-        var manifest = latest
-        guard manifest.status != .completed else { return }
-        manifest.status = .completed
-        manifest.completedAt = Date()
-        manifest.lastError = nil
-        do {
-            try await manifestStore.save(manifest)
+            manifest = try await manifestStore.transition(
+                sessionID: original.id,
+                allowedFrom: [.finalizing]
+            ) { durable in
+                durable.status = .completed
+                durable.completedAt = Date()
+                durable.lastError = nil
+            }
         } catch {
             recoveryService.recordError("Completed session could not be persisted: \(error.localizedDescription)")
             errorMessage = "Completed session could not be persisted: \(error.localizedDescription)"
+            return
+        }
+        guard sessionLifecycleGeneration == lifecycleGeneration,
+              currentManifest?.id == original.id,
+              sessionLifecycleOperation == .completing(sessionID: original.id, token: lifecycleToken) else { return }
+        guard manifest.status == .completed else {
             return
         }
         currentManifest = manifest
@@ -2131,29 +4827,46 @@ final class BoothCoordinator {
         }
 
         let directory = URL(fileURLWithPath: manifest.absoluteDirectoryPath, isDirectory: true)
-        let token = manifest.downloadToken
-        let publicBase = (manifest.cloudDelivery?.publicBaseURL
-            ?? UserDefaults.standard.string(forKey: "publicBaseURL"))?
+        let publicBase = manifest.cloudDelivery?.publicBaseURL
             .trimmingCharacters(in: CharacterSet(charactersIn: "/ "))
-        let ip = LocalWebServer.lanIPAddress() ?? "localhost"
+        let cloudUploadEnabled = manifest.deliveryIntent?.cloudUploadEnabled ?? (manifest.cloudDelivery != nil)
+        let localBaseURL = LocalWebServer.guestDeliveryEndpoint(selection: guestDeliveryInterfaceSelection)
+            .endpoint?.baseURL ?? ""
+        let allowTrustedLocalHTTP = UserDefaults.standard.bool(forKey: "allowTrustedLocalHTTP")
         let qr = Self.downloadURL(
             publicBaseURL: publicBase,
-            localBaseURL: "http://\(ip):8585",
-            token: token,
-            cloudUploadEnabled: manifest.cloudDelivery != nil
-                || UserDefaults.standard.bool(forKey: "cloudUploadEnabled")
+            localBaseURL: localBaseURL,
+            manifest: manifest,
+            cloudUploadEnabled: cloudUploadEnabled,
+            allowTrustedLocalHTTP: allowTrustedLocalHTTP
         )
         let stripThumb = loadCGImage(from: directory.appendingPathComponent("strip.png"))
             .flatMap { jpegData(from: $0, quality: 0.4) }
         currentStripPreview = loadCGImage(from: directory.appendingPathComponent("strip.png"))
+        stripAssetReference = stripThumb.map {
+            makeAssetReference(
+                data: $0,
+                assetID: "strip-\(manifest.id)",
+                sessionID: manifest.id,
+                revision: "output-v1",
+                kind: .stripThumbnail
+            )
+        }
+        finishedAwaitingCustomerAckSessionID = manifest.id
         stateMachine.finishSession(qrPayload: qr)
         if let context = nextSessionMessageContext() {
-            multipeer.sendControl(.sessionFinished(
+            if let stripThumb, let stripAssetReference {
+                assetSources[stripAssetReference] = stripThumb
+            }
+            multipeer.sendControl(.sessionFinishedAssets(
                 context: context,
                 qrPayload: qr,
-                stripThumbData: stripThumb,
-                gifThumbData: nil
+                stripAsset: stripAssetReference,
+                gifAsset: nil
             ))
+            if let stripThumb, let stripAssetReference {
+                _ = sendAsset(data: stripThumb, reference: stripAssetReference)
+            }
         }
         if jobs.filter({ $0.kind == .renderGIF }).allSatisfy({
             $0.status == .succeeded || $0.status == .cancelled
@@ -2167,13 +4880,79 @@ final class BoothCoordinator {
         currentSession = nil
         lastSessionPresentation = currentSessionPresentation
         currentSessionPresentation = nil
+        sessionLifecycleOperation = .idle
+        attemptPendingLANRecoveryIfIdle()
     }
 
     private func restoreDownloadTokens() async {
+        // Restore production routes before retrying remote cleanup for retained
+        // soak runs. Soak sessions are excluded by refreshServerRoutes, and a
+        // remote timeout must not hold live guest downloads offline at launch.
         await refreshServerRoutes()
+        await depublishOrphanedSoakRoutes()
+    }
+
+    private func depublishOrphanedSoakRoutes() async {
+        await jobQueue.waitUntilReady()
+        for result in await manifestStore.loadAll() {
+            guard case .loaded(let original) = result,
+                  original.origin == .soakTest else { continue }
+            store.backfillSessionOrigin(from: original)
+            guard let runID = original.soakRunID else {
+                recoveryService.recordError("Soak cleanup \(original.id): test route has no run identifier.")
+                continue
+            }
+            let durableJobs = try? await jobQueue.loadJobsForCleanup(sessionID: original.id)
+            let retainDiagnostics = durableJobs.map {
+                BoothSoakCleanupPolicy.shouldRetainOrphanedDiagnostics(manifest: original, jobs: $0)
+            } ?? true
+            let manifest: SessionManifest
+            do {
+                manifest = try await manifestStore.prepareOrphanedSoakForCleanup(
+                    sessionID: original.id,
+                    expectedRunID: runID,
+                    retainForDiagnostics: retainDiagnostics
+                )
+            } catch {
+                recoveryService.recordError("Soak cleanup \(original.id): could not restore its cleanup policy: \(error.localizedDescription)")
+                continue
+            }
+            _ = await cleanupSoakSession(
+                manifest,
+                expectedRunID: runID,
+                removeArtifacts: !retainDiagnostics && manifest.soakAutoCleanupEnabled == true
+            )
+        }
     }
 
     func refreshServerRoutes() async {
+        serverRouteRefreshGeneration &+= 1
+        let generation = serverRouteRefreshGeneration
+        let defaults = UserDefaults.standard
+        let allowTrustedLocalHTTP = defaults.bool(forKey: "allowTrustedLocalHTTP")
+        let policy = SessionQRCodePayloadResolver.evaluatePolicy(
+            publicBaseURL: defaults.string(forKey: "publicBaseURL"),
+            cloudUploadEnabled: defaults.bool(forKey: "cloudUploadEnabled"),
+            allowTrustedLocalHTTP: allowTrustedLocalHTTP
+        )
+        let exposure: LocalGuestRouteExposure = policy.permitsLocalGuestHTTP(
+            allowTrustedLocalHTTP: allowTrustedLocalHTTP
+        ) ? .trustedLocalHTTP : .disabled
+        await server.setGuestRouteExposure(exposure)
+
+        let manifestResults = await manifestStore.loadAll()
+        let manifests = manifestResults.compactMap { result -> SessionManifest? in
+            guard case .loaded(let manifest) = result else { return nil }
+            return manifest
+        }
+        let soakSessionIDs = Set(manifests.filter { $0.origin == .soakTest }.map(\.id))
+        let unreadableManifestIDs = Set(manifestResults.compactMap { result -> String? in
+            guard case .failed(let fileURL, _) = result else { return nil }
+            return fileURL.deletingPathExtension().lastPathComponent
+        })
+        let excludedGallerySessionIDs = soakSessionIDs
+            .union(unreadableManifestIDs)
+            .union(hiddenSoakRouteSessionIDs)
         var galleryMappings: [String: EventGalleryRouteRegistration] = [:]
         for result in await galleryStore.loadAll() {
             guard case .loaded(let index) = result else { continue }
@@ -2181,8 +4960,7 @@ final class BoothCoordinator {
                document.gallery.mode == .disabled {
                 continue
             }
-            let approved = index.sessions
-                .filter { $0.approvalStatus == .approved }
+            let approved = index.productionRouteSessions(excludingSessionIDs: excludedGallerySessionIDs)
                 .map { entry in
                     GalleryRouteSession(
                         sessionID: entry.sessionID,
@@ -2206,9 +4984,12 @@ final class BoothCoordinator {
         }
 
         var sessionMappings: [String: SessionRouteRegistration] = [:]
-        for result in await manifestStore.loadAll() {
-            guard case .loaded(let manifest) = result,
-                  manifest.status == .completed || manifest.status == .finalizing else { continue }
+        for manifest in manifests {
+            guard manifest.status == .completed || manifest.status == .finalizing,
+                  !hiddenSoakRouteSessionIDs.contains(manifest.id) else { continue }
+            if manifest.origin == .soakTest {
+                guard activeSoakRunID == manifest.soakRunID else { continue }
+            }
             let directory = URL(fileURLWithPath: manifest.absoluteDirectoryPath, isDirectory: true)
             let strip = directory.appendingPathComponent(manifest.stripFileName ?? "strip.png")
             guard FileManager.default.fileExists(atPath: directory.path),
@@ -2219,13 +5000,15 @@ final class BoothCoordinator {
             let galleryPath = manifest.eventConfig.eventGalleryPath.flatMap { path in
                 galleryMappings.values.contains(where: { "/e/\($0.eventToken)/" == path }) ? path : nil
             }
-            sessionMappings[manifest.downloadToken] = SessionRouteRegistration(
+            guard let routePath = try? CloudGuestRoute.resolve(for: manifest).relativePath else { continue }
+            sessionMappings[routePath] = SessionRouteRegistration(
                 sessionDirectory: directory,
                 language: manifest.eventConfig.customerLanguage,
                 eventGalleryPath: galleryPath,
                 gifState: gifAvailability(for: manifest, directory: directory)
             )
         }
+        guard generation == serverRouteRefreshGeneration else { return }
         await server.replaceSessionRoutes(sessionMappings)
         await server.replaceGalleryRoutes(galleryMappings)
     }
@@ -2237,8 +5020,12 @@ final class BoothCoordinator {
         guard manifest.shots.contains(where: { !$0.gifFrameFileNames.isEmpty }) else { return .none }
         let gifURL = directory.appendingPathComponent("booth.gif")
         let fileExists = FileManager.default.fileExists(atPath: gifURL.path)
-        guard let job = jobQueue.jobs.first(where: {
-            $0.sessionID == manifest.id && $0.kind == .renderGIF
+        guard let plan = FinalizationPlan.make(from: manifest),
+              plan.jobKinds.contains(.renderGIF),
+              let job = jobQueue.jobs.first(where: {
+            $0.sessionID == manifest.id
+                && $0.finalizationTransactionID == plan.transactionID
+                && $0.kind == .renderGIF
         }) else {
             return manifest.gifFileName != nil && fileExists ? .ready : .preparing
         }
@@ -2258,37 +5045,62 @@ final class BoothCoordinator {
         let cutoff = Calendar.current.date(byAdding: .day, value: -keepDays, to: Date())!
         for result in await manifestStore.loadAll() {
             guard case .loaded(let manifest) = result else { continue }
+            // The soak cleanup path owns diagnostic retention and cloud retry.
+            // General age-based pruning must never discard a retained test run.
+            guard manifest.origin != .soakTest else { continue }
             if manifest.status == .completed,
                let completedAt = manifest.completedAt,
                completedAt < cutoff {
                 do {
+                    let flowQuiesced = await sessionFlowOperations.cancelAndQuiesce(
+                        sessionID: manifest.id,
+                        timeout: .seconds(10)
+                    )
+                    let jobQuiescence = try await jobQueue.cancelAndQuiesceJobs(sessionID: manifest.id)
+                    guard flowQuiesced, jobQuiescence == .quiesced else {
+                        recoveryService.markCleanupPending(sessionID: manifest.id)
+                        continue
+                    }
                     try workspace.removeEntireSession(manifest: manifest)
                 } catch {
                     recoveryService.recordError("Old session files could not be removed: \(error.localizedDescription)")
+                    continue
                 }
                 do {
                     try await manifestStore.delete(sessionID: manifest.id)
+                    try await jobQueue.deleteJobsAndForgetCancellationBarrier(sessionID: manifest.id)
                 } catch {
                     recoveryService.recordError("Old session manifest could not be removed: \(error.localizedDescription)")
+                    continue
                 }
-                jobQueue.deleteJobs(sessionID: manifest.id)
                 await server.unregisterToken(manifest.downloadToken)
                 if let session = store.fetchSession(id: manifest.id) { store.deleteSession(session) }
             } else if manifest.status == .cancelled,
                       let cancelledAt = manifest.cancelledAt,
                       cancelledAt < Calendar.current.date(byAdding: .day, value: -7, to: Date())! {
                 do {
+                    let result = try await jobQueue.cancelAndQuiesceJobs(sessionID: manifest.id)
+                    guard result == .quiesced else {
+                        recoveryService.markCleanupPending(sessionID: manifest.id)
+                        continue
+                    }
+                    try workspace.removeEntireSession(manifest: manifest)
                     try await manifestStore.delete(sessionID: manifest.id)
+                    try await jobQueue.deleteJobsAndForgetCancellationBarrier(sessionID: manifest.id)
                 } catch {
-                    recoveryService.recordError("Cancelled session manifest could not be removed: \(error.localizedDescription)")
+                    recoveryService.markCleanupPending(sessionID: manifest.id)
+                    recoveryService.recordError("Cancelled session cleanup could not finish: \(error.localizedDescription)")
                 }
-                jobQueue.deleteJobs(sessionID: manifest.id)
             }
         }
         jobQueue.purgeOldSucceededJobs(olderThan: Calendar.current.date(byAdding: .day, value: -7, to: Date())!)
 
         // Keep the pre-1.1 cleanup path for sessions that predate runtime manifests.
         for session in store.fetchSessions(finishedBefore: cutoff) {
+            // Skip sessions managed by the manifest system (Finding 14).
+            if let _ = try? await manifestStore.load(sessionID: session.id) {
+                continue
+            }
             if let stripPath = session.stripPath {
                 let strip = picturesOutputDir()?.appendingPathComponent(stripPath)
                 if let strip {
@@ -2309,21 +5121,12 @@ final class BoothCoordinator {
         guard let sessionID = lastCompletedSessionID else { return }
         Task { @MainActor [weak self] in
             guard let self else { return }
+            printer.refreshPrinters()
             let manifest: SessionManifest
             do {
                 manifest = try await manifestStore.load(sessionID: sessionID)
             } catch {
                 errorMessage = "Print could not load the completed session: \(error.localizedDescription)"
-                return
-            }
-            let skipDialog = UserDefaults.standard.bool(forKey: "selphySkipPrintDialog")
-            if skipDialog {
-                if let existing = jobQueue.jobs.first(where: { $0.sessionID == sessionID && $0.kind == .autoPrint }),
-                   existing.status == .failed || existing.status == .cancelled {
-                    jobQueue.retry(jobID: existing.id)
-                } else {
-                    jobQueue.enqueueAutoPrint(for: manifest)
-                }
                 return
             }
             let url = URL(fileURLWithPath: manifest.absoluteDirectoryPath).appendingPathComponent(manifest.stripFileName ?? "strip.png")
@@ -2339,6 +5142,7 @@ final class BoothCoordinator {
         guard let sessionID = lastCompletedSessionID else { return }
         Task { @MainActor [weak self] in
             guard let self else { return }
+            printer.refreshPrinters()
             let manifest: SessionManifest
             do {
                 manifest = try await manifestStore.load(sessionID: sessionID)
@@ -2351,7 +5155,7 @@ final class BoothCoordinator {
             do {
                 try await printer.printStrip(
                     at: url,
-                    showPrintDialog: !UserDefaults.standard.bool(forKey: "selphySkipPrintDialog")
+                    showPrintDialog: true
                 )
             } catch {
                 errorMessage = "Print failed: \(error.localizedDescription)"
@@ -2365,21 +5169,84 @@ final class BoothCoordinator {
         multipeer.onControlMessage = { [weak self] msg in
             self?.handleMessage(msg)
         }
+        multipeer.onTransportReady = { [weak self] peer in
+            guard peer.role == .iPad else { return }
+            self?.handleTransportReady()
+        }
+        multipeer.onAssetChunk = { [weak self] chunk in
+            self?.handleAssetChunk(chunk)
+        }
+        multipeer.onTransportEvent = { [weak self] event in
+            self?.recordTransportEvent(event)
+        }
+    }
+
+    private func recordTransportEvent(_ event: BoothTransportDiagnosticEvent) {
+        guard let kind = OperationsEventKind(rawValue: event.kind.rawValue) else { return }
+        recordOperation(
+            kind,
+            duration: event.duration,
+            reason: event.reason,
+            channel: event.channel,
+            route: event.route,
+            attempt: event.attempt,
+            byteCount: event.byteCount,
+            targetPeerID: event.targetPeerID,
+            routeGeneration: event.routeGeneration,
+            networkPreference: event.networkPreference,
+            candidateSource: event.candidateSource
+        )
+    }
+
+    private func handleTransportReady() {
+        if let event = activeEvent {
+            multipeer.sendControl(.eventConfig(config: event.toEventConfig()))
+        }
+        sendExperienceCatalog()
+        resynciPad()
     }
 
     private func handleMessage(_ msg: Message) {
         switch msg {
-        case .hello(let role) where role == .iPad:
-            if let event = activeEvent {
-                multipeer.sendControl(.eventConfig(config: event.toEventConfig()))
+        case .customerSessionStartRequest(let request):
+            if let active = activeSessionStart {
+                if active.requestID == request.requestID {
+                    sendSessionStartResult(requestID: request.requestID, result: .inProgress)
+                } else {
+                    sendSessionStartResult(
+                        requestID: request.requestID,
+                        result: .rejected(reason: LocalizedText(
+                            english: "A session is already starting.",
+                            thai: "มีการเริ่มเซสชันอยู่แล้ว"
+                        ).value(for: request.selection?.language ?? .english))
+                    )
+                }
+                break
             }
-            sendExperienceCatalog()
-            resynciPad()
-        case .sessionStart(let context):
-            guard context == nil else { break }
-            if stateMachine.phase == .idle, activeEvent != nil {
-                startSession()
+            if request.requestID == lastSessionStartRequestID,
+               let sessionID = lastSessionStartSessionID {
+                sendSessionStartResult(
+                    requestID: request.requestID,
+                    result: .accepted(sessionID: sessionID)
+                )
+                resynciPad()
+                break
             }
+            guard currentSession == nil, finishedAwaitingCustomerAckSessionID == nil else {
+                sendSessionStartResult(
+                    requestID: request.requestID,
+                    result: .rejected(reason: LocalizedText(
+                        english: "A session is already in progress.",
+                        thai: "มีเซสชันกำลังดำเนินการอยู่แล้ว"
+                    ).value(for: request.selection?.language ?? .english))
+                )
+                break
+            }
+            startSession(selection: request.selection, requestID: request.requestID)
+        case .sessionStart:
+            break
+        case .assetRequest(let references):
+            handleAssetRequest(references)
         case .customerSessionRequest(let selection):
             guard stateMachine.phase == .idle || stateMachine.phase == .selectingExperience || stateMachine.phase == .readyToStart else {
                 multipeer.sendControl(.sessionRequestRejected(reason: LocalizedText(
@@ -2389,13 +5256,117 @@ final class BoothCoordinator {
                 return
             }
             startSession(selection: selection)
-        case .reviewDecision(let context, let action):
-            if acceptsClientSessionMessage(context), case .review(let idx) = stateMachine.phase {
-                handleReviewDecision(photoIndex: idx, action: action)
-            }
-        case .captureRecoveryAction(let context, let action):
-            if acceptsClientSessionMessage(context) { handleCaptureRecoveryAction(action) }
+        case .reviewDecision(let state, let requestID, let action):
+            handleClientReviewDecision(state: state, requestID: requestID, action: action)
+        case .captureRecoveryAction(let state, let requestID, let action):
+            handleCaptureRecoveryAction(state: state, requestID: requestID, action: action)
+        case .customerFinished(let context):
+            handleCustomerFinished(context)
         default: break
+        }
+    }
+
+    private func handleAssetChunk(_ chunk: BoothAssetChunk) {
+        // The transport authenticates the peer; the session binding below keeps a
+        // delayed asset from a prior session out of the current display.
+        guard chunk.metadata.sessionID == nil
+                || chunk.metadata.sessionID == currentSession?.id
+                || chunk.metadata.sessionID == stateMachine.currentSessionID else { return }
+        do {
+            _ = try assetAssembler.append(chunk)
+        } catch {
+            errorMessage = "Received asset data was rejected."
+        }
+    }
+
+    private func handleAssetRequest(_ references: [BoothAssetReference]) {
+        guard !references.isEmpty, references.count <= 16 else {
+            errorMessage = "Asset recovery request was rejected."
+            return
+        }
+        var seen = Set<BoothAssetReference>()
+        for reference in references where seen.insert(reference).inserted {
+            let isKnownSession = reference.sessionID == nil
+                || reference.sessionID == currentSession?.id
+                || reference.sessionID == stateMachine.currentSessionID
+                || reference.sessionID == lastCompletedSessionID
+            guard isKnownSession else {
+                multipeer.sendControl(.assetUnavailable(
+                    reference: reference,
+                    reason: "The requested asset is no longer available."
+                ))
+                continue
+            }
+            guard let data = assetSources[reference],
+                  data.count == reference.byteCount,
+                  Data(SHA256.hash(data: data)) == reference.sha256 else {
+                multipeer.sendControl(.assetUnavailable(
+                    reference: reference,
+                    reason: "The requested asset is no longer available."
+                ))
+                continue
+            }
+            // A valid source can still be temporarily unable to queue on the
+            // asset channel. Keep it retryable; only missing/invalid sources
+            // are permanently unavailable.
+            _ = sendAsset(data: data, reference: reference)
+        }
+    }
+
+    private func handleCustomerFinished(_ context: SessionMessageContext) {
+        guard activeSoakRunID == nil,
+              let sessionID = finishedAwaitingCustomerAckSessionID,
+              context.sessionID == sessionID,
+              context.sequence <= sessionMessageSequence,
+              acceptsClientSessionMessage(context),
+              case .finished = stateMachine.phase,
+              customerFinishedInFlightSessionID == nil else { return }
+        customerFinishedInFlightSessionID = sessionID
+        sessionMessageSequence &+= 1
+        let idle = SessionSyncSnapshot(
+            config: stateMachine.config,
+            sessionID: nil,
+            phase: .idle,
+            presentation: nil,
+            isMirrored: capture.camera.isMirrored,
+            sequence: sessionMessageSequence,
+            authorityEpoch: authorityEpoch
+        )
+        multipeer.sendControl(.sessionSync(snapshot: idle)) { [weak self] outcome in
+            guard let self else { return }
+            guard self.customerFinishedInFlightSessionID == sessionID else { return }
+            guard outcome == .sent,
+                  self.finishedAwaitingCustomerAckSessionID == sessionID else {
+                self.customerFinishedInFlightSessionID = nil
+                self.errorMessage = "The next session acknowledgement could not be delivered."
+                return
+            }
+            self.customerFinishedInFlightSessionID = nil
+            self.finishedAwaitingCustomerAckSessionID = nil
+            self.sessionLifecycleGeneration &+= 1
+            self.currentManifest = nil
+            self.currentManifestID = nil
+            self.retakeCounts = [:]
+            self.gifFrames = [:]
+            self.currentCaptureAttempt = nil
+            self.currentCountdown = nil
+            self.currentStripPreview = nil
+            self.currentFilteredReviewImages = [:]
+            self.currentSessionPresentation = nil
+            self.lastSessionPresentation = nil
+            self.sessionAssetReferences = [:]
+            self.stripAssetReference = nil
+            self.assetSources = [:]
+            self.pendingPromptAssets = [:]
+            self.assetAssembler = BoothAssetAssembler()
+            self.capture.resetStills()
+            self.reviewDecisionPending = false
+            self.currentReviewStateToken = nil
+            self.activeReviewRequestID = nil
+            self.recentReviewRequests.removeAll(keepingCapacity: true)
+            self.recentReviewRequestOrder.removeAll(keepingCapacity: true)
+            self.stateMachine.reset()
+            self.attemptPendingLANRecoveryIfIdle()
         }
     }
 
@@ -2403,7 +5374,11 @@ final class BoothCoordinator {
         let sessionID = currentSession?.id ?? (stateMachine.currentSessionID.isEmpty ? nil : stateMachine.currentSessionID)
         guard let sessionID else { return nil }
         sessionMessageSequence &+= 1
-        return SessionMessageContext(sessionID: sessionID, sequence: sessionMessageSequence)
+        return SessionMessageContext(
+            sessionID: sessionID,
+            sequence: sessionMessageSequence,
+            authorityEpoch: authorityEpoch
+        )
     }
 
     private func acceptsClientSessionMessage(_ context: SessionMessageContext) -> Bool {
@@ -2414,7 +5389,7 @@ final class BoothCoordinator {
             #endif
             return false
         }
-        return true
+        return context.authorityEpoch == authorityEpoch
     }
 
     // Push current Mac state to iPad after (re)connect so it's never stuck at idle mid-session.
@@ -2425,30 +5400,51 @@ final class BoothCoordinator {
         case .readyToStart: currentSession?.id
         default: currentSession?.id ?? lastCompletedSessionID
         }
-        let reviewThumbnail: Data? = {
-            guard case .review(let index) = phase else { return nil }
-            return stateMachine.keptShots[index]
-        }()
-        let stripThumbnail: Data? = {
-            guard case .finished = phase else { return nil }
-            return currentStripPreview.flatMap { jpegData(from: $0, quality: 0.4) }
-        }()
-        let sequence = sessionID == nil ? 0 : (nextSessionMessageContext()?.sequence ?? 0)
+        let context = sessionID == nil ? nil : nextSessionMessageContext()
+        let sequence: UInt64
+        if let context {
+            sequence = context.sequence
+        } else {
+            sessionMessageSequence &+= 1
+            sequence = sessionMessageSequence
+        }
+        if case .review(let index) = phase, let context {
+            currentReviewStateToken = ReviewStateToken(
+                sessionID: context.sessionID,
+                photoIndex: index,
+                revision: context.sequence,
+                authorityEpoch: context.authorityEpoch
+            )
+        } else if case .captureRecovery = phase {
+            // Keep the original recovery occurrence across reconnects. A new
+            // sync sequence must not make an old action valid again.
+        } else {
+            currentReviewStateToken = nil
+            currentCaptureRecoveryStateToken = nil
+        }
         multipeer.sendControl(.sessionSync(snapshot: SessionSyncSnapshot(
             config: stateMachine.config,
             sessionID: sessionID,
             phase: phase,
             presentation: currentSessionPresentation ?? lastSessionPresentation,
-            reviewThumbnailData: reviewThumbnail,
-            stripThumbnailData: stripThumbnail,
             isMirrored: capture.camera.isMirrored,
             isBoothPaused: isBoothPaused,
             sequence: sequence,
             countdown: currentCountdown,
-            keptShots: stateMachine.keptShots,
+            reviewAsset: {
+                guard case .review(let index) = phase else { return nil }
+                return sessionAssetReferences[index]
+            }(),
+            stripAsset: {
+                guard case .finished = phase else { return nil }
+                return stripAssetReference
+            }(),
+            keptShotAssets: sessionAssetReferences,
             acceptedPhotoIndices: stateMachine.acceptedPhotoIndices.sorted(),
             deferredPhotoIndices: stateMachine.deferredPhotoIndices.sorted(),
-            nextPhotoIndex: stateMachine.nextPhotoIndex
+            nextPhotoIndex: stateMachine.nextPhotoIndex,
+            captureRecoveryState: currentCaptureRecoveryStateToken,
+            authorityEpoch: authorityEpoch
         )))
         multipeer.sendControl(.setMirrored(isMirrored: capture.camera.isMirrored))
     }
@@ -2514,7 +5510,8 @@ final class BoothCoordinator {
     func healthSnapshot() async -> BoothHealthSnapshot {
         let serverStatus = await server.statusSnapshot()
         let queue = jobQueue.jobs
-        let connectedPeer: String? = connectionStatus.peerDisplayName
+        let displayReady = isCustomerDisplayReady
+        let connectedPeer: String? = displayReady ? connectionStatus.peerDisplayName : nil
         let serverHealth: BoothHealthStatus = switch serverStatus.state {
         case .ready: .healthy
         case .starting: .unknown
@@ -2526,16 +5523,20 @@ final class BoothCoordinator {
         }.map(Int64.init)
         let camera = cameraHealthSnapshot
         let hasRequiredFailure = queue.contains { !$0.kind.isOptional && $0.status == .failed }
-        let overall: BoothHealthStatus = camera.connected && serverHealth == .healthy && !hasRequiredFailure
+        let connectionHealthy = displayReady
+        let overall: BoothHealthStatus = camera.connected
+            && serverHealth == .healthy
+            && connectionHealthy
+            && !hasRequiredFailure
             ? .healthy
-            : camera.connected || serverHealth == .healthy ? .degraded : .unavailable
+            : camera.connected || serverHealth == .healthy || connectionHealthy ? .degraded : .unavailable
         let deliverySessionID = currentSession?.id ?? lastCompletedSessionID
         let deliveryJobs = deliverySessionID.map { sessionID in queue.filter { $0.sessionID == sessionID } } ?? []
         return BoothHealthSnapshot(
             updatedAt: Date(),
             status: overall,
             camera: camera,
-            customerDisplayConnected: connectedPeer != nil || isExternalViewerActive,
+            customerDisplayConnected: displayReady,
             customerDisplayPeer: connectedPeer,
             controlConnection: connectionLabel(connectionStatus.state),
             previewConnection: effectiveNetworkLabel,
@@ -2554,20 +5555,23 @@ final class BoothCoordinator {
             currentSessionID: currentSession?.id,
             currentPhase: stateMachine.phase.displayName,
             isBoothPaused: isBoothPaused,
-            delivery: deliveryJobs.isEmpty ? nil : SessionDeliveryResolver.resolve(deliveryJobs)
+            delivery: deliveryJobs.isEmpty ? nil : SessionDeliveryResolver.resolve(
+                deliveryJobs,
+                transactionID: currentManifest?.finalizationTransactionID
+            )
         )
     }
 
     private var printerLabel: String {
         switch printer.configuredPrinterStatus() {
-        case .systemDefault: return "System Default"
-        case .available(let name), .unavailable(let name): return name
+        case .systemDefault: return NSPrintInfo.shared.printer.name
+        case .unavailable(let name): return name
         }
     }
 
     private var printerStatusLabel: String {
         switch printer.configuredPrinterStatus() {
-        case .systemDefault, .available: return "available"
+        case .systemDefault: return "available"
         case .unavailable: return "unavailable"
         }
     }
@@ -2594,9 +5598,33 @@ final class BoothCoordinator {
         sessionID: String? = nil,
         photoIndex: Int? = nil,
         duration: Double? = nil,
-        reason: String? = nil
+        reason: String? = nil,
+        channel: String? = nil,
+        route: String? = nil,
+        attempt: Int? = nil,
+        byteCount: Int? = nil,
+        targetPeerID: String? = nil,
+        routeGeneration: Int? = nil,
+        networkPreference: BoothNetworkPreference? = nil,
+        candidateSource: String? = nil
     ) {
-        Task { await operationsEvents.record(kind, sessionID: sessionID, photoIndex: photoIndex, duration: duration, reason: reason) }
+        Task {
+            await operationsEvents.record(
+                kind,
+                sessionID: sessionID,
+                photoIndex: photoIndex,
+                duration: duration,
+                reason: reason,
+                channel: channel,
+                route: route,
+                attempt: attempt,
+                byteCount: byteCount,
+                targetPeerID: targetPeerID,
+                routeGeneration: routeGeneration,
+                networkPreference: networkPreference,
+                candidateSource: candidateSource
+            )
+        }
     }
 
     func setEventFolder(_ url: URL) {
@@ -2641,6 +5669,8 @@ final class BoothCoordinator {
             return nil
         }
     }
+
+    var productionSoakOutputDirectory: URL? { picturesOutputDir() }
 
     private func safeFolderName(_ s: String) -> String {
         SessionWorkspace.safeEventFolderName(s)

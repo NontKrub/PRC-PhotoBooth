@@ -1,6 +1,8 @@
-# PRC PhotoBooth
+# PRC PhotoBooth v1.4.2
 
 PRC PhotoBooth is a SwiftUI photo-booth system for macOS and iPad. The Mac app runs the booth, controls the camera, stores sessions, renders the finished outputs, and serves guest downloads. The iPad app provides the customer-facing kiosk flow for starting a session, reviewing photos, and retrieving the result.
+
+Version 1.4.2 keeps iPadOS 16 as the minimum and adds stability fixes, trusted Mac↔iPad pairing, selected-peer reconnect, clearer Ethernet/Wi-Fi diagnostics, and native macOS printing.
 
 ## Features
 
@@ -8,9 +10,11 @@ PRC PhotoBooth is a SwiftUI photo-booth system for macOS and iPad. The Mac app r
 - Camera support through AVFoundation for built-in, USB, and Continuity Cameras.
 - USB-tethered DSLR/mirrorless capture through ImageCaptureCore, including live preview for supported Sony PTP cameras.
 - Customer workflow with countdowns, photo review, keep/retake decisions, and operator overrides.
-- Network.framework Mac↔iPad control and preview transport with Bonjour discovery, framing, heartbeat, reconnect, and state resynchronization. MultipeerConnectivity remains a debug fallback.
+- Network.framework Mac↔iPad control and preview transport with Bonjour discovery, framing, heartbeat, reconnect, and state resynchronization. `NetworkBoothTransport` is the app-selected production transport.
+- Persistent Mac/iPad identities, editable device names, one-time six-digit PIN or QR pairing, Keychain-backed trusted reconnect, and explicit preferred-peer selection. Discovery never silently selects an unknown device.
+- Ethernet-first routing with conservative idle recovery, explicit manual LAN retry, and Wi-Fi fallback shown as a warning when the preferred wired route is unavailable.
 - Recoverable capture failures with Try Receive Again, Retake, Continue Session, and Keep Previous Photo actions.
-- Composited PNG strips, looping animated GIFs, QR-code download links, and optional printing to a connected Selphy printer.
+- Composited PNG strips, looping animated GIFs, QR-code download links, and optional printing through the native macOS System Print Panel or a non-modal automatic system-printer job.
 - Local guest download server on port `8585`.
 - Booth preflight checks, a non-PIN-gated Operations tab, and persistent processing/upload/print jobs.
 - Restart-safe capture recovery and persistent QR registration using absolute session folders.
@@ -35,16 +39,21 @@ Version 1.2 has no audio countdown. Countdown and pose prompts are visual only.
            └── Shared models, session state machine, and message protocol
 ```
 
-Control messages are JSON-encoded and sent reliably over a framed Network.framework control connection. Preview JPEGs use a separate latest-frame-wins connection within the same `NetworkBoothTransport`, so preview traffic cannot delay session controls. The operator chooses Wi-Fi or LAN; LAN requires Network.framework's `.wiredEthernet` interface and falls back to Wi-Fi after a failed path or validated handshake. Bonjour advertises `_prc-control._tcp` and `_prc-preview._tcp`. A DEBUG-only `--legacy-multipeer` flag keeps the old adapter available while hardware migration is validated.
+Control messages are JSON-encoded and sent reliably over a framed Network.framework control connection. Preview JPEGs use a separate latest-frame-wins connection within the same `NetworkBoothTransport`, so preview traffic cannot delay session controls. Pairing runs over that existing control channel: the operator starts a two-minute Mac pairing session, then pairs an explicitly selected iPad with a six-digit PIN or QR payload. Reconnect uses mutual nonce/HMAC authentication with the long-lived secret kept in each device's Keychain. Bonjour advertises `_prc-control._tcp` and `_prc-preview._tcp` with public identity metadata only; it never advertises PINs, QR tokens, or secrets.
 
 ## Requirements
 
 - macOS 15 or later
-- iPadOS 18 or later
+- iPadOS 16 or later
 - Xcode 27 and Swift 6
 - [XcodeGen](https://github.com/yonaskolb/XcodeGen) when regenerating the project from `project.yml`
 - A camera supported by AVFoundation or a compatible USB-tethered camera for DSLR mode
 - Local-network access between the Mac and iPad for discovery and control
+
+Xcode 27 uses Device Hub for simulated and physical iPad devices. For command-line
+builds and tests, simulated destinations continue to use `platform=iOS Simulator`.
+Wi-Fi preference accepts the working local TCP path, including a Personal Hotspot;
+it does not require the path monitor to classify that path as `InterfaceType.wifi`.
 
 The Mac target is configured as a universal application for Apple Silicon and Intel Macs. Camera, microphone, and local-network permissions must be granted at first launch. LAN mode requires a reachable wired Ethernet path on both devices; otherwise the transport reports and uses Wi-Fi fallback.
 
@@ -63,6 +72,21 @@ open PRC-PhotoBooth.xcodeproj
 
 Configure an Apple development team and signing settings in Xcode if automatic signing is not already available on the machine.
 
+### v1.4.2 pairing and connection setup
+
+1. Launch both apps on the same local network. Discovery may list nearby devices, but neither app silently adopts an unknown peer.
+2. On the Mac, open `Settings → iPad & Network → Pair New iPad`. The Mac displays a two-minute six-digit PIN and QR code.
+3. On the iPad, open the upper-left gear, choose the Mac, then use `Pair` with the PIN or `Scan Pairing QR`. If camera access is unavailable, enter the PIN instead.
+4. After pairing, both devices remember the peer metadata and shared Keychain secret. The selected peer becomes preferred; automatic reconnect, when enabled, targets only that trusted peer.
+5. To switch devices, do it explicitly from the relevant connection settings while the booth is idle. Forgetting a device disconnects it, removes its trust secret and metadata, and prevents automatic reconnect.
+6. Set the requested route to Ethernet when wired adapters are present. A failed wired route falls back to Wi-Fi; use `Retry LAN Now` for an explicit direct LAN attempt while idle.
+
+The Mac Operations screen reports selected and connected peers, authentication, control/preview readiness, requested and effective routes, fallback state, and the last network error. Run `Test Connection` for per-step diagnostics. Pairing/authentication and an authenticated preview are required for event readiness.
+
+### Printing
+
+`Print Test Page` and manual session printing use the native macOS Print Panel, where the operator chooses the printer, paper, orientation, copies, and scaling. Automatic booth printing can submit directly to the system printer without opening a modal panel. Cancelling a manual test is recorded as cancelled/skipped, not as a printer failure; real printer errors still fail.
+
 ### Build the Mac app
 
 ```bash
@@ -75,7 +99,8 @@ xcodebuild \
 
 ### Build the iPad app
 
-Replace `<simulator-uuid>` with an available iPad simulator identifier, or use a connected iPad destination.
+Replace `<simulator-uuid>` with an available iPad simulator identifier. Physical iPad
+build/install/inspection is performed through Xcode 27 Device Hub.
 
 ```bash
 xcodebuild \
@@ -104,8 +129,8 @@ xcodebuild \
 1. Launch the Mac app and grant camera, microphone, and local-network permissions.
 2. In Event Setup, create an event, choose the number of photos and countdown, import an optional frame PNG, and set the photo slots.
 3. Mark the event as active and select the camera source in the operator console.
-4. Launch the iPad app on the same local network. The apps discover each other automatically through Network.framework Bonjour.
-5. Choose Wi-Fi or LAN in the Mac operator settings. LAN prefers wired Ethernet and automatically falls back to Wi-Fi if the wired route or validated iPad handshake is unavailable.
+4. Launch the iPad app on the same local network. Nearby devices are listed through Network.framework Bonjour, but an unknown Mac is not selected automatically.
+5. Pair the intended iPad from `Settings → iPad & Network`; the Mac accepts only that selected trusted iPad as its active booth peer. Choose Wi-Fi or LAN in the Mac operator settings. LAN prefers wired Ethernet and automatically falls back to Wi-Fi if the wired route or validated iPad handshake is unavailable.
 6. Start a session from the iPad or operator console. After each capture, keep the photo or retake it.
 7. Open Operations before an event and run Safe Checks. Run Full Preflight when a diagnostic camera capture or printer test is appropriate.
 8. When the session finishes, queued required jobs make the strip and QR available first; GIF, cloud upload, and automatic printing continue independently.
@@ -212,6 +237,7 @@ run.sh     local build-and-launch helper for Mac plus an iPad simulator
 ## Security notes
 
 - The admin PIN is stored in the macOS Keychain. Set a deployment-specific PIN before using the booth in production.
+- Device installation IDs and editable display names are local metadata, not secrets. Pairing secrets are stored only in each app's Keychain and are used for mutual challenge-response authentication; they are not written to UserDefaults, QR payloads, diagnostics, or logs.
 - The local download server is intended for guest access on a trusted network. Treat the QR token and the server port as access credentials, and do not expose port `8585` directly to the public internet without an appropriate proxy and access controls.
 - Cloud backup/publishing is optional and depends on the operator's own SSH, `rsync`, and Cloudflare tooling configuration. No server credentials belong in this repository.
 - Do not commit signing teams, simulator identifiers, DerivedData paths, private keys, or other machine-specific secrets.

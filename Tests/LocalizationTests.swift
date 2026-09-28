@@ -1,7 +1,26 @@
 import Foundation
 import Testing
+@testable import PRC_PhotoBooth_Mac
 
 struct LocalizationTests {
+    @Test("macOS Settings has eight stable localized section routes")
+    func settingsSectionRoutes() throws {
+        let expectedIDs = ["general", "camera", "network", "display", "printing", "cloud", "security", "eventReadiness"]
+        #expect(SettingsSection.allCases.map(\.id) == expectedIDs)
+        #expect(SettingsSection.allCases.count == 8)
+
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let url = root.appendingPathComponent("Mac/Localizable.xcstrings")
+        let object = try JSONSerialization.jsonObject(with: Data(contentsOf: url))
+        let document = try #require(object as? [String: Any])
+        let strings = try #require(document["strings"] as? [String: Any])
+        for key in ["General", "Camera", "iPad & Network", "Display", "Printing", "Cloud", "Security", "Event Readiness"] {
+            #expect(strings[key] != nil, "Missing macOS Settings localization key: \(key)")
+        }
+    }
+
     @Test("Thai translations are present for every app catalog entry")
     func thaiTranslationsArePresent() throws {
         let root = URL(fileURLWithPath: #filePath)

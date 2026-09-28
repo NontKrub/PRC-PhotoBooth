@@ -5,7 +5,7 @@ options:
   createIntermediateGroups: true
   deploymentTarget:
     macOS: "15.0"
-    iOS: "18.0"
+    iOS: "16.0"
   swift: "6.0"
   xcodeVersion: "27"
   generateEmptyDirectories: true
@@ -36,14 +36,15 @@ targets:
       path: Mac/Info.plist
       properties:
         CFBundleDisplayName: PRC PhotoBooth
-        CFBundleShortVersionString: "1.3"
-        CFBundleVersion: "3"
+        CFBundleShortVersionString: "1.4.3"
+        CFBundleVersion: "9"
         NSCameraUsageDescription: PRC PhotoBooth needs camera access to capture photos for the booth.
         NSMicrophoneUsageDescription: PRC PhotoBooth uses the microphone as part of the camera session.
         NSLocalNetworkUsageDescription: PRC PhotoBooth connects to the iPad over local network to stream the camera preview and sync session state.
         NSBonjourServices:
           - _prc-control._tcp
           - _prc-preview._tcp
+          - _prc-asset._tcp
           - _prc-photobooth._tcp
           - _prc-photobooth._udp
     entitlements:
@@ -57,6 +58,8 @@ targets:
         com.apple.security.files.user-selected.read-write: true
         com.apple.security.files.downloads.read-write: true
         com.apple.security.print: true
+        keychain-access-groups:
+          - "$(AppIdentifierPrefix)$(PRODUCT_BUNDLE_IDENTIFIER)"
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.nont.prcphoto.mac
@@ -96,7 +99,7 @@ targets:
   PRC-PhotoBooth-iPad:
     type: application
     platform: iOS
-    deploymentTarget: "18.0"
+    deploymentTarget: "16.0"
     sources:
       - path: Shared
         excludes:
@@ -113,12 +116,14 @@ targets:
       path: iPad/Info.plist
       properties:
         CFBundleDisplayName: PRC PhotoBooth
-        CFBundleShortVersionString: "1.3"
-        CFBundleVersion: "3"
+        CFBundleShortVersionString: "1.4.3"
+        CFBundleVersion: "9"
         NSLocalNetworkUsageDescription: PRC PhotoBooth connects to the operator Mac over local network for camera preview and session control.
+        NSCameraUsageDescription: PRC PhotoBooth uses the iPad camera to scan Mac pairing QR codes.
         NSBonjourServices:
           - _prc-control._tcp
           - _prc-preview._tcp
+          - _prc-asset._tcp
           - _prc-photobooth._tcp
           - _prc-photobooth._udp
         UIRequiresFullScreen: true
@@ -131,7 +136,7 @@ targets:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.nont.prcphoto.ipad
         SWIFT_VERSION: 6.0
-        IPHONEOS_DEPLOYMENT_TARGET: "18.0"
+        IPHONEOS_DEPLOYMENT_TARGET: "16.0"
         TARGETED_DEVICE_FAMILY: "2"
         CODE_SIGN_STYLE: Automatic
         DEVELOPMENT_TEAM: ""
@@ -148,6 +153,7 @@ targets:
     dependencies:
       - sdk: MultipeerConnectivity.framework
       - sdk: Network.framework
+      - sdk: AVFoundation.framework
       - sdk: CoreImage.framework
       - sdk: CoreGraphics.framework
       - sdk: ImageIO.framework
@@ -173,6 +179,25 @@ targets:
       - target: PRC-PhotoBooth-Mac
       - sdk: Vision.framework
 
+  # ───────────────────────────────────────────────
+  # Unit Tests (iPad host)
+  # ───────────────────────────────────────────────
+  PRC-PhotoBooth-iPadTests:
+    type: bundle.unit-test
+    platform: iOS
+    deploymentTarget: "16.0"
+    sources:
+      - iPadTests
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.nont.prcphoto.ipad.tests
+        SWIFT_VERSION: 6.0
+        IPHONEOS_DEPLOYMENT_TARGET: "16.0"
+        TARGETED_DEVICE_FAMILY: "2"
+        GENERATE_INFOPLIST_FILE: YES
+    dependencies:
+      - target: PRC-PhotoBooth-iPad
+
 schemes:
   PRC-PhotoBooth-Mac:
     build:
@@ -197,3 +222,13 @@ schemes:
       config: Debug
       targets:
         - PRC-PhotoBoothTests
+
+  PRC-PhotoBooth-iPadTests:
+    build:
+      targets:
+        PRC-PhotoBooth-iPad: all
+        PRC-PhotoBooth-iPadTests: [test]
+    test:
+      config: Debug
+      targets:
+        - PRC-PhotoBooth-iPadTests

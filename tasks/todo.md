@@ -1,4 +1,164 @@
-# PRC PhotoBooth v1.3 TODO
+# Current release: v1.4.2 — Stability, Printing, Connectivity & Pairing
+
+## Final pairing and asset-recovery implementation — 2026-09-14
+
+- [x] Record baseline branch, SHA, protected dirty files, toolchain, and automated tests.
+- [x] Split idempotent pairing discovery from destructive retry/selection restart.
+- [x] Keep local route preference authoritative; retain remote TXT/hello value as metadata only.
+- [x] Preserve Direct Ethernet static endpoint and iPadOS 16 compatibility browser; gate path-hint relaxation by provenance/authentication.
+- [x] Correct role-aware pairing diagnostics.
+- [x] Add bounded silent-Asset deadline and Asset-only recycle using existing generation gates.
+- [x] Gate Review Keep/Retake on authoritative media and expose recovery independently of socket readiness.
+- [x] Add deterministic pairing, route, asset, and review regression coverage.
+- [x] Run affected/full automation and build matrix; report physical/tooling gates as unrun.
+- [x] Initial architecture/security review completed; the Critical asset-deadline finding was fixed and automated gates rerun. Release verdict remains `NOT READY` without mandatory physical/tooling evidence.
+
+## Final review follow-up — 2026-09-14
+
+- [x] Ignore stale critical-send completions without mutating the current pairing attempt.
+- [x] Isolate concurrent constrained and compatibility Bonjour results by route provenance.
+- [x] Enforce Ethernet-path provenance for the compatibility `.lan` discovery path.
+- [x] Route failed asset-request sends through the existing bounded retry and Asset-only recovery policy.
+- [x] Re-run full automated/build gates: Mac `404/404`, iPad simulator `20/20`, Mac/iPad builds, and `git diff --check`; push only product source, tests, and readiness notes while preserving local Xcode state and sync-conflict artifacts.
+- [ ] Release verdict remains `NOT READY` until integrated, physical, and tooling gates pass.
+
+## Final event-readiness continuation — 2026-09-14
+
+- [x] Record branch `fix/v1.4.2-stability-pairing`, starting SHA `42612c82c432899ef723d2bb400e53e2f28dd6b3`, dirty Xcode user-state and sync-conflict files, Xcode 27.0, Swift 6.4, macOS 27.0, macOS 15/iPadOS 16 targets, version `1.4.2 (6)`.
+- [x] Record baseline Mac test command exit `0`; existing ledger baseline is Mac `392/392` in `56/56` suites.
+- [x] Record fresh pre-edit Mac Debug, Mac Release, iPad Debug, iPad Release on simulator `9FB3C107-DCA8-4D98-B9DA-A594BB232A5B`, and unsigned generic iPadOS Release builds; all exited `0` with isolated DerivedData.
+- [x] Implement and test Ethernet path authority, split foreground recovery, low-level recovery timing, bounded asset retry, request-driven prompt delivery, and Release Remote Operator policy.
+- [x] Polish only affected connection/preflight/degraded-state UI after functional slices pass.
+- [x] Run the final automated matrix: Mac `395/395`, iPad `9/9`, Mac/iPad Debug and Release builds, and unsigned generic iPadOS Release compile.
+- [x] Run the deterministic 10,000-message secure control-writer loopback stress test; receiver ordering and pending queue bounds passed.
+- [ ] Integrated 500-session transport soak, 8-photo relaunch/recovery, 12-second MainActor stall, and network-failure-under-stall test remain open.
+- [ ] Instruments, packet capture, Device Hub, physical network/camera/QR/printer, relaunch, and three-hour soak remain mandatory release gates.
+- [x] Run Mac TSan: `395/395` passed with zero runtime warnings.
+- [x] iPad simulator TSan: `9/9` passed with zero runtime warnings.
+- [ ] Release verdict remains `NOT READY` until mandatory physical/tooling gates pass.
+
+This is the active checklist. Historical v1.3/v1.4 notes remain below and are not release instructions.
+
+## Final stability continuation — 2026-09-14
+
+- [x] Add ordered, bounded, reconnect-safe asset request pumping; invalid/missing sources report unavailable while transient asset backpressure remains retryable.
+- [x] Keep authenticated secure control authoritative over generic Wi-Fi path hints; reject unauthenticated replacement of verified preview/asset channels.
+- [x] Move waiting, reconnect, LAN-recovery, asset-reconnect, preview-write, and iPad asset assembly/hash/decode progression off the MainActor where applicable.
+- [x] Expose secure and asset channel readiness through status, preflight, Operations, diagnostics, and iPad Connection Settings.
+- [x] Add deterministic recovery/admission tests, including 20- and 30-reference asset-pump coverage.
+- [x] Mac automated tests: 392/392 in 56/56 suites; iPad simulator tests: 7/7 in 1/1 suite.
+- [x] Mac app and iPad simulator app builds passed; `git diff --check` passed.
+- [ ] MainActor-stall, TSan, Instruments, packet-capture, Device Hub GUI, physical network/camera/QR/printer, relaunch, and multi-hour soak gates remain unrun.
+- [ ] Release verdict remains NOT READY until the physical and tooling gates are closed.
+
+## Pairing-regression follow-up — 2026-08-31
+
+This dated ledger supersedes earlier v1.4.2 pairing rows below. Reviewed branch: `fix/v1.4.2-stability-pairing`; starting and final uncommitted Git HEAD: `83941dd5c487cab51e6f10e711136ecbd17c8ecf`.
+
+- [x] Move pairing ownership into Mac Settings and separate incoming/pending devices from trusted/preferred devices.
+- [x] Make pairing/auth sends completion-aware; bind callbacks to connection generation, pairing generation, and session ID.
+- [x] Add iPad-authoritative expiry, bounded reconnect recovery, centralized ephemeral cleanup, and provisional trust until mutual HMAC authentication.
+- [x] Preserve protocol 3, secure PIN/QR, Keychain secrets, preferred-peer/wrong-peer policy, preview identity checks, and LAN/Wi-Fi route behavior.
+- [x] Add pairing-stage diagnostics and lifecycle/session-generation tests; final Mac suite 355/355 (54/54 suites).
+- [x] Final iPad test target 4/4 (1/1 suite); Mac Debug/Release, iPad Debug/Release, and generic iOS Release (`arm64-apple-ios16.0`, signing disabled) builds passed.
+- [x] Caveman root-cause and final reviews completed; named Ponytail skill was unavailable, so an equivalent manual simplification/security/scope review was completed.
+- [x] Compare the reported known-good GitHub window: no 30 October commits exist; the matching 30 August 22:51 (+07:00) build is `234519a`. Restore its direct Mac-started PIN path when Bonjour advertises a complete, unexpired session; retain intent pairing as the no-session fallback. Focused BoothPairingTests: 21/21 passed; iPad Debug simulator build passed.
+- [ ] Formal Computer Test/Use GUI matrix: built Mac app launch succeeded; host accessibility/display automation was unavailable. Built iPad app launched in the available iOS 26.5 simulator, but Settings interaction had no touch/accessibility driver.
+- [ ] Physical iPad Wi-Fi PIN/QR pairing, reconnect, timeout, interruption, and preview acceptance.
+- [ ] Physical Ethernet discovery/authentication, Wi-Fi fallback, and restoration acceptance.
+- [ ] Physical printer, camera permission, QR scan, and long-run booth cycle gates.
+
+- [x] Fix printer cancellation outcome and preflight mapping; cancellation is skipped, not passed or failed.
+- [x] Remove misleading Actual Size mode and retain native macOS print-panel controls.
+- [x] Treat unknown disk space as warning/unknown; make Operations refresh task cancellation-aware.
+- [x] Add explicit manual LAN retry, two-second discovery grace, conservative idle recovery, and focused route tests.
+- [x] Persist device identity/name; store trusted metadata in preferences and pairing secrets in Keychain.
+- [x] Add protocol-v3 pairing/auth messages, six-digit PIN, two-minute expiry, attempt limit, QR payload, HMAC reconnect, forget, and selected-peer policy.
+- [x] Add Mac/iPad pairing settings, QR scanner permission/error paths, accessibility identifiers, and localized visible strings.
+- [x] Update CI triggers, Release artifacts, generic device compile, stable runner lane, README, and current release plan.
+- [x] Record reviewed starting/final uncommitted implementation HEAD 83941dd5c487cab51e6f10e711136ecbd17c8ecf; project.yml was regenerated without project-source changes.
+- [x] Run final local Mac and iPad automated matrix; Mac tests 355/355 (54/54 suites) and iPad tests 4/4 (1/1 suite) passed; Mac/iPad Debug and Release builds plus generic iOS Release compile passed.
+- [x] Run focused pairing/protocol/LAN tests: 67/67 passed across 5/5 suites.
+- [x] Make pairing cancellation wait for the control-message send completion before closing.
+- [x] Automatically expire pairing sessions and clean stale transport/UI state after 120 seconds.
+- [x] Guard pairing expiry by session ID so an old expiry cannot terminate a newer session.
+- [x] Prevent duplicate Mac pairing-sheet presentation with one effective sheet owner.
+- [x] Keep pairing QR payload encoding stable across countdown redraws and preserve the active PIN until explicit cancel, success, or expiry.
+- [ ] GitHub Actions PR App Builds: prior run 33352736453 covered the committed baseline; not rerun for this uncommitted pairing-regression fix.
+- [x] Run the equivalent final simplification/security/scope review and rerun affected gates; the named Ponytail skill was unavailable in this environment.
+- [ ] Run the formal Computer Use Mac/iPad GUI matrix; built-app launch checks ran, but host accessibility/display automation and an iPad touch driver were unavailable.
+- [ ] Run physical Ethernet, PIN/QR, printer, camera, and long-run gates.
+- [ ] Mark release-ready only after all non-hardware blockers pass.
+
+## v1.4.2 Pairing UX + GIF Dimension Hardening
+
+- [x] Add untrusted iPad pairing-intent and session-availability messages
+- [x] Auto-start Mac pairing session with request safeguards
+- [x] Root-level Mac incoming pairing popup using MacPairingSheet
+- [x] iPad unified Connect flow and automatic PIN entry
+- [x] Pairing intent validation, trust gate, cooldown, active-session, and connected-peer tests
+- [x] GIF portrait dimensions for every preset
+- [x] GIF landscape and square dimensions
+- [x] GIF no-upscale behavior
+- [x] GIF same-dimension frame regression
+- [x] GIF non-square layer-position regression
+- [ ] Computer Use / physical-device validation
+
+---
+
+## v1.4.2 Large Event Stability & Security Hardening — 2026-09-13
+
+Execution ledger. Preserve earlier historical checklists below.
+
+- [x] Record branch, local SHA, fetched remote divergence, dirty files, toolchain, and baseline build/test evidence.
+- [x] Record XcodeGen source-of-truth and no-branch-switch/no-reset constraints.
+- [x] Add bounded transport transition/send/reconnect diagnostics with secret redaction tests.
+- [x] Isolate Network.framework I/O, parsing, heartbeat, reconnect, and preview coalescing from MainActor; retain the MainActor publication facade.
+- [x] Remove `.wifi` physical-interface restriction while retaining direct Ethernet semantics.
+- [x] Add deterministic `.waiting`, viability, better-path, stale-generation, and one-reconnect-task policy coverage.
+- [x] Add iPad active/background/foreground recovery and idle-timer behavior without deleting authoritative session state.
+- [x] Make critical control-send outcomes explicit; reject oversize/encoding/network failures loudly and trigger safe resync.
+- [x] Prove payload boundary remains safe or split large assets without raising the frame ceiling arbitrarily.
+- [x] Complete security review of pairing; no long-term trust secret is serialized or transmitted.
+- [ ] Implement native secure pairing/operational confidentiality only if macOS 15/iPadOS 16 compatibility is proven; app-layer v4 ECDH/HKDF/HMAC plus mandatory SAS is complete, but native TLS/PSK is blocked by the local SDK API surface and remains a release blocker.
+- [x] Disable Remote Operator by default; prevent unauthenticated `/operator` token disclosure; add request/resource bounds and headers.
+- [x] Fix critical queue fairness and isolate safe render/disk work from transport/UI.
+- [x] Extend existing preflight, diagnostics export, connection UI, reconnect overlay, localization, and accessibility coverage.
+- [ ] Add deterministic DEBUG soak/failure-injection coverage without production-only state forks.
+- [x] Run final automated matrix and report Device Hub/physical gates separately.
+- [x] Do not mark release `READY` while physical hotspot, Ethernet, pairing, printer, camera, and soak gates remain unrun.
+
+### Final evidence — 2026-09-13
+
+- [x] Mac automated tests: 375 tests in 55 suites passed.
+- [x] iPad smoke tests: 7 tests in 1 suite passed on the available iOS simulator.
+- [x] Mac Debug/Release, iPad Debug/Release simulator, and unsigned `iphoneos` Release builds passed after the authenticated SAS update.
+- [x] `git diff --check` passed; XcodeGen source-of-truth remained `project.yml`.
+- [ ] TSan, deterministic soak/failure injection, Computer Use GUI flow, and physical Wi-Fi/hotspot, Ethernet, camera, QR-scan, printer, and long-run gates remain unrun.
+- [ ] Release readiness: NOT READY until the operational TLS/PSK decision and physical matrix are closed.
+
+### Final event hardening continuation — 2026-09-13
+
+- [x] Replace local iPad session rollover with Mac-authoritative `customerFinished` acknowledgement and idle sync.
+- [x] Keep control payloads metadata-only; add bounded CryptoKit secure channel and bounded asset chunking/reassembly.
+- [x] Add completion-aware critical sends, route/viability diagnostics, iPad request deadlines, foreground freshness, and active-session idle-timer behavior.
+- [x] Add failed-capture retake coverage and a deterministic 500 sequential one-photo session state-machine soak.
+- [x] Mac tests: 383/383 in 55/55 suites; iPad tests: 7/7 in 1/1 suite.
+- [x] Mac Debug/Release, iPad Debug/Release simulator, and unsigned generic `iphoneos` Release compile passed; deployment target remains iOS 16.0.
+- [x] `git diff --check` passed.
+- [ ] MainActor 12-second stall proof, stale-heartbeat integration race, dedicated asset TCP channel, TSan, Instruments, live packet capture, and full network/capture/print failure injection remain unrun.
+- [ ] Device Hub GUI, physical iPad, Wi-Fi/router, hotspot, Ethernet, camera, QR, printer, and 3-hour soak gates remain unrun.
+- [ ] Release verdict: NOT READY.
+
+### Final event-readiness delivery amendment — 2026-09-14
+
+- [x] Delivery implementation committed as `30f1645`: protocol 6, asset-channel-v2, Mac-authoritative negotiation/session sync, bounded control and independent asset writers, dedicated asset route, encrypted binding, and recovery.
+- [x] Final automated matrix: Mac 387/387 in 55/55 suites; iPad 7/7 in 1/1 suite; Mac Debug/Release, iPad Debug/Release simulator, and unsigned generic iOS Release all PASS.
+- [x] `xcodegen generate` and `git diff --check` passed.
+- [ ] TSan, Instruments, packet capture, deterministic integration/12-second MainActor stall/10k writer stress, 500 network/capture/print session soak, Device Hub GUI, physical network/camera/QR/printer, app-relaunch, and 3-hour soak gates remain unrun.
+- [ ] Release verdict: NOT READY.
+
+# Historical: PRC PhotoBooth v1.3 TODO
 
 ## Current reliability/network/GIF task
 
@@ -32,7 +192,7 @@
 - [x] Guard normal `SessionStateMachine` events and isolate authoritative restore/sync
 - [x] Synchronize Mac/iPad countdowns with absolute capture deadlines
 - [x] Add reliability, preflight, message-gate, state-machine, countdown, and occupied-port tests
-- [x] Build Mac/iPad Debug and Release configurations; preserve macOS 15/iOS 18 and universal Mac architectures
+- [x] Build Mac/iPad Debug and Release configurations; preserve macOS 15/iPadOS 16 and universal Mac architectures
 - [ ] Resolve pre-existing Thai localization test failure
 - [ ] Repeat Computer Use UI matrix when app-window access is available
 - [ ] Run physical Sony ZV-E10 and real-iPad reconnect matrix
@@ -176,3 +336,95 @@
 - [x] Update PR #7
 - [x] Confirm CI green for final ledger commit `f5daeb1` — PR App Builds run 15 passed
 - [x] Do not merge before real ZV-E10 and 3-shot GIF tests pass
+
+## v1.4 implementation checklist
+
+- [ ] Work only on `feature/v1.4-operator-experience-connectivity`; preserve unrelated worktree changes.
+- [ ] LAN: initial `.unsatisfied` does not abort a wired attempt; timeout/loss still falls back correctly.
+- [ ] LAN: expose route, handshake, control/preview, and bounded preview counters/throughput diagnostics.
+- [ ] Review: dedicated larger current-review JPEG; small kept-shot thumbnails remain in snapshots.
+- [ ] Review: responsive iPad layout and payload/reconnect tests.
+- [ ] Preview: Auto/Standard/High policy with route hysteresis; preserve Sony original JPEG path.
+- [ ] Guest Experience: top navigation, 24 pt outer padding, staged Save/Back behavior.
+- [ ] Printing: remove app paper/copies/printer/skip-dialog controls; use system print panel for test/manual jobs.
+- [ ] Settings: top navigation; Security owns PIN reset and re-locks after reset.
+- [ ] Operations: collapsible sections with readiness open and failure badges visible.
+- [ ] Event Setup: `Set` selection, range/command selection, safe batch deletion and confirmation.
+- [ ] Frame editor: multi-selection, delete/duplicate/group move/nudge, focused shortcuts, undo/redo.
+- [ ] Version 1.4 in `project.yml`; regenerate Xcode project.
+- [ ] Mac Debug/Release, iPad Debug/Release, and full Swift Testing suite pass.
+- [ ] Computer Use Mac UI test attempted; physical iPad/device test attempted and blockers recorded.
+- [ ] Delete only recorded temporary test events; restore PIN to `1324`; final diff/security/artifact review.
+
+## v1.4 completion ledger
+
+- [x] Guest Experience staged Save/Back lifecycle
+- [x] Operations failure badges remain visible while collapsed
+- [x] Event single-active invariant
+- [x] Frame editor anchor-aware Undo/Redo
+- [x] 24 pt Guest Experience spacing
+- [x] LAN regression tests
+- [x] Printing regression
+- [x] Review image/reconnect regression
+- [x] Preview Auto/Standard/High regression
+- [x] Mac Debug/Release and iPad Debug/Release final builds
+- [x] Full test suite: 286 passed; one documented pre-existing localization failure
+- [ ] Computer Use Mac validation: launch passed; UI interaction blocked by native pipe closure
+- [ ] Physical hardware validation (not run; hardware unavailable)
+
+## Final event-readiness closure — 2026-09-14
+
+- [x] Verify branch `fix/v1.4.2-stability-pairing` at starting SHA `f49382b7bab62786bc3a9e2e9f304d4be23f1464`.
+- [x] Preserve pre-existing Xcode user-state modification and untracked sync-conflict file; do not stage either.
+- [x] Confirm immutable release configuration: Xcode 27, Swift 6, macOS 15.0, iPadOS 16.0, version 1.4.2 (6), iPad-only.
+- [x] Inspect current CI run `34806079207`; macOS artifact upload failed with exact `ENOTFOUND` after package/name/path validation; iPad upload and Stable macOS lane passed.
+- [x] Run fresh baseline: `xcodegen generate`, Mac Debug/Release, Mac tests, iPad Debug/Release, iPad tests, unsigned generic iOS Release, `git diff --check`.
+- [x] Reproduce and fix bounded asset retry recovery across a fresh verified Asset-channel generation.
+- [x] Add deterministic asset retry tests A-H without duplicate transport-generation state.
+- [x] Re-run full automated matrix and record actual test counts: Mac 397/397 in 57 suites; iPad 18/18 in 2 suites.
+- [x] Run secure Control writer 10,000-message regression.
+- [x] Add/run 500-session deterministic soak.
+- [x] Add/run 8-photo relaunch/recovery test.
+- [ ] Add/run 12-second MainActor stall test.
+- [ ] Add/run network failure during MainActor stall test.
+- [x] Run Mac/iPad TSan where supported; no TSan race diagnostics reported.
+- [ ] Run Instruments Time Profiler, Swift Concurrency, Allocations, and memory checks.
+- [ ] Run native UI review for affected recovery states with localization/accessibility checks.
+- [ ] Run Device Hub GUI matrix.
+- [ ] Run physical private-router/no-internet, Personal Hotspot, Direct Ethernet, QR/PIN, camera, printer, relaunch, and three-hour old-iPad gates.
+- [x] Re-run final-SHA GitHub Actions 34813252769 for commit 0ff869e; all three lanes and artifact uploads passed.
+- [x] Final Caveman root-cause review and Ponytail review; exact blockers recorded below.
+- [ ] Release verdict remains `NOT READY` until every mandatory gate has evidence.
+
+- [x] Current closure notes: protocol 6 and the authenticated CryptoKit directional channel are the active v1.4.2 security architecture. Earlier TLS/PSK, protocol-3, and simulator-only entries are historical and superseded, not current implementation TODOs. Generic iOS Release is device compilation evidence only; Device Hub GUI and physical-device validation remain unrun.
+
+## v1.4.2 stability implementation amendment — 2026-09-14
+
+- [x] Queue-confined latest-frame preview delivery with bounded pending state,
+  stale-generation invalidation, and delivery diagnostics.
+- [x] Authenticated Control-only liveness admission; raw heartbeat frames are
+  rejected and heartbeat/reconnect timers are transport-queue owned.
+- [x] Off-main bounded review/preview/asset image decoding with session-generation
+  guards and explicit corrupt-media recovery state.
+- [x] Finalization/automatic-print cancellation propagation and off-main print
+  document validation; AppKit submission remains MainActor-bound.
+- [x] Keychain-backed PIN storage with retry backoff and legacy hash migration;
+  app-level legacy MultipeerConnectivity selection removed.
+- [x] Native accessibility/status refinement for pairing, reconnect, review, and
+  Operations states.
+- [x] Deterministic preview flood, stale-generation, raw-heartbeat, reconnect
+  timer, and bounded-image tests.
+- [ ] Full lifecycle ownership split and the 12-second MainActor/network-failure
+  proof remain open; the current runtime extraction owns heartbeat/reconnect
+  timers, while socket/listener/browser ownership remains in the façade.
+- [x] Final automation rerun: Mac 410/410 in 58 suites; iPad 20/20; Mac/iPad
+  Debug and Release builds; unsigned generic iPadOS Release compile.
+- [x] Mac/iPad TSan reruns passed with no reported race diagnostics or runtime
+  warnings.
+- [x] Single Impeccable detector pass over affected UI returned no findings.
+- [ ] Instruments workload traces, Device Hub UI, required iPad Pro 9.7/iPadOS
+  16 physical network/camera/QR/printer/relaunch checks, and three-hour soak.
+  A paired iPad Air 11-inch (M4) on iOS 27 is available but is not equivalent
+  hardware and was not substituted.
+
+Current amendment verdict: `NOT READY FOR EVENT`.

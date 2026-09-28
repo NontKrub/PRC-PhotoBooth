@@ -1,0 +1,7 @@
+.DS_Store
+*.profraw
+DerivedData/
+.derivedData/
+.build/
+xcuserdata/
+*.sync-conflict-*

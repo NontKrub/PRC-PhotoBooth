@@ -1,0 +1,56 @@
+{
+  "schema": 1,
+  "waves": {
+    "ready-1": {
+      "leaves": [
+        "leaf-1.1.1",
+        "leaf-1.1.2",
+        "leaf-1.2.1"
+      ],
+      "state": "complete",
+      "openedAt": "2026-09-26T11:53:56.116Z",
+      "started": {
+        "leaf-1.1.1": {
+          "handle": "/root/impl_cloud_route",
+          "at": "2026-09-26T11:54:31.644Z"
+        },
+        "leaf-1.1.2": {
+          "handle": "/root/impl_data_isolation",
+          "at": "2026-09-26T11:54:31.756Z"
+        },
+        "leaf-1.2.1": {
+          "handle": "/root/impl_transport_core",
+          "at": "2026-09-26T11:54:31.884Z"
+        }
+      },
+      "returned": {
+        "leaf-1.2.1": {
+          "at": "2026-09-26T11:57:29.949Z"
+        },
+        "leaf-1.1.1": {
+          "at": "2026-09-26T12:00:38.598Z"
+        },
+        "leaf-1.1.2": {
+          "at": "2026-09-26T12:00:38.934Z"
+        }
+      },
+      "sealedAt": "2026-09-26T11:54:32.023Z",
+      "completedAt": "2026-09-26T12:00:38.934Z"
+    },
+    "ready-2": {
+      "leaves": [
+        "leaf-1.2.1"
+      ],
+      "state": "sealed",
+      "openedAt": "2026-09-26T11:58:45.504Z",
+      "started": {
+        "leaf-1.2.1": {
+          "handle": "/root/impl_transport_core",
+          "at": "2026-09-26T11:58:45.642Z"
+        }
+      },
+      "returned": {},
+      "sealedAt": "2026-09-26T11:58:45.769Z"
+    }
+  }
+}

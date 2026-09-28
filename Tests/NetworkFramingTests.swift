@@ -2,6 +2,23 @@ import Testing
 import Foundation
 @testable import PRC_PhotoBooth_Mac
 
+private final class LockedDataBuffer: @unchecked Sendable {
+    private let lock = NSLock()
+    private var values: [Data] = []
+
+    func append(_ value: Data) {
+        lock.lock()
+        values.append(value)
+        lock.unlock()
+    }
+
+    var snapshot: [Data] {
+        lock.lock()
+        defer { lock.unlock() }
+        return values
+    }
+}
+
 @Suite("Network framing")
 struct NetworkFramingTests {
     @Test("preview coalescing keeps only newest pending frame")
@@ -60,6 +77,17 @@ struct NetworkFramingTests {
         #expect(try parser.append(first + second).map(\.payload) == [Data("a".utf8), Data("b".utf8)])
     }
 
+    @Test("control pull parser leaves coalesced frames for the next state")
+    func controlParserPullsOneFrameAtATime() throws {
+        let first = try BoothFrameEncoder.encode(channel: .control, payload: Data("first".utf8))
+        let second = try BoothFrameEncoder.encode(channel: .control, payload: Data("second".utf8))
+        var parser = BoothFrameParser()
+
+        #expect(try parser.appendNext(first + second)?.payload == Data("first".utf8))
+        #expect(try parser.appendNext(Data())?.payload == Data("second".utf8))
+        #expect(try parser.appendNext(Data()) == nil)
+    }
+
     @Test("a reconnect starts with a fresh parser")
     func parserResetAfterReconnect() throws {
         let encoded = try BoothFrameEncoder.encode(channel: .control, payload: Data("fresh".utf8))
@@ -85,14 +113,379 @@ struct NetworkFramingTests {
         #expect(throws: BoothFrameError.unsupportedVersion(9)) { try versionParser.append(unknownChannel) }
     }
 
-    @Test("rejects oversized payloads")
+    @Test("rejects oversized payloads based on channel limit")
     func oversizedPayload() throws {
         var parser = BoothFrameParser()
-        let length = UInt32(BoothFrameParser.maximumPayloadLength + 1).bigEndian
+        let length = UInt32(BoothFrameParser.maximumControlPayloadLength + 1).bigEndian
         var header = Data([0x50, 0x52, 1, BoothTransportChannel.control.rawValue])
         withUnsafeBytes(of: length) { header.append(contentsOf: $0) }
-        #expect(throws: BoothFrameError.oversizedPayload(BoothFrameParser.maximumPayloadLength + 1)) {
+        #expect(throws: BoothFrameError.oversizedPayload(BoothFrameParser.maximumControlPayloadLength + 1)) {
             try parser.append(header)
         }
     }
+
+    @Test("channel-aware limits match between parser and encoder")
+    func matchingCeilingsBetweenParserAndEncoder() {
+        for channel in [BoothTransportChannel.control, .preview, .asset, .heartbeat] {
+            let maxLen = BoothFrameParser.maximumPayloadLength(for: channel)
+            switch channel {
+            case .control:
+                #expect(maxLen == 256 * 1024)
+            case .preview, .asset:
+                #expect(maxLen == 2 * 1024 * 1024)
+            case .heartbeat:
+                #expect(maxLen == 256)
+            }
+        }
+    }
+
+    @Test("control channel exact max accepted and max + 1 rejected on header only")
+    func controlChannelBoundaries() throws {
+        // Exact max control payload (256 KiB)
+        let exactMax = BoothFrameParser.maximumControlPayloadLength
+        let validPayload = Data(repeating: 0x42, count: exactMax)
+        let encoded = try BoothFrameEncoder.encode(channel: .control, payload: validPayload)
+        var parser = BoothFrameParser()
+        let frames = try parser.append(encoded)
+        #expect(frames.count == 1)
+        #expect(frames[0].channel == .control)
+        #expect(frames[0].payload.count == exactMax)
+
+        // Control max + 1 rejected by encoder
+        let overMaxPayload = Data(repeating: 0x42, count: exactMax + 1)
+        #expect(throws: BoothFrameError.oversizedPayload(exactMax + 1)) {
+            try BoothFrameEncoder.encode(channel: .control, payload: overMaxPayload)
+        }
+
+        // Control max + 1 rejected by parser on raw header ONLY (8 bytes, no body buffered)
+        var headerOnly = Data([0x50, 0x52, 1, BoothTransportChannel.control.rawValue])
+        var length = UInt32(exactMax + 1).bigEndian
+        withUnsafeBytes(of: &length) { headerOnly.append(contentsOf: $0) }
+        #expect(headerOnly.count == 8)
+
+        var headerParser = BoothFrameParser()
+        #expect(throws: BoothFrameError.oversizedPayload(exactMax + 1)) {
+            try headerParser.append(headerOnly)
+        }
+        #expect(headerParser.bufferedByteCount == 8) // Only the 8-byte header is buffered; no body was allocated
+    }
+
+    @Test("preview channel accepts payloads larger than control max but within preview limit")
+    func previewChannelBoundaries() throws {
+        let controlMax = BoothFrameParser.maximumControlPayloadLength
+        let previewMax = BoothFrameParser.maximumPayloadLength(for: .preview)
+        let largerThanControl = controlMax + 1024
+        #expect(largerThanControl < previewMax)
+
+        let payload = Data(repeating: 0x55, count: largerThanControl)
+        let encoded = try BoothFrameEncoder.encode(channel: .preview, payload: payload)
+        var parser = BoothFrameParser()
+        let frames = try parser.append(encoded)
+        #expect(frames.count == 1)
+        #expect(frames[0].channel == .preview)
+        #expect(frames[0].payload.count == largerThanControl)
+
+        // Preview max + 1 rejected
+        var overHeader = Data([0x50, 0x52, 1, BoothTransportChannel.preview.rawValue])
+        var overLength = UInt32(previewMax + 1).bigEndian
+        withUnsafeBytes(of: &overLength) { overHeader.append(contentsOf: $0) }
+
+        var overParser = BoothFrameParser()
+        #expect(throws: BoothFrameError.oversizedPayload(previewMax + 1)) {
+            try overParser.append(overHeader)
+        }
+    }
+
+    @Test("asset channel enforces asset payload limit")
+    func assetChannelBoundaries() throws {
+        let assetMax = BoothFrameParser.maximumPayloadLength(for: .asset)
+        var overHeader = Data([0x50, 0x52, 1, BoothTransportChannel.asset.rawValue])
+        var overLength = UInt32(assetMax + 1).bigEndian
+        withUnsafeBytes(of: &overLength) { overHeader.append(contentsOf: $0) }
+
+        var parser = BoothFrameParser()
+        #expect(throws: BoothFrameError.oversizedPayload(assetMax + 1)) {
+            try parser.append(overHeader)
+        }
+    }
+
+    @Test("monotonic heartbeat reports a timeout once until activity")
+    func heartbeatTimeoutIsEdgeTriggered() {
+        let state = BoothTransportHeartbeatState()
+
+        #expect(!state.shouldReportTimeout(after: 60))
+        #expect(state.shouldReportTimeout(after: 0))
+        #expect(!state.shouldReportTimeout(after: 0))
+
+        state.markActivity()
+        #expect(state.shouldReportTimeout(after: 0))
+    }
+
+    @Test("raw heartbeat channel frames are rejected")
+    func rawHeartbeatChannelIsRejected() {
+        let decoder = BoothTransportFrameDecoder()
+        let frame = try! BoothFrameEncoder.encode(
+            channel: .heartbeat,
+            payload: Data("heartbeat".utf8)
+        )
+
+        #expect(throws: BoothFrameError.invalidMessage) {
+            try decoder.decode(frame, channel: .control)
+        }
+
+        let pullDecoder = BoothTransportFrameDecoder()
+        #expect(throws: BoothControlFrameDecodeFailure.self) {
+            try pullDecoder.decodeNextControl(frame)
+        }
+    }
+
+    @Test("control framing failures retain a typed safe diagnostic")
+    func controlFramingFailureDiagnostic() {
+        let decoder = BoothTransportFrameDecoder()
+
+        do {
+            _ = try decoder.decodeNextControl(Data([0, 0, 0, 0, 0, 0, 0, 0]))
+            Issue.record("An invalid control frame header was accepted.")
+        } catch let failure as BoothControlFrameDecodeFailure {
+            #expect(failure.errorName == "invalidMagic")
+            #expect(failure.payloadByteCount == 0)
+            #expect(failure.frameByteCount == nil)
+            #expect(failure.bufferedByteCount == 8)
+            #expect(failure.diagnosticDescription.contains("error=invalidMagic"))
+        } catch {
+            Issue.record("Unexpected control framing error: \(error)")
+        }
+    }
+
+    @Test("secure-channel errors expose symbolic diagnostics")
+    func secureChannelErrorDescriptionIsSymbolic() {
+        let error = BoothSecureChannelError.malformedEnvelope
+
+        #expect(error.errorDescription == "malformedEnvelope")
+        #expect(error.localizedDescription == "malformedEnvelope")
+    }
+
+    @Test("plaintext bootstrap frames are rejected once the handshake completes")
+    func rejectsLateePlaintextBootstrap() throws {
+        let channel = try makeConfiguredSecureChannel()
+        let decoder = BoothTransportFrameDecoder()
+        let hello = Message.secureChannelHello(hello: makeHello())
+        let frame = try BoothFrameEncoder.encode(
+            channel: .control, payload: try hello.encoded()
+        )
+        // Before establishment the bootstrap frame is accepted in the clear.
+        #expect(try decoder.decode(frame, channel: .control, secureChannel: channel).count == 1)
+
+        decoder.setHandshakeComplete(true, channel: .control)
+        #expect(throws: (any Error).self) {
+            try decoder.decode(frame, channel: .control, secureChannel: channel)
+        }
+    }
+
+    @Test("secure Ready followed by encrypted heartbeat decodes across one receive")
+    func readyThenEncryptedHeartbeatIsSequential() throws {
+        let (macChannel, iPadChannel) = try makeSecureChannelPair()
+        let ready = Message.secureChannelReady(
+            sessionID: "secure-session",
+            proof: Data(repeating: 0x5A, count: 32)
+        )
+        let readyFrame = try BoothFrameEncoder.encode(channel: .control, payload: ready.encoded())
+        let heartbeatEnvelope = try iPadChannel.protect(Message.heartbeat.encoded(), channel: .control)
+        let heartbeatFrame = try BoothFrameEncoder.encode(channel: .control, payload: heartbeatEnvelope)
+        let decoder = BoothTransportFrameDecoder()
+
+        let maybeReady = try decoder.decodeNextControl(readyFrame + heartbeatFrame, secureChannel: macChannel)
+        let decodedReady = try #require(maybeReady)
+        #expect(decodedReady.isControlMessage(ready))
+        decoder.setHandshakeComplete(true, channel: .control)
+        let maybeHeartbeat = try decoder.decodeNextControl(Data(), secureChannel: macChannel)
+        let decodedHeartbeat = try #require(maybeHeartbeat)
+        #expect(decodedHeartbeat.isControlMessage(.heartbeat))
+        #expect(try decoder.decodeNextControl(Data(), secureChannel: macChannel) == nil)
+    }
+
+    @Test("fragmented Ready and encrypted heartbeat decode across a phase change")
+    func fragmentedReadyAndEncryptedHeartbeatAreSequential() throws {
+        let (macChannel, iPadChannel) = try makeSecureChannelPair()
+        let ready = Message.secureChannelReady(
+            sessionID: "secure-session",
+            proof: Data(repeating: 0x5A, count: 32)
+        )
+        let readyFrame = try BoothFrameEncoder.encode(channel: .control, payload: ready.encoded())
+        let heartbeatEnvelope = try iPadChannel.protect(Message.heartbeat.encoded(), channel: .control)
+        let heartbeatFrame = try BoothFrameEncoder.encode(channel: .control, payload: heartbeatEnvelope)
+        let decoder = BoothTransportFrameDecoder()
+
+        #expect(try decoder.decodeNextControl(Data(readyFrame.prefix(3)), secureChannel: macChannel) == nil)
+        let readyAndPartialHeartbeat = Data(readyFrame.dropFirst(3)) + Data(heartbeatFrame.prefix(14))
+        let maybeReady = try decoder.decodeNextControl(readyAndPartialHeartbeat, secureChannel: macChannel)
+        let decodedReady = try #require(maybeReady)
+        #expect(decodedReady.isControlMessage(ready))
+        decoder.setHandshakeComplete(true, channel: .control)
+        #expect(try decoder.decodeNextControl(Data(), secureChannel: macChannel) == nil)
+
+        let maybeHeartbeat = try decoder.decodeNextControl(Data(heartbeatFrame.dropFirst(14)), secureChannel: macChannel)
+        let decodedHeartbeat = try #require(maybeHeartbeat)
+        #expect(decodedHeartbeat.isControlMessage(.heartbeat))
+        #expect(try decoder.decodeNextControl(Data(), secureChannel: macChannel) == nil)
+    }
+
+    @Test("plaintext secure bootstrap after Ready fails on the next coalesced frame")
+    func coalescedLateBootstrapIsRejected() throws {
+        let (macChannel, _) = try makeSecureChannelPair()
+        let ready = Message.secureChannelReady(
+            sessionID: "secure-session",
+            proof: Data(repeating: 0x5A, count: 32)
+        )
+        let lateHello = Message.secureChannelHello(hello: makeHello())
+        let readyFrame = try BoothFrameEncoder.encode(channel: .control, payload: ready.encoded())
+        let helloFrame = try BoothFrameEncoder.encode(channel: .control, payload: lateHello.encoded())
+        let decoder = BoothTransportFrameDecoder()
+
+        let maybeReady = try decoder.decodeNextControl(readyFrame + helloFrame, secureChannel: macChannel)
+        let decodedReady = try #require(maybeReady)
+        #expect(decodedReady.isControlMessage(ready))
+        decoder.setHandshakeComplete(true, channel: .control)
+        do {
+            _ = try decoder.decodeNextControl(Data(), secureChannel: macChannel)
+            Issue.record("A plaintext bootstrap after secure establishment was accepted.")
+        } catch let failure as BoothControlFrameDecodeFailure {
+            #expect(failure.errorName == "malformedEnvelope")
+            #expect(failure.plaintextMessageCase == "secureChannelHello")
+            #expect(failure.decoderPhase == "established")
+            #expect(!failure.hasSecureEnvelopeMagic)
+        }
+    }
+
+    @Test("malformed-envelope diagnostics identify only safe frame metadata")
+    func malformedFrameDiagnosticIsRedacted() throws {
+        let channel = try makeConfiguredSecureChannel()
+        let decoder = BoothTransportFrameDecoder()
+        let plaintext = Message.boothPaused(isPaused: true)
+        let plaintextData = try plaintext.encoded()
+        let frame = try BoothFrameEncoder.encode(channel: .control, payload: plaintextData)
+
+        do {
+            _ = try decoder.decodeNextControl(frame, secureChannel: channel)
+            Issue.record("A plaintext application message was accepted while keys were prepared.")
+        } catch let failure as BoothControlFrameDecodeFailure {
+            #expect(failure.errorName == "malformedEnvelope")
+            #expect(failure.payloadByteCount == plaintextData.count)
+            #expect(failure.frameByteCount == plaintextData.count + 8)
+            #expect(failure.plaintextMessageCase == "boothPaused")
+            #expect(failure.keysPrepared)
+            #expect(!failure.operationalChannelEstablished)
+            #expect(failure.decoderPhase == "secureNegotiation")
+            #expect(failure.diagnosticDescription.contains("error=malformedEnvelope"))
+            #expect(!failure.diagnosticDescription.contains("isPaused"))
+            #expect(!failure.diagnosticDescription.contains("true"))
+        }
+    }
+
+    @Test("preview delivery keeps one pending frame while MainActor is blocked")
+    func previewDeliveryCoalescesBeforeMainActor() {
+        let queue = DispatchQueue(label: "PRC-PhotoBooth.Tests.PreviewDelivery")
+        let pump = BoothLatestPreviewDeliveryPump(queue: queue)
+        let entered = DispatchSemaphore(value: 0)
+        let release = DispatchSemaphore(value: 0)
+        let delivered = DispatchSemaphore(value: 0)
+        DispatchQueue.main.async {
+            entered.signal()
+            release.wait()
+        }
+        #expect(entered.wait(timeout: .now() + 1) == .success)
+
+        let received = LockedDataBuffer()
+        pump.onDeliver = { data, _, _ in
+            received.append(data)
+            delivered.signal()
+        }
+
+        queue.sync {
+            for index in 0..<10_000 {
+                pump.enqueueOnQueue(Data("frame-\(index)".utf8), generation: 0)
+            }
+        }
+        let snapshot = pump.snapshot()
+        #expect(snapshot.framesReceived == 10_000)
+        #expect(snapshot.framesCoalesced == 9_999)
+        #expect(snapshot.pendingFrames == 1)
+
+        release.signal()
+        #expect(delivered.wait(timeout: .now() + 2) == .success)
+        let values = received.snapshot
+        #expect(values.count == 1)
+        let last = values.last
+        #expect(last == Data("frame-9999".utf8))
+    }
+
+    @Test("preview delivery drops pending frames from an old generation")
+    func previewDeliveryRejectsStaleGeneration() {
+        let queue = DispatchQueue(label: "PRC-PhotoBooth.Tests.PreviewGeneration")
+        let pump = BoothLatestPreviewDeliveryPump(queue: queue)
+        let delivered = DispatchSemaphore(value: 0)
+        let received = LockedDataBuffer()
+        pump.onDeliver = { data, _, _ in
+            received.append(data)
+            delivered.signal()
+        }
+
+        queue.sync {
+            pump.enqueueOnQueue(Data("old".utf8), generation: 0)
+            pump.resetOnQueue(generation: 1)
+            pump.enqueueOnQueue(Data("new".utf8), generation: 1)
+        }
+
+        #expect(delivered.wait(timeout: .now() + 2) == .success)
+        #expect(received.snapshot == [Data("new".utf8)])
+    }
+}
+
+private func makeConfiguredSecureChannel() throws -> BoothSecureChannel {
+    let secret = Data(repeating: 0xA5, count: 32)
+    let macHello = makeHello()
+    let iPadHello = BoothSecureChannelHello(
+        sessionID: "secure-session",
+        challenge: Data(repeating: 0x02, count: 32),
+        senderRole: .iPad,
+        senderDeviceID: "ipad",
+        receiverDeviceID: "mac"
+    )
+    let channel = BoothSecureChannel()
+    try channel.configure(secret: secret, localHello: macHello, peerHello: iPadHello)
+    return channel
+}
+
+private func makeSecureChannelPair() throws -> (mac: BoothSecureChannel, iPad: BoothSecureChannel) {
+    let secret = Data(repeating: 0xA5, count: 32)
+    let macHello = makeHello()
+    let iPadHello = BoothSecureChannelHello(
+        sessionID: "secure-session",
+        challenge: Data(repeating: 0x02, count: 32),
+        senderRole: .iPad,
+        senderDeviceID: "ipad",
+        receiverDeviceID: "mac"
+    )
+    let mac = BoothSecureChannel()
+    let iPad = BoothSecureChannel()
+    try mac.configure(secret: secret, localHello: macHello, peerHello: iPadHello)
+    try iPad.configure(secret: secret, localHello: iPadHello, peerHello: macHello)
+    return (mac, iPad)
+}
+
+private extension BoothDecodedTransportFrame {
+    func isControlMessage(_ expected: Message) -> Bool {
+        guard case .control(let message) = self else { return false }
+        return message == expected
+    }
+}
+
+private func makeHello() -> BoothSecureChannelHello {
+    BoothSecureChannelHello(
+        sessionID: "secure-session",
+        challenge: Data(repeating: 0x01, count: 32),
+        senderRole: .mac,
+        senderDeviceID: "mac",
+        receiverDeviceID: "ipad"
+    )
 }

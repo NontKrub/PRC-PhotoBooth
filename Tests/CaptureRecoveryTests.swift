@@ -69,6 +69,32 @@ struct CaptureRecoveryTests {
         }
     }
 
+    @Test("failed capture retake returns to its countdown")
+    @MainActor
+    func failedCaptureRetakeRestartsPhoto() {
+        let sm = SessionStateMachine()
+        sm.startSession(config: EventConfig(photoCount: 2, countdownSeconds: 3))
+        sm.beginCountdown(photoIndex: 0)
+        sm.tickCountdown()
+        let failure = CaptureFailureSummary(
+            photoIndex: 0,
+            reason: .downloadFailed,
+            message: "The photo did not arrive.",
+            shutterLikelyFired: true,
+            canRetryReceive: false,
+            canUsePreviousPhoto: false,
+            canContinueSession: true
+        )
+        sm.enterCaptureRecovery(photoIndex: 0, failure: failure)
+        sm.retakeFailedCapture(photoIndex: 0)
+
+        if case .countdown(let index, _) = sm.phase {
+            #expect(index == 0)
+        } else {
+            Issue.record("Failed capture retake should restart the same photo")
+        }
+    }
+
     @Test("late attempt completion cannot finish newer capture")
     func lateAttemptIsIgnored() {
         var gate = CaptureAttemptGate()

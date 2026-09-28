@@ -17,16 +17,19 @@
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
-	<string>1.3</string>
+	<string>1.4.3</string>
 	<key>CFBundleVersion</key>
-	<string>3</string>
+	<string>9</string>
 	<key>NSBonjourServices</key>
 	<array>
 		<string>_prc-control._tcp</string>
 		<string>_prc-preview._tcp</string>
+		<string>_prc-asset._tcp</string>
 		<string>_prc-photobooth._tcp</string>
 		<string>_prc-photobooth._udp</string>
 	</array>
+	<key>NSCameraUsageDescription</key>
+	<string>PRC PhotoBooth uses the iPad camera to scan Mac pairing QR codes.</string>
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>PRC PhotoBooth connects to the operator Mac over local network for camera preview and session control.</string>
 	<key>UIRequiresFullScreen</key>

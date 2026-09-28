@@ -66,11 +66,60 @@ public enum CustomerDisplayWorkflow {
                 || phase.isFinished
         }
     }
-}
 
-private extension BoothPhase {
-    var isFinished: Bool {
-        if case .finished = self { return true }
-        return false
+    public static func canUseReviewActions(
+        in phase: BoothPhase,
+        reviewMediaReady: Bool
+    ) -> Bool {
+        guard case .review = phase else { return false }
+        return reviewMediaReady
     }
 }
+
+// MARK: - Customer Display Authority (Finding A05)
+
+public enum CustomerDisplayAuthority: Equatable, Sendable {
+    case none
+    case iPadOnly
+    case externalDisplayOnly
+    case dualDisplay
+
+    public static func evaluate(
+        isAuthenticatedIPadConnected: Bool,
+        isExternalViewerActive: Bool
+    ) -> CustomerDisplayAuthority {
+        switch (isAuthenticatedIPadConnected, isExternalViewerActive) {
+        case (false, false):
+            return .none
+        case (true, false):
+            return .iPadOnly
+        case (false, true):
+            return .externalDisplayOnly
+        case (true, true):
+            return .dualDisplay
+        }
+    }
+
+    public var isCustomerDisplayReady: Bool {
+        self != .none
+    }
+
+    public var shouldStartCountdownImmediatelyLocally: Bool {
+        switch self {
+        case .externalDisplayOnly:
+            return true
+        case .iPadOnly, .dualDisplay, .none:
+            return false
+        }
+    }
+
+    public var requiresIPadSetupSend: Bool {
+        switch self {
+        case .iPadOnly, .dualDisplay:
+            return true
+        case .externalDisplayOnly, .none:
+            return false
+        }
+    }
+}
+

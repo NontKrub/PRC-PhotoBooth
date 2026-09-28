@@ -1,28 +1,262 @@
 import SwiftUI
 import AppKit
 
+enum OperationsSectionSeverity: Int, Sendable, Equatable {
+    case normal
+    case warning
+    case failure
+}
+
+struct OperationsSectionStatus: Sendable, Equatable {
+    var summary: String?
+    var severity: OperationsSectionSeverity
+}
+
+enum OperationsStatusLogic {
+    static func readiness(_ readiness: BoothReadinessStatus) -> OperationsSectionStatus {
+        switch readiness {
+        case .ready: return OperationsSectionStatus(summary: "Ready", severity: .normal)
+        case .readyWithWarnings: return OperationsSectionStatus(summary: "Warnings", severity: .warning)
+        case .notReady: return OperationsSectionStatus(summary: "Not ready", severity: .failure)
+        case .checking: return OperationsSectionStatus(summary: "Checking…", severity: .warning)
+        }
+    }
+
+    static func preflight(_ results: [PreflightCheckResult]) -> OperationsSectionStatus {
+        let failures = results.filter { $0.status == .failed }.count
+        if failures > 0 { return OperationsSectionStatus(summary: "\(failures) failed", severity: .failure) }
+        let warnings = results.filter { $0.status == .warning }.count
+        if warnings > 0 { return OperationsSectionStatus(summary: "\(warnings) warnings", severity: .warning) }
+        return OperationsSectionStatus(summary: "\(results.count) checks", severity: .normal)
+    }
+
+    static func recovery(isAvailable: Bool, cleanupPending: Bool = false) -> OperationsSectionStatus {
+        if cleanupPending {
+            return OperationsSectionStatus(summary: "Cleanup pending", severity: .warning)
+        }
+        return OperationsSectionStatus(summary: isAvailable ? "Available" : nil, severity: isAvailable ? .warning : .normal)
+    }
+
+    static func webDelivery(_ jobs: [SessionJob], configured: Bool) -> OperationsSectionStatus {
+        guard !jobs.isEmpty || configured else {
+            return OperationsSectionStatus(summary: "Not configured", severity: .normal)
+        }
+        let failures = jobs.filter { $0.status == .failed || $0.status == .cancelled }.count
+        if failures > 0 { return OperationsSectionStatus(summary: "\(failures) failed", severity: .failure) }
+        let retrying = jobs.filter { $0.status == .waitingRetry }.count
+        if retrying > 0 { return OperationsSectionStatus(summary: "\(retrying) retrying", severity: .warning) }
+        let running = jobs.filter { $0.status == .running }.count
+        if running > 0 { return OperationsSectionStatus(summary: "\(running) uploading", severity: .normal) }
+        if jobs.allSatisfy({ $0.status == .succeeded }) {
+            return OperationsSectionStatus(summary: "\(jobs.count) uploaded", severity: .normal)
+        }
+        return OperationsSectionStatus(summary: "\(jobs.count) jobs", severity: .normal)
+    }
+
+    static func queue(_ jobs: [SessionJob], persistenceError: String?) -> OperationsSectionStatus {
+        if persistenceError != nil {
+            return OperationsSectionStatus(summary: "Persistence failed", severity: .failure)
+        }
+        let unknownSideEffects = jobs.filter { $0.lastFailureDisposition == .sideEffectUnknown }.count
+        if unknownSideEffects > 0 {
+            return OperationsSectionStatus(summary: "\(unknownSideEffects) needs verification", severity: .failure)
+        }
+        let requiredFailures = jobs.filter {
+            !$0.kind.isOptional && ($0.status == .failed || $0.status == .cancelled)
+        }.count
+        if requiredFailures > 0 {
+            return OperationsSectionStatus(summary: "\(requiredFailures) failed", severity: .failure)
+        }
+        let failures = jobs.filter { $0.status == .failed || $0.status == .cancelled }.count
+        if failures > 0 {
+            return OperationsSectionStatus(summary: "\(failures) failed", severity: .warning)
+        }
+        let retrying = jobs.filter { $0.status == .waitingRetry }.count
+        if retrying > 0 {
+            return OperationsSectionStatus(summary: "\(retrying) retrying", severity: .warning)
+        }
+        return OperationsSectionStatus(summary: "\(jobs.count) jobs", severity: .normal)
+    }
+
+    static func printer(
+        _ status: ConfiguredPrinterStatus,
+        lastTestResult: PrinterTestResult?,
+        isPrinting: Bool = false
+    ) -> OperationsSectionStatus {
+        if lastTestResult?.outcome == .unknown {
+            return OperationsSectionStatus(summary: "Verify printer", severity: .failure)
+        }
+        if isPrinting {
+            return OperationsSectionStatus(summary: "Printing", severity: .normal)
+        }
+        if case .unavailable = status {
+            return OperationsSectionStatus(summary: "Unavailable", severity: .failure)
+        }
+        if let result = lastTestResult {
+            if result.outcome == .cancelled {
+                return OperationsSectionStatus(summary: "Test cancelled", severity: .normal)
+            }
+            if !result.isSuccess {
+                return OperationsSectionStatus(summary: "Test failed", severity: .failure)
+            }
+        }
+        return OperationsSectionStatus(summary: "Idle", severity: .normal)
+    }
+
+    static func server(_ status: LocalWebServerStatus, deliveryPolicy: GuestDeliveryPolicy = .unavailable) -> OperationsSectionStatus {
+        switch status.state {
+        case .stopped: return OperationsSectionStatus(summary: "Stopped", severity: .warning)
+        case .starting: return OperationsSectionStatus(summary: "Starting…", severity: .normal)
+        case .failed: return OperationsSectionStatus(summary: "Failed", severity: .failure)
+        case .ready:
+            switch deliveryPolicy {
+            case .publicHTTPS:
+                return OperationsSectionStatus(summary: "Guest Delivery · HTTPS", severity: .normal)
+            case .trustedLocalHTTP:
+                return OperationsSectionStatus(summary: "Guest Delivery · Trusted LAN HTTP", severity: .warning)
+            case .unavailable:
+                return OperationsSectionStatus(summary: "Guest Delivery · Disabled", severity: .warning)
+            }
+        }
+    }
+
+    static func health(_ status: BoothHealthStatus) -> OperationsSectionStatus {
+        switch status {
+        case .healthy: return OperationsSectionStatus(summary: "Healthy", severity: .normal)
+        case .degraded: return OperationsSectionStatus(summary: "Degraded", severity: .warning)
+        case .unavailable: return OperationsSectionStatus(summary: "Unavailable", severity: .failure)
+        case .unknown: return OperationsSectionStatus(summary: "Unknown", severity: .warning)
+        }
+    }
+
+    static func connection(
+        _ state: BoothConnectionState,
+        authenticated: Bool,
+        previewConnected: Bool,
+        secureConnected: Bool = true,
+        assetReady: Bool = true,
+        fallbackActive: Bool = false,
+        reconnectInProgress: Bool = false
+    ) -> OperationsSectionStatus {
+        guard case .connected = state else {
+            return OperationsSectionStatus(
+                summary: state == .connecting ? "Reconnecting…" : "Disconnected",
+                severity: state == .connecting ? .warning : .failure
+            )
+        }
+        guard authenticated else {
+            return OperationsSectionStatus(summary: "Trust pending", severity: .warning)
+        }
+        if reconnectInProgress {
+            return OperationsSectionStatus(summary: "Reconnecting…", severity: .warning)
+        }
+        if fallbackActive {
+            return OperationsSectionStatus(summary: "Wi-Fi fallback active", severity: .warning)
+        }
+        guard secureConnected else {
+            return OperationsSectionStatus(summary: "Secure channel unavailable", severity: .failure)
+        }
+        guard previewConnected else {
+            return OperationsSectionStatus(summary: "Preview unavailable", severity: .warning)
+        }
+        guard assetReady else {
+            return OperationsSectionStatus(summary: "Assets unavailable", severity: .warning)
+        }
+        return OperationsSectionStatus(summary: "Connected", severity: .normal)
+    }
+}
+
 struct OperationsView: View {
     @Environment(BoothCoordinator.self) private var coordinator
+    @Environment(BoothConnectionStatus.self) private var connectionStatus
     @Environment(\.locale) private var locale
     @State private var showPrinterConfirmation = false
+    @State private var showPrintResolutionConfirmation = false
+    @State private var printResolutionJobID: String?
+    @State private var printResolutionPrinted = false
+    @State private var queueErrorDetails: String?
     @State private var showDiscardConfirmation = false
     @State private var serverStatus = LocalWebServerStatus(state: .stopped, registeredTokenCount: 0)
     @State private var boothHealth = BoothHealthSnapshot.empty
     @State private var manifests: [String: SessionManifest] = [:]
+    @State private var retryingJobIDs: Set<String> = []
+    @State private var isRetryingAll = false
+    @State private var retryErrorMessage: String?
+    @AppStorage("operations.readinessExpanded") private var readinessExpanded = true
+    @AppStorage("operations.preflightExpanded") private var preflightExpanded = false
+    @AppStorage("operations.recoveryExpanded") private var recoveryExpanded = true
+    @AppStorage("operations.webDeliveryExpanded") private var webDeliveryExpanded = false
+    @AppStorage("operations.queueExpanded") private var queueExpanded = false
+    @AppStorage("operations.galleryExpanded") private var galleryExpanded = false
+    @AppStorage("operations.printerExpanded") private var printerExpanded = false
+    @AppStorage("operations.serverExpanded") private var serverExpanded = false
+    @AppStorage("operations.healthExpanded") private var healthExpanded = false
+    @AppStorage("operations.remoteExpanded") private var remoteExpanded = false
+    @AppStorage("cloudUploadEnabled") private var cloudUploadEnabled = false
+    @AppStorage("publicBaseURL") private var publicBaseURL = ""
+    @AppStorage("allowTrustedLocalHTTP") private var allowTrustedLocalHTTP = false
 
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 20) {
-                readinessSummary
-                preflightResults
-                recoverySection
-                webDeliverySection
-                queueSection
-                GalleryModerationView()
-                printerSection
-                serverSection
-                healthSection
-                remoteOperatorSection
+                DisclosureGroup(isExpanded: $readinessExpanded) {
+                    readinessSummary
+                } label: {
+                    operationsHeader(title: "Booth Readiness", status: readinessStatus)
+                }
+                DisclosureGroup(isExpanded: $preflightExpanded) {
+                    preflightResults
+                } label: {
+                    operationsHeader(title: "Preflight Results", status: preflightStatus)
+                }
+                GroupBox {
+                    connectionStabilitySection
+                } label: {
+                    operationsHeader(title: "Connection Stability", status: connectionStabilityStatus)
+                }
+                if coordinator.recoveryService.recoverableCaptureSession != nil
+                    || !coordinator.recoveryService.cleanupPendingSessionIDs.isEmpty {
+                    DisclosureGroup(isExpanded: $recoveryExpanded) {
+                        recoverySection
+                    } label: {
+                        operationsHeader(title: "Session Recovery", status: recoveryStatus)
+                    }
+                }
+                DisclosureGroup(isExpanded: $webDeliveryExpanded) {
+                    webDeliverySection
+                } label: {
+                    operationsHeader(title: "Web Delivery", status: webDeliveryHeaderStatus)
+                }
+                DisclosureGroup(isExpanded: $queueExpanded) {
+                    queueSection
+                } label: {
+                    operationsHeader(title: "Persistent Queue", status: queueStatus)
+                }
+                DisclosureGroup(isExpanded: $galleryExpanded) {
+                    GalleryModerationView()
+                } label: {
+                    operationsHeader(title: "Gallery Moderation", status: .init(summary: nil, severity: .normal))
+                }
+                DisclosureGroup(isExpanded: $printerExpanded) {
+                    printerSection
+                } label: {
+                    operationsHeader(title: "Printer", status: printerSectionStatus)
+                }
+                DisclosureGroup(isExpanded: $serverExpanded) {
+                    serverSection
+                } label: {
+                    operationsHeader(title: "Local Server", status: serverSectionStatus)
+                }
+                DisclosureGroup(isExpanded: $healthExpanded) {
+                    healthSection
+                } label: {
+                    operationsHeader(title: "Device Health", status: healthSectionStatus)
+                }
+                DisclosureGroup(isExpanded: $remoteExpanded) {
+                    remoteOperatorSection
+                } label: {
+                    operationsHeader(title: "Remote Operator", status: remoteOperatorStatus)
+                }
             }
             .padding(24)
         }
@@ -32,7 +266,12 @@ struct OperationsView: View {
             await refreshManifests()
             boothHealth = await coordinator.healthSnapshot()
             while !Task.isCancelled {
-                try? await Task.sleep(for: .seconds(2))
+                do {
+                    try await Task.sleep(for: .seconds(2))
+                } catch {
+                    return
+                }
+                guard !Task.isCancelled else { return }
                 await refreshServerStatus()
                 await refreshManifests()
                 boothHealth = await coordinator.healthSnapshot()
@@ -67,6 +306,51 @@ struct OperationsView: View {
         } message: {
             Text("Accepted files and the unfinished SwiftData session will be removed. The cancelled manifest remains for diagnostics.")
         }
+        .confirmationDialog(
+            "Confirm printer outcome",
+            isPresented: $showPrintResolutionConfirmation,
+            titleVisibility: .visible
+        ) {
+            Button(printResolutionPrinted ? "Printed successfully" : "Not printed") {
+                guard let jobID = printResolutionJobID else { return }
+                coordinator.resolveUnknownPrint(jobID: jobID, printed: printResolutionPrinted)
+                printResolutionJobID = nil
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("Confirm the physical printer result before releasing this print lane.")
+        }
+        .alert(
+            operatorString("Queue Storage Error", locale: locale),
+            isPresented: Binding(
+                get: { queueErrorDetails != nil },
+                set: { if !$0 { queueErrorDetails = nil } }
+            )
+        ) {
+            Button(operatorString("OK", locale: locale), role: .cancel) {
+                queueErrorDetails = nil
+            }
+        } message: {
+            Text(queueErrorDetails ?? "")
+        }
+    }
+
+    private func operationsHeader(title: String, status: OperationsSectionStatus) -> some View {
+        HStack {
+            Text(title).font(.headline)
+            Spacer()
+            if status.severity != .normal {
+                Image(systemName: status.severity == .failure ? "xmark.octagon.fill" : "exclamationmark.triangle.fill")
+                    .foregroundStyle(status.severity == .failure ? .red : .orange)
+                    .accessibilityLabel(status.severity == .failure ? "Failure" : "Warning")
+            }
+            if let summary = status.summary {
+                Text(summary)
+                    .font(.caption)
+                    .foregroundStyle(status.severity == .failure ? .red : status.severity == .warning ? .orange : .secondary)
+            }
+        }
+        .contentShape(Rectangle())
     }
 
     private var readinessSummary: some View {
@@ -77,6 +361,11 @@ struct OperationsView: View {
                     .foregroundStyle(readinessColor)
                 VStack(alignment: .leading, spacing: 4) {
                     Text(readinessTitle).font(.title2.bold())
+                    if let sessionStatus = coordinator.operationsSessionStatus {
+                        Text(operatorFormat("Session: %@", locale: locale, sessionStatus))
+                            .font(.caption)
+                            .foregroundStyle(sessionStatus == "Cancelling" ? .orange : .secondary)
+                    }
                     if let lastRun = coordinator.preflight.lastRunAt {
                         (Text("Last checked ") + Text(lastRun, style: .relative) + Text(" ago"))
                             .font(.caption).foregroundStyle(.secondary)
@@ -114,6 +403,28 @@ struct OperationsView: View {
 
     @ViewBuilder
     private var recoverySection: some View {
+        if !coordinator.recoveryService.cleanupPendingSessionIDs.isEmpty {
+            GroupBox("Cancelled — cleanup pending") {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("The session is cancelled. Its files remain protected until background work stops.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Text(operatorString(
+                        "Do not remove these files manually. Cleanup will retry after background work stops.",
+                        locale: locale
+                    ))
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                    ForEach(coordinator.recoveryService.cleanupPendingSessionIDs.sorted(), id: \.self) { sessionID in
+                        Text(operatorFormat("Session ID: %@", locale: locale, sessionID))
+                            .font(.caption2.monospaced())
+                            .foregroundStyle(.tertiary)
+                            .textSelection(.enabled)
+                            .accessibilityLabel(operatorFormat("Session ID: %@", locale: locale, sessionID))
+                    }
+                }
+            }
+        }
         if let recoverable = coordinator.recoveryService.recoverableCaptureSession {
             GroupBox("Session Recovery") {
                 VStack(alignment: .leading, spacing: 8) {
@@ -249,6 +560,13 @@ struct OperationsView: View {
         }
     }
 
+    private func isManualRetryEligible(_ job: SessionJob) -> Bool {
+        ManualJobRetryEligibility.evaluate(
+            job,
+            manifestIsCancelled: manifests[job.sessionID]?.status == .cancelled
+        ) == .eligible
+    }
+
     private var queueSection: some View {
         GroupBox("Persistent Queue") {
             VStack(alignment: .leading, spacing: 10) {
@@ -260,12 +578,58 @@ struct OperationsView: View {
                     queueCount("Failed", counts.failed)
                     queueCount("Completed", counts.completed)
                     Spacer()
-                    Button("Retry All Failed") { coordinator.jobQueue.retryAllFailed() }
-                        .disabled(counts.failed == 0)
+                    Button {
+                        guard !isRetryingAll, retryingJobIDs.isEmpty else { return }
+                        isRetryingAll = true
+                        retryErrorMessage = nil
+                        Task {
+                            defer { isRetryingAll = false }
+                            do {
+                                _ = try await coordinator.retryAllFailedJobs()
+                                await refreshManifests()
+                            } catch {
+                                retryErrorMessage = error.localizedDescription
+                            }
+                        }
+                    } label: {
+                        if isRetryingAll {
+                            HStack(spacing: 4) {
+                                ProgressView()
+                                    .controlSize(.small)
+                                Text("Retrying…")
+                            }
+                        } else {
+                            Text("Retry All Failed")
+                        }
+                    }
+                    .disabled(isRetryingAll || !retryingJobIDs.isEmpty || !coordinator.jobQueue.jobs.contains {
+                        isManualRetryEligible($0)
+                    })
+                }
+                if let retryErrorMessage {
+                    Label(retryErrorMessage, systemImage: "exclamationmark.triangle")
+                        .font(.caption).foregroundStyle(.red)
                 }
                 if let error = coordinator.jobQueue.lastQueueError {
-                    Label(error, systemImage: "exclamationmark.triangle")
-                        .font(.caption).foregroundStyle(.red)
+                    VStack(alignment: .leading, spacing: 8) {
+                        Label(error, systemImage: "exclamationmark.triangle")
+                            .font(.caption).foregroundStyle(.red)
+                        HStack {
+                            Button(operatorString("Retry Storage Recovery", locale: locale)) {
+                                Task {
+                                    _ = await coordinator.jobQueue.retryPersistenceRecovery()
+                                    await coordinator.runSafePreflight()
+                                }
+                            }
+                            .accessibilityHint(operatorString(
+                                "Re-read durable queue files and resume workers when storage is available.",
+                                locale: locale
+                            ))
+                            Button(operatorString("View Details", locale: locale)) {
+                                queueErrorDetails = error
+                            }
+                        }
+                    }
                 }
                 ForEach(coordinator.jobQueue.jobs) { job in
                     VStack(alignment: .leading, spacing: 5) {
@@ -275,16 +639,71 @@ struct OperationsView: View {
                             Spacer()
                             Text(operatorJobStatusName(job.status, locale: locale))
                                 .foregroundStyle(job.status == .failed ? .red : .secondary)
-                            if (job.status == .failed || job.status == .cancelled) && job.kind != .cloudUpload {
-                                Button("Retry") { coordinator.jobQueue.retry(jobID: job.id) }
+                            if (job.status == .failed || job.status == .cancelled), job.kind != .cloudUpload {
+                                if job.lastFailureDisposition == .sideEffectUnknown {
+                                    Text(operatorString("Verify printer", locale: locale))
+                                        .foregroundStyle(.orange)
+                                    Button(operatorString("Printed successfully", locale: locale)) {
+                                        printResolutionJobID = job.id
+                                        printResolutionPrinted = true
+                                        showPrintResolutionConfirmation = true
+                                    }
+                                    Button(operatorString("Not printed", locale: locale)) {
+                                        printResolutionJobID = job.id
+                                        printResolutionPrinted = false
+                                        showPrintResolutionConfirmation = true
+                                    }
+                                } else if isManualRetryEligible(job) {
+                                    Button {
+                                        guard !retryingJobIDs.contains(job.id), !isRetryingAll else { return }
+                                        retryingJobIDs.insert(job.id)
+                                        retryErrorMessage = nil
+                                        Task {
+                                            defer { retryingJobIDs.remove(job.id) }
+                                            do {
+                                                try await coordinator.retryJob(jobID: job.id)
+                                                await refreshManifests()
+                                            } catch {
+                                                retryErrorMessage = error.localizedDescription
+                                            }
+                                        }
+                                    } label: {
+                                        if retryingJobIDs.contains(job.id) {
+                                            HStack(spacing: 4) {
+                                                ProgressView()
+                                                    .controlSize(.small)
+                                                Text("Retrying…")
+                                            }
+                                        } else {
+                                            Text("Retry")
+                                        }
+                                    }
+                                    .disabled(isRetryingAll || retryingJobIDs.contains(job.id))
+                                }
                             }
-                            if job.kind.isOptional && job.status != .succeeded && job.status != .cancelled {
+                            if job.kind.isOptional
+                                && job.status != .succeeded
+                                && job.status != .cancelled
+                                && !(job.kind == .autoPrint
+                                    && (job.status == .running
+                                        || job.lastFailureDisposition == .sideEffectUnknown)) {
                                 Button("Cancel") { coordinator.jobQueue.cancel(jobID: job.id) }
                             }
                             Button("Open Folder") { openFolder(for: job.sessionID) }
                         }
                         Text("\(operatorString("Attempts", locale: locale)): \(job.attemptCount)" + (job.lastError.map { " · \($0)" } ?? ""))
                             .font(.caption).foregroundStyle(.secondary)
+                        if job.kind == .updateGallery, job.status == .failed {
+                            Label(
+                                operatorString(
+                                    "Gallery update needs attention. Customer strip and download are available.",
+                                    locale: locale
+                                ),
+                                systemImage: "photo.badge.exclamationmark"
+                            )
+                                .font(.caption)
+                                .foregroundStyle(.orange)
+                        }
                         if let next = job.nextAttemptAt {
                             (Text("Next attempt ") + Text(next, style: .relative))
                                 .font(.caption2).foregroundStyle(.tertiary)
@@ -301,22 +720,61 @@ struct OperationsView: View {
         GroupBox("Printer Diagnostics") {
             VStack(alignment: .leading, spacing: 8) {
                 Text(printerStatusText)
-                Text("\(operatorString("Paper", locale: locale)): \(UserDefaults.standard.string(forKey: "selphyPaperSize") ?? SelphyPaperSize.postcard.rawValue) · \(operatorString("Copies", locale: locale)): \(max(1, UserDefaults.standard.integer(forKey: "selphyCopies")))")
-                    .font(.caption).foregroundStyle(.secondary)
+                if case .systemDefault = coordinator.printer.configuredPrinterStatus() {
+                    Text(operatorFormat("System default: %@", locale: locale, NSPrintInfo.shared.printer.name))
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+                if let startedAt = coordinator.printer.currentPrintStartedAt {
+                    LabeledContent("Elapsed") {
+                        Text(startedAt, style: .timer)
+                            .monospacedDigit()
+                    }
+                    if case .unknownAwaitingAppKitCompletion = coordinator.printer.lifecycleState {
+                        Text(operatorString(
+                            "Waiting for macOS to finish the print operation. Automatic printing is paused; customer sessions remain available.",
+                            locale: locale
+                        ))
+                            .font(.caption)
+                            .foregroundStyle(.orange)
+                    } else {
+                        Text("Customer sessions remain available while printing.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
                 if let result = coordinator.printer.lastTestResult {
-                    Label(result.message, systemImage: result.isSuccess ? "checkmark.circle" : "xmark.circle")
+                    let cancelled = result.outcome == .cancelled
+                    let resultColor: Color = cancelled ? .secondary : result.isSuccess ? .green : .red
+                    Label(
+                        result.message,
+                        systemImage: cancelled ? "minus.circle" : result.isSuccess ? "checkmark.circle" : "xmark.circle"
+                    )
                         .font(.caption)
-                        .foregroundStyle(result.isSuccess ? .green : .red)
+                        .foregroundStyle(resultColor)
                 } else {
                     Text("Printer test: Not run this launch.").font(.caption).foregroundStyle(.secondary)
                 }
+                if let lastPrintAt = coordinator.printer.lastPrintAt {
+                    LabeledContent("Last print") {
+                        Text(lastPrintAt, style: .relative)
+                    }
+                }
+                if let lastPrintError = coordinator.printer.lastPrintError {
+                    LabeledContent("Last print error") {
+                        Text(lastPrintError)
+                            .foregroundStyle(.red)
+                            .multilineTextAlignment(.trailing)
+                    }
+                }
                 HStack {
                     Button("Print Test Page") {
-                        Task { try? await coordinator.printer.printTestPage(); await coordinator.runSafePreflight() }
+                        Task { _ = try? await coordinator.printer.printTestPage(); await coordinator.runSafePreflight() }
                     }
                     .buttonStyle(.bordered)
+                    .disabled(coordinator.printer.isPrinting)
+                    .accessibilityIdentifier("Print Test Page")
                     Button("Open System Print Settings…") {
-                        NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.Printers-Scanners-Settings")!)
+                        _ = SystemSettingsRouter.open(.printersAndScanners)
                     }
                     .buttonStyle(.bordered)
                 }
@@ -330,9 +788,54 @@ struct OperationsView: View {
                 Text(serverStatusText)
                 Text("Registered tokens: \(serverStatus.registeredTokenCount)")
                     .font(.caption).foregroundStyle(.secondary)
-                if !coordinator.serverURL.isEmpty {
-                    Text("LAN URL: \(coordinator.serverURL)")
-                        .font(.caption.monospaced()).textSelection(.enabled)
+                let policy = SessionQRCodePayloadResolver.evaluatePolicy(
+                    publicBaseURL: publicBaseURL,
+                    cloudUploadEnabled: cloudUploadEnabled,
+                    allowTrustedLocalHTTP: allowTrustedLocalHTTP
+                )
+                switch policy {
+                case .publicHTTPS:
+                    Label("Guest Delivery · HTTPS", systemImage: "lock.shield")
+                        .font(.caption)
+                        .foregroundStyle(.green)
+                    if let validated = ValidatedPublicGuestBaseURL(string: publicBaseURL) {
+                        Text(validated.canonicalString)
+                            .font(.caption.monospaced())
+                            .textSelection(.enabled)
+                    }
+                    if allowTrustedLocalHTTP {
+                        Label(
+                            "Trusted LAN HTTP is also enabled; local guest routes are unencrypted.",
+                            systemImage: "exclamationmark.triangle.fill"
+                        )
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                    }
+                case .trustedLocalHTTP:
+                    Label("Guest Delivery · Trusted LAN HTTP", systemImage: "exclamationmark.triangle.fill")
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                    Text("Guest photos and download links are unencrypted on the local network. Use only on an isolated, operator-controlled network.")
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                    if !coordinator.serverURL.isEmpty {
+                        Text("LAN URL: \(coordinator.serverURL)")
+                            .font(.caption.monospaced()).textSelection(.enabled)
+                    }
+                case .unavailable:
+                    Label("Guest Delivery · Disabled", systemImage: "minus.circle")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    if cloudUploadEnabled,
+                       !publicBaseURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                        Text("The public guest URL is invalid. Cloud delivery requires HTTPS.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    } else {
+                        Text("Enable public HTTPS or trusted LAN HTTP in Global booth guest-delivery settings.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
                 }
             }
         }
@@ -351,12 +854,8 @@ struct OperationsView: View {
                 }
                 HStack(spacing: 18) {
                     healthValue("Control", boothHealth.controlConnection)
-                    let route = switch coordinator.connectionStatus.effectiveNetwork {
-                    case .lan: "LAN"
-                    case .wifi where coordinator.connectionStatus.isFallbackActive: "Wi-Fi fallback"
-                    case .wifi: "Wi-Fi"
-                    case .unavailable: "Unavailable"
-                    }
+                    let presentation = BoothConnectionPresentationResolver.resolve(connectionStatus)
+                    let route = presentation.effectiveTransport
                     healthValue("Route", route)
                     healthValue("Preview", camera.livePreviewActive ? "Active" : "Inactive")
                     healthValue("PTP", camera.ptpHealthy.map { $0 ? "Healthy" : "Degraded" } ?? "n/a")
@@ -386,30 +885,202 @@ struct OperationsView: View {
 
     private var remoteOperatorSection: some View {
         GroupBox("Remote Operator") {
-            let pairingURL = coordinator.operatorPairingURL
-            HStack(alignment: .top, spacing: 16) {
-                if let qr = generateQRCode(from: pairingURL) {
-                    Image(nsImage: NSImage(cgImage: qr, size: .zero))
-                        .interpolation(.none)
-                        .resizable()
-                        .frame(width: 130, height: 130)
-                        .accessibilityLabel("Remote operator pairing QR code")
+            if !RemoteOperatorAuth.isAvailableInCurrentBuild {
+                VStack(alignment: .leading, spacing: 8) {
+                    Label(
+                        operatorString("Unavailable in this release", locale: locale),
+                        systemImage: "lock.shield"
+                    )
+                    Text(operatorString(
+                        "Remote control requires a secure operator transport. Local booth operation is unaffected.",
+                        locale: locale
+                    ))
+                        .foregroundStyle(.secondary)
                 }
-                VStack(alignment: .leading, spacing: 7) {
-                    Text("Scan to connect an operator device.")
-                    Text(pairingURL).font(.caption.monospaced()).textSelection(.enabled)
-                    HStack {
-                        Button("Copy Pairing Link") {
-                            NSPasteboard.general.clearContents()
-                            NSPasteboard.general.setString(pairingURL, forType: .string)
+            } else if !coordinator.isRemoteOperatorEnabled {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text(operatorString(
+                        "Development only — unencrypted HTTP. Use only on a trusted local network.",
+                        locale: locale
+                    ))
+                        .foregroundStyle(.secondary)
+                    if canEnableRemoteOperator {
+                        Button(operatorString("Enable Remote Operator", locale: locale)) {
+                            coordinator.enableRemoteOperator()
                         }
-                        if let station = coordinator.sharingStationURL {
-                            Text("Sharing Station: \(station)").font(.caption.monospaced()).textSelection(.enabled)
+                        .buttonStyle(.borderedProminent)
+                    } else {
+                        Label(
+                            operatorString("Waiting for local server and LAN address…", locale: locale),
+                            systemImage: "network.slash"
+                        )
+                        .foregroundStyle(.secondary)
+                    }
+                }
+            } else if let pairingURL = coordinator.operatorPairingURL {
+                HStack(alignment: .top, spacing: 16) {
+                    if let qr = generateQRCode(from: pairingURL) {
+                        Image(nsImage: NSImage(cgImage: qr, size: .zero))
+                            .interpolation(.none)
+                            .resizable()
+                            .frame(width: 130, height: 130)
+                            .accessibilityLabel("Remote operator pairing QR code")
+                    }
+                    VStack(alignment: .leading, spacing: 7) {
+                        Text("Scan once to connect an operator device. The link is a credential and expires shortly.")
+                        Text(pairingURL).font(.caption.monospaced()).textSelection(.enabled)
+                        HStack {
+                            Button("Copy Pairing Link") {
+                                NSPasteboard.general.clearContents()
+                                NSPasteboard.general.setString(pairingURL, forType: .string)
+                            }
+                            Button("Revoke Access", role: .destructive) {
+                                coordinator.disableRemoteOperator()
+                            }
+                            if let station = coordinator.sharingStationURL {
+                                Text("Sharing Station: \(station)").font(.caption.monospaced()).textSelection(.enabled)
+                            }
                         }
                     }
                 }
+            } else {
+                Label(
+                    operatorString("Waiting for local server and LAN address…", locale: locale),
+                    systemImage: "network.slash"
+                )
+                .foregroundStyle(.secondary)
             }
         }
+    }
+
+    private var canEnableRemoteOperator: Bool {
+        guard case .ready = serverStatus.state,
+              let host = URL(string: coordinator.serverURL)?.host,
+              !host.isEmpty else { return false }
+        return host != "localhost" && host != "127.0.0.1"
+    }
+
+    private var remoteOperatorStatus: OperationsSectionStatus {
+        RemoteOperatorAuth.isAvailableInCurrentBuild
+            ? .init(summary: nil, severity: .normal)
+            : .init(summary: operatorString("Unavailable", locale: locale), severity: .warning)
+    }
+
+    private var connectionStabilityStatus: OperationsSectionStatus {
+        OperationsStatusLogic.connection(
+            connectionStatus.state,
+            authenticated: connectionStatus.isPeerAuthenticated,
+            previewConnected: connectionStatus.isPreviewChannelConnected,
+            secureConnected: connectionStatus.isSecureChannelEstablished,
+            assetReady: connectionStatus.isAssetChannelReady,
+            fallbackActive: connectionStatus.isFallbackActive,
+            reconnectInProgress: connectionStatus.isReconnectInProgress
+        )
+    }
+
+    private var connectionPresentation: BoothConnectionPresentation {
+        BoothConnectionPresentationResolver.resolve(connectionStatus)
+    }
+
+    private var connectionStabilitySection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 16) {
+                Label(
+                    connectionStabilityStatus.summary ?? "Unknown",
+                    systemImage: connectionStabilityStatus.severity == .normal
+                        ? "checkmark.circle.fill"
+                        : "exclamationmark.triangle.fill"
+                )
+                .foregroundStyle(connectionStabilityStatus.severity == .failure ? .red : connectionStabilityStatus.severity == .warning ? .orange : .green)
+                Spacer()
+                Text(connectionStatus.peerDisplayName ?? "No iPad")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            HStack(spacing: 18) {
+                healthValue("Control", controlConnectionLabel)
+                healthValue("Preview", connectionStatus.isPreviewChannelConnected ? "Connected" : "Unavailable")
+                healthValue("Secure", connectionStatus.isSecureChannelEstablished ? "Established" : "Unavailable")
+                healthValue("Assets", connectionStatus.isAssetChannelReady ? "Ready" : "Unavailable")
+                healthValue("Trust", connectionStatus.isPeerAuthenticated ? "Authenticated" : "Not authenticated")
+            }
+            HStack(spacing: 18) {
+                healthValue("Route", connectionPresentation.effectiveTransport)
+                healthValue("Reconnect", connectionStatus.isReconnectInProgress ? "Active" : "Idle")
+                healthValue(
+                    "Last Control",
+                    connectionStatus.lastControlActivityAt?.formatted(date: .omitted, time: .standard) ?? "Never"
+                )
+                if let transport = coordinator.multipeer as? NetworkBoothTransport {
+                    let diagnostics = transport.discoveryDiagnostics
+                    healthValue(
+                        "Generation",
+                        "\(diagnostics.generation) / \(diagnostics.controlConnectionGeneration)"
+                    )
+                }
+            }
+            if let fallbackText = connectionPresentation.fallbackText {
+                Label(fallbackText, systemImage: "wifi.exclamationmark")
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+                    .accessibilityIdentifier("Wi-Fi Fallback Warning")
+            }
+        }
+    }
+
+    private var controlConnectionLabel: String {
+        switch connectionStatus.state {
+        case .connected: return "Connected"
+        case .connecting: return "Reconnecting…"
+        case .disconnected: return "Disconnected"
+        }
+    }
+
+    private var readinessStatus: OperationsSectionStatus {
+        OperationsStatusLogic.readiness(coordinator.preflight.readiness)
+    }
+
+    private var preflightStatus: OperationsSectionStatus {
+        OperationsStatusLogic.preflight(coordinator.preflight.results)
+    }
+
+    private var recoveryStatus: OperationsSectionStatus {
+        OperationsStatusLogic.recovery(
+            isAvailable: coordinator.recoveryService.recoverableCaptureSession != nil,
+            cleanupPending: !coordinator.recoveryService.cleanupPendingSessionIDs.isEmpty
+        )
+    }
+
+    private var webDeliveryHeaderStatus: OperationsSectionStatus {
+        OperationsStatusLogic.webDelivery(
+            coordinator.jobQueue.jobs.filter { $0.kind == .cloudUpload },
+            configured: UserDefaults.standard.bool(forKey: "cloudUploadEnabled")
+        )
+    }
+
+    private var queueStatus: OperationsSectionStatus {
+        OperationsStatusLogic.queue(coordinator.jobQueue.jobs, persistenceError: coordinator.jobQueue.lastQueueError)
+    }
+
+    private var printerSectionStatus: OperationsSectionStatus {
+        OperationsStatusLogic.printer(
+            coordinator.printer.configuredPrinterStatus(),
+            lastTestResult: coordinator.printer.lastTestResult,
+            isPrinting: coordinator.printer.isPrinting
+        )
+    }
+
+    private var serverSectionStatus: OperationsSectionStatus {
+        let policy = SessionQRCodePayloadResolver.evaluatePolicy(
+            publicBaseURL: publicBaseURL,
+            cloudUploadEnabled: cloudUploadEnabled,
+            allowTrustedLocalHTTP: allowTrustedLocalHTTP
+        )
+        return OperationsStatusLogic.server(serverStatus, deliveryPolicy: policy)
+    }
+
+    private var healthSectionStatus: OperationsSectionStatus {
+        OperationsStatusLogic.health(boothHealth.status)
     }
 
     private func healthValue(_ label: String, _ value: String) -> some View {
@@ -425,9 +1096,9 @@ struct OperationsView: View {
 
     private var readinessTitle: String {
         switch coordinator.preflight.readiness {
-        case .ready: return operatorString("Ready", locale: locale)
-        case .readyWithWarnings: return operatorString("Ready with Warnings", locale: locale)
-        case .notReady: return operatorString("Not Ready", locale: locale)
+        case .ready: return operatorString("READY FOR EVENT", locale: locale)
+        case .readyWithWarnings: return operatorString("READY WITH WARNINGS", locale: locale)
+        case .notReady: return operatorString("NOT READY", locale: locale)
         case .checking: return operatorString("Checking…", locale: locale)
         }
     }
@@ -451,10 +1122,17 @@ struct OperationsView: View {
     }
 
     private var printerStatusText: String {
+        if coordinator.printer.lastTestResult?.outcome == .unknown {
+            return operatorString("Verify printer", locale: locale)
+        }
+        if coordinator.printer.isPrinting {
+            return operatorString("Printing", locale: locale)
+        }
         switch coordinator.printer.configuredPrinterStatus() {
-        case .systemDefault: return operatorString("Selected printer: System Default", locale: locale)
-        case .available(let name): return operatorFormat("Selected printer: %@", locale: locale, name)
-        case .unavailable(let name): return operatorFormat("Configured printer unavailable: %@", locale: locale, name)
+        case .systemDefault:
+            return operatorFormat("System default: %@", locale: locale, NSPrintInfo.shared.printer.name)
+        case .unavailable(let name):
+            return operatorFormat("System printer unavailable: %@", locale: locale, name)
         }
     }
 

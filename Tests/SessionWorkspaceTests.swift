@@ -34,7 +34,7 @@ struct SessionWorkspaceTests {
         #expect(FileManager.default.fileExists(atPath: URL(fileURLWithPath: descriptor.absoluteDirectoryPath).appendingPathComponent(".work/foreground.png").path))
     }
 
-    @Test("saves accepted image and deterministic GIF frames, replacing an index safely")
+    @Test("saves accepted image and immutable generations for replacement captures")
     func savesAndReplacesCapture() throws {
         let root = try temporaryDirectory()
         defer { try? FileManager.default.removeItem(at: root) }
@@ -59,14 +59,18 @@ struct SessionWorkspaceTests {
             workspace: descriptor
         )
 
-        #expect(first.imageFileName == "shot_0.jpg")
-        #expect(first.gifFrameFileNames == [
-            ".work/gif/photo_0/frame_000.jpg",
-            ".work/gif/photo_0/frame_001.jpg"
-        ])
-        #expect(second.gifFrameFileNames == [".work/gif/photo_0/frame_000.jpg"])
-        let frameDir = URL(fileURLWithPath: descriptor.absoluteDirectoryPath).appendingPathComponent(".work/gif/photo_0")
-        #expect(try FileManager.default.contentsOfDirectory(atPath: frameDir.path).sorted() == ["frame_000.jpg"])
+        #expect(first.imageFileName != second.imageFileName)
+        #expect(first.imageFileName.hasPrefix("shot_0-"))
+        #expect(first.gifFrameFileNames.count == 2)
+        #expect(second.gifFrameFileNames.count == 1)
+        let firstDir = URL(fileURLWithPath: descriptor.absoluteDirectoryPath).appendingPathComponent(
+            URL(fileURLWithPath: first.gifFrameFileNames[0]).deletingLastPathComponent().path
+        )
+        let secondDir = URL(fileURLWithPath: descriptor.absoluteDirectoryPath).appendingPathComponent(
+            URL(fileURLWithPath: second.gifFrameFileNames[0]).deletingLastPathComponent().path
+        )
+        #expect(try FileManager.default.contentsOfDirectory(atPath: firstDir.path).count == 2)
+        #expect(try FileManager.default.contentsOfDirectory(atPath: secondDir.path).count == 1)
     }
 
     @Test("loads accepted images, removes work only, and reports missing files")
@@ -87,7 +91,7 @@ struct SessionWorkspaceTests {
             id: "abcdefgh-1234", eventID: "event", eventName: "Event",
             eventConfig: EventConfig(eventID: "event", eventName: "Event", photoCount: 1, slots: []),
             startedAt: Date(), completedAt: nil, cancelledAt: nil, status: .capturing,
-            nextPhotoIndex: 1, outputRootPath: root.path, relativeDirectoryPath: "Event/dir",
+            nextPhotoIndex: 1, outputRootPath: root.path, relativeDirectoryPath: descriptor.relativeDirectoryPath,
             absoluteDirectoryPath: descriptor.absoluteDirectoryPath, frameSnapshotFileName: nil,
             stripFileName: nil, gifFileName: nil, downloadToken: "token",
             shots: [RuntimeShotRecord(photoIndex: 0, imageFileName: saved.imageFileName, gifFrameFileNames: [], retakeCount: 0, acceptedAt: Date())],
@@ -96,7 +100,7 @@ struct SessionWorkspaceTests {
 
         #expect(try workspace.loadAcceptedImages(manifest: manifest)[0] != nil)
         try workspace.removeWorkingFiles(manifest: manifest)
-        #expect(FileManager.default.fileExists(atPath: URL(fileURLWithPath: descriptor.absoluteDirectoryPath).appendingPathComponent("shot_0.jpg").path))
+        #expect(FileManager.default.fileExists(atPath: URL(fileURLWithPath: descriptor.absoluteDirectoryPath).appendingPathComponent(saved.imageFileName).path))
         #expect(!FileManager.default.fileExists(atPath: URL(fileURLWithPath: descriptor.absoluteDirectoryPath).appendingPathComponent(".work").path))
 
         var missing = manifest
