@@ -1,8 +1,8 @@
-# PRC PhotoBooth v1.4.2
+# PRC PhotoBooth v1.4.3
 
 PRC PhotoBooth is a SwiftUI photo-booth system for macOS and iPad. The Mac app runs the booth, controls the camera, stores sessions, renders the finished outputs, and serves guest downloads. The iPad app provides the customer-facing kiosk flow for starting a session, reviewing photos, and retrieving the result.
 
-Version 1.4.2 keeps iPadOS 16 as the minimum and adds stability fixes, trusted Mac↔iPad pairing, selected-peer reconnect, clearer Ethernet/Wi-Fi diagnostics, and native macOS printing.
+Version 1.4.3 keeps iPadOS 16 as the minimum and hardens trusted Mac↔iPad reconnect, network switching, pairing cleanup, connection status, local-server readiness, and production-pipeline soak testing.
 
 ## Features
 
@@ -22,6 +22,7 @@ Version 1.4.2 keeps iPadOS 16 as the minimum and adds stability fixes, trusted M
 - Version 1.2 guest experience packages with up to eight templates, local Core Image filters, pose prompts, and Thai/English customer choices.
 - Privacy-controlled local event galleries with pending, approved, and hidden moderation states.
 - Camera/booth health diagnostics, persistent operations events, delivery-state visibility, reliability analytics, an authenticated LAN operator dashboard, and an offline sharing station.
+- Production-pipeline soak testing through the real camera, session, finalization, delivery, and optional printing paths, with 1–4 randomly assigned retakes per session.
 - Debug-only hardware-free demo camera and standalone iPad kiosk flows.
 
 Version 1.2 has no audio countdown. Countdown and pose prompts are visual only.
@@ -72,7 +73,7 @@ open PRC-PhotoBooth.xcodeproj
 
 Configure an Apple development team and signing settings in Xcode if automatic signing is not already available on the machine.
 
-### v1.4.2 pairing and connection setup
+### v1.4.3 pairing and connection setup
 
 1. Launch both apps on the same local network. Discovery may list nearby devices, but neither app silently adopts an unknown peer.
 2. On the Mac, open `Settings → iPad & Network → Pair New iPad`. The Mac displays a two-minute six-digit PIN and QR code.
@@ -82,6 +83,18 @@ Configure an Apple development team and signing settings in Xcode if automatic s
 6. Set the requested route to Ethernet when wired adapters are present. A failed wired route falls back to Wi-Fi; use `Retry LAN Now` for an explicit direct LAN attempt while idle.
 
 The Mac Operations screen reports selected and connected peers, authentication, control/preview readiness, requested and effective routes, fallback state, and the last network error. Run `Test Connection` for per-step diagnostics. Pairing/authentication and an authenticated preview are required for event readiness.
+
+Changing between home Wi-Fi, an iPad Personal Hotspot, and another usable local route invalidates the obsolete connection generation and reconnects the selected trusted peer. The operator status reports `Connected` only while an authenticated iPad session is active. `Forget` and `Forget All iPads` disconnect matching live sessions, remove their trust records and preferred-peer selection, and restart advertising and discovery so the Mac can appear in Nearby Macs again.
+
+### Version 1.4.3 event readiness and soak testing
+
+- Event Readiness checks the running local download server directly, so a healthy server on port `8585` enables the soak test instead of being reported as unavailable from stale state.
+- Production Pipeline uses the configured camera and the same coordinator, storage, finalization queue, QR delivery, cloud option, and print cadence as a guest session.
+- Every production soak session receives a random retake count from 1 through 4. The runner captures replacement photos through the production retake path and verifies that the accepted replacement is the one finalized.
+- Soak sessions remain isolated from the live gallery and event statistics. Run-scoped cleanup removes only artifacts owned by that soak run and retains diagnostics when cleanup fails.
+- Synthetic Benchmark remains available for hardware-free checks and is identified separately from production coverage.
+
+The v1.4.3 pull-request validation passed the Xcode 27 macOS Debug and Release builds, the full Mac test lane, the stable macOS Release and test lane, iPad Simulator Debug and Release builds and tests, and the generic iPadOS Release build. See [GitHub Actions run 36380691125](https://github.com/NontKrub/PRC-PhotoBooth/actions/runs/36380691125).
 
 ### Printing
 
