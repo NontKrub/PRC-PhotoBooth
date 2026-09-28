@@ -222,15 +222,20 @@ public enum BoothConnectionPresentationResolver {
         }
 
         let stateText: String
-        switch status.routeState {
-        case .connectingLAN:
-            stateText = "Connecting via LAN"
-        case .connectingWiFi:
-            stateText = status.isFallbackActive ? "Connecting via Wi-Fi fallback" : "Connecting via Wi-Fi"
-        case .connectedLAN, .connectedWiFi, .fallbackWiFi:
+        switch status.state {
+        case .connected:
             stateText = "Connected"
         case .disconnected:
             stateText = "No iPad connected"
+        case .connecting:
+            switch status.routeState {
+            case .connectingLAN:
+                stateText = "Connecting via LAN"
+            case .connectingWiFi:
+                stateText = status.isFallbackActive ? "Connecting via Wi-Fi fallback" : "Connecting via Wi-Fi"
+            case .connectedLAN, .connectedWiFi, .fallbackWiFi, .disconnected:
+                stateText = "Connecting to iPad"
+            }
         }
 
         let effectiveTransport: String

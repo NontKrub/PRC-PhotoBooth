@@ -176,6 +176,11 @@ final class iPadViewModel: ObservableObject {
         networkTransport?.forgetPeer(peerID)
     }
 
+    func repairPairing(with peerID: String) -> Bool {
+        guard canChangeConnection else { return false }
+        return networkTransport?.repairPairing(with: peerID) ?? false
+    }
+
     func refreshNearbyMacs() {
         guard canChangeConnection else { return }
         networkTransport?.refreshPeerDiscovery()

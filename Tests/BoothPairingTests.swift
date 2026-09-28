@@ -612,13 +612,48 @@ struct BoothPairingTests {
         #expect(store.autoReconnect)
         #expect(store.secret(for: peer.id) == secret)
         #expect(keychain.item(service: service, account: peer.id, useDataProtectionKeychain: true) == secret)
-        #expect(keychain.item(service: service, account: peer.id, useDataProtectionKeychain: false) == nil)
+        #expect(keychain.item(service: service, account: peer.id, useDataProtectionKeychain: false) == secret)
 
         store.forget(peerID: peer.id)
         #expect(store.trustedPeers.isEmpty)
         #expect(store.preferredPeerID == nil)
         #expect(store.secret(for: peer.id) == nil)
         #expect(!store.autoReconnect)
+    }
+
+    @Test("failed Data Protection updates do not replace an existing legacy pairing secret")
+    func failedDataProtectionUpdatePreservesEffectivePairingSecret() {
+        let suite = "BoothPairingTests.write-failure-conflict.\(UUID().uuidString)"
+        let namespace = "test.write-failure-conflict.\(UUID().uuidString)"
+        let service = "com.nont.prcphoto.tests.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let keychain = InMemoryGenericPasswordKeychain()
+        let store = BoothTrustedPeerStore(
+            defaults: defaults,
+            namespace: namespace,
+            keychainService: service,
+            keychain: keychain
+        )
+        let peer = TrustedBoothPeer(id: "ipad-write-failure", displayName: "PRC-iPad", role: .iPad)
+        let previousSecret = Data(repeating: 0x41, count: 32)
+        let attemptedSecret = Data(repeating: 0x52, count: 32)
+        store.trustedPeers = [peer]
+        store.preferredPeerID = peer.id
+        store.autoReconnect = true
+        keychain.put(previousSecret, service: service, account: peer.id, useDataProtectionKeychain: true)
+        keychain.put(previousSecret, service: service, account: peer.id, useDataProtectionKeychain: false)
+        keychain.failDataProtectionWrites = true
+
+        #expect(throws: BoothPairingError.keychain(errSecIO)) {
+            try store.trust(peer, secret: attemptedSecret)
+        }
+        #expect(store.secret(for: peer.id) == previousSecret)
+        #expect(keychain.item(service: service, account: peer.id, useDataProtectionKeychain: true) == previousSecret)
+        #expect(keychain.item(service: service, account: peer.id, useDataProtectionKeychain: false) == previousSecret)
+        #expect(store.trustedPeerIDs == [peer.id])
+        #expect(store.preferredPeerID == peer.id)
+        #expect(store.autoReconnect)
     }
 
     @Test("preferred peer with missing or invalid key requires repair")
@@ -649,6 +684,40 @@ struct BoothPairingTests {
         #expect(store.hasUsableSecret(for: peerID))
     }
 
+    @Test("Keychain unavailability preserves trusted pairing metadata and reconnect preference")
+    func unavailablePairingKeychainDoesNotMarkPeerForRepair() {
+        let suite = "BoothPairingTests.keychain-unavailable.\(UUID().uuidString)"
+        let service = "com.nont.prcphoto.tests.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let keychain = InMemoryGenericPasswordKeychain()
+        let peerID = "mac-peer"
+        let store = BoothTrustedPeerStore(
+            defaults: defaults,
+            namespace: suite,
+            keychainService: service,
+            keychain: keychain
+        )
+        store.trustedPeers = [TrustedBoothPeer(id: peerID, displayName: "Event Mac", role: .mac)]
+        store.preferredPeerID = peerID
+        store.autoReconnect = true
+        keychain.failDataProtectionReads = true
+        keychain.dataProtectionReadFailureStatus = errSecMissingEntitlement
+        keychain.legacyReadFailureStatus = errSecInteractionNotAllowed
+
+        #expect(store.secretLookup(for: peerID) == .unavailable(errSecMissingEntitlement))
+        #expect(!store.preferredPeerNeedsRepair)
+        #expect(store.trustedPeerIDs == [peerID])
+        #expect(store.preferredPeerID == peerID)
+        #expect(store.autoReconnect)
+
+        keychain.dataProtectionReadFailureStatus = errSecInteractionNotAllowed
+        keychain.legacyReadFailureStatus = nil
+        #expect(store.secretLookup(for: peerID) == .unavailable(errSecInteractionNotAllowed))
+        #expect(store.trustedPeerIDs == [peerID])
+        #expect(store.autoReconnect)
+    }
+
     @Test("iPad Keychain lookup keeps the newly saved pairing secret")
     func unifiedKeychainDoesNotDeletePairingSecret() throws {
         let suite = "BoothPairingTests.unified-keychain.\(UUID().uuidString)"
@@ -677,8 +746,8 @@ struct BoothPairingTests {
         #expect(store.secret(for: peer.id) == nil)
     }
 
-    @Test("trusted peer reads migrate legacy Keychain secret to Data Protection")
-    func trustedPeerSecretMigratesToDataProtection() throws {
+    @Test("trusted peer reads retain legacy Keychain secret across rebuilds")
+    func trustedPeerSecretRetainsLegacyCopy() throws {
         let suite = "BoothPairingTests.migration.\(UUID().uuidString)"
         let namespace = "test.migration.\(UUID().uuidString)"
         let service = "com.nont.prcphoto.tests.\(UUID().uuidString)"
@@ -697,8 +766,58 @@ struct BoothPairingTests {
         keychain.put(secret, service: service, account: peer.id, useDataProtectionKeychain: false)
 
         #expect(store.secret(for: peer.id) == secret)
+        #expect(keychain.item(service: service, account: peer.id, useDataProtectionKeychain: true) == nil)
+        #expect(keychain.item(service: service, account: peer.id, useDataProtectionKeychain: false) == secret)
+    }
+
+    @Test("a Data Protection pairing secret is copied only into an absent legacy store")
+    func dataProtectionPairingSecretPreservesExistingLegacyCopy() {
+        let suite = "BoothPairingTests.migration-conflict.\(UUID().uuidString)"
+        let namespace = "test.migration-conflict.\(UUID().uuidString)"
+        let service = "com.nont.prcphoto.tests.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let keychain = InMemoryGenericPasswordKeychain()
+        let store = BoothTrustedPeerStore(
+            defaults: defaults,
+            namespace: namespace,
+            keychainService: service,
+            keychain: keychain
+        )
+        let peer = TrustedBoothPeer(id: "ipad-migration-conflict", displayName: "PRC-iPad", role: .iPad)
+        let dataProtectionSecret = Data(repeating: 0x57, count: 32)
+        let legacySecret = Data(repeating: 0x68, count: 32)
+        store.trustedPeers = [peer]
+        keychain.put(dataProtectionSecret, service: service, account: peer.id, useDataProtectionKeychain: true)
+        keychain.put(legacySecret, service: service, account: peer.id, useDataProtectionKeychain: false)
+
+        #expect(store.secret(for: peer.id) == dataProtectionSecret)
+        #expect(keychain.item(service: service, account: peer.id, useDataProtectionKeychain: true) == dataProtectionSecret)
+        #expect(keychain.item(service: service, account: peer.id, useDataProtectionKeychain: false) == legacySecret)
+    }
+
+    @Test("a Data Protection-only pairing secret gains a verified legacy copy")
+    func dataProtectionPairingSecretCreatesMissingLegacyCopy() {
+        let suite = "BoothPairingTests.migration-copy.\(UUID().uuidString)"
+        let namespace = "test.migration-copy.\(UUID().uuidString)"
+        let service = "com.nont.prcphoto.tests.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let keychain = InMemoryGenericPasswordKeychain()
+        let store = BoothTrustedPeerStore(
+            defaults: defaults,
+            namespace: namespace,
+            keychainService: service,
+            keychain: keychain
+        )
+        let peer = TrustedBoothPeer(id: "ipad-migration-copy", displayName: "PRC-iPad", role: .iPad)
+        let secret = Data(repeating: 0x79, count: 32)
+        store.trustedPeers = [peer]
+        keychain.put(secret, service: service, account: peer.id, useDataProtectionKeychain: true)
+
+        #expect(store.secret(for: peer.id) == secret)
+        #expect(keychain.item(service: service, account: peer.id, useDataProtectionKeychain: false) == secret)
         #expect(keychain.item(service: service, account: peer.id, useDataProtectionKeychain: true) == secret)
-        #expect(keychain.item(service: service, account: peer.id, useDataProtectionKeychain: false) == nil)
     }
 
     @Test("forget removes Data Protection and legacy trusted peer secrets")

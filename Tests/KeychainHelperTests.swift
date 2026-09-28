@@ -17,6 +17,38 @@ struct KeychainHelperTests {
         #expect(!PINGateView.CredentialActivity.verifying.preventsDismissal)
     }
 
+    @Test("opt-in signed Keychain persistence probe uses a dedicated test service")
+    func realKeychainPersistenceProbe() {
+        let environment = ProcessInfo.processInfo.environment
+        guard environment["PRC_RUN_REAL_KEYCHAIN_PERSISTENCE_TEST"] == "1" else { return }
+        let service = "com.nont.prcphoto.release-test-keychain"
+        let account = "operator-pin-rebuild-probe"
+        let marker = Data("PRC PhotoBooth dedicated Keychain persistence probe v1".utf8)
+        let keychain = SecurityGenericPasswordKeychainStore()
+
+        switch environment["PRC_KEYCHAIN_PERSISTENCE_PHASE"] {
+        case "write":
+            let clearStatus = keychain.deleteBothCopies(service: service, account: account)
+            #expect(clearStatus == errSecSuccess)
+            let writeStatus = keychain.writeDataAndVerifyForPersistence(
+                marker,
+                service: service,
+                account: account,
+                accessibility: .afterFirstUnlockThisDeviceOnly
+            )
+            #expect(writeStatus == errSecSuccess, "Dedicated test Keychain write failed: \(credentialStatusName(writeStatus))")
+        case "read":
+            let result = keychain.readDataWithFallback(service: service, account: account)
+            #expect(result.lookup == .found(marker))
+        case "cleanup":
+            let status = keychain.deleteBothCopies(service: service, account: account)
+            #expect(status == errSecSuccess)
+            #expect(keychain.readDataWithFallback(service: service, account: account).lookup == .notFound)
+        default:
+            Issue.record("Set PRC_KEYCHAIN_PERSISTENCE_PHASE to write, read, or cleanup.")
+        }
+    }
+
     @Test("PIN verifier uses Keychain and rate-limits failures")
     func keychainPINAndBackoff() async {
         clearPINCopies()
@@ -60,6 +92,47 @@ struct KeychainHelperTests {
         #expect(readPINDataFromDataProtectionKeychain() == encoded)
     }
 
+    @Test("PIN verification preserves a different legacy Keychain copy")
+    func PINVerificationDoesNotReplaceExistingLegacyCopy() async throws {
+        clearPINCopies()
+        defer { clearPINCopies() }
+
+        func encodedRecord(pin: String, saltByte: UInt8) throws -> Data {
+            let salt = Data(repeating: saltByte, count: PINCredentialRecord.saltByteCount)
+            let record = PINCredentialRecord(
+                version: PINCredentialRecord.currentVersion,
+                algorithm: PINCredentialRecord.defaultAlgorithm,
+                salt: salt,
+                iterations: PINCredentialRecord.defaultIterations,
+                verifier: try #require(derivePBKDF2SHA256(
+                    pin: pin,
+                    salt: salt,
+                    iterations: PINCredentialRecord.defaultIterations
+                ))
+            )
+            return try JSONEncoder().encode(record)
+        }
+
+        let dataProtectionRecord = try encodedRecord(pin: "5317", saltByte: 0x41)
+        let legacyRecord = try encodedRecord(pin: "8642", saltByte: 0x52)
+        testPINKeychain.put(
+            dataProtectionRecord,
+            service: testPINService,
+            account: testPINAccount,
+            useDataProtectionKeychain: true
+        )
+        testPINKeychain.put(
+            legacyRecord,
+            service: testPINService,
+            account: testPINAccount,
+            useDataProtectionKeychain: false
+        )
+
+        #expect(await verifyPIN("5317"))
+        #expect(readPINDataFromDataProtectionKeychain() == dataProtectionRecord)
+        #expect(readLegacyPINData() == legacyRecord)
+    }
+
     @Test("new records use random salt so same PIN yields different records")
     func randomSaltProducesDifferentRecords() async throws {
         clearPINCopies()
@@ -72,6 +145,7 @@ struct KeychainHelperTests {
             return
         }
 
+        #expect(clearPIN())
         #expect(await setPIN("4321"))
         guard let secondData = readPINData(),
               let secondRecord = try? JSONDecoder().decode(PINCredentialRecord.self, from: secondData) else {
@@ -186,8 +260,8 @@ struct KeychainHelperTests {
         #expect(upgraded.salt != oldRecord.salt)
     }
 
-    @Test("legacy PIN Keychain item migrates to Data Protection Keychain")
-    func legacyPINKeychainMigratesToDataProtection() throws {
+    @Test("legacy PIN Keychain item remains available as the stable Mac copy")
+    func legacyPINKeychainRemainsAvailable() throws {
         clearPINCopies()
         defer { clearPINCopies() }
 
@@ -204,8 +278,8 @@ struct KeychainHelperTests {
         saveRawToKeychain(legacyData)
 
         #expect(readPINData() == legacyData)
-        #expect(readPINDataFromDataProtectionKeychain() == legacyData)
-        #expect(readLegacyPINData() == nil)
+        #expect(readPINDataFromDataProtectionKeychain() == nil)
+        #expect(readLegacyPINData() == legacyData)
     }
 
     @Test("clearPIN removes Data Protection and legacy Keychain copies")
@@ -320,8 +394,8 @@ struct KeychainHelperTests {
         saveRawToKeychain(legacyData)
 
         #expect(!(await verifyPIN("0000")))
-        #expect(readPINDataFromDataProtectionKeychain() == legacyData)
-        #expect(readLegacyPINData() == nil)
+        #expect(readPINDataFromDataProtectionKeychain() == nil)
+        #expect(readLegacyPINData() == legacyData)
         UserDefaults.standard.removeObject(forKey: "admin_pin_locked_until")
         #expect(await verifyPIN(pin))
         guard let migrated = readPINDataFromDataProtectionKeychain(),
@@ -331,7 +405,7 @@ struct KeychainHelperTests {
         }
         #expect(record.isValid)
         #expect(migrated != legacyData)
-        #expect(readLegacyPINData() == nil)
+        #expect(readLegacyPINData() == migrated)
     }
 
     @Test("clearPIN removes both Keychain and UserDefaults data")
@@ -361,14 +435,9 @@ struct KeychainHelperTests {
         store.put(legacy, service: "pin-test", account: "migration", useDataProtectionKeychain: false)
         store.failDataProtectionWrites = true
 
-        let result = store.readDataMigratingToDataProtection(
-            service: "pin-test",
-            account: "migration",
-            accessibility: .whenUnlockedThisDeviceOnly
-        )
+        let result = store.readDataWithFallback(service: "pin-test", account: "migration")
 
         #expect(result.data == legacy)
-        #expect(result.legacyCleanupError == nil)
         #expect(store.item(service: "pin-test", account: "migration", useDataProtectionKeychain: false) == legacy)
         #expect(store.item(service: "pin-test", account: "migration", useDataProtectionKeychain: true) == nil)
     }
@@ -380,14 +449,9 @@ struct KeychainHelperTests {
         store.put(legacy, service: "pin-test", account: "readback", useDataProtectionKeychain: false)
         store.corruptDataProtectionReadback = true
 
-        let result = store.readDataMigratingToDataProtection(
-            service: "pin-test",
-            account: "readback",
-            accessibility: .whenUnlockedThisDeviceOnly
-        )
+        let result = store.readDataWithFallback(service: "pin-test", account: "readback")
 
         #expect(result.data == legacy)
-        #expect(result.legacyCleanupError == nil)
         #expect(store.item(service: "pin-test", account: "readback", useDataProtectionKeychain: false) == legacy)
         #expect(store.item(service: "pin-test", account: "readback", useDataProtectionKeychain: true) == nil)
     }
@@ -418,50 +482,84 @@ struct KeychainHelperTests {
         store.put(legacy, service: "pin-test", account: "read-failure", useDataProtectionKeychain: false)
         store.failDataProtectionReads = true
 
-        let result = store.readDataMigratingToDataProtection(
-            service: "pin-test",
-            account: "read-failure",
-            accessibility: .whenUnlockedThisDeviceOnly
-        )
+        let result = store.readDataWithFallback(service: "pin-test", account: "read-failure")
 
         #expect(result.data == legacy)
-        #expect(result.legacyCleanupError == nil)
         #expect(store.item(service: "pin-test", account: "read-failure", useDataProtectionKeychain: false) == legacy)
     }
 
-    @Test("legacy Keychain cleanup failure is reported and retried")
-    func legacyKeychainCleanupFailureIsReportedAndRetried() async throws {
+    @Test("missing PIN is distinct from Keychain entitlement and interaction failures")
+    func pinLookupDistinguishesMissingAndUnavailable() async {
+        clearPINCopies()
+        defer {
+            testPINKeychain.failDataProtectionReads = false
+            testPINKeychain.legacyReadFailureStatus = nil
+            clearPINCopies()
+        }
+
+        #expect(pinCredentialLookup() == .notFound)
+        #expect(adminPINAccessState() == .notConfigured)
+
+        testPINKeychain.failDataProtectionReads = true
+        testPINKeychain.dataProtectionReadFailureStatus = errSecMissingEntitlement
+        testPINKeychain.legacyReadFailureStatus = errSecInteractionNotAllowed
+        #expect(pinCredentialLookup() == .unavailable(errSecMissingEntitlement))
+        #expect(adminPINAccessState() == .unavailable(errSecMissingEntitlement))
+        #expect(!(await setPIN("2468")))
+        #expect(readPINDataFromDataProtectionKeychain() == nil)
+        #expect(readLegacyPINData() == nil)
+
+        testPINKeychain.dataProtectionReadFailureStatus = errSecInteractionNotAllowed
+        testPINKeychain.legacyReadFailureStatus = nil
+        #expect(pinCredentialLookup() == .unavailable(errSecInteractionNotAllowed))
+    }
+
+    @Test("malformed PIN remains recoverable only through explicit reset")
+    func malformedPINIsNotShownAsSetupOrOverwritten() async {
+        clearPINCopies()
+        defer { clearPINCopies() }
+
+        let malformed = Data("not-a-pin-record".utf8)
+        testPINKeychain.put(
+            malformed,
+            service: testPINService,
+            account: testPINAccount,
+            useDataProtectionKeychain: true
+        )
+
+        #expect(pinCredentialLookup() == .malformed)
+        #expect(adminPINAccessState() == .malformed)
+        #expect(!(await setPIN("8642")))
+        #expect(testPINKeychain.item(
+            service: testPINService,
+            account: testPINAccount,
+            useDataProtectionKeychain: true
+        ) == malformed)
+        #expect(testPINKeychain.item(
+            service: testPINService,
+            account: testPINAccount,
+            useDataProtectionKeychain: false
+        ) == nil)
+    }
+
+    @Test("PIN writes retain both verified Keychain copies across repeated reads")
+    func PINCopiesRemainReadableAcrossReads() async throws {
         clearPINCopies()
         defer {
             testPINKeychain.failLegacyDeletes = false
             clearPINCopies()
         }
 
-        let oldPIN = "2468"
-        let oldSalt = Data(repeating: 0x41, count: 16)
-        let oldRecord = PINCredentialRecord(
-            version: 1,
-            algorithm: "PBKDF2-HMAC-SHA256",
-            salt: oldSalt,
-            iterations: 100_000,
-            verifier: derivePBKDF2SHA256(pin: oldPIN, salt: oldSalt, iterations: 100_000)!
-        )
-        saveRawToKeychain(try JSONEncoder().encode(oldRecord))
         testPINKeychain.failLegacyDeletes = true
 
         #expect(await setPIN("9753"))
-        let pending = testPINKeychain.readDataMigratingToDataProtection(
-            service: testPINService,
-            account: testPINAccount,
-            accessibility: .whenUnlockedThisDeviceOnly
-        )
+        let pending = testPINKeychain.readDataWithFallback(service: testPINService, account: testPINAccount)
+        #expect(pending.data == readLegacyPINData())
         #expect(pending.data == readPINDataFromDataProtectionKeychain())
-        #expect(pending.legacyCleanupError == errSecIO)
         #expect(readLegacyPINData() != nil)
 
-        testPINKeychain.failLegacyDeletes = false
         #expect(readPINData() == readPINDataFromDataProtectionKeychain())
-        #expect(readLegacyPINData() == nil)
+        #expect(readLegacyPINData() == readPINDataFromDataProtectionKeychain())
         #expect(await verifyPIN("9753"))
     }
 
@@ -485,6 +583,8 @@ final class InMemoryGenericPasswordKeychain: GenericPasswordKeychainStore, @unch
     var simulatesUnifiedKeychain = false
     var hasSeparateLegacyKeychain: Bool { !simulatesUnifiedKeychain }
     var failDataProtectionReads = false
+    var dataProtectionReadFailureStatus: OSStatus = errSecInteractionNotAllowed
+    var legacyReadFailureStatus: OSStatus?
     var failDataProtectionWrites = false
     var failDataProtectionDeletes = false
     var failLegacyDeletes = false
@@ -498,7 +598,10 @@ final class InMemoryGenericPasswordKeychain: GenericPasswordKeychainStore, @unch
         lock.lock()
         defer { lock.unlock() }
         if useDataProtectionKeychain && failDataProtectionReads {
-            return (errSecInteractionNotAllowed, nil)
+            return (dataProtectionReadFailureStatus, nil)
+        }
+        if !useDataProtectionKeychain, let legacyReadFailureStatus {
+            return (legacyReadFailureStatus, nil)
         }
         let key = itemKey(service: service, account: account, useDataProtectionKeychain: useDataProtectionKeychain)
         guard let data = items[key] else { return (errSecItemNotFound, nil) }

@@ -155,6 +155,35 @@ struct SoakTests {
         #expect(BoothSoakCaptureMetrics.physicalCaptureAttemptCount(records) == 3)
     }
 
+    @Test("random production retake plans stay within one to four captures")
+    func randomProductionRetakePlanStaysInRange() {
+        var generator = SystemRandomNumberGenerator()
+        for photoCount in 1...8 {
+            for _ in 0..<100 {
+                let plan = BoothSoakRetakePlan.random(photoCount: photoCount, using: &generator)
+                #expect(plan.countsByPhoto.count == photoCount)
+                #expect((1...4).contains(plan.totalCount))
+                #expect(plan.countsByPhoto.allSatisfy { $0 >= 0 })
+            }
+        }
+    }
+
+    @Test("production retake plan requires the saved counts and every replacement capture")
+    func productionRetakeRequiresReplacementCaptures() {
+        let now = Date()
+        let plan = BoothSoakRetakePlan(countsByPhoto: [2, 0, 1])
+        let attempts = [0, 0, 0, 1, 2, 2].enumerated().map { index, photoIndex in
+            CaptureAttemptRecord(
+                id: "capture-\(index)", photoIndex: photoIndex,
+                startedAt: now, completedAt: now,
+                result: .success, reason: nil, receiveDuration: nil
+            )
+        }
+        #expect(!plan.verified(recordedCounts: [1, 0, 1], attempts: attempts))
+        #expect(!plan.verified(recordedCounts: [2, 0, 1], attempts: Array(attempts.dropLast())))
+        #expect(plan.verified(recordedCounts: [2, 0, 1], attempts: attempts))
+    }
+
     @Test("report includes event evidence percentiles and first-to-last window degradation")
     func reportContainsReleaseEvidence() {
         var metrics: [BoothSoakCycleMetric] = []

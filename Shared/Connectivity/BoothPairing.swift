@@ -1431,13 +1431,39 @@ protocol GenericPasswordKeychainStore: Sendable {
     func deleteData(service: String, account: String, useDataProtectionKeychain: Bool) -> OSStatus
 }
 
-struct GenericPasswordMigrationReadResult: Equatable, Sendable {
-    var data: Data?
-    var legacyCleanupError: OSStatus?
+enum CredentialLookup<Value: Equatable & Sendable>: Equatable, Sendable {
+    case found(Value)
+    case notFound
+    case unavailable(OSStatus)
+    case malformed
 }
 
-func reportLegacyKeychainCleanupFailure(_ status: OSStatus) {
-    NSLog("Data Protection Keychain credential is active, but legacy cleanup failed (OSStatus %d).", status)
+func credentialStatusName(_ status: OSStatus) -> String {
+    switch status {
+    case errSecSuccess: "errSecSuccess"
+    case errSecItemNotFound: "errSecItemNotFound"
+    case errSecInteractionNotAllowed: "errSecInteractionNotAllowed"
+    case errSecAuthFailed: "errSecAuthFailed"
+    case errSecMissingEntitlement: "errSecMissingEntitlement"
+    case errSecDecode: "errSecDecode"
+    case errSecNotAvailable: "errSecNotAvailable"
+    default: "OSStatus(\(status))"
+    }
+}
+
+enum GenericPasswordKeychainSource: Equatable, Sendable {
+    case dataProtection
+    case legacy
+}
+
+struct GenericPasswordReadResult: Equatable, Sendable {
+    var lookup: CredentialLookup<Data>
+    var source: GenericPasswordKeychainSource?
+
+    var data: Data? {
+        guard case let .found(data) = lookup else { return nil }
+        return data
+    }
 }
 
 extension GenericPasswordKeychainStore {
@@ -1449,59 +1475,51 @@ extension GenericPasswordKeychainStore {
         #endif
     }
 
-    func readDataMigratingToDataProtection(
+    func readDataWithFallback(
         service: String,
-        account: String,
-        accessibility: GenericPasswordKeychainAccessibility
-    ) -> GenericPasswordMigrationReadResult {
-        let preferred = readData(service: service, account: account, useDataProtectionKeychain: true)
-        if !hasSeparateLegacyKeychain {
-            // iOS has only the Data Protection Keychain. A query without
-            // kSecUseDataProtectionKeychain addresses the same item.
-            return GenericPasswordMigrationReadResult(
-                data: preferred.status == errSecSuccess ? preferred.data : nil,
-                legacyCleanupError: nil
-            )
-        }
-        if preferred.status == errSecSuccess {
-            let cleanupStatus = deleteData(service: service, account: account, useDataProtectionKeychain: false)
-            return GenericPasswordMigrationReadResult(
-                data: preferred.data,
-                legacyCleanupError: Self.isSuccessfulDelete(cleanupStatus) ? nil : cleanupStatus
-            )
-        }
-
-        let legacy = readData(service: service, account: account, useDataProtectionKeychain: false)
-        guard legacy.status == errSecSuccess, let legacyData = legacy.data else {
-            return GenericPasswordMigrationReadResult(data: nil, legacyCleanupError: nil)
-        }
-
-        let writeStatus = writeData(
-            legacyData,
+        account: String
+    ) -> GenericPasswordReadResult {
+        let dataProtection = Self.lookup(status: readData(
             service: service,
             account: account,
-            useDataProtectionKeychain: true,
-            accessibility: accessibility
-        )
-        guard writeStatus == errSecSuccess else {
-            return GenericPasswordMigrationReadResult(data: legacyData, legacyCleanupError: nil)
+            useDataProtectionKeychain: true
+        ))
+        if case .found = dataProtection {
+            return GenericPasswordReadResult(lookup: dataProtection, source: .dataProtection)
+        }
+        if !hasSeparateLegacyKeychain {
+            return GenericPasswordReadResult(lookup: dataProtection, source: nil)
+        }
+        let legacy = Self.lookup(status: readData(
+            service: service,
+            account: account,
+            useDataProtectionKeychain: false
+        ))
+        if case .found = legacy {
+            return GenericPasswordReadResult(lookup: legacy, source: .legacy)
         }
 
-        let verified = readData(service: service, account: account, useDataProtectionKeychain: true)
-        guard verified.status == errSecSuccess, verified.data == legacyData else {
-            _ = deleteData(service: service, account: account, useDataProtectionKeychain: true)
-            return GenericPasswordMigrationReadResult(data: legacyData, legacyCleanupError: nil)
+        let result: CredentialLookup<Data>
+        switch (legacy, dataProtection) {
+        case (.notFound, .notFound): result = .notFound
+        case (.malformed, _), (_, .malformed): result = .malformed
+        case let (_, .unavailable(status)): result = .unavailable(status)
+        case let (.unavailable(status), _): result = .unavailable(status)
+        case (.found, _), (_, .found): preconditionFailure("Found credentials are handled above")
         }
-
-        let cleanupStatus = deleteData(service: service, account: account, useDataProtectionKeychain: false)
-        return GenericPasswordMigrationReadResult(
-            data: verified.data,
-            legacyCleanupError: Self.isSuccessfulDelete(cleanupStatus) ? nil : cleanupStatus
-        )
+        return GenericPasswordReadResult(lookup: result, source: nil)
     }
 
-    private static func isSuccessfulDelete(_ status: OSStatus) -> Bool {
-        status == errSecSuccess || status == errSecItemNotFound
+    private static func lookup(
+        status result: (status: OSStatus, data: Data?)
+    ) -> CredentialLookup<Data> {
+        if result.status == errSecSuccess {
+            guard let data = result.data else { return .malformed }
+            return .found(data)
+        }
+        if result.status == errSecItemNotFound { return .notFound }
+        if result.status == errSecDecode { return .malformed }
+        return .unavailable(result.status)
     }
 
     func writeDataAndVerify(
@@ -1523,6 +1541,75 @@ extension GenericPasswordKeychainStore {
         let readback = readData(service: service, account: account, useDataProtectionKeychain: useDataProtectionKeychain)
         guard readback.status == errSecSuccess else { return readback.status }
         return readback.data == data ? errSecSuccess : errSecIO
+    }
+
+    /// Verifies both macOS Keychain copies and succeeds when either persists.
+    /// iOS has only the Data Protection Keychain.
+    func writeDataAndVerifyForPersistence(
+        _ data: Data,
+        service: String,
+        account: String,
+        accessibility: GenericPasswordKeychainAccessibility
+    ) -> OSStatus {
+        #if os(macOS)
+        let dataProtectionStatus = writeDataAndVerify(
+            data,
+            service: service,
+            account: account,
+            useDataProtectionKeychain: true,
+            accessibility: accessibility
+        )
+
+        // Do not replace an existing legacy copy when a different Data
+        // Protection value remains authoritative after a failed write.
+        let dataProtectionReadback = readData(
+            service: service,
+            account: account,
+            useDataProtectionKeychain: true
+        )
+        let mayWriteLegacy: Bool
+        if dataProtectionStatus == errSecSuccess {
+            mayWriteLegacy = true
+        } else if dataProtectionReadback.status == errSecItemNotFound {
+            mayWriteLegacy = true
+        } else if dataProtectionReadback.status == errSecSuccess,
+                  dataProtectionReadback.data == data {
+            mayWriteLegacy = true
+        } else {
+            mayWriteLegacy = false
+        }
+
+        guard mayWriteLegacy else {
+            return dataProtectionStatus == errSecSuccess ? errSecIO : dataProtectionStatus
+        }
+        let legacyStatus = writeDataAndVerify(
+            data,
+            service: service,
+            account: account,
+            useDataProtectionKeychain: false,
+            accessibility: accessibility
+        )
+
+        let effectiveReadback = readDataWithFallback(service: service, account: account)
+        guard case let .found(persistedData) = effectiveReadback.lookup else {
+            switch effectiveReadback.lookup {
+            case .unavailable(let status): return status
+            case .malformed: return errSecDecode
+            case .notFound:
+                return dataProtectionStatus != errSecSuccess ? dataProtectionStatus : legacyStatus
+            case .found: preconditionFailure("Found credentials are handled above")
+            }
+        }
+        return persistedData == data ? errSecSuccess : errSecIO
+        #else
+        return writeDataAndVerify(
+            data,
+            service: service,
+            account: account,
+            useDataProtectionKeychain: true,
+            accessibility: accessibility
+        )
+        #endif
     }
 
     func deleteBothCopies(service: String, account: String) -> OSStatus {
@@ -1645,13 +1732,17 @@ final class BoothTrustedPeerStore {
     var trustedPeerIDs: Set<String> { Set(trustedPeers.map(\.id)) }
 
     func hasUsableSecret(for peerID: String) -> Bool {
-        secret(for: peerID)?.count == 32
+        if case .found = secretLookup(for: peerID) { return true }
+        return false
     }
 
     var preferredPeerNeedsRepair: Bool {
         guard let preferredID = preferredPeerID,
               trustedPeerIDs.contains(preferredID) else { return false }
-        return !hasUsableSecret(for: preferredID)
+        switch secretLookup(for: preferredID) {
+        case .notFound, .malformed: return true
+        case .found, .unavailable: return false
+        }
     }
 
     var preferredPeerID: String? {
@@ -1685,15 +1776,41 @@ final class BoothTrustedPeerStore {
     }
 
     func secret(for peerID: String) -> Data? {
-        let result = keychain.readDataMigratingToDataProtection(
+        if case let .found(data) = secretLookup(for: peerID) { return data }
+        return nil
+    }
+
+    func secretLookup(for peerID: String) -> CredentialLookup<Data> {
+        let result = keychain.readDataWithFallback(
             service: keychainService,
-            account: peerID,
-            accessibility: .afterFirstUnlockThisDeviceOnly
+            account: peerID
         )
-        if let status = result.legacyCleanupError {
-            reportLegacyKeychainCleanupFailure(status)
+        let lookup = secretLookup(from: result.lookup)
+        if case let (.found(secret), .dataProtection) = (lookup, result.source),
+           keychain.hasSeparateLegacyKeychain,
+           keychain.readData(
+               service: keychainService,
+               account: peerID,
+               useDataProtectionKeychain: false
+           ).status == errSecItemNotFound {
+            _ = keychain.writeDataAndVerify(
+                secret,
+                service: keychainService,
+                account: peerID,
+                useDataProtectionKeychain: false,
+                accessibility: .afterFirstUnlockThisDeviceOnly
+            )
         }
-        return result.data
+        return lookup
+    }
+
+    private func secretLookup(from lookup: CredentialLookup<Data>) -> CredentialLookup<Data> {
+        switch lookup {
+        case .found(let secret): return secret.count == 32 ? .found(secret) : .malformed
+        case .notFound: return .notFound
+        case .unavailable(let status): return .unavailable(status)
+        case .malformed: return .malformed
+        }
     }
 
     @discardableResult
@@ -1727,17 +1844,13 @@ final class BoothTrustedPeerStore {
     }
 
     private func saveSecret(_ secret: Data, peerID: String) throws {
-        let status = keychain.writeDataAndVerify(
+        let status = keychain.writeDataAndVerifyForPersistence(
             secret,
             service: keychainService,
             account: peerID,
-            useDataProtectionKeychain: true,
             accessibility: .afterFirstUnlockThisDeviceOnly
         )
         guard status == errSecSuccess else { throw BoothPairingError.keychain(status) }
-        if keychain.hasSeparateLegacyKeychain {
-            _ = keychain.deleteData(service: keychainService, account: peerID, useDataProtectionKeychain: false)
-        }
     }
 
     private func deleteSecret(peerID: String) -> OSStatus {

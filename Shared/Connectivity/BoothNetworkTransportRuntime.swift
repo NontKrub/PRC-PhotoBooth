@@ -27,6 +27,9 @@ final class BoothNetworkTransportRuntime: @unchecked Sendable {
             routeGeneration: Int?
         )
         case controlFrames(generation: Int, frames: [BoothDecodedTransportFrame])
+        /// Frames from the facade-owned direct receive path. They are emitted
+        /// only after its decoder has completed the secure handshake.
+        case directControlFrames(generation: Int, frames: [BoothDecodedTransportFrame])
         case controlFrameDecodeFailed(
             generation: Int,
             routeGeneration: Int?,
@@ -54,6 +57,7 @@ final class BoothNetworkTransportRuntime: @unchecked Sendable {
                 snapshot.candidate.generation
             case .trustedAuthenticated(let generation, _, _, _, _, _, _, _),
                  .controlFrames(let generation, _),
+                 .directControlFrames(let generation, _),
                  .controlFrameDecodeFailed(let generation, _, _, _),
                  .disconnected(let generation, _),
                  .rejected(let generation, _):
@@ -2391,6 +2395,24 @@ final class BoothNetworkTransportRuntime: @unchecked Sendable {
     func markControlActivityOnQueue() {
         guard controlTrafficAdmitted, heartbeatConnection != nil else { return }
         heartbeatState.markActivity()
+    }
+
+    /// Refresh liveness only for the exact connection and generation that
+    /// owns the active heartbeat. A delayed callback from a replaced socket
+    /// cannot extend its successor's timeout.
+    func markControlActivityOnQueue(connection: NWConnection, generation: Int) {
+        guard controlTrafficAdmitted,
+              activeControlConnection === connection,
+              activeControlGeneration == generation,
+              heartbeatConnection === connection,
+              heartbeatGeneration == generation else { return }
+        heartbeatState.markActivity()
+    }
+
+    func isControlConnectionCurrent(connection: NWConnection, generation: Int) -> Bool {
+        onQueue {
+            activeControlConnection === connection && activeControlGeneration == generation
+        }
     }
 
     func stopHeartbeat() {

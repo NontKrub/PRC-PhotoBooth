@@ -182,7 +182,18 @@
         }
       }
     },
+    "%@ sessions × (%@ photos + 1–4 retakes) = %@–%@ camera captures." : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "%1$@ sessions × (%2$@ photos + 1–4 retakes) = %3$@–%4$@ camera captures."
+          }
+        }
+      }
+    },
     "%@ sessions × %@ photos = %@ camera captures." : {
+      "extractionState" : "stale",
       "localizations" : {
         "en" : {
           "stringUnit" : {
@@ -567,6 +578,74 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "การเข้าถึงผู้ดูแล"
+          }
+        }
+      }
+    },
+    "Admin credential unavailable" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Admin credential unavailable"
+          }
+        },
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ไม่สามารถเข้าถึงข้อมูลรับรองผู้ดูแลระบบ"
+          }
+        }
+      }
+    },
+    "Admin credential unavailable." : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Admin credential unavailable."
+          }
+        },
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ไม่สามารถเข้าถึงข้อมูลรับรองผู้ดูแลระบบ"
+          }
+        }
+      }
+    },
+    "Admin PIN could not be saved. Try again." : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Admin PIN could not be saved. Try again."
+          }
+        },
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "บันทึก PIN ผู้ดูแลระบบไม่ได้ ลองอีกครั้ง"
+          }
+        }
+      }
+    },
+    "Admin PIN is not configured. Retry Settings." : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Admin PIN is not configured. Retry Settings."
+          }
+        },
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ยังไม่ได้ตั้งค่า PIN ผู้ดูแลระบบ ลองเปิดการตั้งค่าอีกครั้ง"
           }
         }
       }
@@ -1396,6 +1475,23 @@
         }
       }
     },
+    "Checking Admin PIN…" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Checking Admin PIN…"
+          }
+        },
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "กำลังตรวจสอบ PIN ผู้ดูแลระบบ…"
+          }
+        }
+      }
+    },
     "Checking Booth…" : {
       "extractionState" : "manual",
       "localizations" : {
@@ -1536,6 +1632,17 @@
         }
       }
     },
+    "Cloud" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "คลาวด์"
+          }
+        }
+      }
+    },
     "Cloud SSH setup" : {
       "localizations" : {
         "th" : {
@@ -1553,17 +1660,6 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "การตั้งค่า Cloud SSH ยังไม่เสร็จสมบูรณ์"
-          }
-        }
-      }
-    },
-    "Cloud" : {
-      "extractionState" : "manual",
-      "localizations" : {
-        "th" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "คลาวด์"
           }
         }
       }
@@ -1673,6 +1769,23 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "เสร็จแล้ว"
+          }
+        }
+      }
+    },
+    "Configured" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Configured"
+          }
+        },
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ตั้งค่าแล้ว"
           }
         }
       }
@@ -3341,16 +3454,6 @@
         }
       }
     },
-    "GIF processing" : {
-      "localizations" : {
-        "th" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "กำลังประมวลผล GIF"
-          }
-        }
-      }
-    },
     "General" : {
       "extractionState" : "manual",
       "localizations" : {
@@ -3358,6 +3461,16 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "ทั่วไป"
+          }
+        }
+      }
+    },
+    "GIF processing" : {
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "กำลังประมวลผล GIF"
           }
         }
       }
@@ -3674,6 +3787,17 @@
         }
       }
     },
+    "Invalid control frame. Reconnecting…" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ข้อมูลควบคุมไม่ถูกต้อง กำลังเชื่อมต่อใหม่…"
+          }
+        }
+      }
+    },
     "iPad" : {
       "extractionState" : "manual",
       "localizations" : {
@@ -3746,17 +3870,6 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "ISO"
-          }
-        }
-      }
-    },
-    "Invalid control frame. Reconnecting…" : {
-      "extractionState" : "manual",
-      "localizations" : {
-        "th" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "ข้อมูลควบคุมไม่ถูกต้อง กำลังเชื่อมต่อใหม่…"
           }
         }
       }
@@ -5290,6 +5403,23 @@
         }
       }
     },
+    "PRC PhotoBooth could not access the saved Admin PIN." : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "PRC PhotoBooth could not access the saved Admin PIN."
+          }
+        },
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "PRC PhotoBooth ไม่สามารถเข้าถึง PIN ผู้ดูแลระบบที่บันทึกไว้ได้"
+          }
+        }
+      }
+    },
     "PRC-PhotoBooth" : {
       "extractionState" : "manual",
       "localizations" : {
@@ -6006,6 +6136,23 @@
         }
       }
     },
+    "Reset Admin PIN" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Reset Admin PIN"
+          }
+        },
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "รีเซ็ต PIN ผู้ดูแลระบบ"
+          }
+        }
+      }
+    },
     "Reset Admin PIN?" : {
       "extractionState" : "manual",
       "localizations" : {
@@ -6017,6 +6164,23 @@
         }
       }
     },
+    "Reset Admin PIN…" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Reset Admin PIN…"
+          }
+        },
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "รีเซ็ต PIN ผู้ดูแลระบบ…"
+          }
+        }
+      }
+    },
     "Reset PIN" : {
       "extractionState" : "manual",
       "localizations" : {
@@ -6024,6 +6188,23 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "รีเซ็ต PIN"
+          }
+        }
+      }
+    },
+    "Reset saved Admin PIN?" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Reset saved Admin PIN?"
+          }
+        },
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "รีเซ็ต PIN ผู้ดูแลระบบที่บันทึกไว้หรือไม่"
           }
         }
       }
@@ -6331,6 +6512,40 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "บันทึกชื่ออุปกรณ์"
+          }
+        }
+      }
+    },
+    "Saved Admin PIN is invalid" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Saved Admin PIN is invalid"
+          }
+        },
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "PIN ผู้ดูแลระบบที่บันทึกไว้ไม่ถูกต้อง"
+          }
+        }
+      }
+    },
+    "Saved Admin PIN is invalid. Retry or reset it." : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Saved Admin PIN is invalid. Retry or reset it."
+          }
+        },
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "PIN ผู้ดูแลระบบที่บันทึกไว้ไม่ถูกต้อง ลองอีกครั้งหรือรีเซ็ต PIN"
           }
         }
       }
@@ -6996,6 +7211,23 @@
         }
       }
     },
+    "Some iPad secrets could not be removed from Keychain. Those peers remain trusted." : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Some iPad secrets could not be removed from Keychain. Those peers remain trusted."
+          }
+        },
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ลบรหัสลับของ iPad บางเครื่องออกจาก Keychain ไม่ได้ อุปกรณ์เหล่านั้นจึงยังคงเป็นอุปกรณ์ที่เชื่อถือได้"
+          }
+        }
+      }
+    },
     "SSH alias" : {
       "localizations" : {
         "th" : {
@@ -7450,6 +7682,23 @@
         }
       }
     },
+    "The iPad remains trusted because its Keychain secret could not be removed." : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "The iPad remains trusted because its Keychain secret could not be removed."
+          }
+        },
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "iPad ยังคงเป็นอุปกรณ์ที่เชื่อถือได้ เนื่องจากไม่สามารถลบรหัสลับใน Keychain ได้"
+          }
+        }
+      }
+    },
     "The last unaccepted preview was not saved and will be retaken." : {
       "localizations" : {
         "th" : {
@@ -7482,6 +7731,23 @@
         }
       }
     },
+    "The PIN was not reset because Keychain could not remove every stored credential copy." : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "The PIN was not reset because Keychain could not remove every stored credential copy."
+          }
+        },
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ไม่ได้รีเซ็ต PIN เนื่องจาก Keychain ไม่สามารถลบข้อมูลรับรองที่จัดเก็บไว้ได้ทั้งหมด"
+          }
+        }
+      }
+    },
     "The printed QR is still valid. Retrying the upload will restore the same link." : {
       "localizations" : {
         "th" : {
@@ -7498,6 +7764,57 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "URL สาธารณะสำหรับลูกค้าไม่ถูกต้อง การส่งมอบผ่านคลาวด์ต้องใช้ HTTPS"
+          }
+        }
+      }
+    },
+    "The saved Admin PIN could not be reset. Keychain access is still unavailable." : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "The saved Admin PIN could not be reset. Keychain access is still unavailable."
+          }
+        },
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "รีเซ็ต PIN ผู้ดูแลระบบไม่ได้ ขณะนี้ยังเข้าถึง Keychain ไม่ได้"
+          }
+        }
+      }
+    },
+    "The saved Admin PIN was preserved. Open Settings to retry or explicitly reset it." : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "The saved Admin PIN was preserved. Open Settings to retry or explicitly reset it."
+          }
+        },
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ระบบเก็บรักษา PIN ผู้ดูแลระบบไว้แล้ว เปิดการตั้งค่าเพื่อลองอีกครั้งหรือรีเซ็ตด้วยตนเอง"
+          }
+        }
+      }
+    },
+    "The saved Admin PIN was preserved. Retry or explicitly reset it to continue." : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "The saved Admin PIN was preserved. Retry or explicitly reset it to continue."
+          }
+        },
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ระบบเก็บรักษา PIN ผู้ดูแลระบบไว้แล้ว ลองอีกครั้งหรือรีเซ็ตด้วยตนเองเพื่อดำเนินการต่อ"
           }
         }
       }
@@ -7566,6 +7883,23 @@
         }
       }
     },
+    "This removes the saved Admin credential and opens PIN setup." : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "This removes the saved Admin credential and opens PIN setup."
+          }
+        },
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "การดำเนินการนี้จะลบข้อมูลรับรองผู้ดูแลระบบที่บันทึกไว้และเปิดการตั้งค่า PIN ใหม่"
+          }
+        }
+      }
+    },
     "This submits a new print request and does not create another persistent automatic-print job." : {
       "localizations" : {
         "th" : {
@@ -7603,6 +7937,23 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "โทเค็น: %1$@"
+          }
+        }
+      }
+    },
+    "Too many attempts. Try again shortly." : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Too many attempts. Try again shortly."
+          }
+        },
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "พยายามหลายครั้งเกินไป โปรดลองอีกครั้งในอีกสักครู่"
           }
         }
       }

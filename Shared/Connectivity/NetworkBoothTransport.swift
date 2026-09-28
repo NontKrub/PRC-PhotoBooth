@@ -5,16 +5,32 @@ import Network
 import UIKit
 #endif
 
+/// Dispatch sources run on the transport queue. Build their callbacks outside
+/// the facade's MainActor context so Swift does not inherit its isolation.
+enum BoothTransportTimerDispatch {
+    nonisolated static func onMainActor(
+        _ action: @escaping @MainActor @Sendable () -> Void
+    ) -> @Sendable () -> Void {
+        {
+            Task { @MainActor in action() }
+        }
+    }
+}
+
 /// AsyncStream's buffer is bounded so a stalled MainActor cannot accumulate an
 /// unbounded control-frame backlog. The lock protects its generation latches;
 /// stream continuation operations are thread-safe by contract.
 final class BoothNetworkTransportCoreEventStream: @unchecked Sendable {
-    private static let defaultBufferLimit = 128
+    // The bounded stream holds up to 25 seconds of 10 Hz authenticated
+    // control traffic while presentation is stalled; overflow closes the
+    // owning connection instead of growing memory without limit.
+    private static let defaultBufferLimit = 256
     let stream: AsyncStream<BoothNetworkTransportRuntime.ControlCoreEvent>
     private let continuation: AsyncStream<BoothNetworkTransportRuntime.ControlCoreEvent>.Continuation
     private let overflowLock = NSLock()
     private var highestSuppressedGeneration = 0
     private var highestHandledOverflowGeneration = 0
+    private var highestSuppressedDirectGeneration = 0
 
     init(bufferLimit: Int = defaultBufferLimit) {
         let (stream, continuation) = AsyncStream<BoothNetworkTransportRuntime.ControlCoreEvent>.makeStream(
@@ -74,6 +90,18 @@ final class BoothNetworkTransportCoreEventStream: @unchecked Sendable {
         overflowLock.lock()
         defer { overflowLock.unlock() }
         return generation <= highestSuppressedGeneration
+    }
+
+    func suppressDirectEvents(through generation: Int) {
+        overflowLock.lock()
+        highestSuppressedDirectGeneration = max(highestSuppressedDirectGeneration, generation)
+        overflowLock.unlock()
+    }
+
+    func isDirectEventSuppressed(_ generation: Int) -> Bool {
+        overflowLock.lock()
+        defer { overflowLock.unlock() }
+        return generation <= highestSuppressedDirectGeneration
     }
 
     func finish() {
@@ -495,10 +523,14 @@ public final class NetworkBoothTransport: BoothTransport {
         self.transportRuntime.updateTrustedPeerIDs(trustedStore.trustedPeerIDs)
         if role == .iPad, trustedStore.autoReconnect,
            let preferredID = trustedStore.preferredPeerID {
-            if trustedStore.hasUsableSecret(for: preferredID) {
+            switch trustedStore.secretLookup(for: preferredID) {
+            case .found:
                 self.targetPeerID = preferredID
-            } else {
+            case .notFound, .malformed:
                 trustedStore.autoReconnect = false
+            case .unavailable(let status):
+                self.targetPeerID = preferredID
+                self.lastNetworkError = "Pairing credential unavailable. Keychain: \(credentialStatusName(status))."
             }
         }
         self.controlWritePump.onFailure = { [weak self] outcome, reason, generation in
@@ -682,8 +714,12 @@ public final class NetworkBoothTransport: BoothTransport {
     }
 
     private func handleControlCoreEvent(_ event: BoothNetworkTransportRuntime.ControlCoreEvent) {
-        if let generation = event.controlGeneration,
-           controlCoreEventStream.isSuppressed(generation) { return }
+        if case let .directControlFrames(generation, _) = event {
+            guard !controlCoreEventStream.isDirectEventSuppressed(generation) else { return }
+        } else if let generation = event.controlGeneration,
+                  controlCoreEventStream.isSuppressed(generation) {
+            return
+        }
         switch event {
         case let .pairingIntentCandidate(candidate, intent):
             guard transportRuntime.isInboundPairingCandidateCurrent(
@@ -760,6 +796,17 @@ public final class NetworkBoothTransport: BoothTransport {
         case let .controlFrames(generation, frames):
             guard coreOwnedControlGeneration == generation,
                   controlConnectionGeneration == generation,
+                  peerAuthenticated,
+                  secureChannelEstablished else { return }
+            handleDecodedFrames(frames)
+        case let .directControlFrames(generation, frames):
+            guard coreOwnedControlGeneration == nil,
+                  controlConnectionGeneration == generation,
+                  let connection = controlConnection,
+                  transportRuntime.isControlConnectionCurrent(
+                    connection: connection,
+                    generation: generation
+                  ),
                   peerAuthenticated,
                   secureChannelEstablished else { return }
             handleDecodedFrames(frames)
@@ -1686,12 +1733,22 @@ public final class NetworkBoothTransport: BoothTransport {
 
     public func selectPreferredPeer(_ peerID: String?) {
         guard peerID.map(trustedStore.trustedPeerIDs.contains) ?? true else { return }
-        if role == .iPad, let peerID,
-           !trustedStore.hasUsableSecret(for: peerID) {
-            let reason = "Pairing key is missing. Forget this Mac on both devices, then pair again."
-            lastNetworkError = reason
-            setPairingStage(.failed, state: .failed(reason))
-            return
+        if role == .iPad, let peerID {
+            switch trustedStore.secretLookup(for: peerID) {
+            case .found:
+                break
+            case .notFound, .malformed:
+                let reason = "Pairing key is missing or invalid. Forget this Mac on both devices, then pair again."
+                lastNetworkError = reason
+                setPairingStage(.failed, state: .failed(reason))
+                return
+            case .unavailable(let status):
+                let reason = "Pairing credential unavailable. Keychain: \(credentialStatusName(status))."
+                lastNetworkError = reason
+                setPairingStage(.failed, state: .failed(reason))
+                publishStatus()
+                return
+            }
         }
         if role == .iPad { prepareForPeerSelection(peerID) }
         trustedStore.preferredPeerID = peerID
@@ -1712,10 +1769,19 @@ public final class NetworkBoothTransport: BoothTransport {
 
     public func connectToPeer(_ peerID: String) {
         guard role == .iPad, trustedStore.trustedPeerIDs.contains(peerID) else { return }
-        guard trustedStore.hasUsableSecret(for: peerID) else {
-            let reason = "Pairing key is missing. Forget this Mac on both devices, then pair again."
+        switch trustedStore.secretLookup(for: peerID) {
+        case .found:
+            break
+        case .notFound, .malformed:
+            let reason = "Pairing key is missing or invalid. Forget this Mac on both devices, then pair again."
             lastNetworkError = reason
             setPairingStage(.failed, state: .failed(reason))
+            return
+        case .unavailable(let status):
+            let reason = "Pairing credential unavailable. Keychain: \(credentialStatusName(status))."
+            lastNetworkError = reason
+            setPairingStage(.failed, state: .failed(reason))
+            publishStatus()
             return
         }
         guard !(targetPeerID == peerID && peerDeviceID == peerID && peerAuthenticated) else { return }
@@ -1874,31 +1940,50 @@ public final class NetworkBoothTransport: BoothTransport {
     public func forgetPeer(_ peerID: String) -> Bool {
         let deletionStatus = trustedStore.forget(peerID: peerID)
         guard deletionStatus == errSecSuccess else {
-            lastNetworkError = "The iPad remains trusted because its Keychain secret could not be removed."
+            lastNetworkError = role == .mac
+                ? "The iPad remains trusted because its Keychain secret could not be removed."
+                : "The Mac remains trusted because its Keychain secret could not be removed."
             publishStatus()
             return false
         }
         let wasCurrent = peerDeviceID == peerID
+        if wasCurrent {
+            lastNetworkError = nil
+            disconnect()
+            refreshControlCoreCredentials()
+            start()
+            return true
+        }
         if targetPeerID == peerID {
             resetPairingState(clearTarget: true, clearPendingCommit: true, clearFailure: true)
         }
         refreshControlCoreCredentials()
-        if wasCurrent { controlConnection?.cancel() }
         setPairingStage(.idle, state: .idle)
         if role == .iPad { restartDiscoveryForPeerSelection() }
         lastNetworkError = nil
         return true
     }
 
+    /// An explicit recovery action for an iPad whose Mac has forgotten its
+    /// pairing secret. Clearing local trust permits a fresh PIN intent from
+    /// Nearby Macs while the Mac retains the same device identity.
+    @discardableResult
+    public func repairPairing(with peerID: String) -> Bool {
+        guard role == .iPad,
+              trustedStore.trustedPeerIDs.contains(peerID),
+              forgetPeer(peerID) else { return false }
+        if !shouldReconnect { start() }
+        retryPairing(with: peerID)
+        return true
+    }
+
     @discardableResult
     public func forgetAllPeers() -> Bool {
         let deletionStatus = trustedStore.forgetAll()
-        resetPairingState(clearTarget: true, clearPendingCommit: true, clearFailure: true)
+        lastNetworkError = nil
+        disconnect()
         refreshControlCoreCredentials()
-        peerAuthenticated = false
-        controlConnection?.cancel()
-        setPairingStage(.idle, state: .idle)
-        if role == .iPad { restartDiscoveryForPeerSelection() }
+        start()
         guard deletionStatus == errSecSuccess else {
             lastNetworkError = "Some iPad secrets could not be removed from Keychain; those peers remain trusted."
             publishStatus()
@@ -2218,19 +2303,17 @@ public final class NetworkBoothTransport: BoothTransport {
         let token = lanRecoveryToken
         let source = DispatchSource.makeTimerSource(queue: transportQueue)
         source.schedule(deadline: .now() + delay)
-        source.setEventHandler { [weak self] in
-            Task { @MainActor [weak self] in
-                guard let self else { return }
-                guard self.lanRecoveryToken == token else { return }
-                self.lanRecoverySource = nil
-                guard self.isLANPathAvailable,
-                      self.shouldReconnect,
-                      self.activeInterface == .wifi,
-                      self.requestedPreference == .lan,
-                      self.fallbackActive else { return }
-                self.attemptPendingLANRecoveryIfIdle()
-            }
-        }
+        source.setEventHandler(handler: BoothTransportTimerDispatch.onMainActor { [weak self] in
+            guard let self else { return }
+            guard self.lanRecoveryToken == token else { return }
+            self.lanRecoverySource = nil
+            guard self.isLANPathAvailable,
+                  self.shouldReconnect,
+                  self.activeInterface == .wifi,
+                  self.requestedPreference == .lan,
+                  self.fallbackActive else { return }
+            self.attemptPendingLANRecoveryIfIdle()
+        })
         lanRecoverySource = source
         source.resume()
     }
@@ -2424,17 +2507,28 @@ public final class NetworkBoothTransport: BoothTransport {
 
     private func startRouteDiscovery(skipDirectLANFallback: Bool) {
         guard role == .iPad, shouldReconnect else { return }
-        if targetPeerID == trustedStore.preferredPeerID,
-           targetPeerID != nil,
-           trustedStore.preferredPeerNeedsRepair,
+        if let targetPeerID,
+           targetPeerID == trustedStore.preferredPeerID,
            !hasEphemeralPairingState {
-            let reason = "Pairing key is missing. Forget this Mac on both devices, then pair again."
-            trustedStore.autoReconnect = false
-            targetPeerID = nil
-            pendingPairingFailure = reason
-            lastNetworkError = reason
-            refreshControlCoreCredentials()
-            setPairingStage(.failed, state: .failed(reason))
+            switch trustedStore.secretLookup(for: targetPeerID) {
+            case .found:
+                break
+            case .notFound, .malformed:
+                let reason = "Pairing key is missing or invalid. Forget this Mac on both devices, then pair again."
+                trustedStore.autoReconnect = false
+                self.targetPeerID = nil
+                pendingPairingFailure = reason
+                lastNetworkError = reason
+                refreshControlCoreCredentials()
+                setPairingStage(.failed, state: .failed(reason))
+            case .unavailable(let status):
+                let reason = "Pairing credential unavailable. Keychain: \(credentialStatusName(status))."
+                lastNetworkError = reason
+                setPairingStage(.failed, state: .failed(reason))
+                publishPairingStatus()
+                publishStatus()
+                return
+            }
         }
         directLANControlAttemptInFlight = false
         discoveredPeersByID.removeAll()
@@ -3973,8 +4067,37 @@ public final class NetworkBoothTransport: BoothTransport {
         let controlConnectionGeneration = self.controlConnectionGeneration
         let routeGeneration = self.routeDiscoveryGate.generation
         let localRole = self.role
+        let eventStream = self.controlCoreEventStream
+        let isReceiveCurrent: @Sendable () -> Bool = { [transportRuntime, connection] in
+            channel != .control || transportRuntime.isControlConnectionCurrent(
+                connection: connection,
+                generation: controlConnectionGeneration
+            )
+        }
+        let enqueueAuthenticatedControl: (@Sendable ([BoothDecodedTransportFrame]) -> Bool)?
+        if channel == .control {
+            enqueueAuthenticatedControl = { @Sendable [eventStream] frames in
+                eventStream.yield(.directControlFrames(
+                    generation: controlConnectionGeneration,
+                    frames: frames
+                ))
+            }
+        } else {
+            enqueueAuthenticatedControl = nil
+        }
+        let controlDeliveryOverflow: @Sendable (String) -> Void = { [weak self, connection, eventStream] reason in
+            eventStream.suppressDirectEvents(through: controlConnectionGeneration)
+            connection.cancel()
+            Task { @MainActor [weak self, connection] in
+                guard let self,
+                      token.isValid,
+                      self.isCurrent(connection, channel: .control),
+                      self.controlConnectionGeneration == controlConnectionGeneration else { return }
+                self.connectionDidClose(connection, channel: .control, reason: reason)
+            }
+        }
         transportQueue.async { [weak self, weak connection] in
-            guard let self, let connection, token.isValid else { return }
+            guard let self, let connection, token.isValid, isReceiveCurrent() else { return }
             if decoderOverride == nil { decoder.reset(channel) }
             Self.receive(
                 on: connection,
@@ -3987,7 +4110,10 @@ public final class NetworkBoothTransport: BoothTransport {
                 localRole: localRole,
                 activity: { [transportRuntime, secureChannel] in
                     guard secureChannel.isConfigured else { return }
-                    transportRuntime.markControlActivityOnQueue()
+                    transportRuntime.markControlActivityOnQueue(
+                        connection: connection,
+                        generation: controlConnectionGeneration
+                    )
                 },
                 deliver: { [weak self, weak connection] frames in
                     guard let self, let connection,
@@ -4015,7 +4141,10 @@ public final class NetworkBoothTransport: BoothTransport {
                           token.isValid,
                           self.isCurrent(connection, channel: channel) else { return }
                     self.connectionDidClose(connection, channel: channel, reason: reason)
-                }
+                },
+                isReceiveCurrent: isReceiveCurrent,
+                enqueueAuthenticatedControl: enqueueAuthenticatedControl,
+                controlDeliveryOverflow: controlDeliveryOverflow
             )
         }
         return true
@@ -4034,7 +4163,10 @@ public final class NetworkBoothTransport: BoothTransport {
         deliver: @escaping @MainActor ([BoothDecodedTransportFrame]) -> Void,
         deliverPreview: @escaping @Sendable (Data) -> Void,
         diagnoseControlFailure: @escaping @MainActor (BoothControlFrameDecodeFailure) -> Void = { _ in },
-        close: @escaping @MainActor (String?) -> Void
+        close: @escaping @MainActor (String?) -> Void,
+        isReceiveCurrent: @escaping @Sendable () -> Bool = { true },
+        enqueueAuthenticatedControl: (@Sendable ([BoothDecodedTransportFrame]) -> Bool)? = nil,
+        controlDeliveryOverflow: @escaping @Sendable (String) -> Void = { _ in }
     ) {
         guard token.isValid else { return }
         if channel == .control {
@@ -4050,8 +4182,11 @@ public final class NetworkBoothTransport: BoothTransport {
                     localRole: localRole,
                     activity: activity,
                     deliver: deliver,
+                    enqueueAuthenticatedControl: enqueueAuthenticatedControl,
                     diagnoseControlFailure: diagnoseControlFailure,
                     close: close,
+                    isReceiveCurrent: isReceiveCurrent,
+                    controlDeliveryOverflow: controlDeliveryOverflow,
                     data: data ?? Data(),
                     isComplete: isComplete,
                     errorDescription: error?.localizedDescription
@@ -4121,18 +4256,34 @@ public final class NetworkBoothTransport: BoothTransport {
         localRole: DeviceRole,
         activity: @escaping @Sendable () -> Void,
         deliver: @escaping @MainActor ([BoothDecodedTransportFrame]) -> Void,
+        enqueueAuthenticatedControl: (@Sendable ([BoothDecodedTransportFrame]) -> Bool)?,
         diagnoseControlFailure: @escaping @MainActor (BoothControlFrameDecodeFailure) -> Void,
         close: @escaping @MainActor (String?) -> Void,
+        isReceiveCurrent: @escaping @Sendable () -> Bool,
+        controlDeliveryOverflow: @escaping @Sendable (String) -> Void,
         data: Data,
         isComplete: Bool,
         errorDescription: String?
     ) {
-        guard token.isValid else { return }
+        guard token.isValid, isReceiveCurrent() else { return }
         do {
-            if let frame = try decoder.decodeNextControl(data, secureChannel: secureChannel) {
+            var pendingData = data
+            while let frame = try decoder.decodeNextControl(pendingData, secureChannel: secureChannel) {
+                pendingData = Data()
+                guard token.isValid, isReceiveCurrent() else { return }
                 activity()
+                if decoder.isHandshakeComplete(.control),
+                   let enqueueAuthenticatedControl {
+                    guard enqueueAuthenticatedControl([frame]) else {
+                        controlDeliveryOverflow(
+                            "Authenticated control delivery exceeded its bounded backlog. Reconnecting…"
+                        )
+                        return
+                    }
+                    continue
+                }
                 Task { @MainActor in
-                    guard token.isValid else { return }
+                    guard token.isValid, isReceiveCurrent() else { return }
                     deliver([frame])
                     Self.processControlReceive(
                         on: connection,
@@ -4144,14 +4295,19 @@ public final class NetworkBoothTransport: BoothTransport {
                         localRole: localRole,
                         activity: activity,
                         deliver: deliver,
+                        enqueueAuthenticatedControl: enqueueAuthenticatedControl,
                         diagnoseControlFailure: diagnoseControlFailure,
                         close: close,
-                        data: Data(),
+                        isReceiveCurrent: isReceiveCurrent,
+                        controlDeliveryOverflow: controlDeliveryOverflow,
+                        data: pendingData,
                         isComplete: isComplete,
                         errorDescription: errorDescription
                     )
                 }
-            } else if isComplete || errorDescription != nil {
+                return
+            }
+            if isComplete || errorDescription != nil {
                 Task { @MainActor in close(errorDescription) }
             } else {
                 Self.receive(
@@ -4167,7 +4323,10 @@ public final class NetworkBoothTransport: BoothTransport {
                     deliver: deliver,
                     deliverPreview: { _ in },
                     diagnoseControlFailure: diagnoseControlFailure,
-                    close: close
+                    close: close,
+                    isReceiveCurrent: isReceiveCurrent,
+                    enqueueAuthenticatedControl: enqueueAuthenticatedControl,
+                    controlDeliveryOverflow: controlDeliveryOverflow
                 )
             }
         } catch let failure as BoothControlFrameDecodeFailure {
@@ -5601,14 +5760,12 @@ public final class NetworkBoothTransport: BoothTransport {
         let token = assetReconnectToken
         let source = DispatchSource.makeTimerSource(queue: transportQueue)
         source.schedule(deadline: .now() + 0.5)
-        source.setEventHandler { [weak self] in
-            Task { @MainActor [weak self] in
-                guard let self,
-                      self.assetReconnectToken == token else { return }
-                self.assetReconnectSource = nil
-                self.startAssetChannelIfNeeded()
-            }
-        }
+        source.setEventHandler(handler: BoothTransportTimerDispatch.onMainActor { [weak self] in
+            guard let self,
+                  self.assetReconnectToken == token else { return }
+            self.assetReconnectSource = nil
+            self.startAssetChannelIfNeeded()
+        })
         assetReconnectSource = source
         source.resume()
     }
@@ -5620,16 +5777,13 @@ public final class NetworkBoothTransport: BoothTransport {
         guard let connection = controlConnection else { return }
         let source = DispatchSource.makeTimerSource(queue: transportQueue)
         source.schedule(deadline: .now() + Self.lanHandshakeTimeout)
-        source.setEventHandler { [weak self, weak connection] in
-            guard let self, let connection else { return }
-            Task { @MainActor [weak self, weak connection] in
-                guard let self, let connection,
-                      self.controlConnectionGeneration == generation,
-                      self.isCurrent(connection, channel: .control),
-                      !self.secureChannelEstablished else { return }
-                self.failSecureChannel("Secure channel negotiation timed out.")
-            }
-        }
+        source.setEventHandler(handler: BoothTransportTimerDispatch.onMainActor { [weak self, weak connection] in
+            guard let self, let connection,
+                  self.controlConnectionGeneration == generation,
+                  self.isCurrent(connection, channel: .control),
+                  !self.secureChannelEstablished else { return }
+            self.failSecureChannel("Secure channel negotiation timed out.")
+        })
         source.resume()
         secureNegotiationTimeoutSource = source
     }

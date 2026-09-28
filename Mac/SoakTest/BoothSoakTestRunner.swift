@@ -116,6 +116,7 @@ actor BoothSoakTestRunner {
         case .productionPipeline:
             [
                 "Production session": "NOT TESTED",
+                "Photo retakes": "NOT TESTED",
                 "Session persistence": "NOT TESTED",
                 "Rendering": "NOT TESTED",
                 "Production job queue": "NOT TESTED",
@@ -134,6 +135,8 @@ actor BoothSoakTestRunner {
             ]
         }
         var stopAfterProductionFailure = false
+        var verifiedRetakeSessions = 0
+        var verifiedRetakeCount = 0
         var queueFailureCount: Int?
 
         for cycle in 1...config.targetCycles {
@@ -256,6 +259,7 @@ actor BoothSoakTestRunner {
                             : "FAIL (\(cycleQueueFailures) failed transaction-bound job(s))"
                     }
                     coverage["Production session"] = "FAIL (cycle \(cycle): \(reason))"
+                    coverage["Photo retakes"] = "NOT VERIFIED (\(verifiedRetakeCount) retakes in \(verifiedRetakeSessions) completed sessions; cycle \(cycle) failed: \(reason))"
                     coverage["Session persistence"] = "FAIL (production cycle did not complete)"
                     coverage["Rendering"] = reason.localizedCaseInsensitiveContains("render")
                         ? "FAIL (\(reason))"
@@ -273,6 +277,9 @@ actor BoothSoakTestRunner {
             if cycleWasInterrupted { break }
 
             if let cycleResult {
+                verifiedRetakeSessions += 1
+                verifiedRetakeCount += cycleResult.retakeCount
+                coverage["Photo retakes"] = "PASS (\(verifiedRetakeCount) random retakes in \(verifiedRetakeSessions) session(s), 1–4 per session)"
                 coverage["Production session"] = "PASS (origin-tagged live session, accepted captures, finalization, and job drain)"
                 coverage["Session persistence"] = "PASS (production manifest and output workspace)"
                 coverage["Rendering"] = "PASS (production strip render)"
@@ -425,6 +432,7 @@ actor BoothSoakTestRunner {
             "Mode": config.mode.rawValue,
             "Target sessions": String(config.targetCycles),
             "Photos per session": String(config.photosPerSession),
+            "Production retakes": "Random 1–4 per session across the active template’s photo slots",
             "Delay between sessions (seconds)": String(config.delayBetweenCyclesSeconds),
             "Physical print enabled": String(config.enablePhysicalPrint),
             "Print every N sessions": String(config.physicalPrintEveryCycles),

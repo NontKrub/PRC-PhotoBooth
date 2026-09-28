@@ -29,11 +29,11 @@ struct PINGateView: View {
     }
 
     var body: some View {
-        VStack(spacing: 28) {
+        VStack(spacing: 16) {
             // Title
             VStack(spacing: 6) {
                 Image(systemName: "lock.shield.fill")
-                    .font(.system(size: 40))
+                    .font(.system(size: 32))
                     .foregroundStyle(.secondary)
                 Text(title)
                     .font(.title2.bold())
@@ -41,6 +41,7 @@ struct PINGateView: View {
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)
+                    .fixedSize(horizontal: false, vertical: true)
             }
 
             // Dots indicator
@@ -90,8 +91,9 @@ struct PINGateView: View {
                 .disabled(credentialActivity?.preventsDismissal == true)
             }
         }
-        .padding(32)
-        .frame(width: 320)
+        .padding(24)
+        .frame(width: 340)
+        .fixedSize(horizontal: false, vertical: true)
         .interactiveDismissDisabled(credentialActivity?.preventsDismissal == true)
         .focusable()
         .focusEffectDisabled()
@@ -144,9 +146,9 @@ struct PINGateView: View {
 
     var numPad: some View {
         let keys = [["1","2","3"],["4","5","6"],["7","8","9"],["","0","⌫"]]
-        return VStack(spacing: 12) {
+        return VStack(spacing: 8) {
             ForEach(keys, id: \.self) { row in
-                HStack(spacing: 16) {
+                HStack(spacing: 12) {
                     ForEach(row, id: \.self) { key in
                         if key.isEmpty {
                             Color.clear.frame(width: 64, height: 48)
@@ -158,6 +160,7 @@ struct PINGateView: View {
                                     .background(Color.primary.opacity(0.07), in: RoundedRectangle(cornerRadius: 10))
                             }
                             .buttonStyle(.plain)
+                            .accessibilityLabel(key == "⌫" ? "Delete" : key)
                         }
                     }
                 }
@@ -223,9 +226,25 @@ struct PINGateView: View {
         credentialActivity = activity
         credentialOperation = Task { @MainActor in
             let succeeded: Bool
+            var failureMessage: String?
             switch activity {
             case .verifying:
-                succeeded = await verifyPIN(pin)
+                let result = await verifyPINResult(pin)
+                succeeded = result == .verified
+                switch result {
+                case .verified, .cancelled:
+                    break
+                case .incorrect:
+                    failureMessage = operatorString("Incorrect PIN. Try again.", locale: locale)
+                case .lockedOut:
+                    failureMessage = operatorString("Too many attempts. Try again shortly.", locale: locale)
+                case .notConfigured:
+                    failureMessage = operatorString("Admin PIN is not configured. Retry Settings.", locale: locale)
+                case .unavailable(let status):
+                    failureMessage = "\(operatorString("Admin credential unavailable.", locale: locale)) Keychain: \(credentialStatusName(status)) (\(status))."
+                case .malformed:
+                    failureMessage = operatorString("Saved Admin PIN is invalid. Retry or reset it.", locale: locale)
+                }
             case .saving:
                 succeeded = await setPIN(pin)
             }
@@ -235,9 +254,8 @@ struct PINGateView: View {
             if succeeded {
                 onSuccess()
             } else {
-                let message = activity == .verifying
-                    ? operatorString("Incorrect PIN. Try again.", locale: locale)
-                    : operatorString("Admin PIN could not be saved. Try again.", locale: locale)
+                let message = failureMessage
+                    ?? operatorString("Admin PIN could not be saved. Try again.", locale: locale)
                 triggerError(message)
             }
         }

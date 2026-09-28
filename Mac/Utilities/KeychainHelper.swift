@@ -83,6 +83,23 @@ private let kPINFailedAttemptsKey = "admin_pin_failed_attempts"
 private let kPINLockedUntilKey = "admin_pin_locked_until"
 private let kPINMaximumBackoff: TimeInterval = 60
 
+enum AdminPINAccessState: Equatable {
+    case configured
+    case notConfigured
+    case unavailable(OSStatus)
+    case malformed
+}
+
+enum PINVerificationResult: Equatable {
+    case verified
+    case incorrect
+    case lockedOut
+    case notConfigured
+    case unavailable(OSStatus)
+    case malformed
+    case cancelled
+}
+
 private final class PINCredentialKeychainStoreBox: @unchecked Sendable {
     private let lock = NSLock()
     private var store: any GenericPasswordKeychainStore
@@ -115,18 +132,50 @@ func setPINKeychainStoreForTesting(_ store: any GenericPasswordKeychainStore) {
 #endif
 
 func isPINSet() -> Bool {
-    if let data = readPINData(), data.count <= PINCredentialRecord.maximumEncodedRecordByteCount {
-        if let record = try? JSONDecoder().decode(PINCredentialRecord.self, from: data) {
-            return record.isValid
-        }
-        if data.count == 64 || data.count == 32 {
-            return true
-        }
-    }
-    if let legacyUD = UserDefaults.standard.string(forKey: kPINKey), !legacyUD.isEmpty {
-        return true
-    }
+    if case .found = pinCredentialLookup() { return true }
     return false
+}
+
+func adminPINAccessState() -> AdminPINAccessState {
+    switch pinCredentialLookup() {
+    case .found: .configured
+    case .notFound: .notConfigured
+    case .unavailable(let status): .unavailable(status)
+    case .malformed: .malformed
+    }
+}
+
+func pinCredentialLookup() -> CredentialLookup<Data> {
+    pinCredentialRead().lookup
+}
+
+private func pinCredentialRead() -> (lookup: CredentialLookup<Data>, source: GenericPasswordKeychainSource?) {
+    let result = pinKeychainStore.snapshot().readDataWithFallback(
+        service: kPINService,
+        account: kPINAccount
+    )
+
+    switch result.lookup {
+    case .found(let data): return (validatePINCredential(data), result.source)
+    case .notFound:
+        guard let legacyValue = UserDefaults.standard.string(forKey: kPINKey) else { return (.notFound, nil) }
+        return (validatePINCredential(Data(legacyValue.utf8)), nil)
+    case .unavailable(let status): return (.unavailable(status), nil)
+    case .malformed: return (.malformed, nil)
+    }
+}
+
+private func validatePINCredential(_ data: Data) -> CredentialLookup<Data> {
+    guard data.count <= PINCredentialRecord.maximumEncodedRecordByteCount else { return .malformed }
+    if let record = try? JSONDecoder().decode(PINCredentialRecord.self, from: data) {
+        return record.isValid ? .found(data) : .malformed
+    }
+    if data.count == 32 { return .found(data) }
+    if data.count == 64,
+       data.allSatisfy({ (48...57).contains($0) || (65...70).contains($0) || (97...102).contains($0) }) {
+        return .found(data)
+    }
+    return .malformed
 }
 
 func setPIN(_ pin: String) async -> Bool {
@@ -134,7 +183,11 @@ func setPIN(_ pin: String) async -> Bool {
 }
 
 func verifyPIN(_ pin: String) async -> Bool {
-    await PINCredentialService.shared.verifyPIN(pin)
+    await verifyPINResult(pin) == .verified
+}
+
+func verifyPINResult(_ pin: String) async -> PINVerificationResult {
+    await PINCredentialService.shared.verify(pin)
 }
 
 @discardableResult
@@ -151,14 +204,10 @@ func pinLockoutRemaining(now: Date = Date()) -> TimeInterval {
 }
 
 func readPINData() -> Data? {
-    let result = pinKeychainStore.snapshot().readDataMigratingToDataProtection(
+    let result = pinKeychainStore.snapshot().readDataWithFallback(
         service: kPINService,
-        account: kPINAccount,
-        accessibility: .whenUnlockedThisDeviceOnly
+        account: kPINAccount
     )
-    if let status = result.legacyCleanupError {
-        reportLegacyKeychainCleanupFailure(status)
-    }
     return result.data
 }
 
@@ -166,25 +215,29 @@ private actor PINCredentialService {
     static let shared = PINCredentialService()
 
     func setPIN(_ pin: String) -> Bool {
-        guard isValidPINFormat(pin), storeCredential(pin) else { return false }
+        guard isValidPINFormat(pin),
+              case .notFound = pinCredentialLookup(),
+              storeCredential(pin) else { return false }
         UserDefaults.standard.removeObject(forKey: kPINKey)
         resetPINBackoff()
         return true
     }
 
-    func verifyPIN(_ pin: String) -> Bool {
-        guard !Task.isCancelled else { return false }
-        guard pinLockoutRemaining() == 0 else { return false }
+    func verify(_ pin: String) -> PINVerificationResult {
+        guard !Task.isCancelled else { return .cancelled }
+        guard pinLockoutRemaining() == 0 else { return .lockedOut }
         guard isValidPINFormat(pin) else {
             recordPINFailure()
-            return false
+            return .incorrect
         }
 
-        let storedKeychain = readPINData()
-        let storedUserDefaults = UserDefaults.standard.string(forKey: kPINKey).map { Data($0.utf8) }
-        guard let stored = storedKeychain ?? storedUserDefaults,
-              stored.count <= PINCredentialRecord.maximumEncodedRecordByteCount else {
-            return false
+        let credential = pinCredentialRead()
+        let stored: Data
+        switch credential.lookup {
+        case .found(let data): stored = data
+        case .notFound: return .notConfigured
+        case .unavailable(let status): return .unavailable(status)
+        case .malformed: return .malformed
         }
 
         if let record = try? JSONDecoder().decode(PINCredentialRecord.self, from: stored) {
@@ -196,21 +249,24 @@ private actor PINCredentialService {
                     outputLength: record.verifier.count
                   ) else {
                 recordPINFailure()
-                return false
+                return .malformed
             }
-            guard !Task.isCancelled else { return false }
+            guard !Task.isCancelled else { return .cancelled }
             guard constantTimeEquals(computedVerifier, record.verifier) else {
                 recordPINFailure()
-                return false
+                return .incorrect
             }
 
+            if credential.source == .dataProtection {
+                mirrorPINCredentialToLegacy(stored)
+            }
             resetPINBackoff()
             let upgradedCredential = record.iterations < PINCredentialRecord.defaultIterations
                 && storeCredential(pin)
-            if storedKeychain != nil || upgradedCredential {
+            if credential.source != nil || upgradedCredential {
                 UserDefaults.standard.removeObject(forKey: kPINKey)
             }
-            return true
+            return .verified
         }
 
         // Legacy SHA-256 verification (hex string or raw bytes).
@@ -219,16 +275,16 @@ private actor PINCredentialService {
         let matchesRaw = constantTimeEquals(stored, Data(SHA256.hash(data: Data(pin.utf8))))
 
         if matchesHex || matchesRaw {
-            guard !Task.isCancelled else { return false }
+            guard !Task.isCancelled else { return .cancelled }
             if storeCredential(pin) {
                 UserDefaults.standard.removeObject(forKey: kPINKey)
             }
             resetPINBackoff()
-            return true
+            return .verified
         }
 
         recordPINFailure()
-        return false
+        return .incorrect
     }
 
     private func storeCredential(_ pin: String) -> Bool {
@@ -254,23 +310,36 @@ private actor PINCredentialService {
               encoded.count <= PINCredentialRecord.maximumEncodedRecordByteCount else { return false }
 
         let keychainStore = pinKeychainStore.snapshot()
-        let status = keychainStore.writeDataAndVerify(
+        let status = keychainStore.writeDataAndVerifyForPersistence(
             encoded,
             service: kPINService,
             account: kPINAccount,
-            useDataProtectionKeychain: true,
             accessibility: .whenUnlockedThisDeviceOnly
         )
         guard status == errSecSuccess else { return false }
-        let legacyDeleteStatus = keychainStore.deleteData(
-            service: kPINService,
-            account: kPINAccount,
-            useDataProtectionKeychain: false
-        )
-        if legacyDeleteStatus != errSecSuccess && legacyDeleteStatus != errSecItemNotFound {
-            reportLegacyKeychainCleanupFailure(legacyDeleteStatus)
-        }
         return true
+    }
+}
+
+private func mirrorPINCredentialToLegacy(_ data: Data) {
+    let store = pinKeychainStore.snapshot()
+    guard store.hasSeparateLegacyKeychain else { return }
+    let legacy = store.readData(
+        service: kPINService,
+        account: kPINAccount,
+        useDataProtectionKeychain: false
+    )
+    guard legacy.status == errSecItemNotFound else { return }
+    let status = store.writeDataAndVerify(
+        data,
+        service: kPINService,
+        account: kPINAccount,
+        useDataProtectionKeychain: false,
+        accessibility: .whenUnlockedThisDeviceOnly
+    )
+    guard status == errSecSuccess else {
+        NSLog("Admin PIN backup copy could not be verified (\(credentialStatusName(status))).")
+        return
     }
 }
 

@@ -10,6 +10,10 @@ struct MacContentView: View {
     @State private var pendingTab: Int? = nil
     @State private var isAdminUnlocked = false
     @State private var showCloudSSHSetup = false
+    @State private var showPINCredentialIssue = false
+    @State private var pinCredentialIssueTitle = "Admin credential unavailable"
+    @State private var pinCredentialIssueMessage = ""
+    @State private var pinCredentialIssueStatus: String?
     @AppStorage("operatorLanguage") private var operatorLanguage = OperatorLanguage.system.rawValue
     @AppStorage("cloudUploadEnabled") private var cloudUploadEnabled = false
     @AppStorage("publicBaseURL") private var publicBaseURL = ""
@@ -40,11 +44,7 @@ struct MacContentView: View {
                 guard !isAdminUnlocked else { return }
                 selectedTab = old  // revert immediately
                 pendingTab = new
-                if isPINSet() {
-                    showPINVerify = true
-                } else {
-                    showPINSetup = true
-                }
+                presentPINGate()
             }
         }
         .onChange(of: scenePhase) { _, newPhase in
@@ -85,6 +85,18 @@ struct MacContentView: View {
         } message: {
             Text(coordinator.errorMessage ?? "")
         }
+        .alert(LocalizedStringKey(pinCredentialIssueTitle), isPresented: $showPINCredentialIssue) {
+            Button("Retry", action: retryPINGate)
+            Button("Cancel", role: .cancel) { pendingTab = nil }
+        } message: {
+            VStack(alignment: .leading, spacing: 6) {
+                Text(LocalizedStringKey(pinCredentialIssueMessage))
+                if let pinCredentialIssueStatus {
+                    Text(verbatim: pinCredentialIssueStatus)
+                        .font(.caption.monospaced())
+                }
+            }
+        }
         .sheet(isPresented: $showCloudSSHSetup) {
             CloudSSHSetupView(setup: coordinator.cloudSSHSetup)
         }
@@ -101,6 +113,31 @@ struct MacContentView: View {
         case .english: return Locale(identifier: "en")
         case .thai: return Locale(identifier: "th")
         }
+    }
+
+    private func presentPINGate() {
+        switch adminPINAccessState() {
+        case .configured:
+            showPINVerify = true
+        case .notConfigured:
+            showPINSetup = true
+        case .unavailable(let status):
+            pinCredentialIssueTitle = "Admin credential unavailable"
+            pinCredentialIssueMessage = "PRC PhotoBooth could not access the saved Admin PIN."
+            pinCredentialIssueStatus = "Keychain: \(credentialStatusName(status)) (\(status))"
+            showPINCredentialIssue = true
+        case .malformed:
+            pinCredentialIssueTitle = "Saved Admin PIN is invalid"
+            pinCredentialIssueMessage = "The saved Admin PIN was preserved. Open Settings to retry or explicitly reset it."
+            pinCredentialIssueStatus = nil
+            showPINCredentialIssue = true
+        }
+    }
+
+    private func retryPINGate() {
+        guard pendingTab != nil else { return }
+        showPINCredentialIssue = false
+        presentPINGate()
     }
 
 }
@@ -176,6 +213,7 @@ struct SettingsView: View {
     @State private var peerToForget: TrustedBoothPeer?
     @State private var showForgetAllPeers = false
     @State private var settingsActionError: String?
+    @State private var adminPINState: AdminPINAccessState = .notConfigured
 
     var body: some View {
         NavigationSplitView {
@@ -254,7 +292,7 @@ struct SettingsView: View {
         )) {
             Button("OK") { settingsActionError = nil }
         } message: {
-            Text(settingsActionError ?? "")
+            Text(LocalizedStringKey(settingsActionError ?? ""))
         }
         .task {
             coordinator.printer.refreshPrinters()
@@ -555,7 +593,7 @@ struct SettingsView: View {
 
             Text("Connected iPad")
                 .font(.subheadline.bold())
-            if status.isPeerAuthenticated, let name = status.peerDisplayName {
+            if coordinator.isAuthenticatedIPadConnected, let name = status.peerDisplayName {
                 Label(name, systemImage: "checkmark.circle.fill")
                     .foregroundStyle(.green)
                 diagnosticRow("Authentication", "Trusted")
@@ -885,8 +923,21 @@ struct SettingsView: View {
         GroupBox("Admin Access") {
             VStack(alignment: .leading, spacing: 12) {
                 LabeledContent("Admin PIN") {
-                    Text(isPINSet() ? "Configured" : "Not configured")
-                        .foregroundStyle(isPINSet() ? .green : .orange)
+                    VStack(alignment: .leading, spacing: 3) {
+                        switch adminPINState {
+                        case .configured:
+                            Text("Configured").foregroundStyle(.green)
+                        case .notConfigured:
+                            Text("Not configured").foregroundStyle(.orange)
+                        case .unavailable(let status):
+                            Text("Admin credential unavailable").foregroundStyle(.red)
+                            Text(verbatim: "Keychain: \(credentialStatusName(status)) (\(status))")
+                                .font(.caption.monospaced())
+                                .foregroundStyle(.secondary)
+                        case .malformed:
+                            Text("Saved Admin PIN is invalid").foregroundStyle(.red)
+                        }
+                    }
                 }
                 Button("Reset Admin PIN…", role: .destructive) {
                     showResetPINConfirmation = true
@@ -900,6 +951,7 @@ struct SettingsView: View {
         .confirmationDialog("Reset Admin PIN?", isPresented: $showResetPINConfirmation) {
             Button("Reset PIN", role: .destructive) {
                 if clearPIN() {
+                    adminPINState = .notConfigured
                     onResetPIN()
                 } else {
                     settingsActionError = "The PIN was not reset because Keychain could not remove every stored credential copy."
@@ -908,6 +960,9 @@ struct SettingsView: View {
             Button("Cancel", role: .cancel) {}
         } message: {
             Text("You will be asked to create a new PIN the next time Settings is opened.")
+        }
+        .onAppear {
+            adminPINState = adminPINAccessState()
         }
     }
 

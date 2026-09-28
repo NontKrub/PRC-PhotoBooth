@@ -12,7 +12,7 @@ public enum BoothSoakTestMode: String, Sendable, CaseIterable, Identifiable, Cod
         case .cameraHardware:
             return "Captures from the selected physical camera and fails the cycle on any capture error. Does not create customer sessions."
         case .productionPipeline:
-            return "Drives the real session, capture, finalization, worker queue, and local guest delivery workflow. Requires a ready booth."
+            return "Drives real sessions with 1–4 random retakes across their photos, then verifies capture, finalization, the worker queue, and guest delivery. Requires a ready booth."
         case .syntheticBenchmark:
             return "Uses generated images and isolated storage to measure compositor and queue benchmark performance. Does not validate production sessions."
         }
@@ -143,6 +143,7 @@ enum BoothSoakTestError: LocalizedError, Sendable {
 
 struct BoothAutomatedSoakCycleResult: Sendable {
     let captureLatencies: [Double]
+    let retakeCount: Int
     let captureAttemptCount: Int
     let captureFailureCount: Int
     let cameraRecoveryCount: Int
@@ -171,6 +172,31 @@ enum BoothSoakCaptureMetrics {
         attempts.filter {
             $0.result == .success || $0.result == .transferRecovered || $0.result == .failed
         }.count
+    }
+}
+
+struct BoothSoakRetakePlan: Sendable, Equatable {
+    let countsByPhoto: [Int]
+
+    var totalCount: Int { countsByPhoto.reduce(0, +) }
+
+    static func random<R: RandomNumberGenerator>(photoCount: Int, using generator: inout R) -> Self {
+        precondition(photoCount > 0)
+        var counts = Array(repeating: 0, count: photoCount)
+        let total = Int.random(in: 1...4, using: &generator)
+        for _ in 0..<total {
+            counts[Int.random(in: 0..<photoCount, using: &generator)] += 1
+        }
+        return Self(countsByPhoto: counts)
+    }
+
+    func verified(recordedCounts: [Int], attempts: [CaptureAttemptRecord]) -> Bool {
+        guard recordedCounts == countsByPhoto else { return false }
+        return countsByPhoto.enumerated().allSatisfy { item in
+            attempts.filter {
+                $0.photoIndex == item.offset && ($0.result == .success || $0.result == .transferRecovered)
+            }.count >= item.element + 1
+        }
     }
 }
 

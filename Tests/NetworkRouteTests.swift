@@ -36,6 +36,8 @@ private final class CoreEventDeliveryObserver: @unchecked Sendable {
             kind = "authenticated"
         case .controlFrames:
             kind = "controlFrames"
+        case .directControlFrames:
+            kind = "controlFrames"
         default:
             return
         }
@@ -562,9 +564,13 @@ private final class TransportLivenessObserver: @unchecked Sendable {
         var closeDeliveredCount = 0
         var timeoutCount = 0
         var reconnectDueCount = 0
+        var overflowCount = 0
+        var deliveredControlMessages: [Message] = []
     }
 
     private let lock = NSLock()
+    private let overflowEvent = DispatchSemaphore(value: 0)
+    private let closeEvent = DispatchSemaphore(value: 0)
     private var value = Snapshot()
 
     func markActivity() {
@@ -573,9 +579,13 @@ private final class TransportLivenessObserver: @unchecked Sendable {
         lock.unlock()
     }
 
-    func markDelivered(_ count: Int) {
+    func markDelivered(_ frames: [BoothDecodedTransportFrame]) {
         lock.lock()
-        value.deliveredFrameCount += count
+        value.deliveredFrameCount += frames.count
+        value.deliveredControlMessages.append(contentsOf: frames.compactMap { frame in
+            guard case let .control(message) = frame else { return nil }
+            return message
+        })
         lock.unlock()
     }
 
@@ -583,6 +593,7 @@ private final class TransportLivenessObserver: @unchecked Sendable {
         lock.lock()
         value.transportClosedCount += 1
         lock.unlock()
+        closeEvent.signal()
     }
 
     func markCloseDelivered() {
@@ -603,6 +614,21 @@ private final class TransportLivenessObserver: @unchecked Sendable {
         lock.unlock()
     }
 
+    func markOverflow() {
+        lock.lock()
+        value.overflowCount += 1
+        lock.unlock()
+        overflowEvent.signal()
+    }
+
+    func waitForOverflow(timeout: TimeInterval = 5) -> Bool {
+        overflowEvent.wait(timeout: .now() + timeout) == .success
+    }
+
+    func waitForTransportClose(timeout: TimeInterval = 5) -> Bool {
+        closeEvent.wait(timeout: .now() + timeout) == .success
+    }
+
     func snapshot() -> Snapshot {
         lock.lock()
         defer { lock.unlock() }
@@ -617,6 +643,7 @@ private final class TransportLivenessServer: @unchecked Sendable {
     private let runtime: BoothNetworkTransportRuntime
     private let writer: BoothControlWritePump
     private let observer = TransportLivenessObserver()
+    let controlEvents: BoothNetworkTransportCoreEventStream
     private let scheduleReconnectOnClose: Bool
     private let connectionReady = DispatchSemaphore(value: 0)
     private var readyContinuation: CheckedContinuation<NWEndpoint.Port, Error>?
@@ -625,7 +652,11 @@ private final class TransportLivenessServer: @unchecked Sendable {
     private var generation = 0
     private var reconnectWasScheduled = false
 
-    init(secureChannel: BoothSecureChannel, scheduleReconnectOnClose: Bool = false) throws {
+    init(
+        secureChannel: BoothSecureChannel,
+        scheduleReconnectOnClose: Bool = false,
+        controlEventBufferLimit: Int = 256
+    ) throws {
         let queue = DispatchQueue(label: "PRC-PhotoBooth.Tests.TransportLiveness")
         self.queue = queue
         listener = try NWListener(using: .tcp)
@@ -633,6 +664,7 @@ private final class TransportLivenessServer: @unchecked Sendable {
         self.scheduleReconnectOnClose = scheduleReconnectOnClose
         runtime = BoothNetworkTransportRuntime(queue: queue)
         writer = BoothControlWritePump(queue: queue, secureChannel: secureChannel)
+        controlEvents = BoothNetworkTransportCoreEventStream(bufferLimit: controlEventBufferLimit)
         runtime.onHeartbeatTimeout = { [weak observer] _ in
             observer?.markTimeout()
         }
@@ -669,8 +701,8 @@ private final class TransportLivenessServer: @unchecked Sendable {
         }
     }
 
-    func waitForConnection() -> Bool {
-        connectionReady.wait(timeout: .now() + 1) == .success
+    func waitForConnection(timeout: TimeInterval = 5) -> Bool {
+        connectionReady.wait(timeout: .now() + timeout) == .success
     }
 
     func terminateConnection() {
@@ -683,8 +715,36 @@ private final class TransportLivenessServer: @unchecked Sendable {
         observer.snapshot()
     }
 
+    func recordDelivered(_ frames: [BoothDecodedTransportFrame]) {
+        observer.markDelivered(frames)
+    }
+
+    func observerWaitForOverflow() -> Bool {
+        observer.waitForOverflow()
+    }
+
+    func waitForTransportClose() -> Bool {
+        observer.waitForTransportClose()
+    }
+
+    func waitForActivityToSettle() async {
+        var previous = snapshot().activityCount
+        var stableIntervals = 0
+        while stableIntervals < 3 {
+            try? await Task.sleep(for: .milliseconds(50))
+            let current = snapshot().activityCount
+            if current == previous {
+                stableIntervals += 1
+            } else {
+                previous = current
+                stableIntervals = 0
+            }
+        }
+    }
+
     func stop() {
         receiveToken?.invalidate()
+        controlEvents.finish()
         runtime.stopHeartbeat()
         writer.invalidate(generation: 2)
         connection?.cancel()
@@ -708,12 +768,16 @@ private final class TransportLivenessServer: @unchecked Sendable {
                 case .ready:
                     guard self.receiveToken == nil else { return }
                     self.generation += 1
+                    let connectionGeneration = self.generation
                     let token = BoothTransportReceiveToken()
                     self.receiveToken = token
-                    self.writer.bind(connection, generation: self.generation)
+                    let decoder = BoothTransportFrameDecoder()
+                    decoder.setHandshakeComplete(true, channel: .control)
+                    self.runtime.bindControlConnection(connection, generation: connectionGeneration, authenticated: true)
+                    self.writer.bind(connection, generation: connectionGeneration)
                     self.runtime.startHeartbeat(
                         connection: connection,
-                        generation: self.generation,
+                        generation: connectionGeneration,
                         writer: self.writer,
                         interval: 0.25,
                         timeout: 1
@@ -722,19 +786,41 @@ private final class TransportLivenessServer: @unchecked Sendable {
                     NetworkBoothTransport.receive(
                         on: connection,
                         channel: .control,
-                        decoder: BoothTransportFrameDecoder(),
+                        decoder: decoder,
                         token: token,
                         secureChannel: self.secureChannel,
-                        activity: { [weak self] in
+                        activity: { [weak self, runtime] in
                             self?.observer.markActivity()
-                            self?.runtime.markControlActivityOnQueue()
+                            runtime.markControlActivityOnQueue(
+                                connection: connection,
+                                generation: connectionGeneration
+                            )
                         },
                         deliver: { [weak self] frames in
-                            self?.observer.markDelivered(frames.count)
+                            self?.observer.markDelivered(frames)
                         },
                         deliverPreview: { _ in },
                         close: { [weak self] _ in
                             self?.observer.markCloseDelivered()
+                        },
+                        isReceiveCurrent: { [weak self, weak connection] in
+                            guard let self, let connection else { return false }
+                            return self.runtime.isControlConnectionCurrent(
+                                connection: connection,
+                                generation: connectionGeneration
+                            )
+                        },
+                        enqueueAuthenticatedControl: { [controlEvents] frames in
+                            controlEvents.yield(.directControlFrames(
+                                generation: connectionGeneration,
+                                frames: frames
+                            ))
+                        },
+                        controlDeliveryOverflow: { [weak self, weak connection] _ in
+                            guard let self, let connection else { return }
+                            self.observer.markOverflow()
+                            self.controlEvents.suppressDirectEvents(through: connectionGeneration)
+                            connection.cancel()
                         }
                     )
                 case .failed, .cancelled:
@@ -761,6 +847,23 @@ private final class TransportLivenessServer: @unchecked Sendable {
         case .success(let port): readyContinuation.resume(returning: port)
         case .failure(let error): readyContinuation.resume(throwing: error)
         }
+    }
+}
+
+private final class TransportLivenessMessageRecorder: @unchecked Sendable {
+    private let lock = NSLock()
+    private var messages: [Message] = []
+
+    func append(_ message: Message) {
+        lock.lock()
+        messages.append(message)
+        lock.unlock()
+    }
+
+    func snapshot() -> [Message] {
+        lock.lock()
+        defer { lock.unlock() }
+        return messages
     }
 }
 
@@ -959,6 +1062,21 @@ private final class TrustedCoreTestObserver: @unchecked Sendable {
             lock.unlock()
             disconnected.signal()
         case .controlFrames(_, let frames):
+            let messages = frames.compactMap { frame -> Message? in
+                guard case .control(let message) = frame else { return nil }
+                return message
+            }
+            let heartbeats = frames.reduce(into: 0) { count, frame in
+                if case .heartbeat = frame { count += 1 }
+            }
+            guard !messages.isEmpty || heartbeats > 0 else { return }
+            lock.lock()
+            controlMessages.append(contentsOf: messages)
+            heartbeatCountValue += heartbeats
+            lock.unlock()
+            messages.forEach { _ in controlMessageReceived.signal() }
+            (0..<heartbeats).forEach { _ in heartbeatReceived.signal() }
+        case .directControlFrames(_, let frames):
             let messages = frames.compactMap { frame -> Message? in
                 guard case .control(let message) = frame else { return nil }
                 return message
@@ -3378,12 +3496,12 @@ struct NetworkRouteTests {
             second.cancel()
         }
         first.start(queue: clientQueue)
-        #expect(waitForSemaphore(accepted))
+        #expect(waitForSemaphore(accepted, timeout: 5))
         #expect(waitForSemaphore(preAuthTimeout, timeout: 3))
         #expect(runtime.isControlSlotAvailable())
 
         second.start(queue: clientQueue)
-        #expect(waitForSemaphore(accepted))
+        #expect(waitForSemaphore(accepted, timeout: 5))
         #expect(!runtime.isControlSlotAvailable())
     }
 
@@ -3692,6 +3810,31 @@ struct NetworkRouteTests {
         #expect(completed.wait(timeout: .now() + 1) == .success)
     }
 
+    @Test("transport timer callbacks hop from their queue to MainActor")
+    func transportTimerCallbackUsesMainActor() async {
+        let queue = DispatchQueue(label: "PRC-PhotoBooth.Tests.TransportTimer")
+        let ranOnMainThread = await withCheckedContinuation { continuation in
+            let callback = BoothTransportTimerDispatch.onMainActor {
+                continuation.resume(returning: Thread.isMainThread)
+            }
+            queue.async(execute: callback)
+        }
+        #expect(ranOnMainThread)
+    }
+
+    @Test("stopping the control core releases its authenticated socket")
+    func stoppingControlCoreDisconnectsRuntimeOwnedPeer() {
+        let queue = DispatchQueue(label: "PRC-PhotoBooth.Tests.ForgetControl")
+        let runtime = BoothNetworkTransportRuntime(queue: queue)
+        let connection = NWConnection(host: "127.0.0.1", port: 58500, using: .tcp)
+        runtime.bindControlConnection(connection, generation: 1, authenticated: true)
+
+        #expect(runtime.isControlConnectionActive(generation: 1))
+        runtime.stopControlCore()
+        #expect(!runtime.isControlConnectionActive(generation: 1))
+        #expect(runtime.isControlSlotAvailable())
+    }
+
     @Test(
         "authenticated control traffic remains live during a real 12-second MainActor stall",
         .disabled(if: !runMainActorStallTests)
@@ -3719,6 +3862,14 @@ struct NetworkRouteTests {
         try iPadChannel.configure(secret: secret, localHello: iPadHello, peerHello: macHello)
 
         let server = try TransportLivenessServer(secureChannel: macChannel)
+        let deliveryConsumer = Task { @MainActor in
+            for await event in server.controlEvents.stream {
+                if case let .directControlFrames(_, frames) = event {
+                    server.recordDelivered(frames)
+                }
+            }
+        }
+        defer { deliveryConsumer.cancel() }
         let port = try await server.start()
         let clientQueue = DispatchQueue(label: "PRC-PhotoBooth.Tests.TransportLivenessClient")
         let clientConnection = NWConnection(host: "127.0.0.1", port: port, using: .tcp)
@@ -3735,15 +3886,25 @@ struct NetworkRouteTests {
             server.stop()
         }
 
-        #expect(waitForSemaphore(clientReady))
+        #expect(waitForSemaphore(clientReady, timeout: 5))
         clientPump.bind(clientConnection, generation: 1)
-        #expect(server.waitForConnection())
+        #expect(server.waitForConnection(timeout: 5))
 
         let traffic = DispatchSource.makeTimerSource(queue: clientQueue)
+        let expectedMessages = TransportLivenessMessageRecorder()
+        var sequence = 0
         traffic.schedule(deadline: .now() + 0.1, repeating: 0.1)
         traffic.setEventHandler {
+            let message: Message
+            if sequence % 5 == 0 {
+                message = .heartbeat
+            } else {
+                message = .boothPaused(isPaused: sequence % 2 == 0)
+            }
+            expectedMessages.append(message)
+            sequence += 1
             _ = clientPump.enqueue(
-                .heartbeat,
+                message,
                 connection: clientConnection,
                 generation: 1,
                 secure: true,
@@ -3751,7 +3912,6 @@ struct NetworkRouteTests {
             )
         }
         traffic.resume()
-        defer { traffic.cancel() }
 
         let mainEntered = DispatchSemaphore(value: 0)
         let releaseMain = DispatchSemaphore(value: 0)
@@ -3766,14 +3926,110 @@ struct NetworkRouteTests {
         try await Task.sleep(for: .seconds(12))
         let stallDuration = Date().timeIntervalSince(stallStartedAt)
         #expect(stallDuration >= 11.5)
+        traffic.cancel()
+        clientQueue.sync {}
+        await server.waitForActivityToSettle()
         let stalledSnapshot = server.snapshot()
         #expect(stalledSnapshot.activityCount >= 20)
         #expect(stalledSnapshot.timeoutCount == 0)
         #expect(stalledSnapshot.transportClosedCount == 0)
 
         releaseMain.signal()
-        try await Task.sleep(for: .milliseconds(250))
-        #expect(server.snapshot().deliveredFrameCount > 0)
+        try await Task.sleep(for: .milliseconds(350))
+        let deliveredSnapshot = server.snapshot()
+        #expect(deliveredSnapshot.deliveredFrameCount == stalledSnapshot.activityCount)
+        #expect(deliveredSnapshot.deliveredControlMessages == expectedMessages.snapshot())
+    }
+
+    @Test("direct authenticated frame overflow closes its socket and suppresses only that generation")
+    func directControlEventOverflowClosesSocketAndAllowsReplacementGeneration() async throws {
+        let sessionID = "direct-event-overflow"
+        let secret = Data(repeating: 0xB6, count: 32)
+        let macHello = BoothSecureChannelHello(
+            sessionID: sessionID,
+            challenge: Data(repeating: 0x13, count: 32),
+            senderRole: .mac,
+            senderDeviceID: "mac",
+            receiverDeviceID: "ipad"
+        )
+        let iPadHello = BoothSecureChannelHello(
+            sessionID: sessionID,
+            challenge: Data(repeating: 0x24, count: 32),
+            senderRole: .iPad,
+            senderDeviceID: "ipad",
+            receiverDeviceID: "mac"
+        )
+        let macChannel = BoothSecureChannel()
+        let iPadChannel = BoothSecureChannel()
+        try macChannel.configure(secret: secret, localHello: macHello, peerHello: iPadHello)
+        try iPadChannel.configure(secret: secret, localHello: iPadHello, peerHello: macHello)
+
+        let server = try TransportLivenessServer(
+            secureChannel: macChannel,
+            controlEventBufferLimit: 1
+        )
+        let port = try await server.start()
+        let clientQueue = DispatchQueue(label: "PRC-PhotoBooth.Tests.DirectOverflowClient")
+        let clientConnection = NWConnection(host: "127.0.0.1", port: port, using: .tcp)
+        let clientPump = BoothControlWritePump(queue: clientQueue, secureChannel: iPadChannel)
+        let clientReady = DispatchSemaphore(value: 0)
+        clientConnection.stateUpdateHandler = { state in
+            if case .ready = state { clientReady.signal() }
+        }
+        clientConnection.start(queue: clientQueue)
+        drainConnection(clientConnection)
+        defer {
+            clientPump.invalidate(generation: 2)
+            clientConnection.cancel()
+            server.stop()
+        }
+
+        #expect(waitForSemaphore(clientReady, timeout: 5))
+        clientPump.bind(clientConnection, generation: 1)
+        #expect(server.waitForConnection(timeout: 5))
+        for isPaused in [true, false, true] {
+            _ = clientPump.enqueue(
+                .boothPaused(isPaused: isPaused),
+                connection: clientConnection,
+                generation: 1,
+                secure: true,
+                completion: nil
+            )
+        }
+
+        #expect(server.observerWaitForOverflow())
+        #expect(server.waitForTransportClose())
+        let closedSnapshot = server.snapshot()
+        #expect(closedSnapshot.overflowCount == 1)
+        #expect(closedSnapshot.transportClosedCount == 1)
+
+        var iterator = server.controlEvents.stream.makeAsyncIterator()
+        guard case let .directControlFrames(oldGeneration, oldFrames)? = await iterator.next() else {
+            Issue.record("Expected the buffered frame from the failed connection generation")
+            return
+        }
+        #expect(oldGeneration == 1)
+        #expect(server.controlEvents.isDirectEventSuppressed(oldGeneration))
+        #expect(oldFrames.compactMap { frame -> Message? in
+            guard case let .control(message) = frame else { return nil }
+            return message
+        } == [.boothPaused(isPaused: true)])
+
+        let replacementFrames: [BoothDecodedTransportFrame] = [.control(.boothPaused(isPaused: false))]
+        #expect(server.controlEvents.yield(.directControlFrames(generation: 2, frames: replacementFrames)))
+        #expect(!server.controlEvents.isDirectEventSuppressed(2))
+        guard case let .directControlFrames(newGeneration, newFrames)? = await iterator.next() else {
+            Issue.record("Expected the replacement generation event to be delivered")
+            return
+        }
+        server.recordDelivered(newFrames)
+        #expect(newGeneration == 2)
+        #expect(newFrames.compactMap { frame -> Message? in
+            guard case let .control(message) = frame else { return nil }
+            return message
+        } == [.boothPaused(isPaused: false)])
+        #expect(server.snapshot().deliveredControlMessages == [.boothPaused(isPaused: false)])
+        server.controlEvents.finish()
     }
 
     @Test(
@@ -3822,9 +4078,9 @@ struct NetworkRouteTests {
             server.stop()
         }
 
-        #expect(waitForSemaphore(clientReady))
+        #expect(waitForSemaphore(clientReady, timeout: 5))
         clientPump.bind(clientConnection, generation: 1)
-        #expect(server.waitForConnection())
+        #expect(server.waitForConnection(timeout: 5))
 
         let traffic = DispatchSource.makeTimerSource(queue: clientQueue)
         traffic.schedule(deadline: .now() + 0.1, repeating: 0.1)

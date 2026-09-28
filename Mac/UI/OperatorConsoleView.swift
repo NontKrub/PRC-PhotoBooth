@@ -134,7 +134,7 @@ struct OperatorConsoleView: View {
             Text(connectionLabel).font(.caption)
             Spacer()
             let presentation = BoothConnectionPresentationResolver.resolve(connectionStatus)
-            if presentation.controlConnected {
+            if coordinator.isAuthenticatedIPadConnected {
                 Image(systemName: presentation.effectiveTransport == "Ethernet" ? "cable.connector" : "wifi")
                     .font(.caption).foregroundStyle(.green)
             }
@@ -179,7 +179,7 @@ struct OperatorConsoleView: View {
 
     var connectionColor: Color {
         switch connectionStatus.state {
-        case .connected: return .green
+        case .connected: return coordinator.isAuthenticatedIPadConnected ? .green : .yellow
         case .connecting: return .yellow
         case .disconnected: return .red
         }
@@ -187,9 +187,12 @@ struct OperatorConsoleView: View {
 
     var connectionLabel: String {
         let presentation = BoothConnectionPresentationResolver.resolve(connectionStatus)
-        if presentation.controlConnected {
+        if coordinator.isAuthenticatedIPadConnected {
             let name = presentation.peerName ?? "iPad"
             return "iPad connected: \(name) · \(presentation.effectiveTransport)"
+        }
+        if case .connected = connectionStatus.state {
+            return "iPad authentication pending"
         }
         return presentation.stateText
     }

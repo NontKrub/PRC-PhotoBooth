@@ -13,6 +13,7 @@ struct iPadConnectionSettingsView: View {
     @State private var lastPairingPeerID: String?
     @State private var selectedPairingMacName: String?
     @State private var peerToForget: String?
+    @State private var peerToRepair: String?
     @State private var pairingError: String?
     @State private var diagnosticsExportError: String?
     @State private var diagnosticsDocument = ConnectionLogDocument(text: "")
@@ -173,6 +174,26 @@ struct iPadConnectionSettingsView: View {
         } message: {
             Text("This Mac must be paired again before it can reconnect.")
         }
+        .confirmationDialog("Pair with this Mac again?", isPresented: Binding(
+            get: { peerToRepair != nil },
+            set: { if !$0 { peerToRepair = nil } }
+        )) {
+            Button("Pair Again", role: .destructive) {
+                guard let peerID = peerToRepair else { return }
+                peerToRepair = nil
+                lastPairingPeerID = peerID
+                selectedPairingMacName = nearbyMacs.first { $0.id == peerID }?.displayName
+                    ?? preferredMac.displayName
+                automaticPairingPeerID = peerID
+                if !vm.repairPairing(with: peerID) {
+                    automaticPairingPeerID = nil
+                    pairingError = status.lastNetworkError ?? "The saved pairing could not be removed."
+                }
+            }
+            Button("Cancel", role: .cancel) { peerToRepair = nil }
+        } message: {
+            Text("This iPad will remove its saved pairing and request a new PIN from the Mac.")
+        }
         .alert("Pairing Error", isPresented: Binding(
             get: { pairingError != nil },
             set: { if !$0 { pairingError = nil } }
@@ -232,7 +253,7 @@ struct iPadConnectionSettingsView: View {
             if transport?.preferredPeerNeedsRepair == true {
                 Label("Pairing key missing", systemImage: "exclamationmark.triangle.fill")
                     .foregroundStyle(.orange)
-                Text("Forget this Mac on both devices, then pair again with PIN or QR.")
+                Text("Pair again with PIN or QR.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -264,6 +285,13 @@ struct iPadConnectionSettingsView: View {
                         transport?.selectPreferredPeer(nil)
                     }
                     .disabled(!vm.canChangeConnection || status.pairingStage == .verificationPending)
+                }
+
+                if preferredMac.state != .connected,
+                   transport?.trustedPeers.contains(where: { $0.id == preferredID }) == true {
+                    Button("Pair Again with PIN") { peerToRepair = preferredID }
+                        .disabled(!vm.canChangeConnection || status.pairingStage == .verificationPending)
+                        .accessibilityIdentifier("Pair Again with PIN")
                 }
 
                 if let transport {
@@ -436,6 +464,11 @@ struct iPadConnectionSettingsView: View {
                                     }
                                         .disabled(!canChangeConnection || status.peerID == peer.id && status.isPeerAuthenticated && status.isSecureChannelEstablished)
                                         .accessibilityIdentifier("Connect Mac")
+                                    if !(status.peerID == peer.id && status.isPeerAuthenticated && status.isSecureChannelEstablished) {
+                                        Button("Pair Again") { peerToRepair = peer.id }
+                                            .disabled(!vm.canChangeConnection || status.pairingStage == .verificationPending)
+                                            .accessibilityIdentifier("Pair Again with Mac")
+                                    }
                                 } else {
                                     Button("Connect") {
                                         startPairing(with: peer.id)

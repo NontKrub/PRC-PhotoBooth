@@ -65,6 +65,12 @@ public struct SoakTestSettingsView: View {
         .onChange(of: coordinator.productionSoakPhotoCount) { _, _ in
             controller.validatePreflight(coordinator: coordinator)
         }
+        .onChange(of: coordinator.isLocalServerReady) { _, _ in
+            controller.validatePreflight(coordinator: coordinator)
+        }
+        .onChange(of: coordinator.serverURL) { _, _ in
+            controller.validatePreflight(coordinator: coordinator)
+        }
         .onChange(of: controller.config.mode) { oldMode, newMode in
             guard oldMode == .productionPipeline, newMode != .productionPipeline else { return }
             controller.config.enablePhysicalPrint = false
@@ -91,7 +97,7 @@ public struct SoakTestSettingsView: View {
         case .cameraHardware:
             return "Captures \(controller.config.photosPerSession) images per cycle from the selected physical camera. It does not create sessions or validate finalization, delivery, printing, or iPad compatibility."
         case .productionPipeline:
-            var message = "Runs \(controller.config.targetCycles) real sessions using the active event, camera, production storage, finalization queue, and configured guest delivery. Test sessions stay out of the live gallery and event statistics. Their guest routes are removed after each cycle."
+            var message = "Runs \(controller.config.targetCycles) real sessions using the active event, camera, production storage, finalization queue, and configured guest delivery. Each session randomly retakes 1–4 photos; the same photo may be retaken more than once. Test sessions stay out of the live gallery and event statistics. Their guest routes are removed after each cycle."
             if controller.config.testCloudUpload {
                 message += "\n\nCloud upload is enabled. Each cycle uses the current production settings but publishes into this run’s temporary cloud namespace."
                 if controller.config.autoCleanupWorkingFiles {
@@ -312,7 +318,7 @@ public struct SoakTestSettingsView: View {
                 .font(.subheadline.weight(.medium))
             if controller.config.mode == .productionPipeline {
                 if let productionPhotos, let captureCount {
-                    Text("\(cycles) sessions × \(productionPhotos) photos = \(captureCount) camera captures.")
+                    Text("\(cycles) sessions × (\(productionPhotos) photos + 1–4 retakes) = \(captureCount + cycles)–\(captureCount + cycles * 4) camera captures.")
                     if let estimateBytes {
                         Text("Estimated new output: about \(Self.formatBytes(estimateBytes)); estimate uses 10 MiB per photo plus 10 MiB per session.")
                     }

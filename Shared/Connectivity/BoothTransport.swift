@@ -1507,6 +1507,13 @@ final class BoothTransportFrameDecoder: @unchecked Sendable {
         setHandshakeComplete(false, channel: channel)
     }
 
+    /// The decoder is owned by its transport serial queue. Protocol owners
+    /// query this only on that same queue before deciding whether delivery
+    /// may be deferred independently of the next decode.
+    func isHandshakeComplete(_ channel: BoothTransportChannel) -> Bool {
+        handshakeComplete[channel.rawValue] == true
+    }
+
     /// Decodes one control frame and retains subsequent bytes until the
     /// protocol owner has handled this message and applied its state change.
     func decodeNextControl(

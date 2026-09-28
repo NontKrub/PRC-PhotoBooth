@@ -582,6 +582,7 @@
       }
     },
     "Forget this Mac on both devices, then pair again with PIN or QR." : {
+      "extractionState" : "stale",
       "localizations" : {
         "en" : {
           "stringUnit" : {
@@ -829,6 +830,73 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "จับคู่"
+          }
+        }
+      }
+    },
+    "Pair Again" : {
+      "extractionState" : "stale",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Pair Again"
+          }
+        },
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "จับคู่อีกครั้ง"
+          }
+        }
+      }
+    },
+    "Pair Again with PIN" : {
+      "extractionState" : "stale",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Pair Again with PIN"
+          }
+        },
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "จับคู่อีกครั้งด้วย PIN"
+          }
+        }
+      }
+    },
+    "Pair again with PIN or QR." : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Pair again with PIN or QR."
+          }
+        },
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "จับคู่อีกครั้งด้วย PIN หรือ QR"
+          }
+        }
+      }
+    },
+    "Pair with this Mac again?" : {
+      "extractionState" : "stale",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Pair with this Mac again?"
+          }
+        },
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "จับคู่กับ Mac เครื่องนี้อีกครั้งหรือไม่?"
           }
         }
       }
@@ -1408,6 +1476,23 @@
         }
       }
     },
+    "The saved pairing could not be removed." : {
+      "extractionState" : "stale",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "The saved pairing could not be removed."
+          }
+        },
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ไม่สามารถลบข้อมูลการจับคู่ที่บันทึกไว้ได้"
+          }
+        }
+      }
+    },
     "This iPad" : {
       "extractionState" : "stale",
       "localizations" : {
@@ -1421,6 +1506,22 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "iPad เครื่องนี้"
+          }
+        }
+      }
+    },
+    "This iPad will remove its saved pairing and request a new PIN from the Mac." : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "This iPad will remove its saved pairing and request a new PIN from the Mac."
+          }
+        },
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "iPad เครื่องนี้จะลบข้อมูลการจับคู่เดิมและขอ PIN ใหม่จาก Mac"
           }
         }
       }

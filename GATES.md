@@ -34,8 +34,8 @@ Scope: fix the confirmed route crash and remaining software release blockers, ve
   EXPECT: TESTS_PASSED
   EVIDENCE: automatic-evidence=v1; definition-sha256=f7324877838d588c4b34ace05a2de7cbc45c690b97b3ef5da0026524eaa5ca66; exit=0; EXPECT=matched; output-sha256=1dd6495bfc4544022a09bc98a721e653082b1be6c3785bb90894f37b7962d95a; output-bytes=623; shell=/bin/sh; cwd=/Users/nont/my-project/PRC-PhotoBooth; path=8856c3cc55bf/22 entries
 
-- [x] G7: GitHub Actions build, test, release, and packaging lanes pass for current source
-  EVIDENCE: [PR App Builds run 36217889447](https://github.com/NontKrub/PRC-PhotoBooth/actions/runs/36217889447) ran at implementation SHA a4a0e5156428e430f83d2bab1281d555d6b37f86 and completed successfully. Stable macOS Release/tests, macOS Debug/tests/Release/package, and iPad Simulator Debug/Release/tests/generic Release/package all passed. The prior run 36210283877 failed on the listener-admission timeout; the test wait was raised to 3 seconds without changing the production timeout, and this run passed.
+- [ ] G7: GitHub Actions build, test, release, and packaging lanes pass for the candidate source
+  EVIDENCE: Historical [PR App Builds run 36217889447](https://github.com/NontKrub/PRC-PhotoBooth/actions/runs/36217889447) passed at SHA a4a0e5156428e430f83d2bab1281d555d6b37f86. Branch tip 00e59690839d31a7036e916e3195b40170696ffe failed [run 36324733379](https://github.com/NontKrub/PRC-PhotoBooth/actions/runs/36324733379) only in the isolated MainActor stall test; its iPad lanes passed. Remediation passed local verification, but the new PR candidate still needs its own remote CI result.
 
 - [ ] G8: the production hardware matrix and sustained event soak pass
   EVIDENCE: Pending physical Mac, Sony ZV-E10, Canon SELPHY CP1500, paired iPad, event network, and 4–6 hour run. Simulator and synthetic tests do not satisfy this gate.
@@ -45,3 +45,42 @@ Scope: fix the confirmed route crash and remaining software release blockers, ve
 
 - [ ] G10: paired iPad authenticates after a hostile flood, app restart, and DHCP address change
   EVIDENCE: Pending real listener/iPad integration with stored-secret HMAC verification. Runtime tests prove bounded identity-probe admission and per-ID throttling only.
+
+- [x] G11: authenticated control traffic and liveness remain active during the exact 12-second MainActor stall
+  CHECK: env DEVELOPER_DIR='/Applications/Xcode-26.6.0.app/Contents/Developer' TEST_RUNNER_PRC_RUN_MAINACTOR_STALL_TESTS=1 /Applications/Xcode-26.6.0.app/Contents/Developer/usr/bin/xcodebuild -quiet -project PRC-PhotoBooth.xcodeproj -scheme PRC-PhotoBoothTests -destination 'platform=macOS' -derivedDataPath .build/final-blockers -only-testing:'PRC-PhotoBoothTests/NetworkRouteTests/authenticatedControlTrafficSurvivesTwelveSecondMainActorStall()' CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO test && printf 'TESTS_PASSED\n'
+  EXPECT: TESTS_PASSED
+  EVIDENCE: Baseline reproduced on Xcode 26.6: activityCount=1, timeoutCount=1, transportClosedCount=1. Final full Mac run passed the repaired test: 698 passed, 0 failed, 0 skipped in `.build/final-blockers/Logs/Test/Test-PRC-PhotoBoothTests-2569.09.27_23-09-25-+0700.xcresult`.
+
+- [x] G12: queue-owned control delivery preserves order, enforces bounded backpressure, and rejects stale generations
+  CHECK: env DEVELOPER_DIR='/Applications/Xcode-26.6.0.app/Contents/Developer' TEST_RUNNER_PRC_RUN_MAINACTOR_STALL_TESTS=1 /Applications/Xcode-26.6.0.app/Contents/Developer/usr/bin/xcodebuild -quiet -project PRC-PhotoBooth.xcodeproj -scheme PRC-PhotoBoothTests -destination 'platform=macOS' -derivedDataPath .build/final-blockers -only-testing:PRC-PhotoBoothTests/NetworkRouteTests CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO test && printf 'TESTS_PASSED\n'
+  EXPECT: TESTS_PASSED
+  EVIDENCE: Final full Mac run passed the 12-second ordering/backpressure, stale-generation, and real direct-frame overflow tests: `.build/final-blockers/Logs/Test/Test-PRC-PhotoBoothTests-2569.09.27_23-09-25-+0700.xcresult` (698 passed, 0 failed, 0 skipped). The isolated stall and listener-admission tests also passed in the final serial rerun.
+
+- [x] G13: PIN Keychain lookup distinguishes absent, inaccessible, and malformed credentials without destructive migration
+  CHECK: DEVELOPER_DIR='/Applications/Xcode-26.6.0.app/Contents/Developer' /Applications/Xcode-26.6.0.app/Contents/Developer/usr/bin/xcodebuild -quiet -project PRC-PhotoBooth.xcodeproj -scheme PRC-PhotoBoothTests -destination 'platform=macOS' -derivedDataPath .build/final-blockers -only-testing:PRC-PhotoBoothTests/KeychainHelperTests CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO test && printf 'TESTS_PASSED\n'
+  EXPECT: TESTS_PASSED
+  EVIDENCE: Final full Mac run passed `KeychainHelperTests`, including found/notFound/unavailable/malformed and non-destructive migration cases: `.build/final-blockers/Logs/Test/Test-PRC-PhotoBoothTests-2569.09.27_23-09-25-+0700.xcresult` (698 passed, 0 failed, 0 skipped).
+
+- [x] G14: pairing secrets preserve trusted metadata on Keychain failures and remain readable from the supported store
+  CHECK: DEVELOPER_DIR='/Applications/Xcode-26.6.0.app/Contents/Developer' /Applications/Xcode-26.6.0.app/Contents/Developer/usr/bin/xcodebuild -quiet -project PRC-PhotoBooth.xcodeproj -scheme PRC-PhotoBoothTests -destination 'platform=macOS' -derivedDataPath .build/final-blockers -only-testing:PRC-PhotoBoothTests/BoothPairingTests CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO test && printf 'TESTS_PASSED\n'
+  EXPECT: TESTS_PASSED
+  EVIDENCE: Final full Mac run passed `BoothPairingTests`, including unavailable-store metadata preservation, dual-store conflict preservation, and failed Data Protection write consistency: `.build/final-blockers/Logs/Test/Test-PRC-PhotoBoothTests-2569.09.27_23-09-25-+0700.xcresult` (698 passed, 0 failed, 0 skipped).
+
+- [x] G15: PIN gate and Settings strings have English and Thai translations
+  CHECK: DEVELOPER_DIR='/Applications/Xcode-26.6.0.app/Contents/Developer' /Applications/Xcode-26.6.0.app/Contents/Developer/usr/bin/xcodebuild -quiet -project PRC-PhotoBooth.xcodeproj -scheme PRC-PhotoBoothTests -destination 'platform=macOS' -derivedDataPath .build/final-blockers -only-testing:PRC-PhotoBoothTests/LocalizationTests CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO test && printf 'TESTS_PASSED\n'
+  EXPECT: TESTS_PASSED
+  EVIDENCE: Localization tests and English/Thai catalog checks passed in the final Mac suite: `.build/final-blockers/Logs/Test/Test-PRC-PhotoBoothTests-2569.09.27_23-09-25-+0700.xcresult` (698 passed, 0 failed, 0 skipped). Rendered Settings/PIN screenshots, accessibility inspection, and Thai geometry review are tracked in G18.
+
+- [x] G16: full Mac and iPad simulator test suites pass on the available Xcode 26.6 toolchain
+  CHECK: DEVELOPER_DIR='/Applications/Xcode-26.6.0.app/Contents/Developer' /Applications/Xcode-26.6.0.app/Contents/Developer/usr/bin/xcodebuild -quiet -project PRC-PhotoBooth.xcodeproj -scheme PRC-PhotoBoothTests -destination 'platform=macOS' -derivedDataPath .build/final-blockers CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO test && DEVELOPER_DIR='/Applications/Xcode-26.6.0.app/Contents/Developer' /Applications/Xcode-26.6.0.app/Contents/Developer/usr/bin/xcodebuild -quiet -project PRC-PhotoBooth.xcodeproj -scheme PRC-PhotoBooth-iPadTests -destination 'platform=iOS Simulator,name=iPad Pro 13-inch' -derivedDataPath .build/final-blockers CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO test && printf 'TESTS_PASSED\n'
+  EXPECT: TESTS_PASSED
+  EVIDENCE: Latest Mac suite: 700 tests passed, 0 failed, 0 skipped, `.build/current-fixes/Logs/Test/Test-PRC-PhotoBoothTests-2569.09.28_08-41-32-+0700.xcresult`; its dynamic parameter runs total 704. The two new timer/core teardown tests also passed after the final source edit in `.build/current-fixes/Logs/Test/Test-PRC-PhotoBoothTests-2569.09.28_08-46-56-+0700.xcresult`. Latest iPad simulator suite: 23 passed, 0 failed, 0 skipped, `.build/ipad-current-fixes/Logs/Test/Test-PRC-PhotoBooth-iPadTests-2569.09.28_08-40-24-+0700.xcresult`. Mac Release and generic iPadOS Release builds exited 0 after the final source edit; Debug builds were exercised by their test suites. Xcode 26.6 was used.
+
+- [x] G17: effective built-app signing identity and entitlements explain the actual credential persistence behavior
+  EVIDENCE: Signed Debug and Release app products report bundle `com.nont.prcphoto.mac`, Apple Development signing, a matching `application-identifier` and team-prefixed `keychain-access-groups` shape (`<TEAMID>.com.nont.prcphoto.mac`); both configurations use identical values. The opt-in dedicated test service write passed in a signed Debug test host, read passed after a clean Debug rebuild and from a Release-config test host, and cleanup passed. The Team ID was supplied only as a local command-line build override. The probe never used the production Admin PIN service.
+
+- [ ] G18: built Settings scene shows the full PIN gate and all eight categories at required sizes in English and Thai
+  EVIDENCE: pending rendered screenshots and accessibility inspection.
+
+- [ ] G19: physical iPad matrix, rebuild persistence, and sustained event soak pass
+  EVIDENCE: On 2026-09-28 the operator reported physical iPadOS 16.7.16 connection over home Wi-Fi and iPad hotspot, QR pairing, and a Sony ZV-E10 session connection to the Mac. Camera capture was not tested. Changing Mac Wi-Fi triggered a transport-queue assertion; the iPad log then recorded heartbeat timeout and repeated control deadlines. The route-change and Forget All fixes still require physical retesting, as do camera capture, printer, and the 30-minute minimum soak.

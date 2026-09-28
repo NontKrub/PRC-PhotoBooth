@@ -480,7 +480,7 @@ final class BoothCoordinator {
                 )
                 errorMessage = startupComponents[.localServer]?.detail
             } else if case .ready = serverStatus.state {
-                isLocalServerReady = !serverURL.isEmpty
+                isLocalServerReady = true
                 startupComponents[.localServer] = .ready
             }
 
@@ -1556,7 +1556,7 @@ final class BoothCoordinator {
         }.count
     }
 
-    private var isAuthenticatedIPadConnected: Bool {
+    var isAuthenticatedIPadConnected: Bool {
         guard case .connected = connectionStatus.state else { return false }
         guard multipeer is NetworkBoothTransport else { return true }
         return connectionStatus.isPeerAuthenticated
@@ -2609,8 +2609,23 @@ final class BoothCoordinator {
         guard let startedManifest = manifest else {
             throw BoothSoakTestError.stageTimeout("session creation")
         }
+        guard startedManifest.eventConfig.photoCount > 0 else {
+            throw BoothSoakTestError.productionRunUnavailable("the event has no photo slots to retake")
+        }
+        var generator = SystemRandomNumberGenerator()
+        let retakePlan = BoothSoakRetakePlan.random(
+            photoCount: startedManifest.eventConfig.photoCount,
+            using: &generator
+        )
+        var requestedRetakes = Array(repeating: 0, count: startedManifest.eventConfig.photoCount)
+        let planDescription = retakePlan.countsByPhoto.enumerated()
+            .filter { $0.element > 0 }
+            .map { "photo \($0.offset + 1) × \($0.element)" }
+            .joined(separator: ", ")
+        NSLog("%@", "[Soak] Run \(runID), cycle \(cycleIndex): \(retakePlan.totalCount) retakes (\(planDescription))")
+        await publishStage("Planned \(retakePlan.totalCount) retakes: \(planDescription)")
 
-        let completionDeadline = Date().addingTimeInterval(180)
+        let completionDeadline = Date().addingTimeInterval(300)
         var finalizingAt: Date?
         var completedManifest: SessionManifest?
         var finalJobs: [SessionJob] = []
@@ -2632,8 +2647,21 @@ final class BoothCoordinator {
 
             if case .review(let photoIndex) = stateMachine.phase,
                currentManifest?.id == latest.id,
+               currentCaptureAttempt == nil,
                !reviewDecisionPending {
-                handleReviewDecision(photoIndex: photoIndex, action: .keep)
+                let persistedRetakes = currentManifest?.shots.first(where: { $0.photoIndex == photoIndex })?.retakeCount ?? 0
+                guard persistedRetakes == requestedRetakes[photoIndex] else {
+                    throw BoothSoakTestError.productionRunUnavailable(
+                        "retake count for photo \(photoIndex + 1) did not match the soak plan"
+                    )
+                }
+                if requestedRetakes[photoIndex] < retakePlan.countsByPhoto[photoIndex] {
+                    requestedRetakes[photoIndex] += 1
+                    await publishStage("Retaking photo \(photoIndex + 1) (\(requestedRetakes[photoIndex])/\(retakePlan.countsByPhoto[photoIndex]))")
+                    handleReviewDecision(photoIndex: photoIndex, action: .retake)
+                } else {
+                    handleReviewDecision(photoIndex: photoIndex, action: .keep)
+                }
             }
             if case .captureRecovery = stateMachine.phase {
                 throw BoothSoakTestError.productionRunUnavailable(
@@ -2786,6 +2814,14 @@ final class BoothCoordinator {
         }
 
         let captureAttempts = completedManifest.captureAttempts ?? []
+        let recordedRetakeCounts = retakePlan.countsByPhoto.indices.map { photoIndex in
+            completedManifest.shots.first(where: { $0.photoIndex == photoIndex })?.retakeCount ?? 0
+        }
+        guard retakePlan.verified(recordedCounts: recordedRetakeCounts, attempts: captureAttempts) else {
+            throw BoothSoakTestError.productionRunUnavailable(
+                "the planned \(retakePlan.totalCount) retakes (\(planDescription)) and replacement captures were not verified"
+            )
+        }
         let captureLatencies = captureAttempts.compactMap { attempt -> Double? in
             guard attempt.result == .success || attempt.result == .transferRecovered,
                   let completedAt = attempt.completedAt else { return nil }
@@ -2820,6 +2856,7 @@ final class BoothCoordinator {
         soakAutomaticPrintOverride = nil
         return BoothAutomatedSoakCycleResult(
             captureLatencies: captureLatencies,
+            retakeCount: retakePlan.totalCount,
             captureAttemptCount: BoothSoakCaptureMetrics.physicalCaptureAttemptCount(captureAttempts),
             captureFailureCount: captureAttempts.filter { $0.result == .failed }.count,
             cameraRecoveryCount: captureAttempts.filter {
