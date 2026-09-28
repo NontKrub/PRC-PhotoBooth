@@ -189,6 +189,12 @@
             "state" : "new",
             "value" : "%1$@ sessions × (%2$@ photos + 1–4 retakes) = %3$@–%4$@ camera captures."
           }
+        },
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%1$@ เซสชัน × (%2$@ ภาพ + ถ่ายใหม่ 1–4 ครั้ง) = %3$@–%4$@ ภาพที่บันทึกจากกล้อง"
+          }
         }
       }
     },
