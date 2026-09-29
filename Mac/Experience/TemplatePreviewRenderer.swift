@@ -8,6 +8,13 @@ struct TemplatePreviewRenderer {
     static let maxDimension = 640
 
     func render(template: EventTemplateDefinition, frame: CGImage?, foregroundOverlay: CGImage? = nil) throws -> CGImage {
+        guard CanvasDimensionPolicy.isValidDocument(width: template.canvasWidth, height: template.canvasHeight) else {
+            throw TemplatePreviewError.invalidCanvasDimensions
+        }
+        guard (1...8).contains(template.photoCount) else {
+            throw TemplatePreviewError.invalidPhotoCount
+        }
+
         let config = EventConfig(
             photoCount: template.photoCount,
             canvasWidth: template.canvasWidth,
@@ -18,11 +25,11 @@ struct TemplatePreviewRenderer {
         let placeholders = Dictionary(uniqueKeysWithValues: (0..<template.photoCount).map { index in
             (index, placeholder(index: index))
         })
-        let image = try Compositor(config: config, framePNG: frame, foregroundOverlayPNG: foregroundOverlay).render(
+        return try Compositor(config: config, framePNG: frame, foregroundOverlayPNG: foregroundOverlay).render(
             images: placeholders,
-            qrPayload: "https://example.invalid/s/preview/"
+            qrPayload: "https://example.invalid/s/preview/",
+            maxDimension: Self.maxDimension
         )
-        return try scaled(image)
     }
 
     func saveJPEG(_ image: CGImage, to url: URL, quality: CGFloat = 0.82) throws {
@@ -71,37 +78,18 @@ struct TemplatePreviewRenderer {
         CTLineDraw(line, context)
         return context.makeImage()!
     }
-
-    private func scaled(_ image: CGImage) throws -> CGImage {
-        let longest = max(image.width, image.height)
-        guard longest > Self.maxDimension else { return image }
-        let scale = CGFloat(Self.maxDimension) / CGFloat(longest)
-        let width = max(1, Int(CGFloat(image.width) * scale))
-        let height = max(1, Int(CGFloat(image.height) * scale))
-        guard let context = CGContext(
-            data: nil,
-            width: width,
-            height: height,
-            bitsPerComponent: 8,
-            bytesPerRow: 0,
-            space: CGColorSpaceCreateDeviceRGB(),
-            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
-        ) else { throw TemplatePreviewError.contextFailed }
-        context.interpolationQuality = .high
-        context.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
-        guard let result = context.makeImage() else { throw TemplatePreviewError.contextFailed }
-        return result
-    }
 }
 
 enum TemplatePreviewError: LocalizedError, Equatable {
-    case contextFailed
     case encodingFailed
+    case invalidCanvasDimensions
+    case invalidPhotoCount
 
     var errorDescription: String? {
         switch self {
-        case .contextFailed: return "Could not create template preview context."
         case .encodingFailed: return "Could not encode template preview."
+        case .invalidCanvasDimensions: return "Canvas width and height must each be between 300 and 10,000 pixels."
+        case .invalidPhotoCount: return "A template preview requires between one and eight photos."
         }
     }
 }

@@ -37,6 +37,62 @@ struct DSLRCaptureAttemptTests {
         )
     }
 
+    @Test("Capture cancellation gates the shutter and resolves only its own camera generation")
+    func captureCancellationOwnsItsAttemptAndGeneration() {
+        let scope = DSLRCaptureAttemptScope(attemptID: UUID(), cameraGeneration: 4)
+        let control = DSLRCaptureAttemptControl(scope: scope)
+
+        #expect(control.cancel(scope))
+        #expect(!control.canContinue(scope))
+        #expect(!control.markShutterMayHaveBeenIssued(scope))
+        #expect(!control.shutterMayHaveBeenIssued(for: scope))
+        var dispatchCount = 0
+        let dispatched = control.performIfCurrent(scope) { dispatchCount += 1 }
+        #expect(!dispatched)
+        #expect(dispatchCount == 0)
+        #expect(!control.resolve(DSLRCaptureAttemptScope(
+            attemptID: scope.attemptID,
+            cameraGeneration: scope.cameraGeneration + 1
+        )))
+
+        #expect(control.resolve(scope))
+        #expect(!control.resolve(scope))
+        #expect(!control.cancel(scope))
+    }
+
+    @Test("Cancellation after shutter dispatch preserves uncertainty while blocking more commands")
+    func cancellationAfterShutterKeepsUncertainty() {
+        let scope = DSLRCaptureAttemptScope(attemptID: UUID(), cameraGeneration: 8)
+        let control = DSLRCaptureAttemptControl(scope: scope)
+
+        #expect(control.markShutterMayHaveBeenIssued(scope))
+        #expect(control.shutterMayHaveBeenIssued(for: scope))
+        #expect(control.cancel(scope))
+        #expect(control.shutterMayHaveBeenIssued(for: scope))
+        #expect(!control.canContinue(scope))
+        #expect(!control.markShutterMayHaveBeenIssued(scope))
+        var dispatchCount = 0
+        let dispatched = control.performIfCurrent(scope) { dispatchCount += 1 }
+        #expect(!dispatched)
+        #expect(dispatchCount == 0)
+    }
+
+    @Test("a definitive busy refusal clears uncertainty before cancellation can suppress fallback")
+    func busyRefusalThenCancellationSuppressesFallback() {
+        let scope = DSLRCaptureAttemptScope(attemptID: UUID(), cameraGeneration: 12)
+        let control = DSLRCaptureAttemptControl(scope: scope)
+        #expect(control.markShutterMayHaveBeenIssued(scope))
+        control.confirmShutterRejected(scope)
+        #expect(!control.shutterMayHaveBeenIssued(for: scope))
+
+        #expect(control.cancel(scope))
+        var fallbackCount = 0
+        let dispatched = control.performIfCurrent(scope) { fallbackCount += 1 }
+        #expect(!dispatched)
+        #expect(fallbackCount == 0)
+        #expect(!control.shutterMayHaveBeenIssued(for: scope))
+    }
+
     @Test("Failed transfer retains the original baseline for Retry Receive")
     func failedTransferRetainsOriginalContext() {
         let requestedAt = Date(timeIntervalSince1970: 1_800_000_000)

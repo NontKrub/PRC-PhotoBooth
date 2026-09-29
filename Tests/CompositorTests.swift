@@ -126,7 +126,7 @@ struct CompositorTests {
     @Test("QR rotation preserves the element center")
     func qrRotationPreservesCenter() throws {
         let element = SharedQRCodeElement(id: "qr-1", normalizedRect: CGRect(x: 0.25, y: 0.25, width: 0.5, height: 0.5), rotation: 37)
-        var rotated = EventConfig(canvasWidth: 80, canvasHeight: 80, qrCodeElements: [element])
+        let rotated = EventConfig(canvasWidth: 80, canvasHeight: 80, qrCodeElements: [element])
         var unrotated = rotated
         unrotated.qrCodeElements[0].rotation = 0
         let frame = solidImage(width: 80, height: 80, color: Pixel(100, 100, 100, 255))
@@ -167,6 +167,102 @@ struct CompositorTests {
         let result = try Compositor(config: config, framePNG: nil, foregroundOverlayPNG: overlay).render(images: [0: photo])
         try expectPixel(atX: 0, y: 0, in: result, equals: Pixel(0, 0, 255, 255))
         try expectPixel(atX: 1, y: 0, in: result, equals: Pixel(255, 0, 0, 255))
+    }
+
+    @Test("bounded rendering matches an equivalent preview canvas with frame, overlay and QR")
+    func boundedCompositionMatchesEquivalentPreviewCanvas() throws {
+        let config = EventConfig(
+            canvasWidth: 160,
+            canvasHeight: 200,
+            slots: [SharedPhotoSlot(
+                normalizedRect: CGRect(x: 0, y: 0, width: 0.5, height: 0.5),
+                photoIndex: 0
+            )],
+            qrCodeElements: [SharedQRCodeElement(
+                id: "qr-1",
+                normalizedRect: CGRect(x: 0.65, y: 0.55, width: 0.3, height: 0.3)
+            )]
+        )
+        let frame = solidImage(width: 8, height: 10, color: Pixel(240, 210, 20, 255))
+        let overlay = makeImage(width: 160, height: 200) { x, y in
+            x < 40 && y < 40 ? (20, 40, 240, 255) : (0, 0, 0, 0)
+        }
+        let photo = solidImage(width: 12, height: 12, color: Pixel(240, 30, 20, 255))
+        let compositor = Compositor(config: config, framePNG: frame, foregroundOverlayPNG: overlay)
+        let payload = "https://example.invalid/s/preview-parity/"
+        let full = try compositor.render(images: [0: photo], qrPayload: payload)
+        let bounded = try compositor.render(images: [0: photo], qrPayload: payload, maxDimension: 100)
+        let equivalentPreview = try Compositor(
+            config: EventConfig(
+                canvasWidth: 80,
+                canvasHeight: 100,
+                slots: config.slots,
+                qrCodeElements: config.qrCodeElements
+            ),
+            framePNG: frame,
+            foregroundOverlayPNG: makeImage(width: 80, height: 100) { x, y in
+                x < 20 && y < 20 ? (20, 40, 240, 255) : (0, 0, 0, 0)
+            }
+        ).render(images: [0: photo], qrPayload: payload)
+
+        #expect(full.width == 160)
+        #expect(full.height == 200)
+        #expect(bounded.width == 80)
+        #expect(bounded.height == 100)
+        let equivalentPixels = try #require(rgbaPixels(equivalentPreview))
+        let boundedPixels = try #require(rgbaPixels(bounded))
+        #expect(equivalentPixels == boundedPixels)
+        try expectPixel(atX: 10, y: 10, in: bounded, equals: Pixel(20, 40, 240, 255))
+        try expectPixel(atX: 30, y: 30, in: bounded, equals: Pixel(240, 30, 20, 255))
+        try expectPixel(atX: 70, y: 10, in: bounded, equals: Pixel(240, 210, 20, 255))
+        #expect(darkPixelCount(in: bounded, rect: CGRect(x: 52, y: 55, width: 24, height: 30)) > 0)
+    }
+
+    @Test("low-level rendering accepts small canvases and preserves their dimensions")
+    func lowLevelRenderAcceptsSmallCanvases() throws {
+        let image = try Compositor(
+            config: EventConfig(canvasWidth: 4, canvasHeight: 3),
+            framePNG: nil
+        ).render(images: [:])
+
+        #expect(image.width == 4)
+        #expect(image.height == 3)
+    }
+
+    @Test("rejects malformed or unrepresentable low-level dimensions before rendering")
+    func rejectsMalformedCanvasDimensions() {
+        let malformedDimensions: [CGFloat] = [
+            0,
+            -1,
+            .nan,
+            .infinity,
+            -.infinity,
+            .greatestFiniteMagnitude,
+            1e20,
+            10_000.001
+        ]
+
+        for dimension in malformedDimensions {
+            let invalidWidth = EventConfig(canvasWidth: dimension, canvasHeight: 100)
+            #expect(throws: CompositorError.invalidCanvasDimensions) {
+                try Compositor(config: invalidWidth, framePNG: nil).render(images: [:])
+            }
+
+            let invalidHeight = EventConfig(canvasWidth: 100, canvasHeight: dimension)
+            #expect(throws: CompositorError.invalidCanvasDimensions) {
+                try Compositor(config: invalidHeight, framePNG: nil).render(images: [:])
+            }
+        }
+    }
+
+    @Test("rejects invalid output bounds before allocating a context")
+    func rejectsInvalidMaximumDimension() {
+        for maximum in [0, -1, CanvasDimensionPolicy.maximumRenderDimension + 1] {
+            #expect(throws: CompositorError.invalidMaximumDimension) {
+                try Compositor(config: EventConfig(canvasWidth: 80, canvasHeight: 100), framePNG: nil)
+                    .render(images: [:], maxDimension: maximum)
+            }
+        }
     }
 }
 
@@ -257,4 +353,19 @@ private func pixel(atX x: Int, y: Int, in image: CGImage) -> Pixel? {
     ctx.draw(image, in: CGRect(x: 0, y: 0, width: image.width, height: image.height))
     let offset = (y * image.width + x) * 4
     return Pixel(data[offset], data[offset + 1], data[offset + 2], data[offset + 3])
+}
+
+private func rgbaPixels(_ image: CGImage) -> [UInt8]? {
+    var data = [UInt8](repeating: 0, count: image.width * image.height * 4)
+    guard let ctx = CGContext(
+        data: &data,
+        width: image.width,
+        height: image.height,
+        bitsPerComponent: 8,
+        bytesPerRow: image.width * 4,
+        space: CGColorSpaceCreateDeviceRGB(),
+        bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+    ) else { return nil }
+    ctx.draw(image, in: CGRect(x: 0, y: 0, width: image.width, height: image.height))
+    return data
 }

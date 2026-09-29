@@ -3,6 +3,30 @@ import CoreGraphics
 import ImageIO
 import UniformTypeIdentifiers
 
+enum CanvasDimensionPolicy {
+    static let minimumDocumentDimension = 300.0
+    static let maximumCanvasDimension = 10_000.0
+    static let maximumRenderDimension = 10_000
+
+    static func isValidDocument(width: Double, height: Double) -> Bool {
+        width.isFinite
+            && height.isFinite
+            && (minimumDocumentDimension...maximumCanvasDimension).contains(width)
+            && (minimumDocumentDimension...maximumCanvasDimension).contains(height)
+    }
+
+    static func isValidRender(width: CGFloat, height: CGFloat) -> Bool {
+        let width = Double(width)
+        let height = Double(height)
+        return width.isFinite
+            && height.isFinite
+            && width > 0
+            && height > 0
+            && width <= maximumCanvasDimension
+            && height <= maximumCanvasDimension
+    }
+}
+
 // Keeps preview, strip, and GIF layout rules in one renderer.
 struct Compositor {
     let config: EventConfig
@@ -42,11 +66,24 @@ struct Compositor {
         qrImage: CGImage? = nil,
         maxDimension: Int? = nil
     ) throws -> CGImage {
+        guard CanvasDimensionPolicy.isValidRender(width: config.canvasWidth, height: config.canvasHeight) else {
+            throw CompositorError.invalidCanvasDimensions
+        }
+        if let maxDimension,
+           !(1...CanvasDimensionPolicy.maximumRenderDimension).contains(maxDimension) {
+            throw CompositorError.invalidMaximumDimension
+        }
+
+        let canvasWidth = Double(config.canvasWidth)
+        let canvasHeight = Double(config.canvasHeight)
         let scale = maxDimension.map {
-            min(CGFloat(1), CGFloat($0) / max(CGFloat(config.canvasWidth), CGFloat(config.canvasHeight)))
+            min(1, Double($0) / max(canvasWidth, canvasHeight))
         } ?? 1
-        let w = max(1, Int((config.canvasWidth * Double(scale)).rounded()))
-        let h = max(1, Int((config.canvasHeight * Double(scale)).rounded()))
+        let outputWidth = max(1, (canvasWidth * scale).rounded())
+        let outputHeight = max(1, (canvasHeight * scale).rounded())
+        guard let w = Int(exactly: outputWidth), let h = Int(exactly: outputHeight) else {
+            throw CompositorError.invalidCanvasDimensions
+        }
         let qrImage = try qrImage ?? makeQRCode(payload: qrPayload)
 
         guard let ctx = CGContext(
@@ -194,12 +231,15 @@ struct Compositor {
 
 enum CompositorError: LocalizedError {
     case contextFailed, renderFailed, saveFailed, missingQRCodePayload
+    case invalidCanvasDimensions, invalidMaximumDimension
     var errorDescription: String? {
         switch self {
         case .contextFailed: return "Failed to create graphics context"
         case .renderFailed:  return "Failed to render composited image"
         case .saveFailed:    return "Failed to save output file"
         case .missingQRCodePayload: return "A QR code payload is required for this layout"
+        case .invalidCanvasDimensions: return "Canvas dimensions must be finite and between 1 and 10,000 pixels."
+        case .invalidMaximumDimension: return "The output size must be between 1 and 10,000 pixels."
         }
     }
 }
@@ -209,4 +249,15 @@ enum CompositorError: LocalizedError {
 func loadCGImage(from url: URL) -> CGImage? {
     guard let source = CGImageSourceCreateWithURL(url as CFURL, nil) else { return nil }
     return CGImageSourceCreateImageAtIndex(source, 0, nil)
+}
+
+func loadOrientedImageThumbnail(from url: URL, maxDimension: Int) -> CGImage? {
+    guard (1...CanvasDimensionPolicy.maximumRenderDimension).contains(maxDimension),
+          let source = CGImageSourceCreateWithURL(url as CFURL, nil) else { return nil }
+    return CGImageSourceCreateThumbnailAtIndex(source, 0, [
+        kCGImageSourceCreateThumbnailFromImageAlways: true,
+        kCGImageSourceThumbnailMaxPixelSize: maxDimension,
+        kCGImageSourceCreateThumbnailWithTransform: true,
+        kCGImageSourceShouldCacheImmediately: true
+    ] as CFDictionary)
 }

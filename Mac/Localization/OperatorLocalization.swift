@@ -7,6 +7,13 @@ func operatorString(_ key: String, locale: Locale) -> String {
     return bundle.localizedString(forKey: key, value: key, table: "Localizable")
 }
 
+func operatorTemplateCanvasDimensionsMessage(locale: Locale) -> String {
+    if locale.identifier.lowercased().hasPrefix("th") {
+        return "ความกว้างและความสูงของผืนงานต้องอยู่ระหว่าง 300 ถึง 10,000 พิกเซล"
+    }
+    return "Canvas width and height must each be between 300 and 10,000 pixels."
+}
+
 func operatorFormat(_ key: String, locale: Locale, _ arguments: String...) -> String {
     String(
         format: operatorString(key, locale: locale),

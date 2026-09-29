@@ -2,6 +2,7 @@ import SwiftUI
 import UniformTypeIdentifiers
 
 struct TemplateDetailView: View {
+    @Environment(\.locale) private var locale
     @Binding var template: EventTemplateDefinition
     let frame: CGImage?
     let foregroundOverlay: CGImage?
@@ -32,6 +33,12 @@ struct TemplateDetailView: View {
                     TextField("Width", value: $template.canvasWidth, format: .number)
                     Text("×")
                     TextField("Height", value: $template.canvasHeight, format: .number)
+                }
+                if !CanvasDimensionPolicy.isValidDocument(width: template.canvasWidth, height: template.canvasHeight) {
+                    Text(operatorTemplateCanvasDimensionsMessage(locale: locale))
+                        .font(.caption)
+                        .foregroundStyle(.red)
+                        .accessibilityAddTraits(.isStaticText)
                 }
             }
             Section("Frame") {
@@ -65,6 +72,7 @@ struct TemplateDetailView: View {
                 Text("\(template.slots.count) photo slots · \(template.qrCodeElements.count) QR codes")
                     .foregroundStyle(.secondary)
                 Button("Edit Layout…") { showingSlotEditor = true }
+                    .disabled(!CanvasDimensionPolicy.isValidDocument(width: template.canvasWidth, height: template.canvasHeight))
             }
             Section("Pose Prompts") {
                 PosePromptEditorView(template: $template, onImportImage: onImportPromptImage)
