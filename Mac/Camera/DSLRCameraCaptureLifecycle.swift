@@ -10,24 +10,99 @@ struct DSLRCameraPTPScope: Hashable, Sendable {
     let cameraGeneration: UInt64
 }
 
-enum DSLRSonyCancellationCleanupAction: Equatable, Sendable {
-    case none
-    case releaseControls
-    case recycleSession
+enum DSLRSonyControlProperty: UInt16, Sendable {
+    case autofocus = 0xD2C1
+    case shutter = 0xD2C2
 }
 
-enum DSLRSonyCancellationCleanupPolicy {
-    static func action(
-        shutterMayHaveBeenIssued: Bool,
-        releaseSequenceCompleted: Bool,
-        laneQuarantined: Bool
-    ) -> DSLRSonyCancellationCleanupAction {
-        guard shutterMayHaveBeenIssued, !releaseSequenceCompleted else { return .none }
-        return laneQuarantined ? .recycleSession : .releaseControls
+struct DSLRSonyPhysicalControlState: Sendable, Equatable {
+    let cameraGeneration: UInt64
+    private(set) var autofocusMayBeEngaged = false
+    private(set) var shutterMayBeEngaged = false
+    private(set) var autofocusReleaseInFlight = false
+    private(set) var shutterReleaseInFlight = false
+    private(set) var cleanupInProgress = false
+
+    var needsNeutralization: Bool {
+        autofocusMayBeEngaged || shutterMayBeEngaged
+            || autofocusReleaseInFlight || shutterReleaseInFlight
+    }
+
+    mutating func commandDispatched(property: UInt16, value: UInt16, generation: UInt64) {
+        guard generation == cameraGeneration else { return }
+        switch (DSLRSonyControlProperty(rawValue: property), value) {
+        case (.autofocus, 2): autofocusMayBeEngaged = true
+        case (.shutter, 2): shutterMayBeEngaged = true
+        case (.autofocus, 1): autofocusReleaseInFlight = true
+        case (.shutter, 1): shutterReleaseInFlight = true
+        default: break
+        }
+    }
+
+    mutating func commandCompleted(
+        property: UInt16,
+        value: UInt16,
+        responseCode: UInt16,
+        failed: Bool,
+        generation: UInt64
+    ) {
+        guard generation == cameraGeneration else { return }
+        let succeeded = !failed && responseCode == 0x2001
+        let wasBusy = !failed && responseCode == 0x201D
+        switch (DSLRSonyControlProperty(rawValue: property), value) {
+        case (.autofocus, 1):
+            autofocusReleaseInFlight = false
+            if succeeded { autofocusMayBeEngaged = false }
+        case (.shutter, 1):
+            shutterReleaseInFlight = false
+            if succeeded { shutterMayBeEngaged = false }
+        case (.autofocus, 2) where wasBusy:
+            autofocusMayBeEngaged = false
+        case (.shutter, 2) where wasBusy:
+            shutterMayBeEngaged = false
+        default:
+            // An error response does not prove that a press or release had no
+            // physical effect. Preserve the conservative state until release or
+            // a confirmed camera-session close.
+            break
+        }
+    }
+
+    mutating func beginCleanup(laneQuarantined: Bool, generation: UInt64) -> [UInt16]? {
+        guard generation == cameraGeneration,
+              needsNeutralization,
+              !cleanupInProgress else { return nil }
+        guard !laneQuarantined,
+              !autofocusReleaseInFlight,
+              !shutterReleaseInFlight else { return nil }
+        cleanupInProgress = true
+        var commands: [UInt16] = []
+        if shutterMayBeEngaged { commands.append(DSLRSonyControlProperty.shutter.rawValue) }
+        if autofocusMayBeEngaged { commands.append(DSLRSonyControlProperty.autofocus.rawValue) }
+        return commands
+    }
+
+    mutating func finishCleanup(generation: UInt64) {
+        guard generation == cameraGeneration else { return }
+        cleanupInProgress = false
     }
 }
 
 enum DSLRCameraSessionRecoveryPolicy {
+    static func closeIsConfirmed(errorOccurred: Bool) -> Bool {
+        !errorOccurred
+    }
+
+    static func closeDeadlineCanReportFailure(
+        generation: UInt64,
+        currentGeneration: UInt64,
+        cameraStillConnected: Bool,
+        closeIsPending: Bool
+    ) -> Bool {
+        generation == currentGeneration
+            || (!cameraStillConnected && closeIsPending)
+    }
+
     static func mayScheduleCycle(
         requestedGeneration: UInt64,
         currentGeneration: UInt64,
@@ -42,6 +117,13 @@ enum DSLRCameraSessionRecoveryPolicy {
     }
 }
 
+enum DSLRCameraRecoveryStatus: Equatable, Sendable {
+    case opening
+    case initializing
+    case recovering
+    case manualReconnectRequired
+}
+
 final class DSLRCaptureAttemptControl: @unchecked Sendable {
     let scope: DSLRCaptureAttemptScope
 
@@ -49,7 +131,6 @@ final class DSLRCaptureAttemptControl: @unchecked Sendable {
     private var cancelled = false
     private var resolved = false
     private var shutterMayHaveBeenIssued = false
-    private var sonyReleaseSequenceCompleted = false
 
     init(scope: DSLRCaptureAttemptScope) {
         self.scope = scope
@@ -74,30 +155,7 @@ final class DSLRCaptureAttemptControl: @unchecked Sendable {
         defer { lock.unlock() }
         guard self.scope == scope, !cancelled, !resolved else { return false }
         shutterMayHaveBeenIssued = true
-        sonyReleaseSequenceCompleted = false
         return true
-    }
-
-    func markSonyReleaseSequenceCompleted(_ scope: DSLRCaptureAttemptScope) -> Bool {
-        lock.lock()
-        defer { lock.unlock() }
-        guard self.scope == scope, !cancelled, !resolved, shutterMayHaveBeenIssued else { return false }
-        sonyReleaseSequenceCompleted = true
-        return true
-    }
-
-    func cancellationCleanupAction(
-        for scope: DSLRCaptureAttemptScope,
-        laneQuarantined: Bool
-    ) -> DSLRSonyCancellationCleanupAction {
-        lock.lock()
-        defer { lock.unlock() }
-        guard self.scope == scope else { return .none }
-        return DSLRSonyCancellationCleanupPolicy.action(
-            shutterMayHaveBeenIssued: shutterMayHaveBeenIssued,
-            releaseSequenceCompleted: sonyReleaseSequenceCompleted,
-            laneQuarantined: laneQuarantined
-        )
     }
 
     // Linearize cancellation against enqueueing the physical shutter command.

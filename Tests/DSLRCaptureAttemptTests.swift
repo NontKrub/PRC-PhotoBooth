@@ -77,25 +77,110 @@ struct DSLRCaptureAttemptTests {
         #expect(dispatchCount == 0)
     }
 
-    @Test("Sony cancellation releases controls only after physical shutter dispatch")
-    func sonyCancellationCleanupDecision() {
-        let beforePress = DSLRCaptureAttemptScope(attemptID: UUID(), cameraGeneration: 20)
-        let beforePressControl = DSLRCaptureAttemptControl(scope: beforePress)
-        #expect(beforePressControl.cancellationCleanupAction(for: beforePress, laneQuarantined: false) == .none)
+    @Test("Cancellation cleans only Sony controls that were physically dispatched")
+    func cancellationCleansOnlyDispatchedSonyControls() {
+        let beforePressScope = DSLRCaptureAttemptScope(attemptID: UUID(), cameraGeneration: 20)
+        let beforePressControl = DSLRCaptureAttemptControl(scope: beforePressScope)
+        var beforePressState = DSLRSonyPhysicalControlState(cameraGeneration: 20)
+        #expect(beforePressControl.cancel(beforePressScope))
+        #expect(beforePressState.beginCleanup(laneQuarantined: false, generation: 20) == nil)
 
-        let afterPress = DSLRCaptureAttemptScope(attemptID: UUID(), cameraGeneration: 21)
-        let afterPressControl = DSLRCaptureAttemptControl(scope: afterPress)
-        #expect(afterPressControl.markShutterMayHaveBeenIssued(afterPress))
-        #expect(afterPressControl.cancel(afterPress))
-        #expect(afterPressControl.cancellationCleanupAction(for: afterPress, laneQuarantined: false) == .releaseControls)
-        #expect(afterPressControl.cancellationCleanupAction(for: afterPress, laneQuarantined: true) == .recycleSession)
+        let afterAFPressScope = DSLRCaptureAttemptScope(attemptID: UUID(), cameraGeneration: 21)
+        let afterAFPressControl = DSLRCaptureAttemptControl(scope: afterAFPressScope)
+        var afterAFPressState = DSLRSonyPhysicalControlState(cameraGeneration: 21)
+        afterAFPressState.commandDispatched(property: 0xD2C1, value: 2, generation: 21)
+        #expect(afterAFPressControl.cancel(afterAFPressScope))
+        #expect(afterAFPressState.beginCleanup(laneQuarantined: false, generation: 21) == [0xD2C1])
 
-        let released = DSLRCaptureAttemptScope(attemptID: UUID(), cameraGeneration: 22)
-        let releasedControl = DSLRCaptureAttemptControl(scope: released)
-        #expect(releasedControl.markShutterMayHaveBeenIssued(released))
-        #expect(releasedControl.markSonyReleaseSequenceCompleted(released))
-        #expect(releasedControl.cancel(released))
-        #expect(releasedControl.cancellationCleanupAction(for: released, laneQuarantined: false) == .none)
+        let afterShutterScope = DSLRCaptureAttemptScope(attemptID: UUID(), cameraGeneration: 22)
+        let afterShutterControl = DSLRCaptureAttemptControl(scope: afterShutterScope)
+        var afterShutterState = DSLRSonyPhysicalControlState(cameraGeneration: 22)
+        afterShutterState.commandDispatched(property: 0xD2C1, value: 2, generation: 22)
+        afterShutterState.commandDispatched(property: 0xD2C2, value: 2, generation: 22)
+        #expect(afterShutterControl.markShutterMayHaveBeenIssued(afterShutterScope))
+        #expect(afterShutterControl.cancel(afterShutterScope))
+        #expect(afterShutterState.beginCleanup(laneQuarantined: true, generation: 22) == nil)
+        #expect(afterShutterState.beginCleanup(laneQuarantined: false, generation: 22) == [0xD2C2, 0xD2C1])
+    }
+
+    @Test("Sony control state tracks autofocus independently and cleans only dispatched controls")
+    func sonyPhysicalControlCleanupPlan() {
+        let generation: UInt64 = 31
+        var state = DSLRSonyPhysicalControlState(cameraGeneration: generation)
+        state.commandDispatched(property: 0xD2C1, value: 2, generation: generation)
+        #expect(state.needsNeutralization)
+        #expect(state.beginCleanup(laneQuarantined: false, generation: generation) == [0xD2C1])
+        #expect(state.beginCleanup(laneQuarantined: false, generation: generation) == nil)
+
+        state.commandDispatched(property: 0xD2C1, value: 1, generation: generation)
+        state.commandCompleted(
+            property: 0xD2C1,
+            value: 1,
+            responseCode: 0x2001,
+            failed: false,
+            generation: generation
+        )
+        state.finishCleanup(generation: generation)
+        #expect(!state.needsNeutralization)
+        #expect(state.beginCleanup(laneQuarantined: false, generation: generation) == nil)
+    }
+
+    @Test("Sony shutter cleanup releases shutter before autofocus and never dispatches another press")
+    func sonyShutterAndAutofocusCleanupOrdering() {
+        let generation: UInt64 = 32
+        var state = DSLRSonyPhysicalControlState(cameraGeneration: generation)
+        state.commandDispatched(property: 0xD2C1, value: 2, generation: generation)
+        state.commandDispatched(property: 0xD2C2, value: 2, generation: generation)
+        #expect(state.beginCleanup(laneQuarantined: false, generation: generation) == [0xD2C2, 0xD2C1])
+
+        state.commandDispatched(property: 0xD2C2, value: 1, generation: generation)
+        state.commandCompleted(
+            property: 0xD2C2,
+            value: 1,
+            responseCode: 0x2001,
+            failed: false,
+            generation: generation
+        )
+        #expect(state.shutterMayBeEngaged == false)
+        #expect(state.autofocusMayBeEngaged)
+        state.commandDispatched(property: 0xD2C1, value: 1, generation: generation)
+        state.commandCompleted(
+            property: 0xD2C1,
+            value: 1,
+            responseCode: 0x2001,
+            failed: false,
+            generation: generation
+        )
+        state.finishCleanup(generation: generation)
+        #expect(!state.needsNeutralization)
+    }
+
+    @Test("Sony control state stays uncertain after failed release and ignores stale-generation callbacks")
+    func sonyReleaseFailureAndStaleGeneration() {
+        var state = DSLRSonyPhysicalControlState(cameraGeneration: 44)
+        state.commandDispatched(property: 0xD2C2, value: 2, generation: 44)
+        state.commandDispatched(property: 0xD2C2, value: 1, generation: 44)
+        #expect(state.shutterReleaseInFlight)
+        state.commandCompleted(
+            property: 0xD2C2,
+            value: 1,
+            responseCode: 0,
+            failed: true,
+            generation: 44
+        )
+        #expect(!state.shutterReleaseInFlight)
+        #expect(state.shutterMayBeEngaged)
+        #expect(state.beginCleanup(laneQuarantined: true, generation: 44) == nil)
+        #expect(state.beginCleanup(laneQuarantined: false, generation: 45) == nil)
+
+        state.commandCompleted(
+            property: 0xD2C2,
+            value: 1,
+            responseCode: 0x2001,
+            failed: false,
+            generation: 43
+        )
+        #expect(state.shutterMayBeEngaged)
     }
 
     @Test("PTP recovery admits one camera session cycle at a time")
@@ -134,6 +219,30 @@ struct DSLRCaptureAttemptTests {
             captureIsActive: false,
             closingGeneration: nil,
             openingGeneration: nil
+        ))
+        #expect(DSLRCameraSessionRecoveryPolicy.closeIsConfirmed(errorOccurred: false))
+        #expect(!DSLRCameraSessionRecoveryPolicy.closeIsConfirmed(errorOccurred: true))
+    }
+
+    @Test("manual stop keeps a pending session close bounded and fails closed")
+    func stoppedSessionCloseDeadlineRequiresItsPendingGeneration() {
+        #expect(DSLRCameraSessionRecoveryPolicy.closeDeadlineCanReportFailure(
+            generation: 12,
+            currentGeneration: 13,
+            cameraStillConnected: false,
+            closeIsPending: true
+        ))
+        #expect(!DSLRCameraSessionRecoveryPolicy.closeDeadlineCanReportFailure(
+            generation: 12,
+            currentGeneration: 13,
+            cameraStillConnected: false,
+            closeIsPending: false
+        ))
+        #expect(!DSLRCameraSessionRecoveryPolicy.closeDeadlineCanReportFailure(
+            generation: 12,
+            currentGeneration: 13,
+            cameraStillConnected: true,
+            closeIsPending: true
         ))
     }
 
