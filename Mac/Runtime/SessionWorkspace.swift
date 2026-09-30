@@ -404,3 +404,51 @@ struct SessionWorkspace: Sendable {
     }
 
 }
+
+enum AcceptedCaptureCommitPolicy {
+    static func shouldCommit(
+        capturedGeneration: UInt64,
+        currentGeneration: UInt64,
+        expectedSessionID: String,
+        currentSessionID: String?,
+        currentManifestID: String?,
+        manifestStatus: RuntimeSessionStatus?,
+        cancelledAt: Date?,
+        phase: BoothPhase,
+        photoIndex: Int
+    ) -> Bool {
+        capturedGeneration == currentGeneration
+            && currentSessionID == expectedSessionID
+            && currentManifestID == expectedSessionID
+            && manifestStatus == .capturing
+            && cancelledAt == nil
+            && phase == .review(photoIndex: photoIndex)
+    }
+}
+
+func saveAcceptedCaptureInBackground(
+    image: CGImage,
+    gifFrames: [CGImage],
+    photoIndex: Int,
+    workspace: SessionWorkspaceDescriptor,
+    save: @escaping @Sendable (CGImage, [CGImage], Int, SessionWorkspaceDescriptor) throws -> SavedCaptureFiles
+) async throws -> SavedCaptureFiles {
+    try await Task.detached(priority: .utility) {
+        try save(image, gifFrames, photoIndex, workspace)
+    }.value
+}
+
+func removeCaptureFilesInBackground(
+    _ files: SavedCaptureFiles,
+    workspace: SessionWorkspaceDescriptor
+) async throws {
+    try await Task.detached(priority: .utility) {
+        try SessionWorkspace().removeCaptureFiles(files, workspace: workspace)
+    }.value
+}
+
+func pruneUnreferencedCaptureFilesInBackground(manifest: SessionManifest) async throws {
+    try await Task.detached(priority: .utility) {
+        try SessionWorkspace().pruneUnreferencedCaptureFiles(manifest: manifest)
+    }.value
+}

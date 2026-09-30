@@ -255,6 +255,41 @@ struct SoakTests {
         #expect(report.markdownSummary().contains("| Capture | NOT TESTED |"))
     }
 
+    @Test("100 synthetic compositor and queue cycles report resident-memory trend")
+    func runnerExecutesHundredSyntheticCycles() async throws {
+        let runner = BoothSoakTestRunner()
+        let memory = SoakMemorySamples()
+        let report = try await runner.run(
+            config: BoothSoakTestConfig(
+                mode: .syntheticBenchmark,
+                targetCycles: 100,
+                delayBetweenCyclesSeconds: 0,
+                photosPerSession: 3
+            ),
+            captureService: nil,
+            coordinator: nil,
+            progressHandler: { state in
+                guard case .running(let cycle, _, let phase, _) = state,
+                      phase.hasPrefix("Starting synthetic benchmark cycle") else { return }
+                memory.append(cycle: cycle, bytes: BoothSoakTestRunner.currentResidentMemoryBytes())
+            }
+        )
+
+        let samples = memory.values
+        #expect(report.outcome == .passed)
+        #expect(report.completedCycles == 100)
+        #expect(report.failedCycles == 0)
+        #expect(samples.count == 100)
+        guard samples.count == 100 else { return }
+
+        let firstWindow = samples.prefix(10).map(\.bytes)
+        let lastWindow = samples.suffix(10).map(\.bytes)
+        let firstAverage = firstWindow.reduce(UInt64.zero, +) / UInt64(firstWindow.count)
+        let lastAverage = lastWindow.reduce(UInt64.zero, +) / UInt64(lastWindow.count)
+        let elapsed = report.finishedAt.timeIntervalSince(report.startedAt)
+        print("Synthetic soak: cycles=\(report.completedCycles), seconds=\(elapsed), baselineRSS=\(report.baselineMemoryBytes), peakRSS=\(report.peakMemoryBytes), finalRSS=\(report.finalMemoryBytes), startWindowRSS=\(firstAverage), endWindowRSS=\(lastAverage)")
+    }
+
     @Test("camera hardware mode rejects a missing live camera")
     func cameraModeRejectsSyntheticFallback() async {
         let runner = BoothSoakTestRunner()
@@ -370,5 +405,22 @@ struct SoakTests {
         #expect(controller.preflightWarnings.contains(where: { $0.contains("up to 2 real print jobs") }))
         #expect(controller.preflightErrors.contains(where: { $0.contains("live BoothCoordinator") }))
         #expect(!controller.isPreflightValid)
+    }
+}
+
+private final class SoakMemorySamples: @unchecked Sendable {
+    private let lock = NSLock()
+    private var samples: [(cycle: Int, bytes: UInt64)] = []
+
+    var values: [(cycle: Int, bytes: UInt64)] {
+        lock.lock()
+        defer { lock.unlock() }
+        return samples
+    }
+
+    func append(cycle: Int, bytes: UInt64) {
+        lock.lock()
+        defer { lock.unlock() }
+        samples.append((cycle, bytes))
     }
 }

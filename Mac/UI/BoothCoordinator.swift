@@ -16,6 +16,50 @@ enum CameraSourceKind: String, CaseIterable, Identifiable {
     var id: String { rawValue }
 }
 
+@MainActor
+final class LatestStripPreviewRenderQueue {
+    private struct Request {
+        let id: UInt64
+        let render: @Sendable () -> CGImage?
+        let publish: @MainActor (CGImage?) -> Void
+    }
+
+    private var nextID: UInt64 = 0
+    private var latestID: UInt64 = 0
+    private var pending: Request?
+    private var activeTask: Task<Void, Never>?
+
+    func submit(
+        render: @escaping @Sendable () -> CGImage?,
+        publish: @escaping @MainActor (CGImage?) -> Void
+    ) {
+        nextID &+= 1
+        latestID = nextID
+        pending = Request(id: latestID, render: render, publish: publish)
+        startPendingRenderIfIdle()
+    }
+
+    func invalidate() {
+        nextID &+= 1
+        latestID = nextID
+        pending = nil
+    }
+
+    private func startPendingRenderIfIdle() {
+        guard activeTask == nil, let request = pending else { return }
+        pending = nil
+        activeTask = Task { @MainActor [weak self] in
+            let image = await Task.detached(priority: .utility, operation: request.render).value
+            guard let self else { return }
+            self.activeTask = nil
+            if request.id == self.latestID {
+                request.publish(image)
+            }
+            self.startPendingRenderIfIdle()
+        }
+    }
+}
+
 // Preview frames use the reliable BoothTransport preview channel.
 // Control messages remain on the separate BoothTransport control channel.
 enum PreviewFrameRate: Int, CaseIterable, Identifiable {
@@ -246,6 +290,8 @@ final class BoothCoordinator {
     private var sessionMessageSequence: UInt64 = 0
     private let authorityEpoch = UUID()
     private var sessionLifecycleGeneration: UInt64 = 0
+    @ObservationIgnored private let stripPreviewRenderQueue = LatestStripPreviewRenderQueue()
+    private static let stripPreviewMaxDimension = 2048
     private struct ActiveSessionStart {
         let requestID: UUID
         let generation: UInt64
@@ -2177,6 +2223,7 @@ final class BoothCoordinator {
             return
         }
         sessionLifecycleGeneration &+= 1
+        stripPreviewRenderQueue.invalidate()
         let lifecycleGeneration = sessionLifecycleGeneration
         activeSessionStart = ActiveSessionStart(
             requestID: startRequestID,
@@ -2397,40 +2444,14 @@ final class BoothCoordinator {
                 currentSessionPresentation = presentation
                 lastSessionPresentation = presentation
                 recordOperation(.sessionStarted, sessionID: session.id)
-                guard let startContext = nextSessionMessageContext(),
-                      let preparedContext = nextSessionMessageContext() else {
-                    throw NSError(domain: "PRCPhotoBooth.Session", code: 1, userInfo: [NSLocalizedDescriptionKey: "Session identity could not be issued."])
-                }
                 let sessionID = session.id
-                let authority = customerDisplayAuthority
                 for asset in pendingPromptAssets.values {
                     assetSources[asset.reference] = asset.data
                 }
-                if authority.requiresIPadSetupSend {
-                    multipeer.sendControl(.sessionStart(context: startContext))
-                    multipeer.sendControl(.eventConfig(config: config))
-                    multipeer.sendControl(.sessionPrepared(
-                        config: config,
-                        presentation: presentation,
-                        context: preparedContext
-                    )) { [weak self] outcome in
-                        guard let self else { return }
-                        guard outcome == .sent,
-                              self.currentSession?.id == sessionID,
-                              self.stateMachine.currentSessionID == sessionID else {
-                            // Only show error if an iPad was expected (Finding 6).
-                            if self.isAuthenticatedIPadConnected {
-                                self.errorMessage = "The iPad did not receive session setup. Reconnect before retrying."
-                            }
-                            return
-                        }
-                        self.beginCountdown(photoIndex: 0)
-                    }
-                }
-                // External-display-only: no iPad to acknowledge, begin countdown directly (Finding 6).
-                if authority.shouldStartCountdownImmediatelyLocally {
-                    beginCountdown(photoIndex: 0)
-                }
+                resumePendingSessionSetupIfNeeded(
+                    photoIndex: 0,
+                    expectedGeneration: lifecycleGeneration
+                )
                 self.lastSessionStartRequestID = startRequestID
                 self.lastSessionStartSessionID = sessionID
                 self.releaseSessionStart(startRequestID)
@@ -3426,11 +3447,10 @@ final class BoothCoordinator {
     private func updateStripPreview() {
         guard let manifest = currentManifest else { return }
         let config = manifest.eventConfig
-        let framePNG = manifest.frameSnapshotFileName.flatMap {
-            loadCGImage(from: URL(fileURLWithPath: manifest.absoluteDirectoryPath).appendingPathComponent($0))
+        let frameURL = manifest.frameSnapshotFileName.map {
+            URL(fileURLWithPath: manifest.absoluteDirectoryPath).appendingPathComponent($0)
         }
         let images = currentFilteredReviewImages
-        let compositor = Compositor(config: config, framePNG: framePNG)
         let cloudUploadEnabled = manifest.deliveryIntent?.cloudUploadEnabled ?? (manifest.cloudDelivery != nil)
         let allowTrustedLocalHTTP = UserDefaults.standard.bool(forKey: "allowTrustedLocalHTTP")
         let localBaseURL = LocalWebServer.guestDeliveryEndpoint(selection: guestDeliveryInterfaceSelection)
@@ -3444,17 +3464,23 @@ final class BoothCoordinator {
         )
         let expectedSessionID = manifest.id
         let expectedGeneration = sessionLifecycleGeneration
-        Task.detached(priority: .utility) { [compositor, images, qrPayload] in
-            let img = try? compositor.render(images: images, qrPayload: qrPayload)
-            await MainActor.run { [weak self] in
-                guard let self,
-                      self.currentManifest?.id == expectedSessionID,
-                      self.sessionLifecycleGeneration == expectedGeneration else {
-                    return  // session changed — discard stale render (Finding 21)
-                }
-                self.currentStripPreview = img
+        let previewLimit = Self.stripPreviewMaxDimension
+        stripPreviewRenderQueue.submit(render: {
+            let frame = frameURL.flatMap {
+                loadOrientedImageThumbnail(from: $0, maxDimension: previewLimit)
             }
-        }
+            return try? Compositor(config: config, framePNG: frame).render(
+                images: images,
+                qrPayload: qrPayload,
+                maxDimension: previewLimit
+            )
+        }, publish: { [weak self] image in
+            guard let self,
+                  self.currentManifest?.id == expectedSessionID,
+                  self.currentSession?.id == expectedSessionID,
+                  self.sessionLifecycleGeneration == expectedGeneration else { return }
+            self.currentStripPreview = image
+        })
     }
 
     func handleReviewDecision(photoIndex: Int, action: ReviewAction) {
@@ -3919,6 +3945,7 @@ final class BoothCoordinator {
         finishedAwaitingCustomerAckSessionID = nil
         completionInFlightSessionID = nil
         sessionLifecycleGeneration &+= 1
+        stripPreviewRenderQueue.invalidate()
         currentManifest = nil
         currentManifestID = nil
         currentSession = nil
@@ -3962,14 +3989,46 @@ final class BoothCoordinator {
         }
         let lifecycleGeneration = sessionLifecycleGeneration
         let retakeCount = retakeCounts[photoIndex] ?? 0
+        let gifFramesForSave = gifFrames[photoIndex] ?? []
+        let descriptor = workspaceDescriptor(from: manifest)
+        var savedFiles: SavedCaptureFiles?
+        var manifestCommitted = false
 
         do {
-            let saved = try workspace.saveAcceptedCapture(
+            let saved = try await saveAcceptedCaptureInBackground(
                 image: image,
-                gifFrames: gifFrames[photoIndex] ?? [],
+                gifFrames: gifFramesForSave,
                 photoIndex: photoIndex,
-                workspace: workspaceDescriptor(from: manifest)
-            )
+                workspace: descriptor
+            ) { image, frames, index, workspace in
+                try SessionWorkspace().saveAcceptedCapture(
+                    image: image,
+                    gifFrames: frames,
+                    photoIndex: index,
+                    workspace: workspace
+                )
+            }
+            savedFiles = saved
+            guard AcceptedCaptureCommitPolicy.shouldCommit(
+                capturedGeneration: lifecycleGeneration,
+                currentGeneration: sessionLifecycleGeneration,
+                expectedSessionID: manifest.id,
+                currentSessionID: currentSession?.id,
+                currentManifestID: currentManifest?.id,
+                manifestStatus: currentManifest?.status,
+                cancelledAt: currentManifest?.cancelledAt,
+                phase: stateMachine.phase,
+                photoIndex: photoIndex
+            ), currentManifestID == manifest.id else {
+                do {
+                    try await removeCaptureFilesInBackground(saved, workspace: descriptor)
+                } catch {
+                    recoveryService.recordError(
+                        "Stale accepted capture files could not be removed: \(error.localizedDescription)"
+                    )
+                }
+                return .stale
+            }
             let committedManifest = try await manifestStore.update(
                 sessionID: manifest.id,
                 allowedStatuses: [.capturing]
@@ -3988,10 +4047,15 @@ final class BoothCoordinator {
                     } ?? durable.eventConfig.photoCount
                 durable.lastError = nil
             }
+            manifestCommitted = true
             guard sessionLifecycleGeneration == lifecycleGeneration,
                   currentManifest?.id == committedManifest.id else { return .stale }
             currentManifest = committedManifest
-            try? workspace.pruneUnreferencedCaptureFiles(manifest: committedManifest)
+            do {
+                try await pruneUnreferencedCaptureFilesInBackground(manifest: committedManifest)
+            } catch {
+                recoveryService.recordError("Unreferenced capture files could not be pruned: \(error.localizedDescription)")
+            }
             let session = currentSession ?? store.restoreSessionRecord(from: committedManifest)
             store.upsertShot(
                 session: session,
@@ -4015,9 +4079,18 @@ final class BoothCoordinator {
             currentReviewStateToken = nil
             return .accepted
         } catch {
-            if let currentManifest {
-                try? workspace.pruneUnreferencedCaptureFiles(manifest: currentManifest)
+            if let savedFiles, !manifestCommitted {
+                do {
+                    try await removeCaptureFilesInBackground(savedFiles, workspace: descriptor)
+                } catch {
+                    recoveryService.recordError(
+                        "Uncommitted accepted capture files could not be removed: \(error.localizedDescription)"
+                    )
+                }
             }
+            guard sessionLifecycleGeneration == lifecycleGeneration,
+                  currentSession?.id == manifest.id,
+                  currentManifest?.id == manifest.id else { return .stale }
             errorMessage = "Could not save photograph \(photoIndex + 1): \(error.localizedDescription)"
             return .persistenceFailed
         }
@@ -4181,6 +4254,7 @@ final class BoothCoordinator {
         guard let session = currentSession, let manifest = currentManifest else {
             if activeSessionStart != nil {
                 sessionLifecycleGeneration &+= 1
+                stripPreviewRenderQueue.invalidate()
                 activeSessionStart = nil
             }
             reviewDecisionPending = false
@@ -4195,6 +4269,7 @@ final class BoothCoordinator {
             stripAssetReference = nil
             assetSources = [:]
             pendingPromptAssets = [:]
+            stripPreviewRenderQueue.invalidate()
             currentStripPreview = nil
             currentFilteredReviewImages = [:]
             currentSessionPresentation = nil
@@ -4236,6 +4311,7 @@ final class BoothCoordinator {
         }
 
         sessionLifecycleGeneration &+= 1
+        stripPreviewRenderQueue.invalidate()
         let lifecycleGeneration = sessionLifecycleGeneration
         guard sessionLifecycleGeneration == lifecycleGeneration,
               sessionLifecycleOperation == .cancelling(sessionID: manifest.id, token: lifecycleToken) else { return }
@@ -4295,6 +4371,7 @@ final class BoothCoordinator {
         assetSources = [:]
         pendingPromptAssets = [:]
         assetAssembler = BoothAssetAssembler()
+        stripPreviewRenderQueue.invalidate()
         currentStripPreview = nil
         capture.resetStills()
         reviewDecisionPending = false
@@ -4321,6 +4398,9 @@ final class BoothCoordinator {
             errorMessage = "Recovered session has no remaining photograph index."
             return
         }
+        sessionLifecycleGeneration &+= 1
+        stripPreviewRenderQueue.invalidate()
+        currentStripPreview = nil
         currentManifest = manifest
         currentManifestID = manifest.id
         currentSession = store.restoreSessionRecord(from: manifest)
@@ -4359,41 +4439,15 @@ final class BoothCoordinator {
             keptShots: thumbnails,
             nextPhotoIndex: manifest.nextPhotoIndex
         )
-        guard let presentation = currentSessionPresentation,
-              let startContext = nextSessionMessageContext(),
-              let preparedContext = nextSessionMessageContext() else {
+        guard currentSessionPresentation != nil else {
             errorMessage = "Recovered session identity could not be synchronized."
             return
         }
-        let recoveredSessionID = manifest.id
         let recoveredPhotoIndex = manifest.nextPhotoIndex
-        let authority = customerDisplayAuthority
         for asset in pendingPromptAssets.values {
             assetSources[asset.reference] = asset.data
         }
-        if authority.requiresIPadSetupSend {
-            multipeer.sendControl(.sessionStart(context: startContext))
-            multipeer.sendControl(.eventConfig(config: manifest.eventConfig))
-            multipeer.sendControl(.sessionPrepared(
-                config: manifest.eventConfig,
-                presentation: presentation,
-                context: preparedContext
-            )) { [weak self] outcome in
-                guard let self else { return }
-                guard outcome == .sent,
-                      self.currentSession?.id == recoveredSessionID,
-                      self.stateMachine.currentSessionID == recoveredSessionID else {
-                    if self.isAuthenticatedIPadConnected {
-                        self.errorMessage = "The iPad did not receive recovered session setup. Reconnect before retrying."
-                    }
-                    return
-                }
-                self.beginCountdown(photoIndex: recoveredPhotoIndex)
-            }
-        }
-        if authority.shouldStartCountdownImmediatelyLocally {
-            beginCountdown(photoIndex: recoveredPhotoIndex)
-        }
+        resumePendingSessionSetupIfNeeded(photoIndex: recoveredPhotoIndex)
     }
 
     private func finishDiscardingRecoveredSession(_ manifest: SessionManifest) {
@@ -4759,6 +4813,7 @@ final class BoothCoordinator {
         // second job-change task cannot overtake this one mid-await.
         completionInFlightSessionID = original.id
         sessionLifecycleOperation = .completing(sessionID: original.id, token: lifecycleToken)
+        stripPreviewRenderQueue.invalidate()
         defer {
             releaseSessionRecovery(original.id)
             completionInFlightSessionID = nil
@@ -4840,9 +4895,18 @@ final class BoothCoordinator {
             cloudUploadEnabled: cloudUploadEnabled,
             allowTrustedLocalHTTP: allowTrustedLocalHTTP
         )
-        let stripThumb = loadCGImage(from: directory.appendingPathComponent("strip.png"))
-            .flatMap { jpegData(from: $0, quality: 0.4) }
-        currentStripPreview = loadCGImage(from: directory.appendingPathComponent("strip.png"))
+        let stripURL = directory.appendingPathComponent("strip.png")
+        let thumbnailLimit = Self.stripPreviewMaxDimension
+        let (finishedPreview, stripThumb): (CGImage?, Data?) = await Task.detached(priority: .utility) {
+            guard let image = loadOrientedImageThumbnail(from: stripURL, maxDimension: thumbnailLimit) else {
+                return (nil, nil)
+            }
+            return (image, jpegData(from: image, quality: 0.82))
+        }.value
+        guard sessionLifecycleGeneration == lifecycleGeneration,
+              currentManifest?.id == manifest.id,
+              sessionLifecycleOperation == .completing(sessionID: original.id, token: lifecycleToken) else { return }
+        currentStripPreview = finishedPreview
         stripAssetReference = stripThumb.map {
             makeAssetReference(
                 data: $0,
@@ -5041,8 +5105,15 @@ final class BoothCoordinator {
 
     // MARK: - Session cleanup (M10)
 
+#if DEBUG
+    func cleanupOldSessionsForTesting(keepDays: Int) async {
+        await cleanupOldSessions(keepDays: keepDays)
+    }
+#endif
+
     private func cleanupOldSessions(keepDays: Int) async {
         let cutoff = Calendar.current.date(byAdding: .day, value: -keepDays, to: Date())!
+        var routesChanged = false
         for result in await manifestStore.loadAll() {
             guard case .loaded(let manifest) = result else { continue }
             // The soak cleanup path owns diagnostic retention and cloud retry.
@@ -5061,16 +5132,25 @@ final class BoothCoordinator {
                         recoveryService.markCleanupPending(sessionID: manifest.id)
                         continue
                     }
+                    try await galleryStore.removeSession(eventID: manifest.eventID, sessionID: manifest.id)
+                    routesChanged = true
+                    await hideRoutesForExpiredSession(manifest)
                     try workspace.removeEntireSession(manifest: manifest)
                 } catch {
-                    recoveryService.recordError("Old session files could not be removed: \(error.localizedDescription)")
+                    recoveryService.markCleanupPending(
+                        sessionID: manifest.id,
+                        reason: "Old session cleanup is pending; its gallery entry or files could not be removed: \(error.localizedDescription)"
+                    )
                     continue
                 }
                 do {
                     try await manifestStore.delete(sessionID: manifest.id)
                     try await jobQueue.deleteJobsAndForgetCancellationBarrier(sessionID: manifest.id)
                 } catch {
-                    recoveryService.recordError("Old session manifest could not be removed: \(error.localizedDescription)")
+                    recoveryService.markCleanupPending(
+                        sessionID: manifest.id,
+                        reason: "Old session cleanup is pending; its manifest or jobs could not be removed: \(error.localizedDescription)"
+                    )
                     continue
                 }
                 await server.unregisterToken(manifest.downloadToken)
@@ -5079,20 +5159,32 @@ final class BoothCoordinator {
                       let cancelledAt = manifest.cancelledAt,
                       cancelledAt < Calendar.current.date(byAdding: .day, value: -7, to: Date())! {
                 do {
-                    let result = try await jobQueue.cancelAndQuiesceJobs(sessionID: manifest.id)
-                    guard result == .quiesced else {
+                    let flowQuiesced = await sessionFlowOperations.cancelAndQuiesce(
+                        sessionID: manifest.id,
+                        timeout: .seconds(10)
+                    )
+                    let jobQuiescence = try await jobQueue.cancelAndQuiesceJobs(sessionID: manifest.id)
+                    guard flowQuiesced, jobQuiescence == .quiesced else {
                         recoveryService.markCleanupPending(sessionID: manifest.id)
                         continue
                     }
+                    try await galleryStore.removeSession(eventID: manifest.eventID, sessionID: manifest.id)
+                    routesChanged = true
+                    await hideRoutesForExpiredSession(manifest)
                     try workspace.removeEntireSession(manifest: manifest)
                     try await manifestStore.delete(sessionID: manifest.id)
                     try await jobQueue.deleteJobsAndForgetCancellationBarrier(sessionID: manifest.id)
+                    await server.unregisterToken(manifest.downloadToken)
+                    if let session = store.fetchSession(id: manifest.id) { store.deleteSession(session) }
                 } catch {
-                    recoveryService.markCleanupPending(sessionID: manifest.id)
-                    recoveryService.recordError("Cancelled session cleanup could not finish: \(error.localizedDescription)")
+                    recoveryService.markCleanupPending(
+                        sessionID: manifest.id,
+                        reason: "Cancelled session cleanup could not finish: \(error.localizedDescription)"
+                    )
                 }
             }
         }
+        if routesChanged { await refreshServerRoutes() }
         jobQueue.purgeOldSucceededJobs(olderThan: Calendar.current.date(byAdding: .day, value: -7, to: Date())!)
 
         // Keep the pre-1.1 cleanup path for sessions that predate runtime manifests.
@@ -5113,6 +5205,13 @@ final class BoothCoordinator {
             }
             store.deleteSession(session)
         }
+    }
+
+    private func hideRoutesForExpiredSession(_ manifest: SessionManifest) async {
+        if let route = try? CloudGuestRoute.resolve(for: manifest) {
+            await server.hideGuestRoute(path: route.relativePath)
+        }
+        await server.hideGuestRoute(path: "/s/\(manifest.downloadToken)")
     }
 
     // MARK: - Print
@@ -5198,12 +5297,88 @@ final class BoothCoordinator {
         )
     }
 
+    private func resumePendingSessionSetupIfNeeded(
+        photoIndex: Int,
+        expectedGeneration: UInt64? = nil
+    ) {
+        guard let session = currentSession,
+              let manifest = currentManifest,
+              let presentation = currentSessionPresentation,
+              manifest.id == session.id,
+              currentManifestID == session.id,
+              manifest.status == .capturing,
+              manifest.cancelledAt == nil,
+              case .idle = sessionLifecycleOperation,
+              finishedAwaitingCustomerAckSessionID == nil else { return }
+
+        let generation = expectedGeneration ?? sessionLifecycleGeneration
+        guard generation == sessionLifecycleGeneration else { return }
+        let authority = customerDisplayAuthority
+        if authority.shouldStartCountdownImmediatelyLocally {
+            guard stateMachine.phase == .readyToStart,
+                  stateMachine.currentSessionID == session.id else { return }
+            beginCountdown(photoIndex: photoIndex)
+            return
+        }
+        guard SessionSetupDeliveryPolicy.shouldDeliverSetup(
+            phase: stateMachine.phase,
+            sessionID: session.id,
+            stateMachineSessionID: stateMachine.currentSessionID,
+            hasPresentation: true,
+            authority: authority
+        ),
+              let startContext = nextSessionMessageContext(),
+              let preparedContext = nextSessionMessageContext() else { return }
+
+        let sessionID = session.id
+        let config = manifest.eventConfig
+        multipeer.sendControl(.sessionStart(context: startContext))
+        multipeer.sendControl(.eventConfig(config: config))
+        multipeer.sendControl(.sessionPrepared(
+            config: config,
+            presentation: presentation,
+            context: preparedContext
+        )) { [weak self] outcome in
+            guard let self else { return }
+            let cancelledOrFinalized = self.currentManifest?.id != sessionID
+                || self.currentManifest?.status != .capturing
+                || self.currentManifest?.cancelledAt != nil
+                || self.currentManifestID != sessionID
+                || self.currentSessionPresentation == nil
+                || self.sessionLifecycleOperation != .idle
+                || self.finishedAwaitingCustomerAckSessionID != nil
+            guard SessionSetupDeliveryPolicy.shouldBeginCountdown(
+                outcome: outcome,
+                capturedGeneration: generation,
+                currentGeneration: self.sessionLifecycleGeneration,
+                expectedSessionID: sessionID,
+                currentSessionID: self.currentSession?.id,
+                stateMachineSessionID: self.stateMachine.currentSessionID,
+                phase: self.stateMachine.phase,
+                isCancelled: cancelledOrFinalized
+            ) else {
+                if outcome != .sent,
+                   self.currentSession?.id == sessionID,
+                   self.stateMachine.phase == .readyToStart,
+                   self.isAuthenticatedIPadConnected {
+                    self.errorMessage = "The iPad did not receive session setup. Reconnect before retrying."
+                }
+                return
+            }
+            self.beginCountdown(photoIndex: photoIndex)
+        }
+    }
+
     private func handleTransportReady() {
         if let event = activeEvent {
             multipeer.sendControl(.eventConfig(config: event.toEventConfig()))
         }
         sendExperienceCatalog()
-        resynciPad()
+        if stateMachine.phase == .readyToStart {
+            resumePendingSessionSetupIfNeeded(photoIndex: stateMachine.nextPhotoIndex)
+        } else {
+            resynciPad()
+        }
     }
 
     private func handleMessage(_ msg: Message) {
@@ -5223,14 +5398,23 @@ final class BoothCoordinator {
                 }
                 break
             }
-            if request.requestID == lastSessionStartRequestID,
-               let sessionID = lastSessionStartSessionID {
+            if case let .accepted(sessionID, resumeSetup) = SessionSetupDeliveryPolicy.duplicateStartDisposition(
+                requestID: request.requestID,
+                lastRequestID: lastSessionStartRequestID,
+                lastSessionID: lastSessionStartSessionID,
+                currentSessionID: currentSession?.id,
+                phase: stateMachine.phase
+            ) {
                 sendSessionStartResult(
                     requestID: request.requestID,
                     result: .accepted(sessionID: sessionID)
                 )
-                resynciPad()
-                break
+                if resumeSetup {
+                    resumePendingSessionSetupIfNeeded(photoIndex: stateMachine.nextPhotoIndex)
+                } else {
+                    resynciPad()
+                }
+                return
             }
             guard currentSession == nil, finishedAwaitingCustomerAckSessionID == nil else {
                 sendSessionStartResult(
@@ -5344,6 +5528,7 @@ final class BoothCoordinator {
             self.customerFinishedInFlightSessionID = nil
             self.finishedAwaitingCustomerAckSessionID = nil
             self.sessionLifecycleGeneration &+= 1
+            self.stripPreviewRenderQueue.invalidate()
             self.currentManifest = nil
             self.currentManifestID = nil
             self.retakeCounts = [:]

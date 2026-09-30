@@ -1,6 +1,8 @@
 import Testing
 import Foundation
 import CoreGraphics
+import Compression
+import ImageIO
 @testable import PRC_PhotoBooth_Mac
 
 @Suite("Compositor")
@@ -32,6 +34,58 @@ struct CompositorTests {
         let result = try compositor.render(images: [0: redImage, 1: redImage])
         #expect(result.width == 400)
         #expect(result.height == 600)
+    }
+
+    @Test("live strip previews stay bounded for square, portrait, and landscape canvases")
+    func largeLiveStripPreviewsAreBounded() throws {
+        let cases: [(width: Int, height: Int, outputWidth: Int, outputHeight: Int)] = [
+            (10_000, 10_000, 2_048, 2_048),
+            (300, 10_000, 61, 2_048),
+            (10_000, 300, 2_048, 61)
+        ]
+
+        for item in cases {
+            let config = EventConfig(
+                photoCount: 1,
+                canvasWidth: CGFloat(item.width),
+                canvasHeight: CGFloat(item.height),
+                slots: []
+            )
+            let preview = try Compositor(config: config, framePNG: nil).render(
+                images: [:],
+                maxDimension: 2_048
+            )
+            #expect(preview.width == item.outputWidth)
+            #expect(preview.height == item.outputHeight)
+            #expect(max(preview.width, preview.height) <= 2_048)
+
+            let jpeg = try #require(jpegData(from: preview, quality: 0.82))
+            let decoded = try #require(BoothImageDecoder.decode(jpeg))
+            #expect(decoded.width == preview.width)
+            #expect(decoded.height == preview.height)
+        }
+    }
+
+    @Test("finished strip thumbnails downsample a full-size 10,000 pixel PNG")
+    func finishedStripThumbnailIsBounded() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("strip-thumbnail-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let stripURL = root.appendingPathComponent("strip.png")
+        try makeLargeWhitePNG(width: 10_000, height: 10_000).write(to: stripURL)
+        let source = try #require(CGImageSourceCreateWithURL(stripURL as CFURL, nil))
+        let properties = try #require(CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any])
+        #expect((properties[kCGImagePropertyPixelWidth] as? NSNumber)?.intValue == 10_000)
+        #expect((properties[kCGImagePropertyPixelHeight] as? NSNumber)?.intValue == 10_000)
+
+        let thumbnail = try #require(loadOrientedImageThumbnail(from: stripURL, maxDimension: 2_048))
+        #expect(max(thumbnail.width, thumbnail.height) <= 2_048)
+        let jpeg = try #require(jpegData(from: thumbnail, quality: 0.82))
+        let ipadImage = try #require(BoothImageDecoder.decode(jpeg))
+        #expect(ipadImage.width == thumbnail.width)
+        #expect(ipadImage.height == thumbnail.height)
     }
 
     @Test("uses top-left canvas coordinates for frame and slots")
@@ -264,6 +318,87 @@ struct CompositorTests {
             }
         }
     }
+}
+
+private func makeLargeWhitePNG(width: Int, height: Int) throws -> Data {
+    let rowByteCount = (width + 7) / 8
+    var scanlines = Data(count: height * (rowByteCount + 1))
+    scanlines.withUnsafeMutableBytes { rawBytes in
+        guard let bytes = rawBytes.baseAddress?.assumingMemoryBound(to: UInt8.self) else { return }
+        for row in 0..<height {
+            let offset = row * (rowByteCount + 1)
+            bytes[offset] = 0 // PNG filter: None
+            bytes.advanced(by: offset + 1).update(repeating: 0xFF, count: rowByteCount)
+        }
+    }
+
+    var compressed = Data(count: scanlines.count + 1_024)
+    let compressedCapacity = compressed.count
+    let compressedCount = compressed.withUnsafeMutableBytes { compressedBytes in
+        scanlines.withUnsafeBytes { sourceBytes in
+            guard let destination = compressedBytes.baseAddress?.assumingMemoryBound(to: UInt8.self),
+                  let source = sourceBytes.baseAddress?.assumingMemoryBound(to: UInt8.self) else { return 0 }
+            return compression_encode_buffer(
+                destination,
+                compressedCapacity,
+                source,
+                scanlines.count,
+                nil,
+                COMPRESSION_ZLIB
+            )
+        }
+    }
+    guard compressedCount > 0 else { throw CompositorError.renderFailed }
+    compressed.removeSubrange(compressedCount..<compressed.count)
+    var zlibStream = Data([0x78, 0x9C])
+    zlibStream.append(compressed)
+    zlibStream.appendBigEndian(adler32(scanlines))
+
+    var png = Data([137, 80, 78, 71, 13, 10, 26, 10])
+    var header = Data()
+    header.appendBigEndian(UInt32(width))
+    header.appendBigEndian(UInt32(height))
+    header.append(contentsOf: [1, 0, 0, 0, 0]) // 1-bit grayscale, no interlace
+    png.appendPNGChunk(type: "IHDR", payload: header)
+    png.appendPNGChunk(type: "IDAT", payload: zlibStream)
+    png.appendPNGChunk(type: "IEND", payload: Data())
+    return png
+}
+
+private func adler32(_ data: Data) -> UInt32 {
+    var first: UInt32 = 1
+    var second: UInt32 = 0
+    for byte in data {
+        first = (first + UInt32(byte)) % 65_521
+        second = (second + first) % 65_521
+    }
+    return (second << 16) | first
+}
+
+private extension Data {
+    mutating func appendBigEndian(_ value: UInt32) {
+        var value = value.bigEndian
+        Swift.withUnsafeBytes(of: &value) { append(contentsOf: $0) }
+    }
+
+    mutating func appendPNGChunk(type: String, payload: Data) {
+        appendBigEndian(UInt32(payload.count))
+        let typeData = Data(type.utf8)
+        append(typeData)
+        append(payload)
+        appendBigEndian(pngCRC32(typeData + payload))
+    }
+}
+
+private func pngCRC32(_ data: Data) -> UInt32 {
+    var crc: UInt32 = 0xFFFF_FFFF
+    for byte in data {
+        crc ^= UInt32(byte)
+        for _ in 0..<8 {
+            crc = (crc & 1) == 1 ? (crc >> 1) ^ 0xEDB8_8320 : crc >> 1
+        }
+    }
+    return crc ^ 0xFFFF_FFFF
 }
 
 private struct Pixel: Equatable, CustomStringConvertible {

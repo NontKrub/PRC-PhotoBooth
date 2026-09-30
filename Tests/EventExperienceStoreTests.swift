@@ -443,6 +443,7 @@ struct EventExperienceStoreTests {
 
         var duplicate = sourceTemplate
         duplicate.id = "template-b"
+        duplicate.canvasWidth = .infinity
         let previews = try await store.readTemplatePreviews(
             eventID: "event-1",
             templates: [duplicate],

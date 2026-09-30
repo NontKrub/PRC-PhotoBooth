@@ -104,9 +104,9 @@ final class SessionRecoveryService {
         recoveryErrors.append(message)
     }
 
-    func markCleanupPending(sessionID: String) {
+    func markCleanupPending(sessionID: String, reason: String? = nil) {
         cleanupPendingSessionIDs.insert(sessionID)
-        recordError("Cancelled session cleanup is still pending: \(sessionID)")
+        recordError(reason ?? "Session cleanup is still pending: \(sessionID)")
     }
 
     func scanAtStartup() {

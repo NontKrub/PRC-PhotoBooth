@@ -1,4 +1,5 @@
 import Testing
+import Foundation
 
 @testable import PRC_PhotoBooth_Mac
 
@@ -105,5 +106,119 @@ struct CustomerDisplayWorkflowTests {
         #expect(dual.isCustomerDisplayReady)
         #expect(dual.requiresIPadSetupSend)
         #expect(!dual.shouldStartCountdownImmediatelyLocally)
+    }
+
+    @Test("ready session setup is replayed only for its current iPad display")
+    func readySessionSetupReplayEligibility() {
+        #expect(SessionSetupDeliveryPolicy.shouldDeliverSetup(
+            phase: .readyToStart,
+            sessionID: "session-a",
+            stateMachineSessionID: "session-a",
+            hasPresentation: true,
+            authority: .iPadOnly
+        ))
+        #expect(SessionSetupDeliveryPolicy.shouldDeliverSetup(
+            phase: .readyToStart,
+            sessionID: "session-a",
+            stateMachineSessionID: "session-a",
+            hasPresentation: true,
+            authority: .dualDisplay
+        ))
+        #expect(!SessionSetupDeliveryPolicy.shouldDeliverSetup(
+            phase: .readyToStart,
+            sessionID: "session-a",
+            stateMachineSessionID: "session-a",
+            hasPresentation: true,
+            authority: .externalDisplayOnly
+        ))
+        #expect(!SessionSetupDeliveryPolicy.shouldDeliverSetup(
+            phase: .countdown(photoIndex: 0, secondsRemaining: 5),
+            sessionID: "session-a",
+            stateMachineSessionID: "session-a",
+            hasPresentation: true,
+            authority: .iPadOnly
+        ))
+        #expect(!SessionSetupDeliveryPolicy.shouldDeliverSetup(
+            phase: .readyToStart,
+            sessionID: "old-session",
+            stateMachineSessionID: "new-session",
+            hasPresentation: true,
+            authority: .iPadOnly
+        ))
+    }
+
+    @Test("only a sent setup callback for the current ready session can start countdown")
+    func setupCompletionRejectsFailedAndStaleCallbacks() {
+        func mayStart(
+            outcome: BoothControlSendOutcome = .sent,
+            capturedGeneration: UInt64 = 7,
+            currentGeneration: UInt64 = 7,
+            currentSessionID: String? = "session-a",
+            stateMachineSessionID: String = "session-a",
+            phase: BoothPhase = .readyToStart,
+            isCancelled: Bool = false
+        ) -> Bool {
+            SessionSetupDeliveryPolicy.shouldBeginCountdown(
+                outcome: outcome,
+                capturedGeneration: capturedGeneration,
+                currentGeneration: currentGeneration,
+                expectedSessionID: "session-a",
+                currentSessionID: currentSessionID,
+                stateMachineSessionID: stateMachineSessionID,
+                phase: phase,
+                isCancelled: isCancelled
+            )
+        }
+
+        #expect(mayStart())
+        #expect(!mayStart(outcome: .networkSendFailed))
+        #expect(!mayStart(capturedGeneration: 6))
+        #expect(!mayStart(currentSessionID: "session-b", stateMachineSessionID: "session-b"))
+        #expect(!mayStart(stateMachineSessionID: "session-b"))
+        #expect(!mayStart(phase: .countdown(photoIndex: 0, secondsRemaining: 5)))
+        #expect(!mayStart(isCancelled: true))
+
+        var phase: BoothPhase = .readyToStart
+        var countdownStarts = 0
+        for _ in 0..<2 where SessionSetupDeliveryPolicy.shouldBeginCountdown(
+            outcome: .sent,
+            capturedGeneration: 7,
+            currentGeneration: 7,
+            expectedSessionID: "session-a",
+            currentSessionID: "session-a",
+            stateMachineSessionID: "session-a",
+            phase: phase,
+            isCancelled: false
+        ) {
+            countdownStarts += 1
+            phase = .countdown(photoIndex: 0, secondsRemaining: 5)
+        }
+        #expect(countdownStarts == 1)
+    }
+
+    @Test("a duplicate start request reuses its session and resumes only while setup is pending")
+    func duplicateStartReusesSession() {
+        let requestID = UUID()
+        #expect(SessionSetupDeliveryPolicy.duplicateStartDisposition(
+            requestID: requestID,
+            lastRequestID: requestID,
+            lastSessionID: "session-a",
+            currentSessionID: "session-a",
+            phase: .readyToStart
+        ) == .accepted(sessionID: "session-a", resumeSetup: true))
+        #expect(SessionSetupDeliveryPolicy.duplicateStartDisposition(
+            requestID: requestID,
+            lastRequestID: requestID,
+            lastSessionID: "session-a",
+            currentSessionID: "session-a",
+            phase: .countdown(photoIndex: 0, secondsRemaining: 5)
+        ) == .accepted(sessionID: "session-a", resumeSetup: false))
+        #expect(SessionSetupDeliveryPolicy.duplicateStartDisposition(
+            requestID: UUID(),
+            lastRequestID: requestID,
+            lastSessionID: "session-a",
+            currentSessionID: "session-a",
+            phase: .readyToStart
+        ) == .notDuplicate)
     }
 }
