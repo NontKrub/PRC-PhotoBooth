@@ -67,11 +67,16 @@ struct ExperienceSelectionView: View {
                 }
 
                 HStack(spacing: 14) {
-                    Button("Back") {
-                        vm.customerDone()
+                    Button(role: .cancel) {
+                        vm.customerBackFromExperienceSelection()
+                    } label: {
+                        Text("Back")
                     }
                     .buttonStyle(.bordered)
                     .tint(.white)
+                    .frame(minHeight: 44)
+                    .accessibilityLabel("Back to idle screen")
+                    .disabled(vm.isSessionRequestPending)
 
                     Button("Continue") {
                         vm.confirmExperienceSelection()

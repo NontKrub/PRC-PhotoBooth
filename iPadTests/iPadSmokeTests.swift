@@ -10,6 +10,48 @@ private let iPadTestAuthorityEpoch = UUID(uuidString: "00000000-0000-0000-0000-0
 
 @Suite("iPad smoke tests")
 struct iPadSmokeTests {
+    private func experienceCatalog(revision: String = "revision-a") -> CustomerExperienceCatalog {
+        CustomerExperienceCatalog(
+            eventID: "event-1",
+            eventName: "Test event",
+            revision: revision,
+            defaultTemplateID: "template-a",
+            guestTemplateSelectionEnabled: true,
+            templates: [
+                CustomerTemplateOption(id: "template-a", name: LocalizedText(english: "A"), photoCount: 2, aspectRatio: 1, previewAssetID: "preview-shared"),
+                CustomerTemplateOption(id: "template-b", name: LocalizedText(english: "B"), photoCount: 2, aspectRatio: 1, previewAssetID: "preview-b")
+            ],
+            allowedFilterIDs: [.original],
+            defaultFilterID: .original,
+            guestFilterSelectionEnabled: false,
+            defaultLanguage: .english,
+            guestLanguageSelectionEnabled: true
+        )
+    }
+
+    @MainActor
+    private func makeConnectionReady(_ viewModel: iPadViewModel) {
+        viewModel.multipeer.connectionStatus.publish(
+            requestedNetwork: .lan,
+            state: .connected(peerName: "PRC-Booth-01"),
+            peerID: "mac-1",
+            peerDisplayName: "PRC-Booth-01",
+            routeState: .connectedLAN(peer: "PRC-Booth-01"),
+            effectiveNetwork: .lan,
+            isPreviewChannelConnected: true
+        )
+        viewModel.multipeer.connectionStatus.publishPairing(
+            trustedPeerIDs: ["mac-1"],
+            preferredPeerID: "mac-1",
+            updatePreferredPeer: true,
+            authenticated: true,
+            state: .authenticated(peerID: "mac-1")
+        )
+        viewModel.multipeer.connectionStatus.publishSecureChannel(ready: true)
+        viewModel.multipeer.connectionStatus.publishAssetChannel(connected: true, verified: true)
+        viewModel.multipeer.connectionStatus.publishControlActivity()
+    }
+
     @Test("connection log includes actionable state and redacts secrets")
     @MainActor
     func connectionLogIsSafeAndActionable() {
@@ -194,6 +236,159 @@ struct iPadSmokeTests {
         #expect(viewModel.stateMachine.nextPhotoIndex == current.nextPhotoIndex)
         #expect(viewModel.isMirrored)
         #expect(viewModel.isBoothPaused)
+    }
+
+    @Test("same-session setup replay preserves prepared presentation and language")
+    @MainActor
+    func sameSessionSetupReplayIsIdempotent() {
+        let viewModel = iPadViewModel()
+        defer { viewModel.multipeer.disconnect() }
+        let sessionID = "setup-replay-session"
+        let config = EventConfig(eventID: "event-1", eventName: "Test", photoCount: 2)
+        let presentation = SessionPresentation(
+            sessionID: sessionID,
+            language: .english,
+            templateDisplayName: "Template A",
+            filterID: .original,
+            prompts: []
+        )
+        let context1 = SessionMessageContext(sessionID: sessionID, sequence: 1, authorityEpoch: iPadTestAuthorityEpoch)
+        let context2 = SessionMessageContext(sessionID: sessionID, sequence: 2, authorityEpoch: iPadTestAuthorityEpoch)
+        let context3 = SessionMessageContext(sessionID: sessionID, sequence: 3, authorityEpoch: iPadTestAuthorityEpoch)
+        let context4 = SessionMessageContext(sessionID: sessionID, sequence: 4, authorityEpoch: iPadTestAuthorityEpoch)
+
+        viewModel.multipeer.onControlMessage?(.sessionStart(context: context1))
+        viewModel.multipeer.onControlMessage?(.sessionPrepared(config: config, presentation: presentation, context: context2))
+        viewModel.selectedLanguage = .thai
+        viewModel.sessionRequestError = "keep current request state"
+        viewModel.multipeer.onControlMessage?(.sessionStart(context: context3))
+        viewModel.multipeer.onControlMessage?(.sessionPrepared(config: config, presentation: presentation, context: context4))
+
+        #expect(viewModel.stateMachine.phase == .readyToStart)
+        #expect(viewModel.stateMachine.currentSessionID == sessionID)
+        #expect(viewModel.sessionPresentation == presentation)
+        #expect(viewModel.selectedLanguage == .thai)
+        #expect(viewModel.sessionRequestError == "keep current request state")
+    }
+
+    @Test("template preview policy rejects old revision and reused asset id")
+    func templatePreviewMustMatchCurrentCatalogRevision() {
+        let revisionA = experienceCatalog(revision: "revision-a")
+        let revisionB = experienceCatalog(revision: "revision-b")
+        let oldReference = BoothAssetReference(
+            assetID: "preview-shared",
+            revision: "revision-a",
+            kind: .templatePreview,
+            byteCount: 10,
+            sha256: Data(repeating: 0xA, count: 32)
+        )
+        let currentReference = BoothAssetReference(
+            assetID: "preview-shared",
+            revision: "revision-b",
+            kind: .templatePreview,
+            byteCount: 10,
+            sha256: Data(repeating: 0xB, count: 32)
+        )
+        #expect(iPadTemplatePreviewPolicy.accepts(oldReference, catalog: revisionA))
+        #expect(!iPadTemplatePreviewPolicy.accepts(oldReference, catalog: revisionB))
+        #expect(iPadTemplatePreviewPolicy.accepts(currentReference, catalog: revisionB))
+        #expect(!iPadTemplatePreviewPolicy.accepts(BoothAssetReference(
+            assetID: "not-in-catalog",
+            revision: "revision-b",
+            kind: .templatePreview,
+            byteCount: 10,
+            sha256: Data(repeating: 0xC, count: 32)
+        ), catalog: revisionB))
+    }
+
+    @Test("preview transfer that finishes after a catalog revision change is discarded")
+    @MainActor
+    func staleTemplatePreviewTransferCannotInstallOrPoisonNewRevision() async throws {
+        let viewModel = iPadViewModel()
+        defer { viewModel.multipeer.disconnect() }
+        let catalogA = experienceCatalog(revision: "revision-a")
+        let catalogB = experienceCatalog(revision: "revision-b")
+        viewModel.multipeer.onControlMessage?(.eventExperienceCatalog(catalog: catalogA))
+
+        let oldData = try previewPNG(color: .red)
+        let oldReference = BoothAssetReference(
+            assetID: "preview-shared",
+            revision: catalogA.revision,
+            kind: .templatePreview,
+            byteCount: oldData.count,
+            sha256: Data(SHA256.hash(data: oldData))
+        )
+        let oldChunk = try #require(BoothAssetTransfer.chunks(data: oldData, reference: oldReference).first)
+        viewModel.multipeer.onAssetChunk?(oldChunk)
+        viewModel.multipeer.onControlMessage?(.eventExperienceCatalog(catalog: catalogB))
+        for _ in 0..<30 where viewModel.experienceAssets[oldReference.assetID] == nil {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        #expect(viewModel.experienceAssets[oldReference.assetID] == nil)
+
+        let newData = try previewPNG(color: .blue)
+        let newReference = BoothAssetReference(
+            assetID: oldReference.assetID,
+            revision: catalogB.revision,
+            kind: .templatePreview,
+            byteCount: newData.count,
+            sha256: Data(SHA256.hash(data: newData))
+        )
+        let newChunk = try #require(BoothAssetTransfer.chunks(data: newData, reference: newReference).first)
+        viewModel.multipeer.onAssetChunk?(newChunk)
+        for _ in 0..<30 where viewModel.experienceAssets[newReference.assetID] == nil {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        #expect(viewModel.experienceAssets[newReference.assetID] != nil)
+    }
+
+    @Test("experience-selection Back returns locally to idle")
+    @MainActor
+    func selectionBackReturnsToIdleWithoutFinishRequest() {
+        let viewModel = iPadViewModel()
+        defer { viewModel.multipeer.disconnect() }
+        let catalog = experienceCatalog()
+        viewModel.multipeer.onControlMessage?(.eventExperienceCatalog(catalog: catalog))
+        viewModel.stateMachine.beginSelectingExperience()
+        viewModel.sessionRequestError = "old selection error"
+        let selectedTemplateID = viewModel.selectedTemplateID
+        let selectedFilterID = viewModel.selectedFilterID
+        viewModel.customerBackFromExperienceSelection()
+        viewModel.customerBackFromExperienceSelection()
+
+        #expect(viewModel.stateMachine.phase == .idle)
+        #expect(viewModel.experienceCatalog == catalog)
+        #expect(viewModel.selectedTemplateID == selectedTemplateID)
+        #expect(viewModel.selectedFilterID == selectedFilterID)
+        #expect(viewModel.sessionRequestError == nil)
+        #expect(!viewModel.finishRequestPending)
+    }
+
+    @Test("idle begin requires a ready connection")
+    @MainActor
+    func idleBeginRequiresConnectionReadiness() {
+        let disconnected = iPadViewModel()
+        defer { disconnected.multipeer.disconnect() }
+        disconnected.multipeer.onControlMessage?(.eventExperienceCatalog(catalog: experienceCatalog()))
+        disconnected.customerTappedToBegin()
+        #expect(disconnected.stateMachine.phase == .idle)
+
+        let ready = iPadViewModel()
+        defer { ready.multipeer.disconnect() }
+        makeConnectionReady(ready)
+        ready.multipeer.onControlMessage?(.eventExperienceCatalog(catalog: experienceCatalog()))
+        ready.customerTappedToBegin()
+        #expect(ready.isConnectionReady)
+        #expect(ready.stateMachine.phase == .selectingExperience)
+    }
+
+    @MainActor
+    private func previewPNG(color: UIColor) throws -> Data {
+        let image = UIGraphicsImageRenderer(size: CGSize(width: 12, height: 8)).image { context in
+            context.cgContext.setFillColor(color.cgColor)
+            context.cgContext.fill(CGRect(x: 0, y: 0, width: 12, height: 8))
+        }
+        return try #require(image.pngData())
     }
 
     @Test("cross-session and idle syncs cannot rewind an authority epoch")

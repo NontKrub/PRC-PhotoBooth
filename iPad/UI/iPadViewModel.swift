@@ -6,6 +6,16 @@ import CoreGraphics
 import SwiftUI
 import UIKit
 
+struct iPadTemplatePreviewPolicy {
+    static func accepts(_ reference: BoothAssetReference, catalog: CustomerExperienceCatalog?) -> Bool {
+        guard reference.sessionID == nil,
+              reference.kind == .templatePreview,
+              let catalog,
+              reference.revision == catalog.revision else { return false }
+        return catalog.templates.contains { $0.previewAssetID == reference.assetID }
+    }
+}
+
 // iPad-side coordinator — receives messages from Mac, drives local UI state.
 @MainActor
 final class iPadViewModel: ObservableObject {
@@ -407,6 +417,17 @@ final class iPadViewModel: ObservableObject {
             experienceCatalog = catalog
             if !sameRevision {
                 experienceAssets = [:]
+                resetAssetProcessing()
+                let obsoletePreviews = receivedAssetReferences.values.filter {
+                    $0.kind == .templatePreview
+                        && !iPadTemplatePreviewPolicy.accepts($0, catalog: catalog)
+                }
+                for reference in obsoletePreviews {
+                    receivedAssets.removeValue(forKey: reference.assetID)
+                    receivedAssetReferences.removeValue(forKey: reference.assetID)
+                    assetRequestPump.markCompleted(reference)
+                    assetRetryTracker.remove(reference)
+                }
                 selectedTemplateID = nil
                 selectedFilterID = nil
             }
@@ -426,6 +447,11 @@ final class iPadViewModel: ObservableObject {
         case .sessionStart(let context):
             guard let context,
                   acceptSessionChange(context, message: "sessionStart") else { break }
+            if stateMachine.phase == .readyToStart,
+               stateMachine.currentSessionID == context.sessionID,
+               sessionPresentation?.sessionID == context.sessionID {
+                break
+            }
             cancelCountdown()
             clearSessionMedia()
             stateMachine.startSession(config: eventConfig, sessionID: context.sessionID)
@@ -438,6 +464,11 @@ final class iPadViewModel: ObservableObject {
 
         case .sessionPrepared(let config, let presentation, let context):
             guard acceptSessionChange(context, message: "sessionPrepared") else { break }
+            if stateMachine.phase == .readyToStart,
+               stateMachine.currentSessionID == context.sessionID,
+               sessionPresentation?.sessionID == presentation.sessionID {
+                break
+            }
             cancelCountdown()
             clearSessionMedia()
             eventConfig = config
@@ -836,6 +867,8 @@ final class iPadViewModel: ObservableObject {
     private func handleAssetChunk(_ chunk: BoothAssetChunk) {
         let activeSessionID = sessionMessageGate.currentSessionID
         guard chunk.metadata.sessionID == nil || chunk.metadata.sessionID == activeSessionID else { return }
+        if chunk.metadata.kind == .templatePreview,
+           !iPadTemplatePreviewPolicy.accepts(chunk.metadata.reference, catalog: experienceCatalog) { return }
         if cachedAsset(for: chunk.metadata.reference) != nil { return }
         if let expected = expectedAssetReferences[chunk.metadata.assetID] {
             guard expected == chunk.metadata.reference else { return }
@@ -888,6 +921,8 @@ final class iPadViewModel: ObservableObject {
     ) {
         guard generation == assetProcessingGeneration,
               reference.sessionID == nil || reference.sessionID == activeSessionID else { return }
+        if reference.kind == .templatePreview,
+           !iPadTemplatePreviewPolicy.accepts(reference, catalog: experienceCatalog) { return }
         if let expected = expectedAssetReferences[reference.assetID], expected != reference { return }
         if cachedAsset(for: reference) != nil { return }
         assetRequestPump.markCompleted(reference)
@@ -1327,7 +1362,8 @@ final class iPadViewModel: ObservableObject {
     // MARK: - Customer decisions
 
     func customerTappedToBegin() {
-        guard CustomerDisplayWorkflow.canApply(.begin, in: stateMachine.phase) else { return }
+        guard isConnectionReady,
+              CustomerDisplayWorkflow.canApply(.begin, in: stateMachine.phase) else { return }
         if requiresExperienceSelection {
             beginExperienceSelection()
         } else {
@@ -1472,6 +1508,15 @@ final class iPadViewModel: ObservableObject {
     func returnToExperienceSelection() {
         guard CustomerDisplayWorkflow.canApply(.back, in: stateMachine.phase) else { return }
         beginExperienceSelection()
+    }
+
+    func customerBackFromExperienceSelection() {
+        guard !isSessionRequestPending,
+              stateMachine.phase == .selectingExperience,
+              CustomerDisplayWorkflow.canApply(.back, in: stateMachine.phase) else { return }
+        pendingSessionStartRequestID = nil
+        clearTransientRequestState()
+        stateMachine.reset()
     }
 
     func currentPrompt(for photoIndex: Int) -> SessionPromptPresentation? {

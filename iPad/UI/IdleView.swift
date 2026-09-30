@@ -81,10 +81,9 @@ struct IdleView: View {
                             .tracking(0.5)
                     }
                     .padding(.bottom, 60)
-                    .contentShape(Rectangle())
-                    .onTapGesture { vm.customerTappedToBegin() }
                     .accessibilityElement(children: .combine)
                     .accessibilityLabel(isThai ? "แตะที่ใดก็ได้เพื่อเริ่ม" : "Tap anywhere to begin")
+                    .accessibilityAddTraits(.isButton)
                     .accessibilityAction { vm.customerTappedToBegin() }
                 } else {
                     VStack(spacing: 8) {
@@ -105,6 +104,11 @@ struct IdleView: View {
                     .accessibilityLabel(isThai ? "กำลังรอการเชื่อมต่อ ต้องเชื่อมต่อก่อนเริ่ม" : "Waiting for connection. Connection required before starting.")
                 }
             }
+        }
+        .contentShape(Rectangle())
+        .onTapGesture {
+            guard vm.isConnectionReady else { return }
+            vm.customerTappedToBegin()
         }
         .onAppear { pulse = true }
     }
