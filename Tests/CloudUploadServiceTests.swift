@@ -336,7 +336,7 @@ struct CloudUploadServiceTests {
         try Data([1]).write(to: directory.appendingPathComponent("strip.png"))
         let runner = TestCloudCommandRunner()
         let verifier = TestCloudURLVerifier()
-        await verifier.setResponse(statusCode: 503, contentLength: 0)
+        await verifier.setResponse(statusCode: 503, verifiedImage: false)
         let service = CloudUploadService(runner: runner, verifier: verifier)
 
         do {
@@ -361,12 +361,12 @@ struct CloudUploadServiceTests {
 
     @Test("HTTP errors and empty bodies remain retryable")
     func rejectsUnusablePublicDownload() async throws {
-        for response in [(404, Int64(1)), (200, Int64(0))] {
+        for response in [(404, false), (200, false)] {
             let directory = try temporaryDirectory()
             defer { try? FileManager.default.removeItem(at: directory) }
             try Data([1]).write(to: directory.appendingPathComponent("strip.png"))
             let verifier = TestCloudURLVerifier()
-            await verifier.setResponse(statusCode: response.0, contentLength: response.1)
+            await verifier.setResponse(statusCode: response.0, verifiedImage: response.1)
             let service = CloudUploadService(
                 runner: TestCloudCommandRunner(),
                 verifier: verifier
@@ -677,15 +677,24 @@ private actor CancellationAwareCloudCommandRunner: CloudCommandRunning {
 
 private actor TestCloudURLVerifier: CloudPublicURLVerifying {
     private(set) var urls: [URL] = []
-    private var response = CloudHTTPVerification(statusCode: 200, contentLength: 1)
+    private var statusCode = 200
+    private var verifiedImage = true
 
-    func setResponse(statusCode: Int, contentLength: Int64) {
-        response = CloudHTTPVerification(statusCode: statusCode, contentLength: contentLength)
+    func setResponse(statusCode: Int, verifiedImage: Bool) {
+        self.statusCode = statusCode
+        self.verifiedImage = verifiedImage
     }
 
     func verify(url: URL, timeout: TimeInterval) async throws -> CloudHTTPVerification {
         urls.append(url)
-        return response
+        return CloudHTTPVerification(
+            statusCode: statusCode,
+            verifiedImage: verifiedImage,
+            imageWidth: verifiedImage ? 1 : nil,
+            imageHeight: verifiedImage ? 1 : nil,
+            bytesInspected: verifiedImage ? 8 : 0,
+            finalURL: url
+        )
     }
 }
 

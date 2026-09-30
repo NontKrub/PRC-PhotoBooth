@@ -182,7 +182,9 @@
 		BC5D3DB49B16545253A6B26F /* BoothTransport.swift in Sources */ = {isa = PBXBuildFile; fileRef = 89AA2F89E55C0C240F87209E /* BoothTransport.swift */; };
 		BD5BDBC424543A8F68010D1A /* iPadContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F05BE9FC91D033A918857113 /* iPadContentView.swift */; };
 		BECDF0F399AF61132DAC1393 /* CloudUploadService.swift in Sources */ = {isa = PBXBuildFile; fileRef = B3A294E63F41AC0726CD89F1 /* CloudUploadService.swift */; };
+		C08604A8A61B11E3903C90BD /* CloudPublicURLVerifierTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 937EA69EC55B1F801CDEDC53 /* CloudPublicURLVerifierTests.swift */; };
 		C0AB711F69AE72B0187EDECC /* HTTPServerRequest.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5BEE03DC4CC3A6502A9302AB /* HTTPServerRequest.swift */; };
+		C14FCB44112D03059A29078E /* RetentionCleanupTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0E097CB6089C8E0DBC6FA718 /* RetentionCleanupTests.swift */; };
 		C1F891472ADB22356A4DFA95 /* Localizable.xcstrings in Resources */ = {isa = PBXBuildFile; fileRef = 22B8BA04A0B05CC45B9DE512 /* Localizable.xcstrings */; };
 		C2FCDD8FF0AE6350FDD8D258 /* EventConfigBuilder.swift in Sources */ = {isa = PBXBuildFile; fileRef = 247CA105082B972466CE6DA6 /* EventConfigBuilder.swift */; };
 		C348B164EC05BEAB13B967A3 /* SessionWorkspace.swift in Sources */ = {isa = PBXBuildFile; fileRef = BE900AB03E23351DE24FCDF5 /* SessionWorkspace.swift */; };
@@ -273,6 +275,7 @@
 		0CFE1B69407370A63DD530C9 /* BoothConnectionPresentationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BoothConnectionPresentationTests.swift; sourceTree = "<group>"; };
 		0D04DF82E7932C18CF3411DA /* JobQueueStoreTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = JobQueueStoreTests.swift; sourceTree = "<group>"; };
 		0D28EFDBD2D997B469931171 /* SelectionLogic.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SelectionLogic.swift; sourceTree = "<group>"; };
+		0E097CB6089C8E0DBC6FA718 /* RetentionCleanupTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RetentionCleanupTests.swift; sourceTree = "<group>"; };
 		11154D021EC68E28E4E445E8 /* LocalizedText.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LocalizedText.swift; sourceTree = "<group>"; };
 		1277D5F99824D66627D593C2 /* MacApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MacApp.swift; sourceTree = "<group>"; };
 		13511087CFED7C8D2178B904 /* SessionJob.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionJob.swift; sourceTree = "<group>"; };
@@ -376,6 +379,7 @@
 		8EE3B99F5C1FD036A5A483B7 /* ActiveCameraPreviewTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ActiveCameraPreviewTests.swift; sourceTree = "<group>"; };
 		9045D061DC55AC269078B542 /* BoothImageDecoder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BoothImageDecoder.swift; sourceTree = "<group>"; };
 		92C3FCACEEDA2B034E721CFF /* BoothSoakTestController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BoothSoakTestController.swift; sourceTree = "<group>"; };
+		937EA69EC55B1F801CDEDC53 /* CloudPublicURLVerifierTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CloudPublicURLVerifierTests.swift; sourceTree = "<group>"; };
 		96F1949452943364801CE25E /* DSLRCaptureAttemptValidator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DSLRCaptureAttemptValidator.swift; sourceTree = "<group>"; };
 		98B3AC61404AB756ABB081C9 /* EventGalleryStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EventGalleryStore.swift; sourceTree = "<group>"; };
 		998DB3D0CA85975BA97E10C1 /* BoothNetworkTransportRuntime.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BoothNetworkTransportRuntime.swift; sourceTree = "<group>"; };
@@ -854,6 +858,7 @@
 				4346C88E68A8DD1C20ECE9EC /* CanvasElementGeometryTests.swift */,
 				E9543D57E408DA5CE445DEB4 /* CaptureFramingGeometryTests.swift */,
 				6F48DF1659531A153398C215 /* CaptureRecoveryTests.swift */,
+				937EA69EC55B1F801CDEDC53 /* CloudPublicURLVerifierTests.swift */,
 				68AD6CCBF1B3CB849C8CA5A9 /* CloudSSHSetupTests.swift */,
 				F83BAA2070C1E452B6270E1A /* CloudUploadServiceTests.swift */,
 				035DF22C80686690C8B74B53 /* CompositorTests.swift */,
@@ -891,6 +896,7 @@
 				9EB63FA4676F2D969C1E6414 /* QRCodeScanTests.swift */,
 				170BAF86F05EDCDC1C6C158A /* RemoteOperatorAuthTests.swift */,
 				68B898FEB0773DF2B43B117C /* RetakeTrackingTests.swift */,
+				0E097CB6089C8E0DBC6FA718 /* RetentionCleanupTests.swift */,
 				4224D8F7384D1A8B5088C12F /* ReviewImageEncoderTests.swift */,
 				D28FE311CF2E0A52B4AE5299 /* RollingVideoBufferTests.swift */,
 				851FC11E977E043BCBF90BE3 /* SelectionLogicTests.swift */,
@@ -1259,6 +1265,7 @@
 				F98E430CB67E8376857BBF40 /* CanvasElementGeometryTests.swift in Sources */,
 				CB44FE824D08FC8554E15977 /* CaptureFramingGeometryTests.swift in Sources */,
 				5B6B36CA0C3D8A5763039026 /* CaptureRecoveryTests.swift in Sources */,
+				C08604A8A61B11E3903C90BD /* CloudPublicURLVerifierTests.swift in Sources */,
 				061B8A6BAAC97D0554975F74 /* CloudSSHSetupTests.swift in Sources */,
 				3366CE79827720DC01942C08 /* CloudUploadServiceTests.swift in Sources */,
 				5080A23EC41AF2ECB29607A9 /* CompositorTests.swift in Sources */,
@@ -1296,6 +1303,7 @@
 				EE48115A824CCA5ED57949F3 /* QRCodeScanTests.swift in Sources */,
 				A638743412A409209933BA4A /* RemoteOperatorAuthTests.swift in Sources */,
 				68250C96244AB7C6879A910E /* RetakeTrackingTests.swift in Sources */,
+				C14FCB44112D03059A29078E /* RetentionCleanupTests.swift in Sources */,
 				0516FEE3FDCBA4026506F6C4 /* ReviewImageEncoderTests.swift in Sources */,
 				4DBD05E3C9868500F567C5F7 /* RollingVideoBufferTests.swift in Sources */,
 				AA9D95A49DC9C524B1065E1D /* SelectionLogicTests.swift in Sources */,

@@ -778,9 +778,27 @@ enum BoothSecondaryChannelAdmissionDecision: Equatable {
     case rejectCandidate
 }
 
+enum BoothSecondaryChannelAdmissionState: Equatable {
+    case none
+    case handshaking
+    case verified
+    case failed
+}
+
 enum BoothSecondaryChannelAdmissionPolicy {
+    static func decision(existingState: BoothSecondaryChannelAdmissionState) -> BoothSecondaryChannelAdmissionDecision {
+        switch existingState {
+        case .none, .failed: .acceptCandidate
+        case .handshaking, .verified: .rejectCandidate
+        }
+    }
+
     static func decision(existingVerified: Bool) -> BoothSecondaryChannelAdmissionDecision {
-        existingVerified ? .rejectCandidate : .acceptCandidate
+        decision(existingState: existingVerified ? .verified : .none)
+    }
+
+    static func handshakeTimedOut(startedAt: Date, now: Date, timeout: TimeInterval) -> Bool {
+        now.timeIntervalSince(startedAt) >= timeout
     }
 }
 

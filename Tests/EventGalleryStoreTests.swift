@@ -128,6 +128,72 @@ struct EventGalleryStoreTests {
         }
     }
 
+    @Test("malformed gallery index is moved once and can be replaced by a clean save")
+    func quarantinesMalformedIndexOnce() async throws {
+        let root = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = EventGalleryStore(baseDirectory: root)
+        let indexURL = root.appendingPathComponent("Gallery/Events/event-1.json")
+        try FileManager.default.createDirectory(
+            at: indexURL.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        let malformed = Data("{broken json".utf8)
+        try malformed.write(to: indexURL)
+
+        var quarantineURL: URL?
+        do {
+            _ = try await store.load(eventID: "event-1")
+            Issue.record("Expected malformed gallery JSON to fail")
+        } catch EventGalleryStoreError.corrupt(let source, let backup) {
+            #expect(source == indexURL)
+            quarantineURL = backup
+        }
+
+        #expect(!FileManager.default.fileExists(atPath: indexURL.path))
+        let quarantinedURL = try #require(quarantineURL)
+        #expect(try Data(contentsOf: quarantinedURL) == malformed)
+        #expect(try await store.load(eventID: "event-1") == nil)
+        #expect(try await store.load(eventID: "event-1") == nil)
+        #expect(try FileManager.default.contentsOfDirectory(
+            at: indexURL.deletingLastPathComponent(),
+            includingPropertiesForKeys: nil
+        ).filter { $0.pathExtension == "corrupt" }.count == 1)
+
+        let manifest = makeManifest(root: root)
+        try await store.upsertSession(
+            manifest: manifest,
+            configuration: EventGalleryConfiguration(mode: .automatic)
+        )
+        #expect(try await store.load(eventID: "event-1")?.sessions.map(\.sessionID) == [manifest.id])
+        #expect(FileManager.default.fileExists(atPath: quarantinedURL.path))
+    }
+
+    @Test("unsupported future gallery schema stays in place")
+    func preservesFutureSchemaIndex() async throws {
+        let root = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = EventGalleryStore(baseDirectory: root)
+        let manifest = makeManifest(root: root)
+        try await store.upsertSession(
+            manifest: manifest,
+            configuration: EventGalleryConfiguration(mode: .automatic)
+        )
+        let indexURL = root.appendingPathComponent("Gallery/Events/\(manifest.eventID).json")
+        var object = try #require(JSONSerialization.jsonObject(with: Data(contentsOf: indexURL)) as? [String: Any])
+        object["schemaVersion"] = EventGalleryIndex.currentSchemaVersion + 1
+        try JSONSerialization.data(withJSONObject: object).write(to: indexURL)
+
+        do {
+            _ = try await store.load(eventID: manifest.eventID)
+            Issue.record("Expected unsupported gallery schema to fail")
+        } catch EventGalleryStoreError.corrupt(let source, let backup) {
+            #expect(source == indexURL)
+            #expect(backup == indexURL)
+        }
+        #expect(FileManager.default.fileExists(atPath: indexURL.path))
+    }
+
     private func makeManifest(root: URL) -> SessionManifest {
         let directory = root.appendingPathComponent("session")
         try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)

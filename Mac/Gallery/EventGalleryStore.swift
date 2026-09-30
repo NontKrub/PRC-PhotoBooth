@@ -11,20 +11,22 @@ actor EventGalleryStore {
     func load(eventID: String) throws -> EventGalleryIndex? {
         let url = try indexURL(eventID: eventID)
         guard fileManager.fileExists(atPath: url.path) else { return nil }
+        let index: EventGalleryIndex
         do {
             let decoder = JSONDecoder()
             decoder.dateDecodingStrategy = .iso8601
-            let index = try decoder.decode(EventGalleryIndex.self, from: Data(contentsOf: url))
-            guard index.schemaVersion == EventGalleryIndex.currentSchemaVersion else {
-                throw EventGalleryStoreError.corrupt(url, backup: url)
-            }
-            return index
+            index = try decoder.decode(EventGalleryIndex.self, from: Data(contentsOf: url))
         } catch let error as EventGalleryStoreError {
             throw error
         } catch {
-            let backup = try preserveCorruptFile(at: url)
+            let backup = try quarantineMalformedFile(at: url)
             throw EventGalleryStoreError.corrupt(url, backup: backup)
         }
+        guard index.schemaVersion == EventGalleryIndex.currentSchemaVersion else {
+            // Keep indexes from a newer app version in place for a compatible reader.
+            throw EventGalleryStoreError.corrupt(url, backup: url)
+        }
+        return index
     }
 
     func save(_ index: EventGalleryIndex) throws {
@@ -135,19 +137,20 @@ actor EventGalleryStore {
         return root.appendingPathComponent("\(eventID).json")
     }
 
-    private func preserveCorruptFile(at url: URL) throws -> URL {
+    private func quarantineMalformedFile(at url: URL) throws -> URL {
         let formatter = DateFormatter()
         formatter.locale = Locale(identifier: "en_US_POSIX")
         formatter.dateFormat = "yyyyMMdd-HHmmss"
-        var backup = url.deletingLastPathComponent()
-            .appendingPathComponent("\(url.deletingPathExtension().lastPathComponent)-corrupt-\(formatter.string(from: Date())).json.corrupt")
+        let backupBase = "\(url.deletingPathExtension().lastPathComponent)-corrupt-\(formatter.string(from: Date()))"
         var suffix = 2
+        var backup = url.deletingLastPathComponent()
+            .appendingPathComponent("\(backupBase).json.corrupt")
         while fileManager.fileExists(atPath: backup.path) {
-            backup = backup.deletingLastPathComponent()
-                .appendingPathComponent("\(url.deletingPathExtension().lastPathComponent)-corrupt-\(formatter.string(from: Date()))-\(suffix).json.corrupt")
+            backup = url.deletingLastPathComponent()
+                .appendingPathComponent("\(backupBase)-\(suffix).json.corrupt")
             suffix += 1
         }
-        try fileManager.copyItem(at: url, to: backup)
+        try fileManager.moveItem(at: url, to: backup)
         return backup
     }
 }

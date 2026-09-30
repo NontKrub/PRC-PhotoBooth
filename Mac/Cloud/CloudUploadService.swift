@@ -1,5 +1,6 @@
 import Foundation
 import Darwin
+import ImageIO
 
 struct CloudUploadConfiguration: Sendable {
     static let defaultRemoteBasePath = "/bk1/prc/photobooth"
@@ -398,7 +399,11 @@ private final class ProcessRunState: @unchecked Sendable {
 
 struct CloudHTTPVerification: Sendable, Equatable {
     var statusCode: Int
-    var contentLength: Int64
+    var verifiedImage: Bool
+    var imageWidth: Int?
+    var imageHeight: Int?
+    var bytesInspected: Int
+    var finalURL: URL
 }
 
 protocol CloudPublicURLVerifying: Sendable {
@@ -406,18 +411,133 @@ protocol CloudPublicURLVerifying: Sendable {
 }
 
 struct URLSessionCloudPublicURLVerifier: CloudPublicURLVerifying {
+    static let maximumInspectionBytes = 256 * 1024
+    private let session: URLSession
+
+    init(session: URLSession? = nil) {
+        if let session {
+            self.session = session
+        } else {
+            let configuration = URLSessionConfiguration.ephemeral
+            configuration.timeoutIntervalForRequest = 15
+            configuration.timeoutIntervalForResource = 15
+            self.session = URLSession(configuration: configuration)
+        }
+    }
+
     func verify(url: URL, timeout: TimeInterval) async throws -> CloudHTTPVerification {
+        guard url.scheme?.lowercased() == "https", url.host != nil else {
+            throw URLError(.unsupportedURL)
+        }
         var request = URLRequest(url: url)
         request.httpMethod = "GET"
         request.timeoutInterval = timeout
-        let (data, response) = try await URLSession.shared.data(for: request)
+        let redirectDelegate = RejectCloudVerificationRedirects()
+        let (bytes, response) = try await session.bytes(for: request, delegate: redirectDelegate)
         guard let response = response as? HTTPURLResponse else {
             throw URLError(.badServerResponse)
         }
-        let length = response.expectedContentLength > 0
-            ? response.expectedContentLength
-            : Int64(data.count)
-        return CloudHTTPVerification(statusCode: response.statusCode, contentLength: length)
+        guard let finalURL = response.url else { throw URLError(.badServerResponse) }
+        guard response.statusCode == 200, finalURL == url else {
+            bytes.task.cancel()
+            return CloudHTTPVerification(
+                statusCode: response.statusCode,
+                verifiedImage: false,
+                imageWidth: nil,
+                imageHeight: nil,
+                bytesInspected: 0,
+                finalURL: finalURL
+            )
+        }
+
+        var inspectedData = Data()
+        inspectedData.reserveCapacity(Self.maximumInspectionBytes)
+        var chunk: [UInt8] = []
+        chunk.reserveCapacity(4 * 1024)
+        let source = CGImageSourceCreateIncremental(nil)
+        var dimensions: (width: Int, height: Int)?
+
+        do {
+            for try await byte in bytes {
+                try Task.checkCancellation()
+                guard inspectedData.count + chunk.count < Self.maximumInspectionBytes else {
+                    bytes.task.cancel()
+                    return verification(
+                        statusCode: response.statusCode,
+                        dimensions: nil,
+                        bytesInspected: inspectedData.count + chunk.count,
+                        finalURL: finalURL
+                    )
+                }
+                chunk.append(byte)
+                if chunk.count == 4 * 1024 {
+                    inspectedData.append(contentsOf: chunk)
+                    chunk.removeAll(keepingCapacity: true)
+                    dimensions = imageDimensions(in: inspectedData, source: source)
+                    if dimensions != nil { break }
+                }
+            }
+            if dimensions == nil {
+                inspectedData.append(contentsOf: chunk)
+                dimensions = imageDimensions(in: inspectedData, source: source, isFinal: true)
+            }
+            bytes.task.cancel()
+            return verification(
+                statusCode: response.statusCode,
+                dimensions: dimensions,
+                bytesInspected: inspectedData.count,
+                finalURL: finalURL
+            )
+        } catch {
+            bytes.task.cancel()
+            if Task.isCancelled { throw CancellationError() }
+            throw error
+        }
+    }
+
+    private func imageDimensions(
+        in data: Data,
+        source: CGImageSource,
+        isFinal: Bool = false
+    ) -> (width: Int, height: Int)? {
+        CGImageSourceUpdateData(source, data as CFData, isFinal)
+        guard CGImageSourceGetType(source) != nil,
+              let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
+              let width = (properties[kCGImagePropertyPixelWidth] as? NSNumber)?.intValue,
+              let height = (properties[kCGImagePropertyPixelHeight] as? NSNumber)?.intValue,
+              width > 0,
+              height > 0 else { return nil }
+        return (width, height)
+    }
+
+    private func verification(
+        statusCode: Int,
+        dimensions: (width: Int, height: Int)?,
+        bytesInspected: Int,
+        finalURL: URL
+    ) -> CloudHTTPVerification {
+        CloudHTTPVerification(
+            statusCode: statusCode,
+            verifiedImage: dimensions != nil,
+            imageWidth: dimensions?.width,
+            imageHeight: dimensions?.height,
+            bytesInspected: bytesInspected,
+            finalURL: finalURL
+        )
+    }
+}
+
+// This delegate has no mutable state; rejecting redirects keeps verification
+// tied to the configured public strip URL and avoids fetching login pages.
+final class RejectCloudVerificationRedirects: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
+    func urlSession(
+        _ session: URLSession,
+        task: URLSessionTask,
+        willPerformHTTPRedirection response: HTTPURLResponse,
+        newRequest request: URLRequest,
+        completionHandler: @escaping (URLRequest?) -> Void
+    ) {
+        completionHandler(nil)
     }
 }
 
@@ -549,9 +669,16 @@ actor CloudUploadService {
 
         do {
             let verification = try await verifier.verify(url: verificationURL, timeout: Timeout.verification)
-            guard verification.statusCode == 200, verification.contentLength > 0 else {
+            guard verification.statusCode == 200,
+                  verification.finalURL == verificationURL,
+                  verification.verifiedImage,
+                  let width = verification.imageWidth,
+                  width > 0,
+                  let height = verification.imageHeight,
+                  height > 0,
+                  verification.bytesInspected <= URLSessionCloudPublicURLVerifier.maximumInspectionBytes else {
                 throw JobExecutionError.retryable(
-                    "Upload completed but public download verification failed: HTTP \(verification.statusCode) from \(verificationURL.path)"
+                    "Upload completed but public image verification failed: HTTP \(verification.statusCode) from \(verificationURL.path)"
                 )
             }
         } catch let error as JobExecutionError {

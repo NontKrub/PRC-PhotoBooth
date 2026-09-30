@@ -134,6 +134,7 @@ public final class NetworkBoothTransport: BoothTransport {
     private static let previewIdentityCapability = "preview-identity"
     private static let heartbeatInterval: TimeInterval = 2
     private static let heartbeatTimeout: TimeInterval = 8
+    private static let previewIdentityHandshakeTimeout: TimeInterval = 12
     private static let transportQueueLabel = "PRC-PhotoBooth.Transport"
 
     private struct PendingPairingCommit: Equatable, Sendable {
@@ -346,6 +347,7 @@ public final class NetworkBoothTransport: BoothTransport {
     private var previewPeerSupportsIdentity = false
     private var didSendPreviewHello = false
     private var previewIdentityVerified = false
+    private var previewIdentityHandshakeTask: Task<Void, Never>?
     private var lanPathMonitor: NWPathMonitor?
     private var wifiPathMonitor: NWPathMonitor?
     private var pathMonitorGeneration = 0
@@ -3081,6 +3083,8 @@ public final class NetworkBoothTransport: BoothTransport {
 
     private func cancelTransportObjects() {
         cancelUnauthenticatedIdleTimer()
+        previewIdentityHandshakeTask?.cancel()
+        previewIdentityHandshakeTask = nil
         invalidateReceiveToken(for: .control)
         invalidateReceiveToken(for: .preview)
         invalidateReceiveToken(for: .asset)
@@ -3569,13 +3573,13 @@ public final class NetworkBoothTransport: BoothTransport {
             return
         }
         if channel == .preview,
-           BoothSecondaryChannelAdmissionPolicy.decision(existingVerified: previewIdentityVerified)
+           BoothSecondaryChannelAdmissionPolicy.decision(existingState: previewAdmissionState)
                 == .rejectCandidate {
             connection.cancel()
             emitTransportEvent(
                 .secondaryCandidateRejected,
                 channel: .preview,
-                reason: "Verified preview channel is already active."
+                reason: "Preview channel candidate is already active."
             )
             return
         }
@@ -3627,6 +3631,7 @@ public final class NetworkBoothTransport: BoothTransport {
             previewConnection = connection
             previewEndpointDescription = connection.endpoint.debugDescription
             resetPreviewIdentity()
+            schedulePreviewIdentityHandshakeTimeout(connection, generation: previewConnectionGeneration)
             previewWritePump.bind(connection, generation: previewConnectionGeneration)
         } else {
             assetConnectionGeneration &+= 1
@@ -3721,13 +3726,16 @@ public final class NetworkBoothTransport: BoothTransport {
                 )
             }
         } else if channel == .preview {
-            guard previewConnection == nil || previewEndpointDescription != description else { return }
-            if BoothSecondaryChannelAdmissionPolicy.decision(existingVerified: previewIdentityVerified)
+            let admissionState = previewAdmissionState
+            if previewConnection != nil,
+               previewEndpointDescription == description,
+               admissionState != .failed { return }
+            if BoothSecondaryChannelAdmissionPolicy.decision(existingState: admissionState)
                     == .rejectCandidate {
                 emitTransportEvent(
                     .secondaryCandidateRejected,
                     channel: .preview,
-                    reason: "Verified preview channel is already active."
+                    reason: "Preview channel candidate is already active."
                 )
                 return
             }
@@ -3743,6 +3751,7 @@ public final class NetworkBoothTransport: BoothTransport {
             previewEndpointDescription = description
             resetPreviewIdentity()
             if let connection = previewConnection {
+                schedulePreviewIdentityHandshakeTimeout(connection, generation: previewConnectionGeneration)
                 previewWritePump.bind(connection, generation: previewConnectionGeneration)
                 configure(connection, channel: channel, provenance: provenance)
             }
@@ -6057,6 +6066,8 @@ public final class NetworkBoothTransport: BoothTransport {
         }
         let wasPreviewIdentityVerified = previewIdentityVerified
         previewIdentityVerified = true
+        previewIdentityHandshakeTask?.cancel()
+        previewIdentityHandshakeTask = nil
         connectionStatus.publishPreviewChannel(connected: true)
         if !wasPreviewIdentityVerified {
             emitTransportEvent(.previewReady, channel: .preview)
@@ -6335,6 +6346,8 @@ public final class NetworkBoothTransport: BoothTransport {
             apply(command, reason: command == .startWiFi(fallback: true) ? "LAN unavailable" : nil)
         } else if channel == .preview {
             guard let connection, connection === previewConnection else { return }
+            previewIdentityHandshakeTask?.cancel()
+            previewIdentityHandshakeTask = nil
             invalidateReceiveToken(for: .preview)
             cancelWaitingRecovery(for: channel)
             emitTransportEvent(.previewDisconnected, channel: channel, reason: reason)
@@ -6430,6 +6443,8 @@ public final class NetworkBoothTransport: BoothTransport {
     }
 
     private func resetPreviewConnection() {
+        previewIdentityHandshakeTask?.cancel()
+        previewIdentityHandshakeTask = nil
         invalidateReceiveToken(for: .preview)
         previewConnectionGeneration &+= 1
         previewConnection?.cancel()
@@ -6539,6 +6554,43 @@ public final class NetworkBoothTransport: BoothTransport {
         previewPeerID = nil
         didSendPreviewHello = false
         previewIdentityVerified = false
+    }
+
+    private var previewAdmissionState: BoothSecondaryChannelAdmissionState {
+        guard let previewConnection else { return .none }
+        if previewIdentityVerified { return .verified }
+        switch previewConnection.state {
+        case .failed, .cancelled: return .failed
+        default: return .handshaking
+        }
+    }
+
+    private func schedulePreviewIdentityHandshakeTimeout(
+        _ connection: NWConnection,
+        generation: Int
+    ) {
+        let startedAt = Date()
+        previewIdentityHandshakeTask?.cancel()
+        previewIdentityHandshakeTask = Task { @MainActor [weak self, weak connection] in
+            do {
+                try await Task.sleep(for: .seconds(Self.previewIdentityHandshakeTimeout))
+            } catch {
+                return
+            }
+            guard let self,
+                  let connection,
+                  self.previewConnectionGeneration == generation,
+                  self.previewConnection === connection,
+                  self.previewAdmissionState == .handshaking,
+                  BoothSecondaryChannelAdmissionPolicy.handshakeTimedOut(
+                    startedAt: startedAt,
+                    now: Date(),
+                    timeout: Self.previewIdentityHandshakeTimeout
+                  ) else { return }
+            let reason = "Preview identity handshake timed out."
+            self.emitTransportEvent(.secondaryCandidateRejected, channel: .preview, reason: reason)
+            self.connectionDidClose(connection, channel: .preview, reason: reason)
+        }
     }
 
     private func resetControlAuthentication() {

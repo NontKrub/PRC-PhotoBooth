@@ -4995,6 +4995,31 @@ struct TransportRecoveryPolicyTests {
         )
     }
 
+    @Test("preview admission protects an active handshake and releases failed or timed-out slots")
+    func previewAdmissionCoversHandshakeLifecycle() {
+        let deadline = BoothSecondaryChannelAdmissionPolicy.handshakeTimedOut(
+            startedAt: Date(timeIntervalSince1970: 100),
+            now: Date(timeIntervalSince1970: 111.9),
+            timeout: 12
+        )
+        let expired = BoothSecondaryChannelAdmissionPolicy.handshakeTimedOut(
+            startedAt: Date(timeIntervalSince1970: 100),
+            now: Date(timeIntervalSince1970: 112),
+            timeout: 12
+        )
+
+        #expect(!deadline)
+        #expect(expired)
+        #expect(BoothSecondaryChannelAdmissionPolicy.decision(existingState: .handshaking) == .rejectCandidate)
+        #expect(BoothSecondaryChannelAdmissionPolicy.decision(existingState: .verified) == .rejectCandidate)
+        #expect(BoothSecondaryChannelAdmissionPolicy.decision(existingState: .failed) == .acceptCandidate)
+        #expect(BoothSecondaryChannelAdmissionPolicy.decision(existingState: .none) == .acceptCandidate)
+
+        for _ in 0..<1_000 {
+            #expect(BoothSecondaryChannelAdmissionPolicy.decision(existingState: .handshaking) == .rejectCandidate)
+        }
+    }
+
     @Test("Waiting recovery deadline remains tied to its connection generation")
     func recoveryDeadlineUsesExactConnectionGeneration() async throws {
         let queue = DispatchQueue(label: "PRC-PhotoBooth.Tests.Recovery")
