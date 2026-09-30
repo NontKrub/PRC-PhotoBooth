@@ -1,4 +1,5 @@
 import Foundation
+import CryptoKit
 import CoreGraphics
 import ImageIO
 import Testing
@@ -17,7 +18,12 @@ struct CloudPublicURLVerifierTests {
         let session = makeVerifierSession()
         defer { session.invalidateAndCancel() }
 
-        let result = try await URLSessionCloudPublicURLVerifier(session: session).verify(url: url, timeout: 3)
+        let result = try await URLSessionCloudPublicURLVerifier(session: session).verify(
+            url: url,
+            expectedSHA256: Data(SHA256.hash(data: png)),
+            expectedByteCount: png.count,
+            timeout: 3
+        )
 
         #expect(result.statusCode == 200)
         #expect(result.verifiedImage)
@@ -25,6 +31,90 @@ struct CloudPublicURLVerifierTests {
         #expect(result.imageHeight == 5)
         #expect(result.finalURL == url)
         #expect(result.bytesInspected <= URLSessionCloudPublicURLVerifier.maximumInspectionBytes)
+    }
+
+    @Test("same-size valid image with the wrong digest is rejected")
+    func rejectsDifferentImageAtSameSize() async throws {
+        let url = URL(string: "https://photos.example/strip.png")!
+        let expected = try makeVerifierPNG()
+        let actual = try makeVerifierPNG(fill: CGColor(red: 0.9, green: 0.1, blue: 0.2, alpha: 1))
+        #expect(expected.count == actual.count)
+        StubCloudURLProtocol.registry.install([
+            url.path: StubCloudResponse(status: 200, mimeType: "image/png", body: actual)
+        ])
+        let session = makeVerifierSession()
+        defer { session.invalidateAndCancel() }
+
+        let result = try await URLSessionCloudPublicURLVerifier(session: session).verify(
+            url: url,
+            expectedSHA256: Data(SHA256.hash(data: expected)),
+            expectedByteCount: expected.count,
+            timeout: 3
+        )
+
+        #expect(result.imageWidth == 7)
+        #expect(result.imageHeight == 5)
+        #expect(!result.verifiedImage)
+        #expect(result.bytesInspected == expected.count)
+    }
+
+    @Test("truncated recognizable image does not satisfy full-file verification")
+    func rejectsTruncatedImage() async throws {
+        let url = URL(string: "https://photos.example/truncated.png")!
+        let expected = try makeVerifierPNG()
+        let truncated = Data(expected.prefix(expected.count / 2))
+        StubCloudURLProtocol.registry.install([
+            url.path: StubCloudResponse(status: 200, mimeType: "image/png", body: truncated)
+        ])
+        let session = makeVerifierSession()
+        defer { session.invalidateAndCancel() }
+
+        let result = try await URLSessionCloudPublicURLVerifier(session: session).verify(
+            url: url,
+            expectedSHA256: Data(SHA256.hash(data: expected)),
+            expectedByteCount: expected.count,
+            timeout: 3
+        )
+
+        #expect(!result.verifiedImage)
+        #expect(result.bytesInspected == truncated.count)
+    }
+
+    @Test("incorrect content length and encoded response are rejected before reading")
+    func rejectsIncorrectLengthAndEncoding() async throws {
+        let png = try makeVerifierPNG()
+        for (path, response) in [
+            ("wrong-length", StubCloudResponse(
+                status: 200,
+                mimeType: "image/png",
+                body: png,
+                contentLength: String(png.count + 1)
+            )),
+            ("compressed", StubCloudResponse(
+                status: 200,
+                mimeType: "image/png",
+                body: png,
+                contentEncoding: "gzip"
+            ))
+        ] {
+            let url = URL(string: "https://photos.example/\(path)")!
+            StubCloudURLProtocol.registry.install([url.path: response])
+            let session = makeVerifierSession()
+            defer { session.invalidateAndCancel() }
+
+            let result = try await URLSessionCloudPublicURLVerifier(session: session).verify(
+                url: url,
+                expectedSHA256: Data(SHA256.hash(data: png)),
+                expectedByteCount: png.count,
+                timeout: 3
+            )
+
+            #expect(!result.verifiedImage)
+            #expect(result.bytesInspected == 0)
+            // URLProtocol may synchronously hand bytes to URLSession before
+            // bytes(for:) returns its response; bytesInspected measures what
+            // the verifier itself accepted into its bounded hash/parser.
+        }
     }
 
     @Test("HTML login and HTML sent with an image MIME type are rejected")
@@ -41,7 +131,13 @@ struct CloudPublicURLVerifierTests {
             let session = makeVerifierSession()
             defer { session.invalidateAndCancel() }
 
-            let result = try await URLSessionCloudPublicURLVerifier(session: session).verify(url: url, timeout: 3)
+            let body = Data("<html><body>login required</body></html>".utf8)
+            let result = try await URLSessionCloudPublicURLVerifier(session: session).verify(
+                url: url,
+                expectedSHA256: Data(SHA256.hash(data: body)),
+                expectedByteCount: body.count,
+                timeout: 3
+            )
 
             #expect(!result.verifiedImage)
         }
@@ -62,7 +158,13 @@ struct CloudPublicURLVerifierTests {
         let session = makeVerifierSession()
         defer { session.invalidateAndCancel() }
 
-        let result = try await URLSessionCloudPublicURLVerifier(session: session).verify(url: url, timeout: 3)
+        let body = Data("<html>sign in</html>".utf8)
+        let result = try await URLSessionCloudPublicURLVerifier(session: session).verify(
+            url: url,
+            expectedSHA256: Data(SHA256.hash(data: body)),
+            expectedByteCount: body.count,
+            timeout: 3
+        )
 
         #expect(result.statusCode == 302)
         #expect(result.finalURL == url)
@@ -108,7 +210,13 @@ struct CloudPublicURLVerifierTests {
             let session = makeVerifierSession()
             defer { session.invalidateAndCancel() }
 
-            let result = try await URLSessionCloudPublicURLVerifier(session: session).verify(url: url, timeout: 3)
+            let expected = body.isEmpty ? Data([0]) : body
+            let result = try await URLSessionCloudPublicURLVerifier(session: session).verify(
+                url: url,
+                expectedSHA256: Data(SHA256.hash(data: expected)),
+                expectedByteCount: expected.count,
+                timeout: 3
+            )
 
             #expect(!result.verifiedImage)
             #expect(result.bytesInspected == 0)
@@ -129,7 +237,13 @@ struct CloudPublicURLVerifierTests {
         let session = makeVerifierSession()
         defer { session.invalidateAndCancel() }
 
-        let result = try await URLSessionCloudPublicURLVerifier(session: session).verify(url: url, timeout: 5)
+        let expected = Data(repeating: 0x42, count: 1)
+        let result = try await URLSessionCloudPublicURLVerifier(session: session).verify(
+            url: url,
+            expectedSHA256: Data(SHA256.hash(data: expected)),
+            expectedByteCount: URLSessionCloudPublicURLVerifier.maximumInspectionBytes + 4 * 1024,
+            timeout: 5
+        )
         try await waitForStubCancellation(path: url.path)
 
         #expect(!result.verifiedImage)
@@ -152,7 +266,14 @@ struct CloudPublicURLVerifierTests {
         let session = makeVerifierSession()
         defer { session.invalidateAndCancel() }
         let verifier = URLSessionCloudPublicURLVerifier(session: session)
-        let task = Task { try await verifier.verify(url: url, timeout: 5) }
+        let task = Task {
+            try await verifier.verify(
+                url: url,
+                expectedSHA256: Data(repeating: 0x51, count: 32),
+                expectedByteCount: URLSessionCloudPublicURLVerifier.maximumInspectionBytes * 4,
+                timeout: 5
+            )
+        }
         try await waitForStubBytes(path: url.path)
         task.cancel()
 
@@ -173,6 +294,8 @@ private struct StubCloudResponse: Sendable {
     var body = Data()
     var redirectPath: String?
     var repeatsBody = false
+    var contentLength: String?
+    var contentEncoding: String?
 }
 
 private final class StubCloudURLProtocol: URLProtocol, @unchecked Sendable {
@@ -189,6 +312,8 @@ private final class StubCloudURLProtocol: URLProtocol, @unchecked Sendable {
             return
         }
         var headers = ["Content-Type": fixture.mimeType]
+        headers["Content-Length"] = fixture.contentLength
+        headers["Content-Encoding"] = fixture.contentEncoding
         if let redirectPath = fixture.redirectPath {
             headers["Location"] = URL(string: redirectPath, relativeTo: url)?.absoluteURL.absoluteString
         }
@@ -302,6 +427,10 @@ private func makeVerifierSession() -> URLSession {
 }
 
 private func makeVerifierPNG() throws -> Data {
+    try makeVerifierPNG(fill: CGColor(red: 0.2, green: 0.5, blue: 0.8, alpha: 1))
+}
+
+private func makeVerifierPNG(fill: CGColor) throws -> Data {
     guard let context = CGContext(
         data: nil,
         width: 7,
@@ -311,7 +440,7 @@ private func makeVerifierPNG() throws -> Data {
         space: CGColorSpaceCreateDeviceRGB(),
         bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
     ) else { throw CocoaError(.fileWriteUnknown) }
-    context.setFillColor(CGColor(red: 0.2, green: 0.5, blue: 0.8, alpha: 1))
+    context.setFillColor(fill)
     context.fill(CGRect(x: 0, y: 0, width: 7, height: 5))
     guard let image = context.makeImage() else { throw CocoaError(.fileWriteUnknown) }
     let data = NSMutableData()

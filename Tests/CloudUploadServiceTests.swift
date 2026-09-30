@@ -1,6 +1,7 @@
 import Testing
 import Foundation
 import Darwin
+import CryptoKit
 
 @testable import PRC_PhotoBooth_Mac
 
@@ -63,7 +64,7 @@ struct CloudUploadServiceTests {
         )
 
         let commands = await runner.commands
-        #expect(commands.count == 4)
+        #expect(commands.count == 7)
         #expect(commands[0].arguments.contains("booth-host"))
         #expect(commands[0].arguments.last?.contains("mkdir -p") == true)
         #expect(commands[0].arguments.contains("BatchMode=yes"))
@@ -73,12 +74,17 @@ struct CloudUploadServiceTests {
         #expect(commands[1].arguments.contains("--partial"))
         #expect(commands[1].arguments.contains("--partial-dir=.rsync-partial"))
         #expect(commands[1].arguments.contains("--timeout=60"))
-        #expect(commands[2].arguments.last?.contains("test -s") == true)
-        #expect(commands[2].arguments.last?.contains("ln -sfn") == true)
-        #expect(commands[2].arguments.last?.contains("/token") == true)
-        #expect(commands[3].arguments.last?.contains("find") == true)
-        #expect(commands[3].arguments.last?.contains("session-*") == true)
-        #expect(commands[3].arguments.last?.contains("! -path") == true)
+        #expect(commands[2].arguments.last?.contains("sha256sum --") == true)
+        #expect(commands[3].arguments.last?.contains("test -s") == true)
+        #expect(commands[3].arguments.last?.contains("ln -sfn") == true)
+        #expect(commands[3].arguments.last?.contains("/token") == true)
+        #expect(commands[4].arguments.last?.contains("test -L") == true)
+        #expect(commands[4].arguments.last?.contains("readlink") == true)
+        #expect(commands[5].arguments.last?.contains("rm -f") == true)
+        #expect(commands[6].arguments.last?.contains("find") == true)
+        #expect(commands[6].arguments.last?.contains("session-*") == true)
+        #expect(commands[6].arguments.last?.contains("! -path") == true)
+        #expect(commands[6].arguments.last?.contains("current_alias_target=$(readlink") == true)
         #expect((await verifier.urls).first?.path == "/photobooth/s/token/strip.png")
         let page = try String(contentsOf: directory.appendingPathComponent("index.html"), encoding: .utf8)
         #expect(page.contains(#"src="strip.png""#))
@@ -88,13 +94,45 @@ struct CloudUploadServiceTests {
         #expect(!page.contains(#"href="/s/"#))
     }
 
+    @Test("staged checksum mismatch never publishes or verifies the public route")
+    func stagedChecksumMismatchStopsBeforePublish() async throws {
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try Data([1, 2, 3]).write(to: directory.appendingPathComponent("strip.png"))
+        let runner = TestCloudCommandRunner()
+        await runner.failCommand(at: 2, exitCode: 0, output: "\(String(repeating: "0", count: 64))  strip.png\n3\n")
+        let verifier = TestCloudURLVerifier()
+        let service = CloudUploadService(runner: runner, verifier: verifier)
+
+        do {
+            try await service.upload(
+                manifest: makeManifest(directory: directory),
+                configuration: CloudUploadConfiguration(
+                    sshHost: "host",
+                    remoteBasePath: "/srv/photos",
+                    publicBaseURL: "https://photos.example"
+                )
+            )
+            Issue.record("Expected staged checksum mismatch")
+        } catch let error as JobExecutionError {
+            guard case .retryable(let message) = error else {
+                Issue.record("Expected retryable checksum error")
+                return
+            }
+            #expect(message.contains("remote checksum"))
+        }
+
+        #expect((await runner.commands).count == 3)
+        #expect((await verifier.urls).isEmpty)
+    }
+
     @Test("cleanup failure does not downgrade verified cloud delivery")
     func cleanupFailureIsNonFatal() async throws {
         let directory = try temporaryDirectory()
         defer { try? FileManager.default.removeItem(at: directory) }
         try Data([1]).write(to: directory.appendingPathComponent("strip.png"))
         let runner = TestCloudCommandRunner()
-        await runner.failCommand(at: 3, exitCode: 1, output: "permission denied")
+        await runner.failCommand(at: 6, exitCode: 1, output: "permission denied")
         let service = CloudUploadService(runner: runner, verifier: TestCloudURLVerifier())
 
         try await service.upload(
@@ -106,7 +144,138 @@ struct CloudUploadServiceTests {
             )
         )
 
-        #expect((await runner.commands).count == 4)
+        #expect((await runner.commands).count == 7)
+    }
+
+    @Test("ambiguous rollback-backup cleanup keeps the verified public alias")
+    func ambiguousVerifiedBackupCleanupDoesNotRollBack() async throws {
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try Data([1]).write(to: directory.appendingPathComponent("strip.png"))
+        let runner = TestCloudCommandRunner()
+        // The remote rm may have completed before SSH reports an error.
+        await runner.failCommand(at: 5, exitCode: 255, output: "connection closed after command")
+        let service = CloudUploadService(runner: runner, verifier: TestCloudURLVerifier())
+
+        try await service.upload(
+            manifest: makeManifest(directory: directory),
+            configuration: CloudUploadConfiguration(
+                sshHost: "host",
+                remoteBasePath: "/srv/photos",
+                publicBaseURL: "https://photos.example"
+            )
+        )
+
+        let commands = await runner.commands
+        #expect(commands.count == 7)
+        #expect(commands[4].arguments.last?.contains("test -L") == true)
+        #expect(commands[5].arguments.last?.contains("rm -f") == true)
+        #expect(commands[6].arguments.last?.contains("current_alias_target=$(readlink") == true)
+    }
+
+    @Test("public verification failure attempts compare-and-restore")
+    func failedVerificationAttemptsAliasRollback() async throws {
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try Data([1]).write(to: directory.appendingPathComponent("strip.png"))
+        let runner = TestCloudCommandRunner()
+        let verifier = TestCloudURLVerifier()
+        await verifier.setResponse(statusCode: 503, verifiedImage: false)
+        let service = CloudUploadService(runner: runner, verifier: verifier)
+        let manifest = makeManifest(directory: directory)
+
+        do {
+            try await service.upload(
+                manifest: manifest,
+                configuration: CloudUploadConfiguration(
+                    sshHost: "host",
+                    remoteBasePath: "/srv/photos",
+                    publicBaseURL: "https://photos.example"
+                )
+            )
+            Issue.record("Expected public verification to fail")
+        } catch { }
+
+        let commands = await runner.commands
+        #expect(commands.contains { $0.arguments.last?.contains("readlink") == true })
+        #expect(commands.contains {
+            $0.arguments.last?.contains("elif [ ! -e '") == true
+                && $0.arguments.last?.contains("mv -f --") == true
+        })
+        #expect(commands.contains {
+            $0.arguments.last?.contains("rm -rf -- '/srv/photos/.published/\(manifest.id)-") == true
+        })
+    }
+
+    @Test("failed publish restores the old alias if the new alias was never installed")
+    func failedPublishRestoresAliasWhenMissing() async throws {
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try Data([1]).write(to: directory.appendingPathComponent("strip.png"))
+        let runner = TestCloudCommandRunner()
+        let verifier = TestCloudURLVerifier()
+        await runner.failCommand(at: 3, exitCode: 255, output: "connection closed")
+        let service = CloudUploadService(runner: runner, verifier: verifier)
+
+        do {
+            try await service.upload(
+                manifest: makeManifest(directory: directory),
+                configuration: CloudUploadConfiguration(
+                    sshHost: "host",
+                    remoteBasePath: "/srv/photos",
+                    publicBaseURL: "https://photos.example"
+                )
+            )
+            Issue.record("Expected the remote publish command to fail")
+        } catch let error as JobExecutionError {
+            guard case .retryable = error else {
+                Issue.record("Expected a retryable publication failure")
+                return
+            }
+        }
+
+        let commands = await runner.commands
+        #expect(commands.count == 5)
+        let rollback = try #require(commands.last?.arguments.last)
+        #expect(rollback.contains("elif [ ! -e '"))
+        #expect(rollback.contains("mv -f --"))
+        #expect(rollback.contains("readlink"))
+        #expect((await verifier.urls).isEmpty)
+    }
+
+    @Test("a changed public alias cannot be reported as this upload's publication")
+    func changedPublicAliasRollsBackOnlyTheCurrentVersion() async throws {
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try Data([1]).write(to: directory.appendingPathComponent("strip.png"))
+        let runner = TestCloudCommandRunner()
+        await runner.failCommand(at: 4, exitCode: 1, output: "public alias changed")
+        let manifest = makeManifest(directory: directory)
+        let service = CloudUploadService(runner: runner, verifier: TestCloudURLVerifier())
+
+        do {
+            try await service.upload(
+                manifest: manifest,
+                configuration: CloudUploadConfiguration(
+                    sshHost: "host",
+                    remoteBasePath: "/srv/photos",
+                    publicBaseURL: "https://photos.example"
+                )
+            )
+            Issue.record("Expected the changed alias to prevent publication success")
+        } catch let error as JobExecutionError {
+            guard case .retryable(let message) = error else {
+                Issue.record("Expected a retryable alias verification failure")
+                return
+            }
+            #expect(message.contains("verify public alias target"))
+        }
+
+        let commands = await runner.commands
+        #expect(commands.count == 6)
+        #expect(commands[4].arguments.last?.contains("test -L") == true)
+        #expect(commands[5].arguments.last?.contains("readlink") == true)
+        #expect(commands[5].arguments.last?.contains("rm -rf -- '/srv/photos/.published/\(manifest.id)-") == true)
     }
 
     @Test("soak uploads use a per-run namespace and a temporary public alias")
@@ -131,12 +300,12 @@ struct CloudUploadServiceTests {
         )
 
         let commands = await runner.commands
-        #expect(commands.count == 4)
+        #expect(commands.count == 7)
         #expect(commands[0].arguments.last?.contains("/srv/photos/.soak/run-123/.staging/") == true)
         #expect(commands[1].arguments.last?.contains("/srv/photos/.soak/run-123/.staging/") == true)
-        #expect(commands[2].arguments.last?.contains("/srv/photos/s/soak/run-123/") == true)
+        #expect(commands[3].arguments.last?.contains("/srv/photos/s/soak/run-123/") == true)
         #expect((await verifier.urls).first?.path.contains("/s/soak/run-123/") == true)
-        #expect(commands[3].arguments.last?.contains("/srv/photos/.soak/run-123/.published") == true)
+        #expect(commands[6].arguments.last?.contains("/srv/photos/.soak/run-123/.published") == true)
     }
 
     @Test("soak QR, publish alias, verifier, and cleanup share one manifest route")
@@ -170,7 +339,7 @@ struct CloudUploadServiceTests {
 
         try await service.upload(manifest: manifest, configuration: configuration)
         let uploadCommands = await runner.commands
-        #expect(uploadCommands[2].arguments.last?.contains("/srv/photos\(route.relativePath)") == true)
+        #expect(uploadCommands[3].arguments.last?.contains("/srv/photos\(route.relativePath)") == true)
         #expect((await verifier.urls).first?.absoluteString == qrURL + "strip.png")
 
         try await service.removeSoakArtifacts(manifest: manifest, configuration: configuration)
@@ -644,6 +813,7 @@ private actor TestCloudCommandRunner: CloudCommandRunning {
     private(set) var commands: [Command] = []
     private var nextResult: CloudCommandResult?
     private var failures: [Int: CloudCommandResult] = [:]
+    private var uploadedDirectory: URL?
 
     func failNext(exitCode: Int32, output: String) {
         nextResult = CloudCommandResult(exitCode: exitCode, output: output)
@@ -657,9 +827,18 @@ private actor TestCloudCommandRunner: CloudCommandRunning {
         let index = commands.count
         commands.append(Command(executable: executable, arguments: arguments))
         defer { nextResult = nil }
-        return failures.removeValue(forKey: index)
-            ?? nextResult
-            ?? CloudCommandResult(exitCode: 0, output: "")
+        if executable == "/usr/bin/rsync", arguments.count >= 2 {
+            uploadedDirectory = URL(fileURLWithPath: String(arguments[arguments.count - 2].dropLast()))
+        }
+        if let failure = failures.removeValue(forKey: index) ?? nextResult { return failure }
+        if executable == "/usr/bin/ssh",
+           arguments.last?.contains("sha256sum --") == true,
+           let uploadedDirectory,
+           let data = try? Data(contentsOf: uploadedDirectory.appendingPathComponent("strip.png")) {
+            let digest = SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+            return CloudCommandResult(exitCode: 0, output: "\(digest)  strip.png\n\(data.count)\n")
+        }
+        return CloudCommandResult(exitCode: 0, output: "")
     }
 }
 
@@ -685,14 +864,19 @@ private actor TestCloudURLVerifier: CloudPublicURLVerifying {
         self.verifiedImage = verifiedImage
     }
 
-    func verify(url: URL, timeout: TimeInterval) async throws -> CloudHTTPVerification {
+    func verify(
+        url: URL,
+        expectedSHA256: Data,
+        expectedByteCount: Int,
+        timeout: TimeInterval
+    ) async throws -> CloudHTTPVerification {
         urls.append(url)
         return CloudHTTPVerification(
             statusCode: statusCode,
             verifiedImage: verifiedImage,
             imageWidth: verifiedImage ? 1 : nil,
             imageHeight: verifiedImage ? 1 : nil,
-            bytesInspected: verifiedImage ? 8 : 0,
+            bytesInspected: verifiedImage ? expectedByteCount : 0,
             finalURL: url
         )
     }

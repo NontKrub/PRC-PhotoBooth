@@ -1,6 +1,7 @@
 import Foundation
 import Darwin
 import ImageIO
+import CryptoKit
 
 struct CloudUploadConfiguration: Sendable {
     static let defaultRemoteBasePath = "/bk1/prc/photobooth"
@@ -27,6 +28,7 @@ struct CloudSessionLayout: Sendable, Equatable {
     let publishedDirectory: String?
     let publicAlias: String
     let publicAliasParentDirectory: String
+    let rollbackAliasBackup: String?
     let verificationURL: URL?
     let sessionID: String
 
@@ -80,6 +82,7 @@ struct CloudSessionLayout: Sendable, Equatable {
         }
         self.publicAlias = publicAlias
         self.publicAliasParentDirectory = URL(fileURLWithPath: publicAlias).deletingLastPathComponent().path
+        self.rollbackAliasBackup = publishedVersionID.map { "\(publicAlias).rollback-\($0)" }
         self.verificationURL = publicBaseURL.flatMap {
             route.childURL(stripFileName, baseURL: $0)
         }
@@ -407,7 +410,12 @@ struct CloudHTTPVerification: Sendable, Equatable {
 }
 
 protocol CloudPublicURLVerifying: Sendable {
-    func verify(url: URL, timeout: TimeInterval) async throws -> CloudHTTPVerification
+    func verify(
+        url: URL,
+        expectedSHA256: Data,
+        expectedByteCount: Int,
+        timeout: TimeInterval
+    ) async throws -> CloudHTTPVerification
 }
 
 struct URLSessionCloudPublicURLVerifier: CloudPublicURLVerifying {
@@ -419,26 +427,42 @@ struct URLSessionCloudPublicURLVerifier: CloudPublicURLVerifying {
             self.session = session
         } else {
             let configuration = URLSessionConfiguration.ephemeral
-            configuration.timeoutIntervalForRequest = 15
-            configuration.timeoutIntervalForResource = 15
+            configuration.timeoutIntervalForRequest = 120
+            configuration.timeoutIntervalForResource = 120
             self.session = URLSession(configuration: configuration)
         }
     }
 
-    func verify(url: URL, timeout: TimeInterval) async throws -> CloudHTTPVerification {
-        guard url.scheme?.lowercased() == "https", url.host != nil else {
+    func verify(
+        url: URL,
+        expectedSHA256: Data,
+        expectedByteCount: Int,
+        timeout: TimeInterval
+    ) async throws -> CloudHTTPVerification {
+        guard url.scheme?.lowercased() == "https",
+              url.host != nil,
+              expectedSHA256.count == 32,
+              expectedByteCount > 0 else {
             throw URLError(.unsupportedURL)
         }
         var request = URLRequest(url: url)
         request.httpMethod = "GET"
         request.timeoutInterval = timeout
+        request.setValue("identity", forHTTPHeaderField: "Accept-Encoding")
+        request.setValue("no-cache", forHTTPHeaderField: "Cache-Control")
         let redirectDelegate = RejectCloudVerificationRedirects()
         let (bytes, response) = try await session.bytes(for: request, delegate: redirectDelegate)
         guard let response = response as? HTTPURLResponse else {
             throw URLError(.badServerResponse)
         }
         guard let finalURL = response.url else { throw URLError(.badServerResponse) }
-        guard response.statusCode == 200, finalURL == url else {
+        let contentLengthHeader = response.value(forHTTPHeaderField: "Content-Length")
+        let contentLength = contentLengthHeader.flatMap(Int.init)
+        let contentEncoding = response.value(forHTTPHeaderField: "Content-Encoding")?.lowercased()
+        guard response.statusCode == 200,
+              finalURL == url,
+              contentLengthHeader == nil || contentLength == expectedByteCount,
+              contentEncoding == nil || contentEncoding == "identity" else {
             bytes.task.cancel()
             return CloudHTTPVerification(
                 statusCode: response.statusCode,
@@ -452,41 +476,73 @@ struct URLSessionCloudPublicURLVerifier: CloudPublicURLVerifying {
 
         var inspectedData = Data()
         inspectedData.reserveCapacity(Self.maximumInspectionBytes)
-        var chunk: [UInt8] = []
-        chunk.reserveCapacity(4 * 1024)
+        var chunk = Data()
+        chunk.reserveCapacity(Self.networkChunkSize)
         let source = CGImageSourceCreateIncremental(nil)
         var dimensions: (width: Int, height: Int)?
+        var hasher = SHA256()
+        var bytesReceived = 0
+
+        func consume(_ data: Data) {
+            guard !data.isEmpty else { return }
+            bytesReceived += data.count
+            hasher.update(data: data)
+            if dimensions == nil, inspectedData.count < Self.maximumInspectionBytes {
+                let count = min(data.count, Self.maximumInspectionBytes - inspectedData.count)
+                inspectedData.append(data.prefix(count))
+                dimensions = imageDimensions(in: inspectedData, source: source)
+            }
+        }
 
         do {
             for try await byte in bytes {
                 try Task.checkCancellation()
-                guard inspectedData.count + chunk.count < Self.maximumInspectionBytes else {
+                guard bytesReceived + chunk.count < expectedByteCount else {
                     bytes.task.cancel()
                     return verification(
                         statusCode: response.statusCode,
                         dimensions: nil,
-                        bytesInspected: inspectedData.count + chunk.count,
-                        finalURL: finalURL
+                        bytesInspected: bytesReceived + chunk.count,
+                        finalURL: finalURL,
+                        expectedSHA256: expectedSHA256,
+                        actualSHA256: nil,
+                        expectedByteCount: expectedByteCount
                     )
                 }
                 chunk.append(byte)
-                if chunk.count == 4 * 1024 {
-                    inspectedData.append(contentsOf: chunk)
+                if chunk.count == Self.networkChunkSize {
+                    consume(chunk)
                     chunk.removeAll(keepingCapacity: true)
-                    dimensions = imageDimensions(in: inspectedData, source: source)
-                    if dimensions != nil { break }
+                    if dimensions == nil, inspectedData.count == Self.maximumInspectionBytes {
+                        bytes.task.cancel()
+                        return verification(
+                            statusCode: response.statusCode,
+                            dimensions: nil,
+                            bytesInspected: bytesReceived,
+                            finalURL: finalURL,
+                            expectedSHA256: expectedSHA256,
+                            actualSHA256: nil,
+                            expectedByteCount: expectedByteCount
+                        )
+                    }
                 }
             }
+            consume(chunk)
             if dimensions == nil {
-                inspectedData.append(contentsOf: chunk)
                 dimensions = imageDimensions(in: inspectedData, source: source, isFinal: true)
+            } else {
+                CGImageSourceUpdateData(source, inspectedData as CFData, true)
             }
+            let actualSHA256 = Data(hasher.finalize())
             bytes.task.cancel()
             return verification(
                 statusCode: response.statusCode,
                 dimensions: dimensions,
-                bytesInspected: inspectedData.count,
-                finalURL: finalURL
+                bytesInspected: bytesReceived,
+                finalURL: finalURL,
+                expectedSHA256: expectedSHA256,
+                actualSHA256: actualSHA256,
+                expectedByteCount: expectedByteCount
             )
         } catch {
             bytes.task.cancel()
@@ -514,17 +570,25 @@ struct URLSessionCloudPublicURLVerifier: CloudPublicURLVerifying {
         statusCode: Int,
         dimensions: (width: Int, height: Int)?,
         bytesInspected: Int,
-        finalURL: URL
+        finalURL: URL,
+        expectedSHA256: Data,
+        actualSHA256: Data?,
+        expectedByteCount: Int
     ) -> CloudHTTPVerification {
-        CloudHTTPVerification(
+        let verifiedImage = bytesInspected == expectedByteCount
+            && dimensions != nil
+            && actualSHA256 == expectedSHA256
+        return CloudHTTPVerification(
             statusCode: statusCode,
-            verifiedImage: dimensions != nil,
+            verifiedImage: verifiedImage,
             imageWidth: dimensions?.width,
             imageHeight: dimensions?.height,
             bytesInspected: bytesInspected,
             finalURL: finalURL
         )
     }
+
+    private static let networkChunkSize = 64 * 1024
 }
 
 // This delegate has no mutable state; rejecting redirects keeps verification
@@ -545,11 +609,12 @@ actor CloudUploadService {
     private enum Timeout {
         static let ssh: TimeInterval = 30
         static let rsync: TimeInterval = 900
-        static let verification: TimeInterval = 15
+        static let verification: TimeInterval = 120
     }
 
     private let runner: any CloudCommandRunning
     private let verifier: any CloudPublicURLVerifying
+    private var activePublications: Set<String> = []
 
     init(
         runner: any CloudCommandRunning = ProcessCloudCommandRunner(),
@@ -570,11 +635,12 @@ actor CloudUploadService {
         }
 
         let stripFileName = manifest.stripFileName ?? "strip.png"
-        _ = try requiredFile(
+        let stripURL = try requiredFile(
             stripFileName,
             in: directory,
             message: "Local strip.png is missing; cannot re-upload."
         )
+        let expectedStrip = try fileIntegrity(at: stripURL)
         if let gifFileName = manifest.gifFileName {
             _ = try requiredFile(
                 gifFileName,
@@ -609,6 +675,10 @@ actor CloudUploadService {
               let verificationURL = layout.verificationURL else {
             throw JobExecutionError.permanent("Cloud publication route could not be constructed.")
         }
+        guard activePublications.insert(layout.publicAlias).inserted else {
+            throw JobExecutionError.retryable("Cloud publication is already running for this public route.")
+        }
+        defer { activePublications.remove(layout.publicAlias) }
         let page = cloudDownloadPageHTML(
             hasGIF: manifest.gifFileName != nil
         )
@@ -656,19 +726,59 @@ actor CloudUploadService {
         let gifCheck = manifest.gifFileName.map {
             "test -s \(Self.shellQuoted("\(layout.stagingDirectory)/\($0)"))"
         }
-        let publishCommand = (remoteChecks + (gifCheck.map { [$0] } ?? []) + [
+        let stagedStripPath = "\(layout.stagingDirectory)/\(stripFileName)"
+        let checksumResult = try await run(
+            label: "verify staged strip checksum",
+            executable: "/usr/bin/ssh",
+            arguments: Self.sshArguments(
+                host: configuration.sshHost,
+                command: "sha256sum -- \(Self.shellQuoted(stagedStripPath)) && wc -c < \(Self.shellQuoted(stagedStripPath))"
+            ),
+            timeout: Timeout.ssh
+        )
+        guard remoteFileMatches(
+            checksumResult.output,
+            expectedSHA256: expectedStrip.sha256,
+            expectedByteCount: expectedStrip.byteCount
+        ) else {
+            throw JobExecutionError.retryable("Cloud upload remote checksum did not match the local strip.")
+        }
+
+        let backupPreparation: [String]
+        if let backup = layout.rollbackAliasBackup {
+            backupPreparation = [
+                "if [ -L \(Self.shellQuoted(layout.publicAlias)) ]; then cp -P -- \(Self.shellQuoted(layout.publicAlias)) \(Self.shellQuoted(backup)); elif [ -e \(Self.shellQuoted(layout.publicAlias)) ]; then exit 1; else rm -f -- \(Self.shellQuoted(backup)); fi"
+            ]
+        } else {
+            backupPreparation = []
+        }
+        let publishCommand = (remoteChecks + (gifCheck.map { [$0] } ?? []) + backupPreparation + [
             "mv \(Self.shellQuoted(layout.stagingDirectory)) \(Self.shellQuoted(publishedDirectory))",
             "ln -sfn \(Self.shellQuoted(publishedDirectory)) \(Self.shellQuoted(layout.publicAlias))"
         ]).joined(separator: " && ")
-        try await run(
-            label: "ssh publish download link",
-            executable: "/usr/bin/ssh",
-            arguments: Self.sshArguments(host: configuration.sshHost, command: publishCommand),
-            timeout: Timeout.ssh
-        )
+        do {
+            try await run(
+                label: "ssh publish download link",
+                executable: "/usr/bin/ssh",
+                arguments: Self.sshArguments(host: configuration.sshHost, command: publishCommand),
+                timeout: Timeout.ssh
+            )
+        } catch {
+            await restorePreviousPublicAlias(
+                layout: layout,
+                publishedDirectory: publishedDirectory,
+                configuration: configuration
+            )
+            throw error
+        }
 
         do {
-            let verification = try await verifier.verify(url: verificationURL, timeout: Timeout.verification)
+            let verification = try await verifier.verify(
+                url: verificationURL,
+                expectedSHA256: expectedStrip.sha256,
+                expectedByteCount: expectedStrip.byteCount,
+                timeout: Timeout.verification
+            )
             guard verification.statusCode == 200,
                   verification.finalURL == verificationURL,
                   verification.verifiedImage,
@@ -676,26 +786,76 @@ actor CloudUploadService {
                   width > 0,
                   let height = verification.imageHeight,
                   height > 0,
-                  verification.bytesInspected <= URLSessionCloudPublicURLVerifier.maximumInspectionBytes else {
+                  verification.bytesInspected == expectedStrip.byteCount else {
                 throw JobExecutionError.retryable(
-                    "Upload completed but public image verification failed: HTTP \(verification.statusCode) from \(verificationURL.path)"
+                    "Upload completed but public image integrity verification failed: HTTP \(verification.statusCode) from \(verificationURL.path)"
                 )
             }
+            let currentStrip = try fileIntegrity(at: stripURL)
+            guard currentStrip == expectedStrip else {
+                throw JobExecutionError.retryable("The local strip changed during cloud publication verification.")
+            }
+            _ = try await run(
+                label: "verify public alias target",
+                executable: "/usr/bin/ssh",
+                arguments: Self.sshArguments(
+                    host: configuration.sshHost,
+                    command: "test -L \(Self.shellQuoted(layout.publicAlias)) && [ \"$(readlink \(Self.shellQuoted(layout.publicAlias)))\" = \(Self.shellQuoted(publishedDirectory)) ]"
+                ),
+                timeout: Timeout.ssh
+            )
         } catch let error as JobExecutionError {
+            await restorePreviousPublicAlias(
+                layout: layout,
+                publishedDirectory: publishedDirectory,
+                configuration: configuration
+            )
             throw error
         } catch is CancellationError {
+            await restorePreviousPublicAlias(
+                layout: layout,
+                publishedDirectory: publishedDirectory,
+                configuration: configuration
+            )
             throw CancellationError()
         } catch {
+            await restorePreviousPublicAlias(
+                layout: layout,
+                publishedDirectory: publishedDirectory,
+                configuration: configuration
+            )
             if Task.isCancelled { throw CancellationError() }
             throw JobExecutionError.retryable(
                 "Upload completed but public download verification failed: \(error.localizedDescription)"
             )
+        }
+
+        // Verification makes this publication authoritative. Backup cleanup is
+        // best effort: an SSH timeout may mean rm ran remotely, so rolling back
+        // after that ambiguous result could remove the only public copy.
+        if let backup = layout.rollbackAliasBackup {
+            do {
+                let result = try await runner.run(
+                    executable: "/usr/bin/ssh",
+                    arguments: Self.sshArguments(
+                        host: configuration.sshHost,
+                        command: "rm -f -- \(Self.shellQuoted(backup))"
+                    ),
+                    timeout: Timeout.ssh
+                )
+                if result.exitCode != 0 {
+                    NSLog("[Cloud] Verified publication backup cleanup failed (exit %d).", result.exitCode)
+                }
+            } catch {
+                NSLog("[Cloud] Verified publication backup cleanup was not confirmed: \(error.localizedDescription)")
+            }
         }
         try Task.checkCancellation()
 
         let cleanupCommand = cleanupPublishedVersionsCommand(
             publishedRoot: layout.publishedRoot,
             sessionID: layout.sessionID,
+            publicAlias: layout.publicAlias,
             keeping: publishedDirectory
         )
         do {
@@ -784,12 +944,91 @@ actor CloudUploadService {
         return url
     }
 
+    private func fileIntegrity(at url: URL) throws -> (sha256: Data, byteCount: Int) {
+        let fileManager = FileManager.default
+        guard let initial = try? fileManager.attributesOfItem(atPath: url.path),
+              let initialSize = initial[.size] as? NSNumber,
+              let byteCount = Int(exactly: initialSize.int64Value),
+              byteCount > 0,
+              let initialDate = initial[.modificationDate] as? Date else {
+            throw JobExecutionError.retryable("Cloud publication could not inspect the local strip file.")
+        }
+        do {
+            let handle = try FileHandle(forReadingFrom: url)
+            defer { try? handle.close() }
+            var hasher = SHA256()
+            var bytesRead = 0
+            while let chunk = try handle.read(upToCount: 1024 * 1024), !chunk.isEmpty {
+                try Task.checkCancellation()
+                bytesRead += chunk.count
+                guard bytesRead <= byteCount else {
+                    throw JobExecutionError.retryable("The local strip changed while it was being hashed.")
+                }
+                hasher.update(data: chunk)
+            }
+            let final = try fileManager.attributesOfItem(atPath: url.path)
+            guard bytesRead == byteCount,
+                  final[.size] as? NSNumber == initialSize,
+                  final[.modificationDate] as? Date == initialDate else {
+                throw JobExecutionError.retryable("The local strip changed while it was being hashed.")
+            }
+            return (Data(hasher.finalize()), byteCount)
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch let error as JobExecutionError {
+            throw error
+        } catch {
+            throw JobExecutionError.retryable("Could not hash the local strip: \(error.localizedDescription)")
+        }
+    }
+
+    private func remoteFileMatches(
+        _ output: String,
+        expectedSHA256: Data,
+        expectedByteCount: Int
+    ) -> Bool {
+        let lines = output.split(whereSeparator: \.isNewline)
+        guard lines.count >= 2,
+              let actualSize = Int(lines[1].trimmingCharacters(in: .whitespacesAndNewlines)) else { return false }
+        let hashFields = lines[0].split(whereSeparator: \.isWhitespace)
+        guard let actualHash = hashFields.first,
+              actualHash.count == 64 else { return false }
+        return actualHash.lowercased() == expectedSHA256.map { String(format: "%02x", $0) }.joined()
+            && actualSize == expectedByteCount
+    }
+
+    private func restorePreviousPublicAlias(
+        layout: CloudSessionLayout,
+        publishedDirectory: String,
+        configuration: CloudUploadConfiguration
+    ) async {
+        guard let backup = layout.rollbackAliasBackup else { return }
+        let alias = Self.shellQuoted(layout.publicAlias)
+        let currentPublication = Self.shellQuoted(publishedDirectory)
+        let backupLink = Self.shellQuoted(backup)
+        let command = "if [ -L \(alias) ] && [ \"$(readlink \(alias))\" = \(currentPublication) ]; then if [ -L \(backupLink) ]; then mv -f -- \(backupLink) \(alias) || exit 1; else rm -f -- \(alias) || exit 1; fi; elif [ ! -e \(alias) ] && [ ! -L \(alias) ] && [ -L \(backupLink) ]; then mv -f -- \(backupLink) \(alias) || exit 1; else rm -f -- \(backupLink); fi; if [ ! -L \(alias) ] || [ \"$(readlink \(alias))\" != \(currentPublication) ]; then rm -rf -- \(currentPublication); fi"
+        do {
+            // Alias rollback is bounded cleanup, so it still runs after task cancellation.
+            let result = try await runner.run(
+                executable: "/usr/bin/ssh",
+                arguments: Self.sshArguments(host: configuration.sshHost, command: command),
+                timeout: Timeout.ssh
+            )
+            if result.exitCode != 0 {
+                NSLog("[Cloud] Alias rollback command failed (exit %d): %@", result.exitCode, result.output)
+            }
+        } catch {
+            NSLog("[Cloud] Failed publication could not restore the previous public alias: \(error.localizedDescription)")
+        }
+    }
+
+    @discardableResult
     private func run(
         label: String,
         executable: String,
         arguments: [String],
         timeout: TimeInterval
-    ) async throws {
+    ) async throws -> CloudCommandResult {
         let result: CloudCommandResult
         do {
             try Task.checkCancellation()
@@ -808,6 +1047,7 @@ actor CloudUploadService {
                 "Cloud upload \(label) failed (exit \(result.exitCode))\(output.isEmpty ? "." : ": \(output)")"
             )
         }
+        return result
     }
 
     private static let sshOptions = [
@@ -844,6 +1084,7 @@ actor CloudUploadService {
     private func cleanupPublishedVersionsCommand(
         publishedRoot: String,
         sessionID: String,
+        publicAlias: String? = nil,
         keeping publishedDirectory: String? = nil
     ) -> String {
         var parts = [
@@ -853,8 +1094,14 @@ actor CloudUploadService {
         if let publishedDirectory {
             parts.append("! -path \(Self.shellQuoted(publishedDirectory))")
         }
+        let currentAliasTarget = publicAlias.map {
+            "current_alias_target=$(readlink \(Self.shellQuoted($0)) 2>/dev/null || true);"
+        } ?? ""
+        if publicAlias != nil {
+            parts.append("! -path \"$current_alias_target\"")
+        }
         parts.append("-exec rm -rf -- {} +")
-        return "if [ -d \(Self.shellQuoted(publishedRoot)) ]; then \(parts.joined(separator: " ")); fi"
+        return "if [ -d \(Self.shellQuoted(publishedRoot)) ]; then \(currentAliasTarget) \(parts.joined(separator: " ")); fi"
     }
 
     static func shellQuoted(_ value: String) -> String {
