@@ -77,6 +77,66 @@ struct DSLRCaptureAttemptTests {
         #expect(dispatchCount == 0)
     }
 
+    @Test("Sony cancellation releases controls only after physical shutter dispatch")
+    func sonyCancellationCleanupDecision() {
+        let beforePress = DSLRCaptureAttemptScope(attemptID: UUID(), cameraGeneration: 20)
+        let beforePressControl = DSLRCaptureAttemptControl(scope: beforePress)
+        #expect(beforePressControl.cancellationCleanupAction(for: beforePress, laneQuarantined: false) == .none)
+
+        let afterPress = DSLRCaptureAttemptScope(attemptID: UUID(), cameraGeneration: 21)
+        let afterPressControl = DSLRCaptureAttemptControl(scope: afterPress)
+        #expect(afterPressControl.markShutterMayHaveBeenIssued(afterPress))
+        #expect(afterPressControl.cancel(afterPress))
+        #expect(afterPressControl.cancellationCleanupAction(for: afterPress, laneQuarantined: false) == .releaseControls)
+        #expect(afterPressControl.cancellationCleanupAction(for: afterPress, laneQuarantined: true) == .recycleSession)
+
+        let released = DSLRCaptureAttemptScope(attemptID: UUID(), cameraGeneration: 22)
+        let releasedControl = DSLRCaptureAttemptControl(scope: released)
+        #expect(releasedControl.markShutterMayHaveBeenIssued(released))
+        #expect(releasedControl.markSonyReleaseSequenceCompleted(released))
+        #expect(releasedControl.cancel(released))
+        #expect(releasedControl.cancellationCleanupAction(for: released, laneQuarantined: false) == .none)
+    }
+
+    @Test("PTP recovery admits one camera session cycle at a time")
+    func oneRecoveryCycleAtATime() {
+        #expect(DSLRCameraSessionRecoveryPolicy.mayScheduleCycle(
+            requestedGeneration: 8,
+            currentGeneration: 8,
+            captureIsActive: false,
+            closingGeneration: nil,
+            openingGeneration: nil
+        ))
+        #expect(!DSLRCameraSessionRecoveryPolicy.mayScheduleCycle(
+            requestedGeneration: 8,
+            currentGeneration: 8,
+            captureIsActive: true,
+            closingGeneration: nil,
+            openingGeneration: nil
+        ))
+        #expect(!DSLRCameraSessionRecoveryPolicy.mayScheduleCycle(
+            requestedGeneration: 8,
+            currentGeneration: 8,
+            captureIsActive: false,
+            closingGeneration: 8,
+            openingGeneration: nil
+        ))
+        #expect(!DSLRCameraSessionRecoveryPolicy.mayScheduleCycle(
+            requestedGeneration: 8,
+            currentGeneration: 8,
+            captureIsActive: false,
+            closingGeneration: nil,
+            openingGeneration: 9
+        ))
+        #expect(!DSLRCameraSessionRecoveryPolicy.mayScheduleCycle(
+            requestedGeneration: 7,
+            currentGeneration: 8,
+            captureIsActive: false,
+            closingGeneration: nil,
+            openingGeneration: nil
+        ))
+    }
+
     @Test("a definitive busy refusal clears uncertainty before cancellation can suppress fallback")
     func busyRefusalThenCancellationSuppressesFallback() {
         let scope = DSLRCaptureAttemptScope(attemptID: UUID(), cameraGeneration: 12)

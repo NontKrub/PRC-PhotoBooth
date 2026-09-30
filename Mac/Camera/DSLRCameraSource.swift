@@ -245,8 +245,130 @@ final class DSLRCameraSource: NSObject, CameraSource {
             case .timedOut: message = "PTP command timed out after 10 seconds"
             case .disconnected: message = "Camera disconnected"
             }
-            return PTPReply(data: Data(), responseCode: 0, errorDescription: message)
+            if failure == .timedOut {
+                requirePTPSessionRecovery(camera: camera, generation: scope.cameraGeneration)
+            }
+            return PTPReply(
+                data: Data(),
+                responseCode: 0,
+                errorDescription: message
+            )
         }
+    }
+
+    private func requirePTPSessionRecovery(camera: ICCameraDevice, generation: UInt64) {
+        guard connectedCamera === camera, cameraGeneration == generation,
+              pendingPTPRecoveryGeneration != generation else { return }
+        pendingPTPRecoveryGeneration = generation
+        isRunning = false
+        isConnecting = true
+        ptpHealthy = false
+        onConnectionStateChanged?()
+        if activeCaptureScope?.cameraGeneration != generation {
+            requestSessionCycle(camera: camera, generation: generation)
+        }
+    }
+
+    private func requestSessionCycle(camera: ICCameraDevice, generation: UInt64) {
+        guard connectedCamera === camera,
+              DSLRCameraSessionRecoveryPolicy.mayScheduleCycle(
+                requestedGeneration: generation,
+                currentGeneration: cameraGeneration,
+                captureIsActive: activeCaptureScope?.cameraGeneration == generation,
+                closingGeneration: sessionRecoveryClosingGeneration,
+                openingGeneration: sessionRecoveryOpeningGeneration
+              ) else { return }
+
+        pendingPTPRecoveryGeneration = generation
+        sessionRecoveryClosingGeneration = generation
+        reopenAfterClose = true
+        isRunning = false
+        isConnecting = true
+        ptpHealthy = false
+        stopSonyLiveView()
+        pollTask?.cancel()
+        pollTask = nil
+        pendingPTPSessionCloses.append(PTPSessionClose(
+            cameraIdentity: ObjectIdentifier(camera),
+            generation: generation
+        ))
+        onConnectionStateChanged?()
+        camera.requestCloseSession()
+    }
+
+    private func beginSonyControlCleanup(camera: ICCameraDevice, generation: UInt64) {
+        guard connectedCamera === camera,
+              cameraGeneration == generation,
+              !ptpCommandLane.isQuarantined else {
+            requestSessionCycle(camera: camera, generation: generation)
+            return
+        }
+        isRunning = false
+        isConnecting = true
+        stopSonyLiveView()
+        pollTask?.cancel()
+        pollTask = nil
+        onConnectionStateChanged?()
+
+        Task { @MainActor [weak self] in
+            guard let self,
+                  self.connectedCamera === camera,
+                  self.cameraGeneration == generation else { return }
+            let shutterRelease = await self.sendSonyNeutralControl(camera, property: 0xD2C2)
+            guard self.connectedCamera === camera, self.cameraGeneration == generation else { return }
+            guard shutterRelease.responseCode == 0x2001,
+                  shutterRelease.errorDescription == nil else {
+                self.requestSessionCycle(camera: camera, generation: generation)
+                return
+            }
+
+            let autofocusRelease = await self.sendSonyNeutralControl(camera, property: 0xD2C1)
+            guard self.connectedCamera === camera, self.cameraGeneration == generation else { return }
+            guard autofocusRelease.responseCode == 0x2001,
+                  autofocusRelease.errorDescription == nil else {
+                self.requestSessionCycle(camera: camera, generation: generation)
+                return
+            }
+
+            self.isRunning = true
+            self.isConnecting = false
+            self.startSonyLiveView(camera)
+            self.startPollLoop(camera)
+            self.onConnectionStateChanged?()
+        }
+    }
+
+    private func sendSonyNeutralControl(_ camera: ICCameraDevice, property: UInt16) async -> PTPReply {
+        let command = Self.makePTPCommand(
+            opcode: 0x9207,
+            transactionID: nextPTPTransactionID(),
+            parameters: [UInt32(property)]
+        )
+        var outData = Data(count: 2)
+        outData.withUnsafeMutableBytes {
+            $0.storeBytes(of: UInt16(1).littleEndian, toByteOffset: 0, as: UInt16.self)
+        }
+        return await executePTPCommand(
+            camera,
+            command: command,
+            outData: outData,
+            priority: .capture
+        )
+    }
+
+    private func failSessionRecoveryInitialization(generation: UInt64) {
+        guard sessionRecoveryOpeningGeneration == generation else { return }
+        pendingPTPRecoveryGeneration = nil
+        sessionRecoveryClosingGeneration = nil
+        sessionRecoveryOpeningGeneration = nil
+        reopenAfterClose = false
+        isRunning = false
+        isConnecting = false
+        ptpHealthy = false
+        onConnectionStateChanged?()
+        onError?(DSLRError.captureFailed(
+            "Camera connection recovery failed. Reconnect the camera before capturing again."
+        ))
     }
 
     private func nextPTPTransactionID() -> UInt32 {
@@ -289,6 +411,9 @@ final class DSLRCameraSource: NSObject, CameraSource {
     private let ptpCommandLane = DSLRCameraPTPCommandLane()
     private var pollTask: Task<Void, Never>?    // continuous GetAllDevicePropDesc heartbeat
     private var reopenAfterClose = false
+    private var pendingPTPRecoveryGeneration: UInt64?
+    private var sessionRecoveryClosingGeneration: UInt64?
+    private var sessionRecoveryOpeningGeneration: UInt64?
     private var ptpHealthy = false
     private var fallbackTakePictureIssued = false
     private var busyRejection = false   // Sony shutter control returned DeviceBusy (0x201D)
@@ -374,6 +499,11 @@ final class DSLRCameraSource: NSObject, CameraSource {
 
     func stop() {
         let closingGeneration = cameraGeneration
+        let closeAlreadyRequested = sessionRecoveryClosingGeneration == closingGeneration && reopenAfterClose
+        pendingPTPRecoveryGeneration = nil
+        sessionRecoveryClosingGeneration = nil
+        sessionRecoveryOpeningGeneration = nil
+        reopenAfterClose = false
         if let scope = activeCaptureScope {
             finishCaptureAttempt(
                 scope: scope,
@@ -387,7 +517,7 @@ final class DSLRCameraSource: NSObject, CameraSource {
         stopSonyLiveView()
         pollTask?.cancel()
         pollTask = nil
-        if let camera = connectedCamera {
+        if let camera = connectedCamera, !closeAlreadyRequested {
             pendingPTPSessionCloses.append(PTPSessionClose(
                 cameraIdentity: ObjectIdentifier(camera),
                 generation: closingGeneration
@@ -717,40 +847,42 @@ final class DSLRCameraSource: NSObject, CameraSource {
     // Vendor prop codes reported by the camera — populated after SDIOConnect phases 1+2
     private var sonyVendorPropCodes: [UInt16] = []
 
-    private func cycleSession() {
-        guard let camera = connectedCamera else { return }
-        reopenAfterClose = true
-        pendingPTPSessionCloses.append(PTPSessionClose(
-            cameraIdentity: ObjectIdentifier(camera),
-            generation: cameraGeneration
-        ))
-        camera.requestCloseSession()  // sync Obj-C void — no async bridging
-    }
-
-    private func ptpSonyInit(_ cam: ICCameraDevice, generation: UInt64) async {
-        guard connectedCamera === cam, cameraGeneration == generation, !Task.isCancelled else { return }
+    private func ptpSonyInit(_ cam: ICCameraDevice, generation: UInt64) async -> Bool {
+        func canContinueInitialization() -> Bool {
+            connectedCamera === cam
+                && cameraGeneration == generation
+                && pendingPTPRecoveryGeneration != generation
+                && !Task.isCancelled
+        }
+        guard canContinueInitialization() else { return false }
         await ptpSonySDIOConnect(cam, phase: 1)
+        guard canContinueInitialization() else { return false }
         try? await Task.sleep(for: .milliseconds(200))
-        guard connectedCamera === cam, cameraGeneration == generation, !Task.isCancelled else { return }
+        guard canContinueInitialization() else { return false }
         await ptpSonySDIOConnect(cam, phase: 2)
+        guard canContinueInitialization() else { return false }
         try? await Task.sleep(for: .milliseconds(300))
-        guard connectedCamera === cam, cameraGeneration == generation, !Task.isCancelled else { return }
+        guard canContinueInitialization() else { return false }
         await ptpSonyGetVendorPropCodes(cam)
+        guard canContinueInitialization() else { return false }
         try? await Task.sleep(for: .milliseconds(300))
-        guard connectedCamera === cam, cameraGeneration == generation, !Task.isCancelled else { return }
+        guard canContinueInitialization() else { return false }
         await ptpSonySDIOConnect(cam, phase: 3)
+        guard canContinueInitialization() else { return false }
         try? await Task.sleep(for: .milliseconds(300))
-        guard connectedCamera === cam, cameraGeneration == generation, !Task.isCancelled else { return }
+        guard canContinueInitialization() else { return false }
         // Give the controlling application priority, matching libgphoto2's Sony init.
         _ = await ptpSonySetControlAInt8(cam, prop: 0xD25A, value: 1, label: "SetPriorityMode")
+        guard canContinueInitialization() else { return false }
         try? await Task.sleep(for: .milliseconds(300))
-        guard connectedCamera === cam, cameraGeneration == generation, !Task.isCancelled else { return }
+        guard canContinueInitialization() else { return false }
         // PcSaveImageFormat (D269): 1=RAW & JPEG, 2=JPEG Only, 3=RAW Only.
         // A booth needs the full-resolution rendered JPEG, not a paired 25 MB
         // RAW whose embedded preview is only 1616x1080.
         _ = await ptpSonySetControlAInt8(cam, prop: 0xD269, value: 2, label: "SetPcSaveJPEGOnly")
+        guard canContinueInitialization() else { return false }
         try? await Task.sleep(for: .milliseconds(300))
-        guard connectedCamera === cam, cameraGeneration == generation, !Task.isCancelled else { return }
+        guard canContinueInitialization() else { return false }
         // Query D215 once at connection time. If previous clients left PC-save
         // images queued, the response handler drains those RAM-only objects.
         await ptpSonyGetAllDevicePropDesc(cam)
@@ -758,6 +890,7 @@ final class DSLRCameraSource: NSObject, CameraSource {
         // Do not write 0xD2CA here. It is Sony's FormatMedia action, not the
         // still-image destination. The destination property is 0xD222 and should
         // remain under the camera's PC Remote settings.
+        return canContinueInitialization()
     }
 
     // Sony Alpha live view is exposed as a continually refreshed JPEG object at
@@ -1273,12 +1406,41 @@ final class DSLRCameraSource: NSObject, CameraSource {
         // Sony's reference capture flow allows up to one second here.
         try? await Task.sleep(for: .seconds(1))
         guard isCurrentCapture(scope, camera: cam), !ptpCommandLane.isQuarantined else { return }
-        _ = await ptpSonySetControlB(cam, prop: 0xD2C2, value: 1, label: "Shutter-release", scope: scope)
-        guard isCurrentCapture(scope, camera: cam), !ptpCommandLane.isQuarantined else { return }
+        let shutterReleaseCode = await ptpSonySetControlB(
+            cam,
+            prop: 0xD2C2,
+            value: 1,
+            label: "Shutter-release",
+            scope: scope
+        )
+        guard isCurrentCapture(scope, camera: cam) else { return }
+        guard !ptpCommandLane.isQuarantined, shutterReleaseCode == 0x2001 else {
+            requirePTPSessionRecovery(camera: cam, generation: scope.cameraGeneration)
+            failCapture(
+                DSLRError.captureFailed("The Sony shutter release was not confirmed. Recovering the camera connection."),
+                scope: scope
+            )
+            return
+        }
         try? await Task.sleep(for: .milliseconds(160))
         guard isCurrentCapture(scope, camera: cam), !ptpCommandLane.isQuarantined else { return }
-        _ = await ptpSonySetControlB(cam, prop: 0xD2C1, value: 1, label: "AF-release", scope: scope)
+        let autofocusReleaseCode = await ptpSonySetControlB(
+            cam,
+            prop: 0xD2C1,
+            value: 1,
+            label: "AF-release",
+            scope: scope
+        )
         guard isCurrentCapture(scope, camera: cam) else { return }
+        guard !ptpCommandLane.isQuarantined, autofocusReleaseCode == 0x2001 else {
+            requirePTPSessionRecovery(camera: cam, generation: scope.cameraGeneration)
+            failCapture(
+                DSLRError.captureFailed("The Sony autofocus release was not confirmed. Recovering the camera connection."),
+                scope: scope
+            )
+            return
+        }
+        _ = activeCaptureControl?.markSonyReleaseSequenceCompleted(scope)
 
         guard shutterAccepted else {
             guard lastCode == 0x201D else {
@@ -1839,6 +2001,10 @@ final class DSLRCameraSource: NSObject, CameraSource {
         case .failure(let error):
             completion?.resume(throwing: error)
         }
+        if pendingPTPRecoveryGeneration == scope.cameraGeneration,
+           let camera = connectedCamera {
+            requestSessionCycle(camera: camera, generation: scope.cameraGeneration)
+        }
     }
 
     private func finishCaptureAttempt(attemptID: UUID, result: AttemptTerminalResult) {
@@ -1869,10 +2035,29 @@ final class DSLRCameraSource: NSObject, CameraSource {
                 cameraGeneration: scope.cameraGeneration
             )
         )
+        let laneQuarantined = ptpCommandLane.isQuarantined
+        let cleanupAction = control.cancellationCleanupAction(
+            for: scope,
+            laneQuarantined: laneQuarantined
+        )
         let message = control.shutterMayHaveBeenIssued(for: scope)
             ? "Capture was cancelled after a shutter command. The photo may have been taken; retry receiving before taking another photo."
             : "Capture was cancelled before the shutter was confirmed."
         finishCaptureAttempt(scope: scope, result: .failure(DSLRError.captureFailed(message)))
+
+        guard pendingPTPRecoveryGeneration != scope.cameraGeneration,
+              let camera = connectedCamera,
+              cameraGeneration == scope.cameraGeneration else { return }
+        switch cleanupAction {
+        case .releaseControls:
+            beginSonyControlCleanup(camera: camera, generation: scope.cameraGeneration)
+        case .recycleSession:
+            requestSessionCycle(camera: camera, generation: scope.cameraGeneration)
+        case .none:
+            if laneQuarantined {
+                requestSessionCycle(camera: camera, generation: scope.cameraGeneration)
+            }
+        }
     }
 
     // MARK: - PTP
@@ -2018,6 +2203,10 @@ extension DSLRCameraSource: @preconcurrency ICDeviceBrowserDelegate {
                 ptpCommandLane.cancel(cameraGeneration: generation, reason: .disconnected)
                 ptpCommandLane.retire(cameraGeneration: generation)
             }
+            pendingPTPRecoveryGeneration = nil
+            sessionRecoveryClosingGeneration = nil
+            sessionRecoveryOpeningGeneration = nil
+            reopenAfterClose = false
             isRunning = false
             isConnecting = false
             ptpHealthy = false
@@ -2170,6 +2359,13 @@ extension DSLRCameraSource: @preconcurrency ICCameraDeviceDelegate {
                     result: .failure(DSLRError.cameraDisconnected)
                 )
             }
+            if sessionRecoveryOpeningGeneration == failedGeneration
+                    || sessionRecoveryClosingGeneration == failedGeneration {
+                pendingPTPRecoveryGeneration = nil
+                sessionRecoveryClosingGeneration = nil
+                sessionRecoveryOpeningGeneration = nil
+                reopenAfterClose = false
+            }
             isConnecting = false
             connectedCamera = nil
             cameraGeneration &+= 1
@@ -2193,10 +2389,25 @@ extension DSLRCameraSource: @preconcurrency ICCameraDeviceDelegate {
             guard let self else { return }
             self.ptpHealthy = false
             self.lastStatusPollAt = .distantPast
-            await self.ptpSonyInit(cam, generation: openedGeneration)   // Sony SDIO vendor init — must precede capture commands
+            let initialized = await self.ptpSonyInit(cam, generation: openedGeneration)
             guard self.connectedCamera === cam,
                   self.cameraGeneration == openedGeneration,
                   !Task.isCancelled else { return }
+            guard initialized else {
+                if self.sessionRecoveryOpeningGeneration == openedGeneration {
+                    self.failSessionRecoveryInitialization(generation: openedGeneration)
+                } else if self.sessionRecoveryClosingGeneration != openedGeneration {
+                    self.isRunning = false
+                    self.isConnecting = false
+                    self.onConnectionStateChanged?()
+                }
+                return
+            }
+            if self.sessionRecoveryOpeningGeneration == openedGeneration {
+                self.sessionRecoveryOpeningGeneration = nil
+                self.sessionRecoveryClosingGeneration = nil
+                self.pendingPTPRecoveryGeneration = nil
+            }
             self.isRunning = true
             self.isConnecting = false
             self.startSonyLiveView(cam)
@@ -2235,10 +2446,20 @@ extension DSLRCameraSource: @preconcurrency ICCameraDeviceDelegate {
         NSLog("[DSLR] didCloseSession error=%@ reopen=%d", error?.localizedDescription ?? "none", reopenAfterClose ? 1 : 0)
         if reopenAfterClose, let cam = connectedCamera {
             reopenAfterClose = false
+            if sessionRecoveryClosingGeneration == closingGeneration {
+                sessionRecoveryClosingGeneration = nil
+                pendingPTPRecoveryGeneration = nil
+            }
             cameraGeneration &+= 1
+            if sessionRecoveryClosingGeneration == nil {
+                sessionRecoveryOpeningGeneration = cameraGeneration
+            }
             NSLog("[DSLR] Reopening IC session to reset D2CA state")
             cam.requestOpenSession()
         } else {
+            pendingPTPRecoveryGeneration = nil
+            sessionRecoveryClosingGeneration = nil
+            sessionRecoveryOpeningGeneration = nil
             connectedCamera = nil
             cameraGeneration &+= 1
             isConnecting = false

@@ -10,6 +10,38 @@ struct DSLRCameraPTPScope: Hashable, Sendable {
     let cameraGeneration: UInt64
 }
 
+enum DSLRSonyCancellationCleanupAction: Equatable, Sendable {
+    case none
+    case releaseControls
+    case recycleSession
+}
+
+enum DSLRSonyCancellationCleanupPolicy {
+    static func action(
+        shutterMayHaveBeenIssued: Bool,
+        releaseSequenceCompleted: Bool,
+        laneQuarantined: Bool
+    ) -> DSLRSonyCancellationCleanupAction {
+        guard shutterMayHaveBeenIssued, !releaseSequenceCompleted else { return .none }
+        return laneQuarantined ? .recycleSession : .releaseControls
+    }
+}
+
+enum DSLRCameraSessionRecoveryPolicy {
+    static func mayScheduleCycle(
+        requestedGeneration: UInt64,
+        currentGeneration: UInt64,
+        captureIsActive: Bool,
+        closingGeneration: UInt64?,
+        openingGeneration: UInt64?
+    ) -> Bool {
+        requestedGeneration == currentGeneration
+            && !captureIsActive
+            && closingGeneration == nil
+            && openingGeneration == nil
+    }
+}
+
 final class DSLRCaptureAttemptControl: @unchecked Sendable {
     let scope: DSLRCaptureAttemptScope
 
@@ -17,6 +49,7 @@ final class DSLRCaptureAttemptControl: @unchecked Sendable {
     private var cancelled = false
     private var resolved = false
     private var shutterMayHaveBeenIssued = false
+    private var sonyReleaseSequenceCompleted = false
 
     init(scope: DSLRCaptureAttemptScope) {
         self.scope = scope
@@ -41,7 +74,30 @@ final class DSLRCaptureAttemptControl: @unchecked Sendable {
         defer { lock.unlock() }
         guard self.scope == scope, !cancelled, !resolved else { return false }
         shutterMayHaveBeenIssued = true
+        sonyReleaseSequenceCompleted = false
         return true
+    }
+
+    func markSonyReleaseSequenceCompleted(_ scope: DSLRCaptureAttemptScope) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        guard self.scope == scope, !cancelled, !resolved, shutterMayHaveBeenIssued else { return false }
+        sonyReleaseSequenceCompleted = true
+        return true
+    }
+
+    func cancellationCleanupAction(
+        for scope: DSLRCaptureAttemptScope,
+        laneQuarantined: Bool
+    ) -> DSLRSonyCancellationCleanupAction {
+        lock.lock()
+        defer { lock.unlock() }
+        guard self.scope == scope else { return .none }
+        return DSLRSonyCancellationCleanupPolicy.action(
+            shutterMayHaveBeenIssued: shutterMayHaveBeenIssued,
+            releaseSequenceCompleted: sonyReleaseSequenceCompleted,
+            laneQuarantined: laneQuarantined
+        )
     }
 
     // Linearize cancellation against enqueueing the physical shutter command.

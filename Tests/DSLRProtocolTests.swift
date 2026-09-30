@@ -323,7 +323,7 @@ struct DSLRProtocolTests {
         #expect(nextReply.data == Data([1]))
     }
 
-    @Test("a callback from the disconnected camera generation cannot resolve a reconnected command")
+    @Test("a late timed-out callback cannot resolve a command after camera-generation recovery")
     @MainActor
     func oldGenerationCallbackCannotResolveReconnect() async throws {
         let lane = DSLRCameraPTPCommandLane()
@@ -349,10 +349,10 @@ struct DSLRProtocolTests {
         var iterator = sent.makeAsyncIterator()
         let oldCommand = start(oldScope)
         let oldTicket = try #require(await iterator.next())
-        lane.cancel(cameraGeneration: oldScope.cameraGeneration, reason: .disconnected)
+        lane.deadlineReached(oldTicket)
         let oldResult = await oldCommand.value
-        guard case .failure(.disconnected) = oldResult else {
-            Issue.record("Disconnect must resolve the old caller promptly.")
+        guard case .failure(.timedOut) = oldResult else {
+            Issue.record("The unanswered old generation must time out before session recovery.")
             return
         }
         #expect(lane.isQuarantined)
