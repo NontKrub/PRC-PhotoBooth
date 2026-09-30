@@ -70,6 +70,27 @@ struct SessionManifestStoreTests {
         })
     }
 
+    @Test("lookup treats a dangling manifest symlink as unreadable rather than missing")
+    func danglingManifestSymlinkIsUnreadable() async throws {
+        let root = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let sessions = root.appendingPathComponent("Sessions", isDirectory: true)
+        try FileManager.default.createDirectory(at: sessions, withIntermediateDirectories: true)
+        let link = sessions.appendingPathComponent("legacy-session.json")
+        try FileManager.default.createSymbolicLink(
+            atPath: link.path,
+            withDestinationPath: root.appendingPathComponent("missing.json").path
+        )
+
+        guard case .unreadable(let fileURL, _) = await SessionManifestStore(baseDirectory: root)
+            .lookup(sessionID: "legacy-session") else {
+            Issue.record("A dangling manifest symlink was treated as missing.")
+            return
+        }
+        #expect(fileURL == link)
+        #expect(FileManager.default.fileExists(atPath: link.path) == false)
+    }
+
     @Test("loads valid manifests, filters status, and deletes one file")
     func loadsFiltersAndDeletes() async throws {
         let root = try temporaryDirectory()

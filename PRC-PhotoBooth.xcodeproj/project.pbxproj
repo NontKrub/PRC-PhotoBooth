@@ -23,6 +23,7 @@
 		0FB0314189F51050F22BCAD4 /* AVFoundation.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = C2CA83F7AD79B9E79F7505F5 /* AVFoundation.framework */; };
 		118FC700F84675C284D4A640 /* ReviewImageEncoder.swift in Sources */ = {isa = PBXBuildFile; fileRef = 71B8D8C5B2035B10B0C4C764 /* ReviewImageEncoder.swift */; };
 		12BABEFD263A328AC04344E7 /* BoothImageDecoder.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9045D061DC55AC269078B542 /* BoothImageDecoder.swift */; };
+		13DF901C1F19C1BE06128D2B /* SessionStartupReceiptIntegrationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9F67B3596DC013A1480C3395 /* SessionStartupReceiptIntegrationTests.swift */; };
 		14E5F69CA34432D8DDB6337C /* EventGallerySettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AEB3524ED59CED1F96D4B9FA /* EventGallerySettingsView.swift */; };
 		15CB08C5C7A7C044829B5A26 /* StillCaptureLifecycle.swift in Sources */ = {isa = PBXBuildFile; fileRef = DB8D4C74AB35C28AAC3B38E0 /* StillCaptureLifecycle.swift */; };
 		160AE9511911551DC764B0FB /* SessionRecoveryService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 84D92FE313AF4B522174C85B /* SessionRecoveryService.swift */; };
@@ -390,6 +391,7 @@
 		9EB63FA4676F2D969C1E6414 /* QRCodeScanTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QRCodeScanTests.swift; sourceTree = "<group>"; };
 		9EBB25A83BF1BA49D031BF82 /* NetworkBoothTransport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NetworkBoothTransport.swift; sourceTree = "<group>"; };
 		9EC5B75CB04026ADBE94DD2E /* DemoKioskDriver.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DemoKioskDriver.swift; sourceTree = "<group>"; };
+		9F67B3596DC013A1480C3395 /* SessionStartupReceiptIntegrationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionStartupReceiptIntegrationTests.swift; sourceTree = "<group>"; };
 		A14B450ECDDDD6F417C43FA1 /* GIFEncoderTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GIFEncoderTests.swift; sourceTree = "<group>"; };
 		A5B62D650073182D6B778A65 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
 		A61D4E79BC09D0F47BDFD110 /* PrinterService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PrinterService.swift; sourceTree = "<group>"; };
@@ -905,6 +907,7 @@
 				70E2D58E1F5981D3BE3AE72D /* SessionManifestStoreTests.swift */,
 				0CCEE0EBC1DDE9E8D89D4D20 /* SessionQRCodePayloadResolverTests.swift */,
 				5383E866A38FD3F694ABCF5E /* SessionRecoveryTests.swift */,
+				9F67B3596DC013A1480C3395 /* SessionStartupReceiptIntegrationTests.swift */,
 				3A624C16E0BE73D12C1BEE77 /* SessionWorkspaceTests.swift */,
 				BC2A5DF8A26C5775900DD4E3 /* SoakSessionCleanupTests.swift */,
 				E04600D6FBEFBD02F5283804 /* SoakTests.swift */,
@@ -1312,6 +1315,7 @@
 				184CF8230CB2FC21F436CB29 /* SessionManifestStoreTests.swift in Sources */,
 				FEC9349B98E65A0693973747 /* SessionQRCodePayloadResolverTests.swift in Sources */,
 				512AF9DDF20E7007AC490482 /* SessionRecoveryTests.swift in Sources */,
+				13DF901C1F19C1BE06128D2B /* SessionStartupReceiptIntegrationTests.swift in Sources */,
 				0290520093718EFB9045ED46 /* SessionWorkspaceTests.swift in Sources */,
 				BA2F6A95EB343177EF679DC9 /* SoakSessionCleanupTests.swift in Sources */,
 				6AC130A33125BF6C5A7879E3 /* SoakTests.swift in Sources */,

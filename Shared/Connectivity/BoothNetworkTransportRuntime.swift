@@ -1676,6 +1676,7 @@ final class BoothNetworkTransportRuntime: @unchecked Sendable {
               hello.capabilities.contains("pairing-v2"),
               hello.capabilities.contains("secure-channel-v1"),
               hello.capabilities.contains("asset-channel-v2"),
+              hello.capabilities.contains("startup-receipts-v1"),
               hello.capabilities.contains("preview-identity") else {
             rejectTrustedCandidateOnQueue(
                 candidate.connection,

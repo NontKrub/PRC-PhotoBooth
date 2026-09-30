@@ -8,6 +8,33 @@ import Testing
 
 private let iPadTestAuthorityEpoch = UUID(uuidString: "00000000-0000-0000-0000-000000000020")!
 
+private actor AssetDecodeTestBarrier {
+    private var isEntered = false
+    private var decodeContinuation: CheckedContinuation<Void, Never>?
+    private var entryContinuation: CheckedContinuation<Void, Never>?
+
+    func holdDecode() async {
+        await withCheckedContinuation { continuation in
+            isEntered = true
+            entryContinuation?.resume()
+            entryContinuation = nil
+            decodeContinuation = continuation
+        }
+    }
+
+    func waitUntilEntered() async {
+        if isEntered { return }
+        await withCheckedContinuation { continuation in
+            entryContinuation = continuation
+        }
+    }
+
+    func releaseDecode() {
+        decodeContinuation?.resume()
+        decodeContinuation = nil
+    }
+}
+
 @Suite("iPad smoke tests")
 struct iPadSmokeTests {
     private func experienceCatalog(revision: String = "revision-a") -> CustomerExperienceCatalog {
@@ -243,6 +270,8 @@ struct iPadSmokeTests {
     func sameSessionSetupReplayIsIdempotent() {
         let viewModel = iPadViewModel()
         defer { viewModel.multipeer.disconnect() }
+        var receipts: [Message] = []
+        viewModel.startupReceiptHandlerForTesting = { receipts.append($0) }
         let sessionID = "setup-replay-session"
         let config = EventConfig(eventID: "event-1", eventName: "Test", photoCount: 2)
         let presentation = SessionPresentation(
@@ -258,17 +287,196 @@ struct iPadSmokeTests {
         let context4 = SessionMessageContext(sessionID: sessionID, sequence: 4, authorityEpoch: iPadTestAuthorityEpoch)
 
         viewModel.multipeer.onControlMessage?(.sessionStart(context: context1))
-        viewModel.multipeer.onControlMessage?(.sessionPrepared(config: config, presentation: presentation, context: context2))
+        viewModel.multipeer.onControlMessage?(.sessionPrepared(
+            config: config,
+            presentation: presentation,
+            context: context2,
+            deliveryID: UUID(uuidString: "00000000-0000-0000-0000-000000000021")!
+        ))
         viewModel.selectedLanguage = .thai
         viewModel.sessionRequestError = "keep current request state"
         viewModel.multipeer.onControlMessage?(.sessionStart(context: context3))
-        viewModel.multipeer.onControlMessage?(.sessionPrepared(config: config, presentation: presentation, context: context4))
+        viewModel.multipeer.onControlMessage?(.sessionPrepared(
+            config: config,
+            presentation: presentation,
+            context: context4,
+            deliveryID: UUID(uuidString: "00000000-0000-0000-0000-000000000022")!
+        ))
 
         #expect(viewModel.stateMachine.phase == .readyToStart)
         #expect(viewModel.stateMachine.currentSessionID == sessionID)
         #expect(viewModel.sessionPresentation == presentation)
         #expect(viewModel.selectedLanguage == .thai)
         #expect(viewModel.sessionRequestError == "keep current request state")
+        #expect(receipts == [
+            .sessionSetupApplied(
+                context: context2,
+                deliveryID: UUID(uuidString: "00000000-0000-0000-0000-000000000021")!
+            ),
+            .sessionSetupApplied(
+                context: context4,
+                deliveryID: UUID(uuidString: "00000000-0000-0000-0000-000000000022")!
+            )
+        ])
+    }
+
+    @Test("countdown installation is acknowledged and duplicate delivery is idempotent")
+    @MainActor
+    func countdownInstallationReceiptIsIdempotent() {
+        let viewModel = iPadViewModel()
+        defer { viewModel.multipeer.disconnect() }
+        var receipts: [Message] = []
+        viewModel.startupReceiptHandlerForTesting = { receipts.append($0) }
+        let sessionID = "countdown-receipt-session"
+        let config = EventConfig(eventID: "event-1", eventName: "Test", photoCount: 2)
+        let presentation = SessionPresentation(
+            sessionID: sessionID,
+            language: .english,
+            templateDisplayName: "Template A",
+            filterID: .original,
+            prompts: []
+        )
+        let context1 = SessionMessageContext(sessionID: sessionID, sequence: 1, authorityEpoch: iPadTestAuthorityEpoch)
+        let context2 = SessionMessageContext(sessionID: sessionID, sequence: 2, authorityEpoch: iPadTestAuthorityEpoch)
+        let context3 = SessionMessageContext(sessionID: sessionID, sequence: 3, authorityEpoch: iPadTestAuthorityEpoch)
+        let setupID = UUID(uuidString: "00000000-0000-0000-0000-000000000023")!
+        let countdownID = UUID(uuidString: "00000000-0000-0000-0000-000000000024")!
+        let descriptor = CountdownDescriptor(photoIndex: 0, captureAt: Date())
+
+        viewModel.multipeer.onControlMessage?(.sessionStart(context: context1))
+        viewModel.multipeer.onControlMessage?(.sessionPrepared(
+            config: config,
+            presentation: presentation,
+            context: context2,
+            deliveryID: setupID
+        ))
+        let countdown = Message.beginCountdown(context: context3, deliveryID: countdownID, descriptor: descriptor)
+        viewModel.multipeer.onControlMessage?(countdown)
+        viewModel.multipeer.onControlMessage?(countdown)
+
+        #expect(viewModel.stateMachine.phase == .countdown(photoIndex: 0, secondsRemaining: 0))
+        #expect(receipts.filter {
+            if case .sessionSetupApplied = $0 { return true }
+            return false
+        }.count == 1)
+        #expect(receipts.filter {
+            if case .countdownInstalled = $0 { return true }
+            return false
+        } == [
+            .countdownInstalled(context: context3, deliveryID: countdownID, descriptor: descriptor),
+            .countdownInstalled(context: context3, deliveryID: countdownID, descriptor: descriptor)
+        ])
+    }
+
+    @Test("fresh iPad installs a synchronized active-session baseline before countdown")
+    @MainActor
+    func freshIPadCanInstallCountdownAfterAuthoritativeSync() {
+        let viewModel = iPadViewModel()
+        defer { viewModel.multipeer.disconnect() }
+        var receipts: [Message] = []
+        viewModel.startupReceiptHandlerForTesting = { receipts.append($0) }
+
+        let sessionID = "reconnected-countdown-session"
+        let config = EventConfig(
+            eventID: "event-1",
+            eventName: "Selected experience",
+            photoCount: 2,
+            countdownSeconds: 30,
+            templateID: "selected-template",
+            selectedFilterID: .vintage,
+            experienceRevision: "revision-selected"
+        )
+        let presentation = SessionPresentation(
+            sessionID: sessionID,
+            language: .thai,
+            templateDisplayName: "Selected template",
+            filterID: .vintage,
+            prompts: []
+        )
+        viewModel.multipeer.onControlMessage?(.sessionSync(snapshot: SessionSyncSnapshot(
+            config: config,
+            sessionID: sessionID,
+            phase: .readyToStart,
+            presentation: presentation,
+            isMirrored: false,
+            isBoothPaused: false,
+            sequence: 40,
+            nextPhotoIndex: 0,
+            authorityEpoch: iPadTestAuthorityEpoch
+        )))
+        let context = SessionMessageContext(
+            sessionID: sessionID,
+            sequence: 41,
+            authorityEpoch: iPadTestAuthorityEpoch
+        )
+        let deliveryID = UUID()
+        let descriptor = CountdownDescriptor(
+            photoIndex: 0,
+            captureAt: Date().addingTimeInterval(30)
+        )
+        viewModel.multipeer.onControlMessage?(.beginCountdown(
+            context: context,
+            deliveryID: deliveryID,
+            descriptor: descriptor
+        ))
+
+        #expect(viewModel.stateMachine.currentSessionID == sessionID)
+        #expect(viewModel.eventConfig == config)
+        #expect(viewModel.sessionPresentation == presentation)
+        #expect(viewModel.stateMachine.phase == .countdown(photoIndex: 0, secondsRemaining: 30))
+        #expect(receipts.contains(.countdownInstalled(
+            context: context,
+            deliveryID: deliveryID,
+            descriptor: descriptor
+        )))
+    }
+
+    @Test("accepted startup retry reuses the original request ID")
+    @MainActor
+    func acceptedStartupRetryKeepsRequestIdentity() {
+        let transport = RecordingIPadTransport()
+        let viewModel = iPadViewModel(transport: transport)
+        defer { viewModel.multipeer.disconnect() }
+        makeConnectionReady(viewModel)
+        var catalog = experienceCatalog()
+        catalog.templates = [catalog.templates[0]]
+        catalog.guestTemplateSelectionEnabled = false
+        catalog.guestLanguageSelectionEnabled = false
+        viewModel.multipeer.onControlMessage?(.eventExperienceCatalog(catalog: catalog))
+
+        viewModel.customerTappedToBegin()
+        let originalRequestID = transport.messages.compactMap(\.startRequestID).first
+        #expect(originalRequestID != nil)
+        guard let originalRequestID else { return }
+
+        viewModel.multipeer.onControlMessage?(.customerSessionStartResult(
+            requestID: originalRequestID,
+            result: .accepted(sessionID: "accepted-startup-session")
+        ))
+        let sessionID = "accepted-startup-session"
+        let context1 = SessionMessageContext(sessionID: sessionID, sequence: 1, authorityEpoch: iPadTestAuthorityEpoch)
+        let context2 = SessionMessageContext(sessionID: sessionID, sequence: 2, authorityEpoch: iPadTestAuthorityEpoch)
+        let config = EventConfig(eventID: catalog.eventID, eventName: catalog.eventName, photoCount: 2)
+        let presentation = SessionPresentation(
+            sessionID: sessionID,
+            language: .english,
+            templateDisplayName: "Template A",
+            filterID: .original,
+            prompts: []
+        )
+        viewModel.multipeer.onControlMessage?(.sessionStart(context: context1))
+        viewModel.multipeer.onControlMessage?(.sessionPrepared(
+            config: config,
+            presentation: presentation,
+            context: context2,
+            deliveryID: UUID()
+        ))
+        #expect(viewModel.stateMachine.phase == .readyToStart)
+
+        viewModel.customerTappedStart()
+
+        let requests = transport.messages.compactMap(\.startRequestID)
+        #expect(requests == [originalRequestID, originalRequestID])
     }
 
     @Test("template preview policy rejects old revision and reused asset id")
@@ -319,8 +527,13 @@ struct iPadSmokeTests {
             sha256: Data(SHA256.hash(data: oldData))
         )
         let oldChunk = try #require(BoothAssetTransfer.chunks(data: oldData, reference: oldReference).first)
+        let decodeBarrier = AssetDecodeTestBarrier()
+        viewModel.beforeAssetDecodeForTesting = { await decodeBarrier.holdDecode() }
         viewModel.multipeer.onAssetChunk?(oldChunk)
+        await decodeBarrier.waitUntilEntered()
         viewModel.multipeer.onControlMessage?(.eventExperienceCatalog(catalog: catalogB))
+        await decodeBarrier.releaseDecode()
+        viewModel.beforeAssetDecodeForTesting = nil
         for _ in 0..<30 where viewModel.experienceAssets[oldReference.assetID] == nil {
             try await Task.sleep(for: .milliseconds(10))
         }
@@ -362,6 +575,69 @@ struct iPadSmokeTests {
         #expect(viewModel.selectedFilterID == selectedFilterID)
         #expect(viewModel.sessionRequestError == nil)
         #expect(!viewModel.finishRequestPending)
+    }
+
+    @Test("selection cannot abandon a timed-out but unresolved start request")
+    @MainActor
+    func selectionBackWaitsForUnresolvedStartRequest() {
+        let transport = RecordingIPadTransport()
+        let viewModel = iPadViewModel(transport: transport)
+        defer { viewModel.multipeer.disconnect() }
+        viewModel.multipeer.onControlMessage?(.eventExperienceCatalog(catalog: experienceCatalog()))
+        viewModel.stateMachine.beginSelectingExperience()
+        let selectedTemplateID = viewModel.selectedTemplateID
+
+        viewModel.confirmExperienceSelection()
+        let requestID = transport.messages.compactMap(\.startRequestID).first
+        #expect(requestID != nil)
+        #expect(viewModel.hasUnresolvedSessionStartRequest)
+
+        viewModel.expireSessionStartRequestTimeoutForTesting()
+        #expect(!viewModel.isSessionRequestPending)
+        #expect(viewModel.hasUnresolvedSessionStartRequest)
+        viewModel.customerBackFromExperienceSelection()
+        viewModel.selectTemplate("template-b")
+        #expect(viewModel.stateMachine.phase == .selectingExperience)
+        #expect(viewModel.selectedTemplateID == selectedTemplateID)
+
+        viewModel.confirmExperienceSelection()
+        #expect(transport.messages.compactMap(\.startRequestID) == [requestID, requestID])
+        guard let requestID else { return }
+        viewModel.multipeer.onControlMessage?(.customerSessionStartResult(
+            requestID: requestID,
+            result: .accepted(sessionID: "late-accepted-session")
+        ))
+        #expect(viewModel.hasUnresolvedSessionStartRequest)
+        #expect(viewModel.stateMachine.phase == .selectingExperience)
+    }
+
+    @Test("accepted setup retry keeps the request unresolved and reuses its ID")
+    @MainActor
+    func acceptedSetupRetryKeepsOriginalStartRequest() {
+        let transport = RecordingIPadTransport()
+        let viewModel = iPadViewModel(transport: transport)
+        defer { viewModel.multipeer.disconnect() }
+        viewModel.multipeer.onControlMessage?(.eventExperienceCatalog(catalog: experienceCatalog()))
+        viewModel.stateMachine.beginSelectingExperience()
+        let originalTemplateID = viewModel.selectedTemplateID
+
+        viewModel.confirmExperienceSelection()
+        let requestID = transport.messages.compactMap(\.startRequestID).first
+        #expect(requestID != nil)
+        guard let requestID else { return }
+        viewModel.multipeer.onControlMessage?(.customerSessionStartResult(
+            requestID: requestID,
+            result: .accepted(sessionID: "durable-start-session")
+        ))
+
+        #expect(viewModel.hasUnresolvedSessionStartRequest)
+        viewModel.customerBackFromExperienceSelection()
+        viewModel.selectTemplate("template-b")
+        viewModel.confirmExperienceSelection()
+
+        #expect(viewModel.stateMachine.phase == .selectingExperience)
+        #expect(viewModel.selectedTemplateID == originalTemplateID)
+        #expect(transport.messages.compactMap(\.startRequestID) == [requestID, requestID])
     }
 
     @Test("idle begin requires a ready connection")
@@ -649,6 +925,44 @@ struct iPadSmokeTests {
                 SharedPhotoSlot(id: "landscape", normalizedRect: CGRect(x: 0, y: 0, width: 0.75, height: 1.0 / 3.0), photoIndex: 1)
             ]
         )
+    }
+}
+
+@MainActor
+private final class RecordingIPadTransport: BoothTransport {
+    let connectionStatus = BoothConnectionStatus(requestedNetwork: .lan)
+    let role = DeviceRole.iPad
+    var activePeerName: String?
+    var onControlMessage: (@MainActor (Message) -> Void)?
+    var onPreviewFrame: (@MainActor (Data) -> Void)?
+    var onAssetChunk: (@MainActor (BoothAssetChunk) -> Void)?
+    var onTransportEvent: (@MainActor (BoothTransportDiagnosticEvent) -> Void)?
+    var onTransportReady: (@MainActor (BoothDeviceIdentity) -> Void)?
+    var messages: [Message] = []
+    var requestedNetworkPreference: BoothNetworkPreference = .lan
+
+    var connectionState: BoothConnectionState { connectionStatus.state }
+    var peerName: String { connectionStatus.peerDisplayName ?? "" }
+    var connectedPeerNames: [String] { connectionStatus.connectedPeerNames }
+
+    func start() { }
+    func restart() { }
+    func sendControl(_ message: Message) -> BoothControlSendOutcome {
+        messages.append(message)
+        return .sent
+    }
+    func sendControl(_ message: Message, completion: @escaping @MainActor (BoothControlSendOutcome) -> Void) {
+        completion(sendControl(message))
+    }
+    func sendAsset(_ chunk: BoothAssetChunk) -> BoothControlSendOutcome { .networkSendFailed }
+    func sendPreviewFrame(_ jpegData: Data) { }
+    func disconnect() { }
+}
+
+private extension Message {
+    var startRequestID: UUID? {
+        guard case .customerSessionStartRequest(let request) = self else { return nil }
+        return request.requestID
     }
 }
 

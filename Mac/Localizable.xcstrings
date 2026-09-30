@@ -3772,6 +3772,16 @@
         }
       }
     },
+    "Initializing camera…" : {
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "กำลังเตรียมกล้อง…"
+          }
+        }
+      }
+    },
     "Individual download pages will remain available." : {
       "localizations" : {
         "th" : {
@@ -4243,6 +4253,16 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "จัดการโดย Cloud SSH Setup ใน ~/.ssh/config และใช้ Cloudflare Access"
+          }
+        }
+      }
+    },
+    "Manual reconnect required" : {
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ต้องเชื่อมต่อกล้องใหม่ด้วยตนเอง"
           }
         }
       }
@@ -5968,6 +5988,16 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "กำลังเชื่อมต่อใหม่…"
+          }
+        }
+      }
+    },
+    "Recovering camera connection…" : {
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "กำลังกู้คืนการเชื่อมต่อกล้อง…"
           }
         }
       }
@@ -8222,6 +8252,16 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "กำลังรอ"
+          }
+        }
+      }
+    },
+    "Waiting for camera…" : {
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "กำลังรอกล้อง…"
           }
         }
       }

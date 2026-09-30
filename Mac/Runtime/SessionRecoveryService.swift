@@ -80,6 +80,8 @@ final class SessionRecoveryService {
 
     var onResume: ((SessionManifest, [Int: CGImage]) -> Void)?
     var onDiscard: ((SessionManifest) -> Void)?
+    var trustedOutputRoot: (@MainActor () -> URL?)?
+    var legacyStoredStripPath: (@MainActor (String) -> String?)?
     var quiesceSessionOperations: (@MainActor (String) async -> Bool)?
     var isSessionRecoveryInFlight: (@MainActor (String) -> Bool)?
     var claimSessionRecovery: (@MainActor (String) -> Bool)?
@@ -105,7 +107,7 @@ final class SessionRecoveryService {
     }
 
     func markCleanupPending(sessionID: String, reason: String? = nil) {
-        cleanupPendingSessionIDs.insert(sessionID)
+        guard cleanupPendingSessionIDs.insert(sessionID).inserted else { return }
         recordError(reason ?? "Session cleanup is still pending: \(sessionID)")
     }
 
@@ -177,7 +179,7 @@ final class SessionRecoveryService {
                     markCleanupPending(sessionID: sessionID)
                     return
                 }
-                try workspace.removeEntireSession(manifest: manifest)
+                try removeOwnedWorkspace(manifest)
                 onDiscard?(manifest)
             } catch {
                 cleanupPendingSessionIDs.insert(sessionID)
@@ -331,7 +333,7 @@ final class SessionRecoveryService {
                     recoveryErrors.append("Cancelled session cleanup is pending: \(manifest.id)")
                     continue
                 }
-                try workspace.removeEntireSession(manifest: manifest)
+                try removeOwnedWorkspace(manifest)
                 try await manifestStore.delete(sessionID: manifest.id)
                 try await jobQueue.deleteJobsAndForgetCancellationBarrier(sessionID: manifest.id)
             } catch {
@@ -345,6 +347,17 @@ final class SessionRecoveryService {
                 recoveryErrors.append("\(manifest.eventName): \(error)")
             }
         }
+    }
+
+    private func removeOwnedWorkspace(_ manifest: SessionManifest) throws {
+        guard let trustedRoot = trustedOutputRoot?() else {
+            throw SessionWorkspaceError.invalidPath(manifest.absoluteDirectoryPath)
+        }
+        try workspace.removeEntireSession(
+            manifest: manifest,
+            trustedOutputRoot: trustedRoot,
+            legacyStoredStripPath: legacyStoredStripPath?(manifest.id)
+        )
     }
 
     func prepareFinalizationPlanForRecovery(for manifest: SessionManifest) async throws -> SessionManifest {

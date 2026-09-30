@@ -149,7 +149,21 @@ struct MessageTests {
                 requestID: reviewRequestID,
                 result: .accepted(sessionID: "session-test")
             ),
-            .beginCountdown(context: context, descriptor: countdown),
+            .sessionPrepared(
+                config: EventConfig(),
+                presentation: SessionPresentation(
+                    sessionID: context.sessionID,
+                    language: .english,
+                    templateDisplayName: "Template",
+                    filterID: .original,
+                    prompts: []
+                ),
+                context: context,
+                deliveryID: reviewRequestID
+            ),
+            .sessionSetupApplied(context: context, deliveryID: reviewRequestID),
+            .beginCountdown(context: context, deliveryID: reviewRequestID, descriptor: countdown),
+            .countdownInstalled(context: context, deliveryID: reviewRequestID, descriptor: countdown),
             .shotCaptured(context: context, index: 0, thumbnailData: Data([0x01, 0x02])),
             .shotCapturedAsset(
                 context: context,
@@ -421,9 +435,9 @@ struct MessageTests {
         #expect(legacyHello.deviceName == "legacy-id")
         #expect(legacyHello.networkPreference == nil)
     }
-    @Test("v1.4.3 connection protocol is version 11 and legacy protocol 10 remains decodable but incompatible")
+    @Test("startup receipt protocol is version 12 and legacy protocol 10 remains decodable but incompatible")
     func protocolVersionMismatchIsVisible() throws {
-        #expect(BoothTransportHello.currentProtocolVersion == 11)
+        #expect(BoothTransportHello.currentProtocolVersion == 12)
         let legacy = Data(#"{"protocolVersion":10,"appVersion":"1.4.3","role":"iPad","deviceID":"legacy-id","capabilities":["control"]}"#.utf8)
         let hello = try JSONDecoder().decode(BoothTransportHello.self, from: legacy)
         #expect(hello.protocolVersion == 10)

@@ -302,7 +302,7 @@ final class DataStore {
 
 }
 
-private enum DataStorePersistenceError: LocalizedError {
+enum DataStorePersistenceError: LocalizedError {
     case unavailable(String)
 
     var errorDescription: String? {

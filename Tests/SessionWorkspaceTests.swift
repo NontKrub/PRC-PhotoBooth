@@ -253,6 +253,52 @@ struct SessionWorkspaceTests {
         #expect(machine.phase == .review(photoIndex: 0))
     }
 
+    @Test("full session removal requires a matching owner marker")
+    func removesOnlyMarkedSession() throws {
+        let root = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let output = root.appendingPathComponent("Output", isDirectory: true)
+        let workspace = SessionWorkspace()
+        let descriptor = try workspace.createWorkspace(
+            sessionID: "owned-session",
+            eventName: "Event",
+            outputRoot: output,
+            startedAt: Date(),
+            frameSourceURL: nil
+        )
+        let sessionDirectory = URL(fileURLWithPath: descriptor.absoluteDirectoryPath, isDirectory: true)
+        try Data([1]).write(to: sessionDirectory.appendingPathComponent("strip.png"))
+        let manifest = workspaceRemovalManifest(id: "owned-session", descriptor: descriptor)
+
+        try workspace.removeEntireSession(manifest: manifest, trustedOutputRoot: output)
+        #expect(!FileManager.default.fileExists(atPath: sessionDirectory.path))
+    }
+
+    @Test("session removal rejects a symlinked workspace and preserves its target")
+    func rejectsSymlinkedSessionWorkspace() throws {
+        let root = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let output = root.appendingPathComponent("Output", isDirectory: true)
+        let workspace = SessionWorkspace()
+        let descriptor = try workspace.createWorkspace(
+            sessionID: "symlink-session",
+            eventName: "Event",
+            outputRoot: output,
+            startedAt: Date(),
+            frameSourceURL: nil
+        )
+        let sessionDirectory = URL(fileURLWithPath: descriptor.absoluteDirectoryPath, isDirectory: true)
+        let outside = root.appendingPathComponent("outside", isDirectory: true)
+        try FileManager.default.moveItem(at: sessionDirectory, to: outside)
+        try FileManager.default.createSymbolicLink(at: sessionDirectory, withDestinationURL: outside)
+        let manifest = workspaceRemovalManifest(id: "symlink-session", descriptor: descriptor)
+
+        #expect(throws: SessionWorkspaceError.self) {
+            try workspace.removeEntireSession(manifest: manifest, trustedOutputRoot: output)
+        }
+        #expect(FileManager.default.fileExists(atPath: outside.appendingPathComponent(".booth-session-id").path))
+    }
+
     @Test("a stale capture save cannot commit after session cancellation")
     func staleCaptureSaveIsRejectedBeforeManifestUpdate() {
         func shouldCommit(
@@ -282,6 +328,31 @@ struct SessionWorkspaceTests {
         #expect(!shouldCommit(manifestStatus: .cancelled, cancelledAt: Date()))
         #expect(!shouldCommit(phase: .idle))
     }
+}
+
+private func workspaceRemovalManifest(id: String, descriptor: SessionWorkspaceDescriptor) -> SessionManifest {
+    SessionManifest(
+        schemaVersion: SessionManifest.currentSchemaVersion,
+        id: id,
+        eventID: "event",
+        eventName: "Event",
+        eventConfig: EventConfig(eventID: "event", eventName: "Event", photoCount: 1),
+        startedAt: Date(),
+        completedAt: Date(),
+        cancelledAt: nil,
+        status: .completed,
+        nextPhotoIndex: 1,
+        outputRootPath: descriptor.outputRootPath,
+        relativeDirectoryPath: descriptor.relativeDirectoryPath,
+        absoluteDirectoryPath: descriptor.absoluteDirectoryPath,
+        frameSnapshotFileName: nil,
+        stripFileName: nil,
+        gifFileName: nil,
+        downloadToken: "token",
+        shots: [],
+        lastError: nil,
+        updatedAt: Date()
+    )
 }
 
 private final class LockedBoolean: @unchecked Sendable {

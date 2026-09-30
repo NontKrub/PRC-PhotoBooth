@@ -169,6 +169,29 @@ struct EventGalleryStoreTests {
         #expect(FileManager.default.fileExists(atPath: quarantinedURL.path))
     }
 
+    @Test("unreadable gallery index is preserved rather than quarantined as malformed")
+    func preservesUnreadableIndex() async throws {
+        let root = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = EventGalleryStore(baseDirectory: root)
+        let indexURL = root.appendingPathComponent("Gallery/Events/event-unreadable.json")
+        try FileManager.default.createDirectory(at: indexURL, withIntermediateDirectories: true)
+
+        do {
+            _ = try await store.load(eventID: "event-unreadable")
+            Issue.record("Expected a directory at the index path to fail as unreadable")
+        } catch EventGalleryStoreError.unreadable(let source, _) {
+            #expect(source.lastPathComponent == indexURL.lastPathComponent)
+            #expect(source.deletingLastPathComponent() == indexURL.deletingLastPathComponent())
+        }
+
+        #expect(FileManager.default.fileExists(atPath: indexURL.path))
+        #expect(try FileManager.default.contentsOfDirectory(
+            at: indexURL.deletingLastPathComponent(),
+            includingPropertiesForKeys: nil
+        ).filter { $0.pathExtension == "corrupt" }.isEmpty)
+    }
+
     @Test("unsupported future gallery schema stays in place")
     func preservesFutureSchemaIndex() async throws {
         let root = try temporaryDirectory()

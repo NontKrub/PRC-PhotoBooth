@@ -166,6 +166,9 @@ struct SessionManifest: Codable, Sendable, Identifiable, Equatable {
     var origin: SessionOrigin? = .normal
     var soakRunID: String? = nil
     var soakCycleIndex: Int? = nil
+    // Startup display requirements survive a Mac restart. Nil means a legacy manifest.
+    var requiresIPadStartupReceipt: Bool? = nil
+    var requiresExternalViewerForStartup: Bool? = nil
     // Retained on diagnostic manifests when soak cleanup needs a retry.
     var soakCleanupWarning: String? = nil
     var soakCleanupLastAttemptAt: Date? = nil

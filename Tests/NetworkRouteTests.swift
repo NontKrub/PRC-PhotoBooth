@@ -890,6 +890,7 @@ private func soakMessages(sessionID: String, photoCount: Int, index: Int) -> [Me
         .sessionSync(snapshot: snapshot),
         .beginCountdown(
             context: firstContext,
+            deliveryID: firstRequestID,
             descriptor: CountdownDescriptor(
                 photoIndex: 0,
                 captureAt: Date(timeIntervalSince1970: Double(index))
@@ -906,6 +907,7 @@ private func soakMessages(sessionID: String, photoCount: Int, index: Int) -> [Me
         let retakeReviewState = ReviewStateToken(sessionID: sessionID, photoIndex: 0, revision: 2, authorityEpoch: testAuthorityEpoch)
         messages.append(.beginCountdown(
             context: retakeContext,
+            deliveryID: firstRequestID,
             descriptor: CountdownDescriptor(
                 photoIndex: 0,
                 captureAt: Date(timeIntervalSince1970: Double(index) + 1)
@@ -5014,10 +5016,75 @@ struct TransportRecoveryPolicyTests {
         #expect(BoothSecondaryChannelAdmissionPolicy.decision(existingState: .verified) == .rejectCandidate)
         #expect(BoothSecondaryChannelAdmissionPolicy.decision(existingState: .failed) == .acceptCandidate)
         #expect(BoothSecondaryChannelAdmissionPolicy.decision(existingState: .none) == .acceptCandidate)
+        #expect(!BoothSecondaryChannelAdmissionPolicy.shouldAdmitPreviewCandidate(
+            existingState: .none,
+            controlIsAuthenticated: false
+        ))
+        #expect(BoothSecondaryChannelAdmissionPolicy.shouldAdmitPreviewCandidate(
+            existingState: .none,
+            controlIsAuthenticated: true
+        ))
 
-        for _ in 0..<1_000 {
-            #expect(BoothSecondaryChannelAdmissionPolicy.decision(existingState: .handshaking) == .rejectCandidate)
+        for _ in 0..<10_000 {
+            #expect(!BoothSecondaryChannelAdmissionPolicy.shouldAdmitPreviewCandidate(
+                existingState: .handshaking,
+                controlIsAuthenticated: true
+            ))
         }
+    }
+
+    @Test("preview admission cooldown is bounded and expires for legitimate recovery")
+    func previewAdmissionCooldownAllowsRecovery() {
+        let now = Date(timeIntervalSince1970: 1_000)
+        #expect(BoothSecondaryChannelAdmissionPolicy.cooldownDuration(afterFailureCount: 0) == 0)
+        #expect(BoothSecondaryChannelAdmissionPolicy.cooldownDuration(afterFailureCount: 1) == 1)
+        #expect(BoothSecondaryChannelAdmissionPolicy.cooldownDuration(afterFailureCount: 2) == 2)
+        #expect(BoothSecondaryChannelAdmissionPolicy.cooldownDuration(afterFailureCount: 3) == 4)
+        #expect(BoothSecondaryChannelAdmissionPolicy.cooldownDuration(afterFailureCount: 4) == 8)
+        #expect(BoothSecondaryChannelAdmissionPolicy.cooldownDuration(afterFailureCount: 5) == 16)
+        #expect(BoothSecondaryChannelAdmissionPolicy.cooldownDuration(afterFailureCount: 1_000) == 30)
+
+        let cooldown = now.addingTimeInterval(4)
+        #expect(!BoothSecondaryChannelAdmissionPolicy.cooldownExpired(until: cooldown, now: now))
+        #expect(BoothSecondaryChannelAdmissionPolicy.cooldownExpired(until: cooldown, now: cooldown))
+        #expect(BoothSecondaryChannelAdmissionPolicy.cooldownExpired(until: nil, now: now))
+        #expect(BoothSecondaryChannelAdmissionPolicy.failureCount(
+            afterFailureCount: 6,
+            lastFailureAt: now.addingTimeInterval(-61),
+            now: now
+        ) == 0)
+        #expect(BoothSecondaryChannelAdmissionPolicy.failureCount(
+            afterFailureCount: 6,
+            lastFailureAt: now.addingTimeInterval(-59),
+            now: now
+        ) == 6)
+
+        var failureCount = 0
+        var availableAt = now
+        for _ in 0..<100 {
+            failureCount += 1
+            availableAt = availableAt.addingTimeInterval(
+                12 + BoothSecondaryChannelAdmissionPolicy.cooldownDuration(afterFailureCount: failureCount)
+            )
+        }
+        let legitimateReconnect = availableAt.addingTimeInterval(0.001)
+        #expect(BoothSecondaryChannelAdmissionPolicy.cooldownExpired(
+            until: availableAt,
+            now: legitimateReconnect
+        ))
+
+        for candidate in 0..<10_000 {
+            #expect(
+                !BoothSecondaryChannelAdmissionPolicy.cooldownExpired(
+                    until: cooldown,
+                    now: now.addingTimeInterval(Double(candidate % 4))
+                )
+            )
+        }
+        #expect(BoothSecondaryChannelAdmissionPolicy.cooldownExpired(
+            until: cooldown,
+            now: now.addingTimeInterval(4)
+        ))
     }
 
     @Test("Waiting recovery deadline remains tied to its connection generation")
@@ -5084,6 +5151,7 @@ struct TransportRecoveryPolicyTests {
             case 2:
                 return .beginCountdown(
                     context: context,
+                    deliveryID: UUID(uuidString: String(format: "00000000-0000-0000-0000-%012llx", UInt64(index + 10_000)))!,
                     descriptor: CountdownDescriptor(
                         photoIndex: index % 8,
                         captureAt: Date(timeIntervalSince1970: Double(index))

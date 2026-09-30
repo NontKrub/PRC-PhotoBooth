@@ -25,6 +25,7 @@ struct SoakSessionCleanupTests {
         )
         let sessionDirectory = outputRoot.appendingPathComponent("Event/\(session.id)", isDirectory: true)
         try FileManager.default.createDirectory(at: sessionDirectory, withIntermediateDirectories: true)
+        try Data(session.id.utf8).write(to: sessionDirectory.appendingPathComponent(".booth-session-id"))
         let sentinel = sessionDirectory.appendingPathComponent("strip.png")
         try Data([0x01]).write(to: sentinel)
 
@@ -70,7 +71,8 @@ struct SoakSessionCleanupTests {
             testingJobQueue: jobQueue,
             runtimeDirectory: runtimeRoot,
             testingDataStore: dataStore,
-            testingCloudUpload: cloudUpload
+            testingCloudUpload: cloudUpload,
+            testingOutputDirectory: outputRoot
         )
 
         let route = try CloudGuestRoute.resolve(for: manifest)

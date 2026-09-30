@@ -150,12 +150,21 @@
       }
     },
     "Back" : {
-      "extractionState" : "stale",
       "localizations" : {
         "th" : {
           "stringUnit" : {
             "state" : "translated",
             "value" : "ย้อนกลับ"
+          }
+        }
+      }
+    },
+    "Back to idle screen" : {
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "กลับไปหน้าพร้อมใช้งาน"
           }
         }
       }
@@ -1354,6 +1363,16 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "กำลังค้นหา Mac…"
+          }
+        }
+      }
+    },
+    "Starting…" : {
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "กำลังเริ่ม…"
           }
         }
       }

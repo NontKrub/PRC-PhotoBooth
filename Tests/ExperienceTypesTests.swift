@@ -183,7 +183,8 @@ struct ExperienceTypesTests {
                     qrCodeElements: [SharedQRCodeElement(id: "qr-1", normalizedRect: CGRect(x: 0.1, y: 0.1, width: 0.2, height: 0.2))]
                 ),
                 presentation: SessionPresentation(sessionID: "session-1", language: .thai, templateDisplayName: "คลาสสิก", filterID: .warm, prompts: []),
-                context: SessionMessageContext(sessionID: "session-1", sequence: 1, authorityEpoch: testAuthorityEpoch)
+                context: SessionMessageContext(sessionID: "session-1", sequence: 1, authorityEpoch: testAuthorityEpoch),
+                deliveryID: UUID(uuidString: "00000000-0000-0000-0000-000000000003")!
             )
         ]
 

@@ -108,11 +108,15 @@ struct OperatorConsoleView: View {
         VStack(spacing: 16) {
             Image(systemName: "camera.fill.badge.ellipsis")
                 .font(.system(size: 44)).foregroundStyle(.orange)
-            Text(coordinator.cameraSourceKind == .dslr ? "DSLR Not Connected" : "Camera Access Required")
+            let dslr = coordinator.capture.dslr
+            Text(dslr.recoveryStatus == .manualReconnectRequired
+                 ? "Manual Camera Reconnect Required"
+                 : (coordinator.cameraSourceKind == .dslr ? "DSLR Not Connected" : "Camera Access Required"))
                 .font(.headline).foregroundStyle(.white)
-            Text(coordinator.cameraSourceKind == .dslr
-                 ? "Connect the selected DSLR or choose AVFoundation capture."
-                 : "Grant camera access in System Settings → Privacy & Security → Camera.")
+            Text(dslr.recoveryStatusReason
+                 ?? (coordinator.cameraSourceKind == .dslr
+                     ? "Connect the selected DSLR or choose AVFoundation capture."
+                     : "Grant camera access in System Settings → Privacy & Security → Camera."))
                 .font(.caption).foregroundStyle(.white.opacity(0.7))
                 .multilineTextAlignment(.center)
                 .frame(maxWidth: 260)
@@ -332,10 +336,16 @@ struct OperatorConsoleView: View {
                 }
                 .buttonStyle(.bordered)
                 .tint(.red)
+            } else if dslr.recoveryStatus == .manualReconnectRequired {
+                Label("Disconnect and reconnect the USB camera to restore capture.", systemImage: "exclamationmark.triangle.fill")
+                    .font(.caption2)
+                    .foregroundStyle(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: .infinity, alignment: .leading)
             } else if dslr.isConnecting {
                 HStack {
                     ProgressView().controlSize(.small)
-                    Text("Connecting…").font(.caption)
+                    Text(dslrRecoveryLabel(dslr.recoveryStatus)).font(.caption)
                 }
                 .frame(maxWidth: .infinity)
             } else {
@@ -344,7 +354,8 @@ struct OperatorConsoleView: View {
                         .frame(maxWidth: .infinity)
                 }
                 .buttonStyle(.borderedProminent)
-                .disabled(coordinator.capture.dslr.availableDevices.isEmpty)
+                .disabled(coordinator.capture.dslr.availableDevices.isEmpty
+                          || dslr.recoveryStatus == .manualReconnectRequired)
             }
 
             if coordinator.capture.dslr.isRunning {
@@ -376,6 +387,16 @@ struct OperatorConsoleView: View {
         }
         .padding(10)
         .background(.quaternary, in: RoundedRectangle(cornerRadius: 8))
+    }
+
+    private func dslrRecoveryLabel(_ status: DSLRCameraRecoveryStatus?) -> String {
+        switch status {
+        case .opening: "Waiting for camera…"
+        case .initializing: "Initializing camera…"
+        case .recovering: "Recovering camera connection…"
+        case .manualReconnectRequired: "Manual reconnect required"
+        case nil: "Connecting…"
+        }
     }
 
     // MARK: - DSLR settings

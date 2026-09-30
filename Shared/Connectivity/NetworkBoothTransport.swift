@@ -348,6 +348,9 @@ public final class NetworkBoothTransport: BoothTransport {
     private var didSendPreviewHello = false
     private var previewIdentityVerified = false
     private var previewIdentityHandshakeTask: Task<Void, Never>?
+    private var previewAdmissionFailureCount = 0
+    private var previewAdmissionLastFailureAt: Date?
+    private var previewAdmissionCooldownUntil: Date?
     private var lanPathMonitor: NWPathMonitor?
     private var wifiPathMonitor: NWPathMonitor?
     private var pathMonitorGeneration = 0
@@ -3573,13 +3576,16 @@ public final class NetworkBoothTransport: BoothTransport {
             return
         }
         if channel == .preview,
-           BoothSecondaryChannelAdmissionPolicy.decision(existingState: previewAdmissionState)
-                == .rejectCandidate {
+           !shouldAdmitPreviewCandidate(existingState: previewAdmissionState) {
             connection.cancel()
             emitTransportEvent(
                 .secondaryCandidateRejected,
                 channel: .preview,
-                reason: "Preview channel candidate is already active."
+                reason: previewAdmissionIsCoolingDown
+                    ? "Preview admission is cooling down after failed identity handshakes."
+                    : peerAuthenticated && secureChannelEstablished
+                        ? "Preview channel candidate is already active."
+                        : "Preview candidate arrived before secure control authentication."
             )
             return
         }
@@ -3730,13 +3736,17 @@ public final class NetworkBoothTransport: BoothTransport {
             if previewConnection != nil,
                previewEndpointDescription == description,
                admissionState != .failed { return }
-            if BoothSecondaryChannelAdmissionPolicy.decision(existingState: admissionState)
-                    == .rejectCandidate {
+            if !shouldAdmitPreviewCandidate(existingState: admissionState) {
                 emitTransportEvent(
                     .secondaryCandidateRejected,
                     channel: .preview,
-                    reason: "Preview channel candidate is already active."
+                    reason: previewAdmissionIsCoolingDown
+                        ? "Preview admission is cooling down after failed identity handshakes."
+                        : peerAuthenticated && secureChannelEstablished
+                            ? "Preview channel candidate is already active."
+                            : "Preview candidate deferred until secure control authentication."
                 )
+                if previewAdmissionIsCoolingDown { scheduleReconnect() }
                 return
             }
             invalidateReceiveToken(for: .preview)
@@ -4459,6 +4469,7 @@ public final class NetworkBoothTransport: BoothTransport {
         }
         guard hello.capabilities.contains("secure-channel-v1"),
               hello.capabilities.contains("asset-channel-v2"),
+              hello.capabilities.contains("startup-receipts-v1"),
               hello.capabilities.contains(Self.previewIdentityCapability) else {
             rejectControlConnection(BoothPairingError.incompatibleProtocol.localizedDescription)
             return
@@ -6066,6 +6077,9 @@ public final class NetworkBoothTransport: BoothTransport {
         }
         let wasPreviewIdentityVerified = previewIdentityVerified
         previewIdentityVerified = true
+        previewAdmissionFailureCount = 0
+        previewAdmissionLastFailureAt = nil
+        previewAdmissionCooldownUntil = nil
         previewIdentityHandshakeTask?.cancel()
         previewIdentityHandshakeTask = nil
         connectionStatus.publishPreviewChannel(connected: true)
@@ -6346,6 +6360,11 @@ public final class NetworkBoothTransport: BoothTransport {
             apply(command, reason: command == .startWiFi(fallback: true) ? "LAN unavailable" : nil)
         } else if channel == .preview {
             guard let connection, connection === previewConnection else { return }
+            if !previewIdentityVerified {
+                // Count every failed unverified candidate, including malformed
+                // frames and peers that connect then immediately disappear.
+                recordPreviewAdmissionFailure()
+            }
             previewIdentityHandshakeTask?.cancel()
             previewIdentityHandshakeTask = nil
             invalidateReceiveToken(for: .preview)
@@ -6563,6 +6582,45 @@ public final class NetworkBoothTransport: BoothTransport {
         case .failed, .cancelled: return .failed
         default: return .handshaking
         }
+    }
+
+    private var previewAdmissionIsCoolingDown: Bool {
+        !BoothSecondaryChannelAdmissionPolicy.cooldownExpired(
+            until: previewAdmissionCooldownUntil,
+            now: Date()
+        )
+    }
+
+    private func shouldAdmitPreviewCandidate(existingState: BoothSecondaryChannelAdmissionState) -> Bool {
+        let now = Date()
+        previewAdmissionFailureCount = BoothSecondaryChannelAdmissionPolicy.failureCount(
+            afterFailureCount: previewAdmissionFailureCount,
+            lastFailureAt: previewAdmissionLastFailureAt,
+            now: now
+        )
+        if previewAdmissionFailureCount == 0 {
+            previewAdmissionLastFailureAt = nil
+            previewAdmissionCooldownUntil = nil
+        }
+        return !previewAdmissionIsCoolingDown
+            && BoothSecondaryChannelAdmissionPolicy.shouldAdmitPreviewCandidate(
+                existingState: existingState,
+                controlIsAuthenticated: peerAuthenticated && secureChannelEstablished
+            )
+    }
+
+    private func recordPreviewAdmissionFailure() {
+        previewAdmissionFailureCount = min(previewAdmissionFailureCount + 1, 6)
+        previewAdmissionLastFailureAt = Date()
+        let delay = BoothSecondaryChannelAdmissionPolicy.cooldownDuration(
+            afterFailureCount: previewAdmissionFailureCount
+        )
+        previewAdmissionCooldownUntil = Date().addingTimeInterval(delay)
+        emitTransportEvent(
+            .secondaryCandidateRejected,
+            channel: .preview,
+            reason: "Preview identity handshake failed; bounded admission cooldown applied."
+        )
     }
 
     private func schedulePreviewIdentityHandshakeTimeout(

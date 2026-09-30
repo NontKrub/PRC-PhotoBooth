@@ -157,21 +157,4 @@ public enum SessionSetupDeliveryPolicy {
             && authority.requiresIPadSetupSend
     }
 
-    public static func shouldBeginCountdown(
-        outcome: BoothControlSendOutcome,
-        capturedGeneration: UInt64,
-        currentGeneration: UInt64,
-        expectedSessionID: String,
-        currentSessionID: String?,
-        stateMachineSessionID: String,
-        phase: BoothPhase,
-        isCancelled: Bool
-    ) -> Bool {
-        outcome == .sent
-            && capturedGeneration == currentGeneration
-            && currentSessionID == expectedSessionID
-            && stateMachineSessionID == expectedSessionID
-            && phase == .readyToStart
-            && !isCancelled
-    }
 }

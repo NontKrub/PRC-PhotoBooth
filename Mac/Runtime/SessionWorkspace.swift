@@ -53,11 +53,16 @@ struct SessionWorkspace: Sendable {
         frameSourceURL: URL?,
         foregroundOverlaySourceURL: URL? = nil
     ) throws -> SessionWorkspaceDescriptor {
-        guard !sessionID.isEmpty, !sessionID.contains("/"), !sessionID.contains("\\") else {
+        guard !sessionID.isEmpty,
+              !sessionID.contains("/"),
+              !sessionID.contains("\\"),
+              !sessionID.contains("\0") else {
             throw SessionWorkspaceError.invalidSessionID
         }
 
-        let eventDirectory = outputRoot.appendingPathComponent(Self.safeEventFolderName(eventName), isDirectory: true)
+        try createDirectory(outputRoot.standardizedFileURL)
+        let trustedRoot = outputRoot.standardizedFileURL.resolvingSymlinksInPath().standardizedFileURL
+        let eventDirectory = trustedRoot.appendingPathComponent(Self.safeEventFolderName(eventName), isDirectory: true)
         try createDirectory(eventDirectory)
 
         let formatter = DateFormatter()
@@ -105,7 +110,11 @@ struct SessionWorkspace: Sendable {
             foregroundOverlaySnapshotFileName = ".work/foreground.png"
         }
 
-        let rootPath = outputRoot.standardizedFileURL.path
+        try Data(sessionID.utf8).write(
+            to: sessionDirectory.appendingPathComponent(".booth-session-id"),
+            options: [.atomic]
+        )
+        let rootPath = trustedRoot.path
         let sessionPath = sessionDirectory.standardizedFileURL.path
         let relative = sessionPath.hasPrefix(rootPath + "/")
             ? String(sessionPath.dropFirst(rootPath.count + 1))
@@ -341,8 +350,16 @@ struct SessionWorkspace: Sendable {
         if fileManager.fileExists(atPath: work.path) { try fileManager.removeItem(at: work) }
     }
 
-    func removeEntireSession(manifest: SessionManifest) throws {
-        let directory = try manifestDirectory(for: manifest)
+    func removeEntireSession(
+        manifest: SessionManifest,
+        trustedOutputRoot: URL,
+        legacyStoredStripPath: String? = nil
+    ) throws {
+        let directory = try ownedSessionDirectory(
+            for: manifest,
+            trustedOutputRoot: trustedOutputRoot,
+            legacyStoredStripPath: legacyStoredStripPath
+        )
         if fileManager.fileExists(atPath: directory.path) { try fileManager.removeItem(at: directory) }
     }
 
@@ -384,6 +401,76 @@ struct SessionWorkspace: Sendable {
             throw SessionWorkspaceError.invalidPath(directory.path)
         }
         return directory
+    }
+
+    private func ownedSessionDirectory(
+        for manifest: SessionManifest,
+        trustedOutputRoot: URL,
+        legacyStoredStripPath: String?
+    ) throws -> URL {
+        let trustedRoot = trustedOutputRoot.standardizedFileURL.resolvingSymlinksInPath().standardizedFileURL
+        let manifestRoot = URL(fileURLWithPath: manifest.outputRootPath, isDirectory: true).standardizedFileURL
+        guard manifestRoot == manifestRoot.resolvingSymlinksInPath().standardizedFileURL,
+              manifestRoot == trustedRoot else {
+            throw SessionWorkspaceError.invalidPath(manifest.absoluteDirectoryPath)
+        }
+        let directory = try manifestDirectory(for: manifest)
+        guard directory.path.hasPrefix(trustedRoot.path + "/") else {
+            throw SessionWorkspaceError.invalidPath(directory.path)
+        }
+        try rejectSymlinkTraversal(from: trustedRoot, to: directory)
+        // Repeated cleanup may revisit a manifest after an earlier attempt removed
+        // the workspace but failed while deleting later metadata.
+        guard fileManager.fileExists(atPath: directory.path) else { return directory }
+
+        let marker = directory.appendingPathComponent(".booth-session-id")
+        if fileManager.fileExists(atPath: marker.path) {
+            guard try String(contentsOf: marker, encoding: .utf8) == manifest.id else {
+                throw SessionWorkspaceError.invalidPath(directory.path)
+            }
+            return directory
+        }
+
+        // Older workspaces have no owner marker. Their completed SwiftData
+        // strip path is an independent persisted ownership reference; without
+        // it, preserve the files rather than trusting a manifest path alone.
+        guard let legacyStoredStripPath,
+              !legacyStoredStripPath.hasPrefix("/"),
+              !legacyStoredStripPath.contains("\\"),
+              !legacyStoredStripPath.contains("\0") else {
+            throw SessionWorkspaceError.invalidPath(directory.path)
+        }
+        let components = legacyStoredStripPath.split(separator: "/", omittingEmptySubsequences: false)
+        guard !components.isEmpty,
+              components.allSatisfy({ !$0.isEmpty && $0 != "." && $0 != ".." }) else {
+            throw SessionWorkspaceError.invalidPath(legacyStoredStripPath)
+        }
+        let storedStrip = trustedRoot.appendingPathComponent(legacyStoredStripPath).standardizedFileURL
+        guard storedStrip.path.hasPrefix(trustedRoot.path + "/"),
+              storedStrip.deletingLastPathComponent().standardizedFileURL == directory,
+              manifest.stripFileName == nil || storedStrip.lastPathComponent == manifest.stripFileName else {
+            throw SessionWorkspaceError.invalidPath(legacyStoredStripPath)
+        }
+        try rejectSymlinkTraversal(from: trustedRoot, to: storedStrip)
+        return directory
+    }
+
+    private func rejectSymlinkTraversal(from root: URL, to target: URL) throws {
+        var current = root
+        let rootComponents = root.standardizedFileURL.pathComponents
+        let targetComponents = target.standardizedFileURL.pathComponents
+        guard targetComponents.count > rootComponents.count,
+              Array(targetComponents.prefix(rootComponents.count)) == rootComponents else {
+            throw SessionWorkspaceError.invalidPath(target.path)
+        }
+        for component in targetComponents.dropFirst(rootComponents.count) {
+            current.appendPathComponent(component)
+            guard fileManager.fileExists(atPath: current.path) else { continue }
+            let attributes = try fileManager.attributesOfItem(atPath: current.path)
+            if attributes[.type] as? FileAttributeType == .typeSymbolicLink {
+                throw SessionWorkspaceError.invalidPath(current.path)
+            }
+        }
     }
 
     private func resolve(_ path: String, in directory: URL) throws -> URL {

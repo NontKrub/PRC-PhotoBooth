@@ -11,11 +11,17 @@ actor EventGalleryStore {
     func load(eventID: String) throws -> EventGalleryIndex? {
         let url = try indexURL(eventID: eventID)
         guard fileManager.fileExists(atPath: url.path) else { return nil }
+        let data: Data
+        do {
+            data = try Data(contentsOf: url)
+        } catch {
+            throw EventGalleryStoreError.unreadable(url, reason: error.localizedDescription)
+        }
         let index: EventGalleryIndex
         do {
             let decoder = JSONDecoder()
             decoder.dateDecodingStrategy = .iso8601
-            index = try decoder.decode(EventGalleryIndex.self, from: Data(contentsOf: url))
+            index = try decoder.decode(EventGalleryIndex.self, from: data)
         } catch let error as EventGalleryStoreError {
             throw error
         } catch {
