@@ -1760,13 +1760,11 @@ struct NetworkRouteTests {
         let capture = ControlListenerCapture()
         let runtime = BoothNetworkTransportRuntime(
             queue: queue,
-            controlListenerFactory: { parameters, port in
-                let listener: NWListener
-                if let port {
-                    listener = try NWListener(using: parameters, on: port)
-                } else {
-                    listener = try NWListener(using: parameters)
-                }
+            controlListenerFactory: { _, _ in
+                // This test covers stale listener callback admission, not
+                // Ethernet binding. An ephemeral listener avoids depending
+                // on a host wired interface or a process-global fixed port.
+                let listener = try NWListener(using: .tcp)
                 capture.append(listener)
                 return listener
             }
@@ -1788,8 +1786,7 @@ struct NetworkRouteTests {
             writer.invalidate(generation: Int.max)
         }
 
-        var wiredParameters = NWParameters.tcp
-        wiredParameters.requiredInterfaceType = .wiredEthernet
+        let wiredParameters = NWParameters.tcp
         let generation = runtime.startControlListener(
             using: wiredParameters,
             port: NWEndpoint.Port(rawValue: 58_500),
@@ -4368,6 +4365,162 @@ struct NetworkRouteTests {
 
         #expect(route.lanPathChanged(isAvailable: false, wifiAvailable: true) == .startWiFi(fallback: true))
         #expect(route.state == .connectingWiFi)
+    }
+
+    @Test("Mac authenticated Ethernet disconnect falls back through NetworkBoothTransport")
+    @MainActor
+    func authenticatedLANDisconnectUsesProductionHandlerAndFallsBackAfterGrace() async throws {
+        let transport = NetworkBoothTransport(role: .mac, networkPreference: .lan)
+        defer { transport.disconnect() }
+        let listenerGeneration = transport.prepareAuthenticatedLANDisconnectForTesting(
+            wifiPathAvailable: true
+        )
+
+        transport.closeAuthenticatedLANControlForTesting()
+        #expect(transport.lanFallbackSnapshotForTesting.activeInterface == .wiredEthernet)
+        #expect(!transport.lanFallbackSnapshotForTesting.fallbackActive)
+
+        try await Task.sleep(for: .milliseconds(200))
+
+        let snapshot = transport.lanFallbackSnapshotForTesting
+        #expect(snapshot.activeInterface == .wifi)
+        #expect(snapshot.fallbackActive)
+        #expect(snapshot.routeState == .connectingWiFi)
+        #expect(snapshot.controlListenerGeneration != listenerGeneration)
+    }
+
+    @Test("Legacy authenticated Ethernet disconnect uses the same bounded fallback")
+    @MainActor
+    func legacyAuthenticatedLANDisconnectUsesProductionHandler() async throws {
+        let transport = NetworkBoothTransport(role: .mac, networkPreference: .lan)
+        defer { transport.disconnect() }
+        let listenerGeneration = transport.prepareAuthenticatedLANDisconnectForTesting(
+            wifiPathAvailable: true,
+            legacyControlPath: true
+        )
+        let connectionGeneration = transport.lanFallbackSnapshotForTesting.controlConnectionGeneration
+
+        transport.closeAuthenticatedLANControlForTesting(coreOwned: false)
+        try await Task.sleep(for: .milliseconds(200))
+
+        let snapshot = transport.lanFallbackSnapshotForTesting
+        #expect(snapshot.activeInterface == .wifi)
+        #expect(snapshot.fallbackActive)
+        #expect(snapshot.controlListenerGeneration != listenerGeneration)
+        #expect(snapshot.controlConnectionGeneration != connectionGeneration)
+    }
+
+    @Test("Ethernet fallback waits for an observed Wi-Fi path")
+    @MainActor
+    func disconnectedLANKeepsListenerUntilWiFiIsObserved() async throws {
+        let wifiPathAvailabilityCases: [Bool?] = [false, nil]
+        for wifiPathAvailable in wifiPathAvailabilityCases {
+            let transport = NetworkBoothTransport(role: .mac, networkPreference: .lan)
+            let listenerGeneration = transport.prepareAuthenticatedLANDisconnectForTesting(
+                wifiPathAvailable: wifiPathAvailable
+            )
+
+            transport.closeAuthenticatedLANControlForTesting()
+            try await Task.sleep(for: .milliseconds(200))
+
+            let waitingSnapshot = transport.lanFallbackSnapshotForTesting
+            #expect(waitingSnapshot.activeInterface == .wiredEthernet)
+            #expect(!waitingSnapshot.fallbackActive)
+            #expect(waitingSnapshot.didObserveWiFiPath == (wifiPathAvailable != nil))
+            #expect(!waitingSnapshot.isWiFiPathAvailable)
+            #expect(waitingSnapshot.fallbackPending)
+            #expect(waitingSnapshot.controlListenerGeneration == listenerGeneration)
+
+            transport.updateWiFiPathForTesting(true)
+            try await Task.sleep(for: .milliseconds(100))
+
+            let recoveredSnapshot = transport.lanFallbackSnapshotForTesting
+            #expect(recoveredSnapshot.activeInterface == .wifi)
+            #expect(recoveredSnapshot.fallbackActive)
+            #expect(recoveredSnapshot.controlListenerGeneration != listenerGeneration)
+            transport.disconnect()
+        }
+    }
+
+    @Test("LAN authentication returning during grace cancels Wi-Fi fallback")
+    @MainActor
+    func authenticatedLANReturnCancelsPendingFallback() async throws {
+        let transport = NetworkBoothTransport(role: .mac, networkPreference: .lan)
+        defer { transport.disconnect() }
+        let listenerGeneration = transport.prepareAuthenticatedLANDisconnectForTesting(
+            wifiPathAvailable: true
+        )
+
+        transport.closeAuthenticatedLANControlForTesting()
+        transport.restoreAuthenticatedLANControlForTesting()
+        try await Task.sleep(for: .milliseconds(200))
+
+        let snapshot = transport.lanFallbackSnapshotForTesting
+        #expect(snapshot.activeInterface == .wiredEthernet)
+        #expect(!snapshot.fallbackActive)
+        #expect(!snapshot.fallbackPending)
+        #expect(snapshot.controlListenerGeneration == listenerGeneration)
+    }
+
+    @Test("Preference change retires the pending Ethernet fallback")
+    @MainActor
+    func preferenceChangeRetiresPendingLANFallback() async throws {
+        let transport = NetworkBoothTransport(role: .mac, networkPreference: .lan)
+        defer { transport.disconnect() }
+        _ = transport.prepareAuthenticatedLANDisconnectForTesting(wifiPathAvailable: true)
+
+        transport.closeAuthenticatedLANControlForTesting()
+        transport.requestedNetworkPreference = .wifi
+        let listenerGeneration = transport.lanFallbackSnapshotForTesting.controlListenerGeneration
+        try await Task.sleep(for: .milliseconds(200))
+
+        let snapshot = transport.lanFallbackSnapshotForTesting
+        #expect(snapshot.activeInterface == .wifi)
+        #expect(!snapshot.fallbackActive)
+        #expect(!snapshot.fallbackPending)
+        #expect(snapshot.controlListenerGeneration == listenerGeneration)
+    }
+
+    @Test("Pending pairing disconnect retains the manual Ethernet listener")
+    @MainActor
+    func pendingPairingDisconnectDoesNotStartWiFiFallback() async throws {
+        let transport = NetworkBoothTransport(role: .mac, networkPreference: .lan)
+        defer { transport.disconnect() }
+        let listenerGeneration = transport.prepareAuthenticatedLANDisconnectForTesting(
+            wifiPathAvailable: true,
+            pairingPending: true
+        )
+
+        transport.closeAuthenticatedLANControlForTesting()
+        try await Task.sleep(for: .milliseconds(200))
+
+        let snapshot = transport.lanFallbackSnapshotForTesting
+        #expect(snapshot.activeInterface == .wiredEthernet)
+        #expect(!snapshot.fallbackActive)
+        #expect(!snapshot.fallbackPending)
+        #expect(snapshot.controlListenerGeneration == listenerGeneration)
+    }
+
+    @Test("Stopping during the Ethernet grace invalidates the old deadline")
+    @MainActor
+    func stoppingDuringLANFallbackGraceInvalidatesDeadline() async throws {
+        let transport = NetworkBoothTransport(role: .mac, networkPreference: .lan)
+        let originalListenerGeneration = transport.prepareAuthenticatedLANDisconnectForTesting(
+            wifiPathAvailable: true
+        )
+
+        transport.closeAuthenticatedLANControlForTesting()
+        transport.disconnect()
+        let stoppedSnapshot = transport.lanFallbackSnapshotForTesting
+        try await Task.sleep(for: .milliseconds(200))
+
+        let finalSnapshot = transport.lanFallbackSnapshotForTesting
+        #expect(stoppedSnapshot.activeInterface == nil)
+        #expect(!stoppedSnapshot.fallbackActive)
+        #expect(finalSnapshot.activeInterface == nil)
+        #expect(!finalSnapshot.fallbackActive)
+        #expect(finalSnapshot.controlListenerGeneration == stoppedSnapshot.controlListenerGeneration)
+        #expect(stoppedSnapshot.controlListenerGeneration == originalListenerGeneration)
     }
 
     @Test("No LAN and no Wi-Fi becomes unavailable")

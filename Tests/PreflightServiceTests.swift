@@ -45,6 +45,37 @@ struct PreflightServiceTests {
         #expect(service.result(for: .networkRoute)?.status == .warning)
     }
 
+    @Test("authenticated Ethernet is ready when the path monitor reports unavailable")
+    @MainActor
+    func authenticatedEthernetOverridesUnavailablePathHint() async {
+        let service = BoothPreflightService()
+        await service.runSafeChecks(using: context(
+            ipadConnected: true,
+            requestedNetwork: .lan,
+            effectiveNetwork: .lan,
+            lanPathAvailable: false
+        ))
+
+        #expect(service.result(for: .lanPath)?.status == .passed)
+        #expect(service.result(for: .lanPath)?.detail == "Authenticated Ethernet transport is active; Network.framework path status is advisory.")
+        #expect(service.result(for: .networkRoute)?.status == .passed)
+    }
+
+    @Test("a LAN preference without an authenticated Ethernet route stays unavailable")
+    @MainActor
+    func lanPreferenceDoesNotImplyAvailablePath() async {
+        let service = BoothPreflightService()
+        await service.runSafeChecks(using: context(
+            requestedNetwork: .lan,
+            effectiveNetwork: .unavailable,
+            lanPathAvailable: false
+        ))
+
+        #expect(service.result(for: .lanPath)?.status == .warning)
+        #expect(service.result(for: .lanPath)?.detail == "This interface is unavailable.")
+        #expect(service.result(for: .networkRoute)?.status == .skipped)
+    }
+
     @Test("preflight reports authenticated channels freshness reconnect state and queue backlog")
     @MainActor
     func transportAndQueueHealth() async {

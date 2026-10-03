@@ -251,6 +251,10 @@ public enum BoothConnectionPresentationResolver {
         let fallbackText = status.isFallbackActive
             ? "Wi-Fi fallback active" + (status.fallbackReason.map { ": \($0)" } ?? "")
             : nil
+        let authenticatedLANActive = controlConnected
+            && status.isPeerAuthenticated
+            && status.peerID == status.preferredPeerID
+            && status.effectiveNetwork == .lan
 
         return BoothConnectionPresentation(
             stateText: stateText,
@@ -263,7 +267,7 @@ public enum BoothConnectionPresentationResolver {
             preferredPeerID: status.preferredPeerID,
             previewConnected: status.isPreviewChannelConnected,
             lanHandshake: handshakeText(status.lanHandshake),
-            ethernetAvailable: status.isLANPathAvailable,
+            ethernetAvailable: status.isLANPathAvailable || authenticatedLANActive,
             wifiAvailable: status.isWiFiPathAvailable,
             previewFPS: status.previewDiagnostics.fps,
             throughputBytesPerSecond: status.previewDiagnostics.bytesPerSecond,

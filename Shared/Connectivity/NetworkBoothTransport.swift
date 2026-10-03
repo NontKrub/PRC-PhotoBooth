@@ -212,6 +212,7 @@ public final class NetworkBoothTransport: BoothTransport {
         set {
             guard requestedPreference != newValue else { return }
             cancelLANRecovery()
+            cancelAuthenticatedLANDisconnectFallback()
             let oldValue = requestedPreference
             requestedPreference = newValue
             refreshControlCoreCredentials()
@@ -305,6 +306,12 @@ public final class NetworkBoothTransport: BoothTransport {
     private var routeDiscoveryFallbackToken = 0
     private var routeDiscoveryGate = BoothRouteDiscoveryGenerationGate()
     private var callbackGate = BoothTransportCallbackGate()
+    private var authenticatedLANDisconnectFallbackSource: DispatchSourceTimer?
+    private var authenticatedLANDisconnectFallbackToken = 0
+    private var authenticatedLANDisconnectFallbackPending = false
+#if DEBUG
+    private var authenticatedLANDisconnectGracePeriodForTesting: TimeInterval?
+#endif
     private var controlConnection: NWConnection?
     private var controlConnectionGeneration = 0
     /// A trusted control socket promoted by the runtime remains runtime-owned.
@@ -1129,6 +1136,7 @@ public final class NetworkBoothTransport: BoothTransport {
     private func handleCoreOwnedControlDisconnect(generation: Int, reason: String?) {
         guard coreOwnedControlGeneration == generation,
               controlConnectionGeneration == generation else { return }
+        let shouldScheduleLANFallback = hasEstablishedManualLANControl
         coreOwnedControlGeneration = nil
         invalidateReceiveToken(for: .control)
         controlConnectionIsViable = false
@@ -1156,7 +1164,16 @@ public final class NetworkBoothTransport: BoothTransport {
         connectedPeerNames = []
         peerDeviceID = nil
         connectionState = role == .iPad && shouldReconnect ? .connecting : .disconnected
+        if retainsManualLANListener {
+            routeMachine = BoothNetworkRouteMachine(preference: requestedPreference)
+        }
         emitTransportEvent(.transportDisconnected, channel: .control, reason: reason)
+        if shouldScheduleLANFallback {
+            scheduleAuthenticatedLANDisconnectFallback()
+        }
+        if authenticatedLANDisconnectFallbackPending {
+            attemptAuthenticatedLANDisconnectFallback()
+        }
         publishStatus()
     }
 
@@ -1203,6 +1220,7 @@ public final class NetworkBoothTransport: BoothTransport {
             transportRuntime.invalidateControlConnection(generation: generation)
             return
         }
+        authenticatedManualLANControlDidRecover()
         if let interface, role == .iPad {
             activeInterface = interface
             fallbackActive = interface == .wifi && requestedPreference == .lan
@@ -2001,6 +2019,7 @@ public final class NetworkBoothTransport: BoothTransport {
     public func start() {
         shouldReconnect = true
         cancelLANRecovery()
+        cancelAuthenticatedLANDisconnectFallback()
         reconnectAttempt = 0
         connectionStatus.publishReconnectState(inProgress: false)
         emitTransportEvent(.transportDiscoveryStarted, attempt: reconnectAttempt)
@@ -2022,6 +2041,7 @@ public final class NetworkBoothTransport: BoothTransport {
 
     public func disconnect() {
         shouldReconnect = false
+        cancelAuthenticatedLANDisconnectFallback()
         connectionStatus.publishReconnectState(inProgress: false)
         cancelLANRecovery()
         cancelRouteDiscovery()
@@ -2368,6 +2388,10 @@ public final class NetworkBoothTransport: BoothTransport {
             return
         }
         if available {
+            if authenticatedLANDisconnectFallbackPending {
+                attemptAuthenticatedLANDisconnectFallback()
+                return
+            }
             guard role == .mac, activeInterface == nil else { return }
             let command = routeMachine.wifiPathChanged(
                 isAvailable: true,
@@ -2406,6 +2430,79 @@ public final class NetworkBoothTransport: BoothTransport {
         case .none:
             break
         }
+    }
+
+    private var hasEstablishedManualLANControl: Bool {
+        role == .mac
+            && requestedPreference == .lan
+            && activeInterface == .wiredEthernet
+            && shouldReconnect
+            && peerAuthenticated
+            && secureChannelEstablished
+            && pendingCorePairingCandidate == nil
+            && !hasEphemeralPairingState
+    }
+
+    private var authenticatedLANDisconnectGracePeriod: TimeInterval {
+#if DEBUG
+        authenticatedLANDisconnectGracePeriodForTesting ?? Self.lanHandshakeTimeout
+#else
+        Self.lanHandshakeTimeout
+#endif
+    }
+
+    private func scheduleAuthenticatedLANDisconnectFallback() {
+        guard retainsManualLANListener,
+              shouldReconnect,
+              authenticatedLANDisconnectFallbackSource == nil,
+              !authenticatedLANDisconnectFallbackPending else { return }
+
+        authenticatedLANDisconnectFallbackToken &+= 1
+        let token = authenticatedLANDisconnectFallbackToken
+        let callbackGeneration = callbackGate.generation
+        let source = DispatchSource.makeTimerSource(queue: transportQueue)
+        source.schedule(deadline: .now() + authenticatedLANDisconnectGracePeriod)
+        source.setEventHandler(handler: BoothTransportTimerDispatch.onMainActor { [weak self] in
+            guard let self,
+                  self.authenticatedLANDisconnectFallbackToken == token,
+                  self.callbackGate.accepts(callbackGeneration) else { return }
+            self.authenticatedLANDisconnectFallbackSource = nil
+            self.authenticatedLANDisconnectFallbackPending = true
+            self.attemptAuthenticatedLANDisconnectFallback()
+        })
+        authenticatedLANDisconnectFallbackSource = source
+        source.resume()
+    }
+
+    private func attemptAuthenticatedLANDisconnectFallback() {
+        guard authenticatedLANDisconnectFallbackPending,
+              retainsManualLANListener,
+              shouldReconnect,
+              !peerAuthenticated,
+              pendingCorePairingCandidate == nil,
+              !hasEphemeralPairingState,
+              didReceiveWiFiPathUpdate,
+              isWiFiPathAvailable else { return }
+
+        let command = routeMachine.transportDisconnected(
+            lanAvailable: false,
+            wifiAvailable: true
+        )
+        guard command == .startWiFi(fallback: true) else { return }
+        print("[NetworkRoute] Authenticated LAN disconnected; falling back to Wi-Fi")
+        apply(command, reason: "Authenticated LAN control disconnected")
+    }
+
+    private func cancelAuthenticatedLANDisconnectFallback() {
+        authenticatedLANDisconnectFallbackToken &+= 1
+        authenticatedLANDisconnectFallbackSource?.cancel()
+        authenticatedLANDisconnectFallbackSource = nil
+        authenticatedLANDisconnectFallbackPending = false
+    }
+
+    private func authenticatedManualLANControlDidRecover() {
+        guard role == .mac, activeInterface == .wiredEthernet else { return }
+        cancelAuthenticatedLANDisconnectFallback()
     }
 
     private func activateWiFiFallback(reason: String) {
@@ -3064,6 +3161,7 @@ public final class NetworkBoothTransport: BoothTransport {
     }
 
     private func tearDownActiveTransport() {
+        cancelAuthenticatedLANDisconnectFallback()
         activeInterface = nil
         directLANControlAttemptInFlight = false
         callbackGate.invalidate()
@@ -5645,6 +5743,7 @@ public final class NetworkBoothTransport: BoothTransport {
         secureNegotiationTimeoutSource = nil
         try? secureNegotiator.markEstablished(generation: controlConnectionGeneration)
         secureChannelEstablished = true
+        authenticatedManualLANControlDidRecover()
         setFrameDecoderHandshake(true, channel: .control)
         connectionStatus.publishSecureChannel(ready: true)
         emitTransportEvent(.secureChannelEstablished, channel: .control)
@@ -6277,6 +6376,7 @@ public final class NetworkBoothTransport: BoothTransport {
         if let reason { lastNetworkError = reason }
         if channel == .control {
             guard let connection, connection === controlConnection else { return }
+            let shouldScheduleLANFallback = hasEstablishedManualLANControl
             invalidateReceiveToken(for: .control)
             controlConnectionIsViable = false
             cancelWaitingRecovery(for: channel)
@@ -6347,6 +6447,13 @@ public final class NetworkBoothTransport: BoothTransport {
                 resetControlAuthentication()
                 connectionState = .disconnected
                 lanHandshakeState = .waiting
+                routeMachine = BoothNetworkRouteMachine(preference: requestedPreference)
+                if shouldScheduleLANFallback {
+                    scheduleAuthenticatedLANDisconnectFallback()
+                }
+                if authenticatedLANDisconnectFallbackPending {
+                    attemptAuthenticatedLANDisconnectFallback()
+                }
                 if controlListener == nil { startListener(channel: .control) }
                 if previewListener == nil { startListener(channel: .preview) }
                 if assetListener == nil { startListener(channel: .asset) }
@@ -6728,6 +6835,104 @@ public final class NetworkBoothTransport: BoothTransport {
             if previewBrowser == nil { startBrowser(channel: .preview) }
         }
     }
+
+#if DEBUG
+    struct LANFallbackSnapshotForTesting: Equatable {
+        let activeInterface: BoothNetworkInterfacePolicy?
+        let fallbackActive: Bool
+        let routeState: BoothNetworkRouteState
+        let controlListenerGeneration: Int
+        let controlConnectionGeneration: Int
+        let didObserveWiFiPath: Bool
+        let isWiFiPathAvailable: Bool
+        let fallbackPending: Bool
+    }
+
+    func prepareAuthenticatedLANDisconnectForTesting(
+        wifiPathAvailable: Bool?,
+        pairingPending: Bool = false,
+        legacyControlPath: Bool = false,
+        gracePeriod: TimeInterval = 0.05
+    ) -> Int {
+        cancelAuthenticatedLANDisconnectFallback()
+        shouldReconnect = true
+        requestedPreference = .lan
+        activeInterface = .wiredEthernet
+        fallbackActive = false
+        fallbackReason = nil
+        routeMachine = BoothNetworkRouteMachine(preference: .lan)
+        _ = routeMachine.beginLANAttempt()
+        _ = routeMachine.lanHandshakeSucceeded(peer: "Test iPad")
+        controlConnectionGeneration = 100
+        coreOwnedControlGeneration = controlConnectionGeneration
+        coreControlListenerGeneration = 1
+        controlConnectionIsViable = true
+        peerAuthenticated = true
+        secureChannelEstablished = true
+        connectionState = .connected(peerName: "Test iPad")
+        didReceiveWiFiPathUpdate = wifiPathAvailable != nil
+        isWiFiPathAvailable = wifiPathAvailable ?? false
+        authenticatedLANDisconnectGracePeriodForTesting = gracePeriod
+        if pairingPending {
+            pendingPairingIntent = BoothPairingIntent(
+                iPadIdentity: BoothDeviceIdentity(
+                    id: UUID().uuidString,
+                    displayName: "Pairing iPad",
+                    role: .iPad
+                ),
+                targetMacDeviceID: localIdentity.id
+            )
+        }
+        if legacyControlPath {
+            // The legacy close handler ordinarily recreates a fixed-port LAN
+            // listeners immediately. Keep non-started placeholders so this
+            // deterministic test exercises that handler without reserving
+            // process-global test ports while suites run in parallel.
+            controlListener = try? NWListener(using: .tcp)
+            previewListener = try? NWListener(using: .tcp)
+            assetListener = try? NWListener(using: .tcp)
+        }
+        publishStatus()
+        return coreControlListenerGeneration
+    }
+
+    func closeAuthenticatedLANControlForTesting(coreOwned: Bool = true) {
+        let generation = controlConnectionGeneration
+        if coreOwned {
+            coreOwnedControlGeneration = generation
+            handleCoreOwnedControlDisconnect(generation: generation, reason: "test control disconnect")
+        } else {
+            coreOwnedControlGeneration = nil
+            let connection = NWConnection(host: "127.0.0.1", port: 1, using: .tcp)
+            controlConnection = connection
+            connectionDidClose(connection, channel: .control, reason: "test control disconnect")
+        }
+    }
+
+    func restoreAuthenticatedLANControlForTesting() {
+        peerAuthenticated = true
+        secureChannelEstablished = true
+        controlConnectionIsViable = true
+        authenticatedManualLANControlDidRecover()
+    }
+
+    func updateWiFiPathForTesting(_ available: Bool) {
+        handleWiFiPathUpdate(available)
+    }
+
+    var lanFallbackSnapshotForTesting: LANFallbackSnapshotForTesting {
+        LANFallbackSnapshotForTesting(
+            activeInterface: activeInterface,
+            fallbackActive: fallbackActive,
+            routeState: routeMachine.state,
+            controlListenerGeneration: coreControlListenerGeneration,
+            controlConnectionGeneration: controlConnectionGeneration,
+            didObserveWiFiPath: didReceiveWiFiPathUpdate,
+            isWiFiPathAvailable: isWiFiPathAvailable,
+            fallbackPending: authenticatedLANDisconnectFallbackPending
+        )
+    }
+#endif
 
     private static func localDeviceName(for role: DeviceRole) -> String {
 #if os(iOS)

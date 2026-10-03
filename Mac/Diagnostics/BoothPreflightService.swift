@@ -33,7 +33,14 @@ final class BoothPreflightService {
         checked.append(result(.cameraTestCapture, "Camera test capture", "Run Full Preflight to test the shutter.", .notRun, .recommended, now))
         checked.append(result(.customerDisplay, "Customer display", context.customerDisplayReady ? "A customer display is ready." : "Connect an iPad or activate the external viewer.", context.customerDisplayReady ? .passed : .failed, .required, now))
         checked.append(networkPathResult(.wifiPath, title: "Wi-Fi path", available: context.wifiPathAvailable, now: now))
-        checked.append(networkPathResult(.lanPath, title: "LAN path", available: context.lanPathAvailable, now: now))
+        let authenticatedLANActive = context.ipadConnected && context.effectiveNetwork == .lan
+        checked.append(networkPathResult(
+            .lanPath,
+            title: "LAN path",
+            available: context.lanPathAvailable,
+            authenticatedTransportActive: authenticatedLANActive,
+            now: now
+        ))
         checked.append(ipadTransportResult(context, now: now))
         checked.append(authenticationResult(context, now: now))
         checked.append(controlChannelResult(context, now: now))
@@ -159,8 +166,19 @@ final class BoothPreflightService {
         _ id: PreflightCheckID,
         title: String,
         available: Bool,
+        authenticatedTransportActive: Bool = false,
         now: Date
     ) -> PreflightCheckResult {
+        if authenticatedTransportActive {
+            return result(
+                id,
+                title,
+                "Authenticated Ethernet transport is active; Network.framework path status is advisory.",
+                .passed,
+                .recommended,
+                now
+            )
+        }
         return result(
             id,
             title,
