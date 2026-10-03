@@ -5,6 +5,30 @@ import Testing
 
 @Suite("Retention cleanup", .serialized)
 struct RetentionCleanupTests {
+    @Test("legacy cleanup query excludes unfinished and non-expired sessions")
+    @MainActor
+    func fetchSessionsFinishedBeforeExcludesNilEqualAndNewDates() {
+        let dataStore = DataStore.inMemoryForTesting()
+        let event = dataStore.createEvent(name: "Retention query")
+        let cutoff = Date(timeIntervalSince1970: 1_800_000_000)
+
+        let unfinishedSession = dataStore.startSession(for: event)
+        let expiredSession = dataStore.startSession(for: event)
+        expiredSession.finishedAt = cutoff.addingTimeInterval(-1)
+        let boundarySession = dataStore.startSession(for: event)
+        boundarySession.finishedAt = cutoff
+        let newerSession = dataStore.startSession(for: event)
+        newerSession.finishedAt = cutoff.addingTimeInterval(1)
+        #expect(dataStore.saveChanges())
+
+        let fetchedIDs = Set(dataStore.fetchSessions(finishedBefore: cutoff).map(\.id))
+
+        #expect(fetchedIDs == [expiredSession.id])
+        #expect(!fetchedIDs.contains(unfinishedSession.id))
+        #expect(!fetchedIDs.contains(boundarySession.id))
+        #expect(!fetchedIDs.contains(newerSession.id))
+    }
+
     @Test("expired approved session leaves gallery and all local routes before deleting files")
     @MainActor
     func removesGalleryBeforeExpiredSessionFiles() async throws {
