@@ -4,6 +4,7 @@ import AppKit
 struct CloudSSHSetupView: View {
     @Bindable var setup: CloudSSHSetupService
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.locale) private var locale
     @State private var configuration: CloudSSHConfiguration
 
     init(setup: CloudSSHSetupService) {
@@ -88,7 +89,7 @@ struct CloudSSHSetupView: View {
 
             if !setup.progressMessage.isEmpty {
                 VStack(alignment: .leading, spacing: 4) {
-                    Text(setup.progressMessage)
+                    Text(operatorString(setup.progressMessage, locale: locale))
                         .font(.callout)
                         .foregroundStyle(setup.state == .complete ? .green : .primary)
                         .fixedSize(horizontal: false, vertical: true)

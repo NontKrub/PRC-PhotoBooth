@@ -1613,9 +1613,15 @@ extension GenericPasswordKeychainStore {
     }
 
     func deleteBothCopies(service: String, account: String) -> OSStatus {
-        let dataProtectionStatus = deleteData(service: service, account: account, useDataProtectionKeychain: true)
+        var dataProtectionStatus = deleteData(service: service, account: account, useDataProtectionKeychain: true)
         if !hasSeparateLegacyKeychain {
             return dataProtectionStatus == errSecItemNotFound ? errSecSuccess : dataProtectionStatus
+        }
+        // Profile-free Mac builds use the native Keychain. Ignore a missing
+        // entitlement only when no Data Protection item remains to be deleted.
+        if dataProtectionStatus == errSecMissingEntitlement,
+           readData(service: service, account: account, useDataProtectionKeychain: true).status == errSecItemNotFound {
+            dataProtectionStatus = errSecItemNotFound
         }
         let legacyStatus = deleteData(service: service, account: account, useDataProtectionKeychain: false)
         for status in [dataProtectionStatus, legacyStatus]

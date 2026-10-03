@@ -87,7 +87,8 @@ struct CloudUploadServiceTests {
         #expect(commands[6].arguments.last?.contains("current_alias_target=$(readlink") == true)
         #expect((await verifier.urls).first?.path == "/photobooth/s/token/strip.png")
         let page = try String(contentsOf: directory.appendingPathComponent("index.html"), encoding: .utf8)
-        #expect(page.contains(#"src="strip.png""#))
+        #expect(page.contains(#"src="booth.gif""#))
+        #expect(page.contains(#"srcset="strip.png" media="(prefers-reduced-motion: reduce)""#))
         #expect(page.contains(#"href="strip.png""#))
         #expect(page.contains(#"href="booth.gif""#))
         #expect(!page.contains(#"src="/s/"#))
@@ -126,6 +127,44 @@ struct CloudUploadServiceTests {
         #expect((await verifier.urls).isEmpty)
     }
 
+    @Test("matching diagnostic output cannot override mismatched checksum stdout")
+    func checksumValidationUsesOnlyStdout() async throws {
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let data = Data([1, 2, 3])
+        try data.write(to: directory.appendingPathComponent("strip.png"))
+        let digest = SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+        let runner = TestCloudCommandRunner()
+        await runner.setCommandResult(at: 2, result: CloudCommandResult(
+            exitCode: 0,
+            output: "\(digest)  strip.png\n3\n",
+            standardOutput: "\(String(repeating: "0", count: 64))  strip.png\n3\n"
+        ))
+        let verifier = TestCloudURLVerifier()
+        let service = CloudUploadService(runner: runner, verifier: verifier)
+
+        do {
+            try await service.upload(
+                manifest: makeManifest(directory: directory),
+                configuration: CloudUploadConfiguration(
+                    sshHost: "host",
+                    remoteBasePath: "/srv/photos",
+                    publicBaseURL: "https://photos.example"
+                )
+            )
+            Issue.record("Expected mismatched checksum stdout to prevent publication")
+        } catch let error as JobExecutionError {
+            guard case .retryable(let message) = error else {
+                Issue.record("Expected retryable checksum error")
+                return
+            }
+            #expect(message.contains("remote checksum"))
+        }
+
+        #expect((await runner.commands).count == 3)
+        #expect((await verifier.urls).isEmpty)
+    }
+
     @Test("cleanup failure does not downgrade verified cloud delivery")
     func cleanupFailureIsNonFatal() async throws {
         let directory = try temporaryDirectory()
@@ -145,6 +184,9 @@ struct CloudUploadServiceTests {
         )
 
         #expect((await runner.commands).count == 7)
+        let page = try String(contentsOf: directory.appendingPathComponent("index.html"), encoding: .utf8)
+        #expect(page.contains(#"src="strip.png""#))
+        #expect(!page.contains("booth.gif"))
     }
 
     @Test("ambiguous rollback-backup cleanup keeps the verified public alias")
@@ -823,6 +865,10 @@ private actor TestCloudCommandRunner: CloudCommandRunning {
         failures[index] = CloudCommandResult(exitCode: exitCode, output: output)
     }
 
+    func setCommandResult(at index: Int, result: CloudCommandResult) {
+        failures[index] = result
+    }
+
     func run(executable: String, arguments: [String], timeout: TimeInterval) async throws -> CloudCommandResult {
         let index = commands.count
         commands.append(Command(executable: executable, arguments: arguments))
@@ -836,7 +882,15 @@ private actor TestCloudCommandRunner: CloudCommandRunning {
            let uploadedDirectory,
            let data = try? Data(contentsOf: uploadedDirectory.appendingPathComponent("strip.png")) {
             let digest = SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
-            return CloudCommandResult(exitCode: 0, output: "\(digest)  strip.png\n\(data.count)\n")
+            // Exercise the real runner's stream formatting, including harmless SSH diagnostics.
+            return try await ProcessCloudCommandRunner().run(
+                executable: "/bin/sh",
+                arguments: [
+                    "-c", "printf '%s' \"$1\"; printf '%s\\n' 'SSH diagnostic' >&2",
+                    "checksum", "\(digest)  strip.png\n\(data.count)\n"
+                ],
+                timeout: 2
+            )
         }
         return CloudCommandResult(exitCode: 0, output: "")
     }

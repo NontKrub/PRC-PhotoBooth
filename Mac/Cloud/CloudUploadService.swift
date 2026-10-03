@@ -106,6 +106,8 @@ struct CloudSessionLayout: Sendable, Equatable {
 struct CloudCommandResult: Sendable, Equatable {
     var exitCode: Int32
     var output: String
+    // Keep machine-readable stdout separate from labeled diagnostic output.
+    var standardOutput: String? = nil
 }
 
 enum CloudCommandError: LocalizedError, Sendable, Equatable {
@@ -182,7 +184,8 @@ struct ProcessCloudCommandRunner: CloudCommandRunning {
             readers.notify(queue: .global(qos: .utility)) {
                 let result = CloudCommandResult(
                     exitCode: process.terminationStatus,
-                    output: combinedOutput(stdout: stdout, stderr: stderr)
+                    output: combinedOutput(stdout: stdout, stderr: stderr),
+                    standardOutput: stdout.string
                 )
                 if let error = state.terminationError {
                     state.complete(.failure(error))
@@ -737,7 +740,7 @@ actor CloudUploadService {
             timeout: Timeout.ssh
         )
         guard remoteFileMatches(
-            checksumResult.output,
+            checksumResult.standardOutput ?? checksumResult.output,
             expectedSHA256: expectedStrip.sha256,
             expectedByteCount: expectedStrip.byteCount
         ) else {
@@ -1118,18 +1121,67 @@ actor CloudUploadService {
 
 private func cloudDownloadPageHTML(hasGIF: Bool) -> String {
     let gifLink = hasGIF
-        ? #"<p><a href="booth.gif" download="photobooth.gif">Save GIF</a></p>"#
+        ? #"<a class="button secondary" href="booth.gif" download="photobooth.gif">Save GIF</a>"#
         : ""
+    let preview = hasGIF ? "booth.gif" : "strip.png"
+    let previewDescription = hasGIF ? "Animated photo strip" : "Photo strip"
+    let subtitle = hasGIF ? "Your photo strip and GIF are ready." : "Your photo strip is ready."
     return """
     <!DOCTYPE html>
     <html lang="en">
-    <head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>PRC Photo Booth — Your Photos</title></head>
-    <body style="font-family:-apple-system,sans-serif;text-align:center;padding:2rem">
-    <h1>✨ Your Photo Strip</h1>
-    <img src="strip.png" alt="Photo Strip" style="max-width:90vw">
-    <p><a href="strip.png" download="photobooth-strip.png">Save Strip</a></p>
+    <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="theme-color" content="#f3f6fc">
+    <title>PRC PhotoBooth — Your photos</title>
+    <style>
+    :root { color-scheme: light; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      color: #14294a; background: #f3f6fc; }
+    * { box-sizing: border-box; }
+    body { margin: 0; min-height: 100svh; padding: 24px; }
+    header { max-width: 960px; margin: 0 auto; font-size: 15px; font-weight: 700; }
+    main { width: 100%; max-width: 640px; margin: 40px auto 24px; text-align: center; }
+    h1 { margin: 0 0 8px; font-size: 32px; line-height: 1.2; letter-spacing: -.02em; }
+    p { margin: 0; color: #596b83; font-size: 16px; line-height: 1.5; }
+    .preview { display: flex; align-items: center; justify-content: center; margin: 24px 0;
+      padding: 20px; background: #e8eef8; border-radius: 20px; }
+    picture { display: flex; justify-content: center; max-width: 100%; }
+    img { display: block; max-width: 100%; max-height: 56svh; width: auto; height: auto;
+      object-fit: contain; border-radius: 4px; box-shadow: 0 6px 18px rgb(20 41 74 / 12%); }
+    .downloads { display: flex; justify-content: center; flex-wrap: wrap; gap: 12px; }
+    .button { display: inline-flex; align-items: center; justify-content: center; min-height: 48px;
+      padding: 12px 24px; border-radius: 10px; background: #165fe5; color: #fff;
+      font-weight: 650; font-size: 16px; line-height: 1.5; text-decoration: none; }
+    .button:hover { background: #104dc0; }
+    .secondary { background: #fff; color: #1650bd; }
+    .secondary:hover { background: #dbe5f2; }
+    a:focus-visible { outline: 3px solid #14294a; outline-offset: 4px; }
+    ::selection { background: #dbe5f2; color: #14294a; }
+    @media (max-width: 480px) {
+      body { padding: 20px 16px; }
+      main { margin-top: 32px; }
+      h1 { font-size: 28px; }
+      .preview { padding: 16px; margin: 20px 0; }
+      .downloads { display: grid; grid-template-columns: 1fr; }
+    }
+    </style>
+    </head>
+    <body>
+    <header>PRC PhotoBooth</header>
+    <main>
+    <h1>Your photos</h1>
+    <p>\(subtitle)</p>
+    <div class="preview">
+      <picture>
+        <source srcset="strip.png" media="(prefers-reduced-motion: reduce)">
+        <img src="\(preview)" alt="\(previewDescription)">
+      </picture>
+    </div>
+    <nav class="downloads" aria-label="Save your photos">
+    <a class="button" href="strip.png" download="photobooth-strip.png">Save photo strip</a>
     \(gifLink)
+    </nav>
+    </main>
     </body>
     </html>
     """

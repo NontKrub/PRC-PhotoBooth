@@ -11,6 +11,25 @@ private let testPINKeychain = InMemoryGenericPasswordKeychain()
 
 @Suite("Admin PIN storage", .serialized)
 struct KeychainHelperTests {
+    @Test("Mac Keychain cleanup supports signing without Data Protection entitlements")
+    func cleanupWithoutDataProtectionEntitlements() {
+        let keychain = InMemoryGenericPasswordKeychain()
+        keychain.dataProtectionDeleteFailureStatus = errSecMissingEntitlement
+        keychain.put(Data([1]), service: "portable", account: "test", useDataProtectionKeychain: false)
+        #expect(keychain.deleteBothCopies(service: "portable", account: "test") == errSecSuccess)
+        #expect(keychain.readDataWithFallback(service: "portable", account: "test").lookup == .notFound)
+
+        keychain.failLegacyDeletes = true
+        #expect(keychain.deleteBothCopies(service: "portable", account: "test") == errSecIO)
+        keychain.failLegacyDeletes = false
+
+        // An existing or unreadable Data Protection item still blocks successful cleanup.
+        keychain.put(Data([2]), service: "portable", account: "test", useDataProtectionKeychain: true)
+        #expect(keychain.deleteBothCopies(service: "portable", account: "test") == errSecMissingEntitlement)
+        keychain.failDataProtectionReads = true
+        #expect(keychain.deleteBothCopies(service: "portable", account: "test") == errSecMissingEntitlement)
+    }
+
     @Test("PIN setup cannot be dismissed after saving starts")
     func pinSavingBlocksCancellationAndDismissal() {
         #expect(PINGateView.CredentialActivity.saving.preventsDismissal)
@@ -587,6 +606,7 @@ final class InMemoryGenericPasswordKeychain: GenericPasswordKeychainStore, @unch
     var legacyReadFailureStatus: OSStatus?
     var failDataProtectionWrites = false
     var failDataProtectionDeletes = false
+    var dataProtectionDeleteFailureStatus: OSStatus?
     var failLegacyDeletes = false
     var corruptDataProtectionReadback = false
 
@@ -629,6 +649,7 @@ final class InMemoryGenericPasswordKeychain: GenericPasswordKeychainStore, @unch
     func deleteData(service: String, account: String, useDataProtectionKeychain: Bool) -> OSStatus {
         lock.lock()
         defer { lock.unlock() }
+        if useDataProtectionKeychain, let dataProtectionDeleteFailureStatus { return dataProtectionDeleteFailureStatus }
         if useDataProtectionKeychain && failDataProtectionDeletes { return errSecIO }
         if !useDataProtectionKeychain && failLegacyDeletes { return errSecIO }
         let key = itemKey(service: service, account: account, useDataProtectionKeychain: useDataProtectionKeychain)
