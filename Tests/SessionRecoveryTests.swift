@@ -305,6 +305,7 @@ struct SessionRecoveryTests {
             startedAt: now,
             directory: normalDirectory
         )
+        try Data(normal.id.utf8).write(to: normalDirectory.appendingPathComponent(".booth-session-id"))
         var diagnostic = makeManifest(
             id: "cancelled-soak-diagnostic",
             status: .cancelled,
@@ -328,6 +329,7 @@ struct SessionRecoveryTests {
             workspace: SessionWorkspace(),
             jobQueue: queue
         )
+        service.trustedOutputRoot = { root }
         await service.scanNow()
 
         #expect(try await manifestStore.load(sessionID: diagnostic.id).isRetainedSoakDiagnostic)

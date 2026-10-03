@@ -439,9 +439,9 @@ struct SettingsView: View {
                         .font(.caption2).foregroundStyle(.secondary)
 
                     HStack(spacing: 8) {
-                        Image(systemName: status.isLANPathAvailable ? "checkmark.circle.fill" : "circle.dashed")
-                            .foregroundStyle(status.isLANPathAvailable ? .green : .secondary)
-                        Text(status.isLANPathAvailable ? "Ethernet available" : "Ethernet unavailable")
+                        Image(systemName: presentation.ethernetAvailable ? "checkmark.circle.fill" : "circle.dashed")
+                            .foregroundStyle(presentation.ethernetAvailable ? .green : .secondary)
+                        Text(presentation.ethernetAvailable ? "Ethernet available" : "Ethernet unavailable")
                             .font(.caption)
                     }
 
@@ -705,12 +705,20 @@ struct SettingsView: View {
     private func networkDiagnostics(_ status: BoothConnectionStatus) -> some View {
         let metrics = status.previewDiagnostics
         let presentation = BoothConnectionPresentationResolver.resolve(status)
+        let authenticatedLANActive = coordinator.isAuthenticatedIPadConnected && status.effectiveNetwork == .lan
+        let ethernetObservation = status.lanPathObservation == .unavailable && authenticatedLANActive
+            ? operatorString("Unavailable (monitor hint; authenticated Ethernet is active).", locale: locale)
+            : pathObservationText(status.lanPathObservation)
+        let fallbackText = presentation.fallbackText
+            ?? (authenticatedLANActive
+                ? operatorString("Inactive (Ethernet connection is active).", locale: locale)
+                : operatorString("Inactive", locale: locale))
         return VStack(alignment: .leading, spacing: 6) {
             Text("Network diagnostics").font(.headline)
             diagnosticRow("Requested connection", status.requestedNetwork == .lan ? "LAN" : "Wi-Fi")
             diagnosticRow("Effective connection", connectionRouteDescription(status))
-            diagnosticRow("Fallback", presentation.fallbackText ?? "Inactive")
-            diagnosticRow("Ethernet path observation", pathObservationText(status.lanPathObservation))
+            diagnosticRow("Fallback", fallbackText)
+            diagnosticRow("Ethernet path observation", ethernetObservation)
             diagnosticRow("Wi-Fi path observation", pathObservationText(status.wifiPathObservation))
             diagnosticRow("Control channel", connectionStateText(status.state))
             diagnosticRow("Authenticated", status.isPeerAuthenticated ? "Yes" : "No")

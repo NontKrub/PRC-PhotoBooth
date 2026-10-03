@@ -175,6 +175,21 @@ enum BoothSoakCaptureMetrics {
     }
 }
 
+enum BoothSoakTemplateSelection {
+    static func candidates(in document: EventExperienceDocument) -> [CustomerSessionSelection] {
+        document.templates.compactMap { template in
+            let selection = CustomerSessionSelection(
+                eventID: document.eventID,
+                experienceRevision: document.revision,
+                templateID: template.id,
+                filterID: document.defaultFilterID,
+                language: document.defaultCustomerLanguage
+            )
+            return (try? CustomerSelectionValidator().validate(selection, against: document)) == nil ? nil : selection
+        }
+    }
+}
+
 struct BoothSoakRetakePlan: Sendable, Equatable {
     let countsByPhoto: [Int]
 

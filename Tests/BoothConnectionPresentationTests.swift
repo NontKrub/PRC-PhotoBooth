@@ -271,6 +271,12 @@ struct BoothConnectionPresentationTests {
     @Test("connected LAN and Wi-Fi fallback expose the same details")
     func connectedRoutes() {
         let status = BoothConnectionStatus(requestedNetwork: .lan)
+        status.publishPairing(
+            trustedPeerIDs: ["peer"],
+            preferredPeerID: "peer",
+            updatePreferredPeer: true,
+            authenticated: true
+        )
         status.publish(
             requestedNetwork: .lan,
             state: .connected(peerName: "iPad Pro"),
@@ -278,6 +284,8 @@ struct BoothConnectionPresentationTests {
             peerDisplayName: "iPad Pro",
             routeState: .connectedLAN(peer: "iPad Pro"),
             effectiveNetwork: .lan,
+            isLANPathAvailable: false,
+            lanPathObservation: .unavailable,
             lanHandshake: .ready,
             isPreviewChannelConnected: true
         )
@@ -287,6 +295,7 @@ struct BoothConnectionPresentationTests {
         #expect(presentation.lanHandshake == "Ready")
         #expect(presentation.controlConnected)
         #expect(presentation.previewConnected)
+        #expect(presentation.ethernetAvailable)
         #expect(presentation.fallbackText == nil)
 
         status.publish(
@@ -305,5 +314,19 @@ struct BoothConnectionPresentationTests {
         #expect(presentation.fallbackText == "Wi-Fi fallback active: LAN unavailable")
         #expect(presentation.controlConnected)
         #expect(!presentation.previewConnected)
+    }
+
+    @Test("a preferred LAN route alone does not make Ethernet available")
+    func preferredLANWithoutConnectionDoesNotCountAsAvailable() {
+        let status = BoothConnectionStatus(requestedNetwork: .lan)
+        status.publishPairing(
+            trustedPeerIDs: ["peer"],
+            preferredPeerID: "peer",
+            updatePreferredPeer: true,
+            authenticated: false
+        )
+        status.publishPathAvailability(lan: false, wifi: true)
+
+        #expect(!BoothConnectionPresentationResolver.resolve(status).ethernetAvailable)
     }
 }

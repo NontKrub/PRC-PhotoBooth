@@ -1,6 +1,8 @@
 import Testing
 import Foundation
 import CoreGraphics
+import Compression
+import ImageIO
 @testable import PRC_PhotoBooth_Mac
 
 @Suite("Compositor")
@@ -32,6 +34,58 @@ struct CompositorTests {
         let result = try compositor.render(images: [0: redImage, 1: redImage])
         #expect(result.width == 400)
         #expect(result.height == 600)
+    }
+
+    @Test("live strip previews stay bounded for square, portrait, and landscape canvases")
+    func largeLiveStripPreviewsAreBounded() throws {
+        let cases: [(width: Int, height: Int, outputWidth: Int, outputHeight: Int)] = [
+            (10_000, 10_000, 2_048, 2_048),
+            (300, 10_000, 61, 2_048),
+            (10_000, 300, 2_048, 61)
+        ]
+
+        for item in cases {
+            let config = EventConfig(
+                photoCount: 1,
+                canvasWidth: CGFloat(item.width),
+                canvasHeight: CGFloat(item.height),
+                slots: []
+            )
+            let preview = try Compositor(config: config, framePNG: nil).render(
+                images: [:],
+                maxDimension: 2_048
+            )
+            #expect(preview.width == item.outputWidth)
+            #expect(preview.height == item.outputHeight)
+            #expect(max(preview.width, preview.height) <= 2_048)
+
+            let jpeg = try #require(jpegData(from: preview, quality: 0.82))
+            let decoded = try #require(BoothImageDecoder.decode(jpeg))
+            #expect(decoded.width == preview.width)
+            #expect(decoded.height == preview.height)
+        }
+    }
+
+    @Test("finished strip thumbnails downsample a full-size 10,000 pixel PNG")
+    func finishedStripThumbnailIsBounded() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("strip-thumbnail-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let stripURL = root.appendingPathComponent("strip.png")
+        try makeLargeWhitePNG(width: 10_000, height: 10_000).write(to: stripURL)
+        let source = try #require(CGImageSourceCreateWithURL(stripURL as CFURL, nil))
+        let properties = try #require(CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any])
+        #expect((properties[kCGImagePropertyPixelWidth] as? NSNumber)?.intValue == 10_000)
+        #expect((properties[kCGImagePropertyPixelHeight] as? NSNumber)?.intValue == 10_000)
+
+        let thumbnail = try #require(loadOrientedImageThumbnail(from: stripURL, maxDimension: 2_048))
+        #expect(max(thumbnail.width, thumbnail.height) <= 2_048)
+        let jpeg = try #require(jpegData(from: thumbnail, quality: 0.82))
+        let ipadImage = try #require(BoothImageDecoder.decode(jpeg))
+        #expect(ipadImage.width == thumbnail.width)
+        #expect(ipadImage.height == thumbnail.height)
     }
 
     @Test("uses top-left canvas coordinates for frame and slots")
@@ -126,7 +180,7 @@ struct CompositorTests {
     @Test("QR rotation preserves the element center")
     func qrRotationPreservesCenter() throws {
         let element = SharedQRCodeElement(id: "qr-1", normalizedRect: CGRect(x: 0.25, y: 0.25, width: 0.5, height: 0.5), rotation: 37)
-        var rotated = EventConfig(canvasWidth: 80, canvasHeight: 80, qrCodeElements: [element])
+        let rotated = EventConfig(canvasWidth: 80, canvasHeight: 80, qrCodeElements: [element])
         var unrotated = rotated
         unrotated.qrCodeElements[0].rotation = 0
         let frame = solidImage(width: 80, height: 80, color: Pixel(100, 100, 100, 255))
@@ -168,6 +222,183 @@ struct CompositorTests {
         try expectPixel(atX: 0, y: 0, in: result, equals: Pixel(0, 0, 255, 255))
         try expectPixel(atX: 1, y: 0, in: result, equals: Pixel(255, 0, 0, 255))
     }
+
+    @Test("bounded rendering matches an equivalent preview canvas with frame, overlay and QR")
+    func boundedCompositionMatchesEquivalentPreviewCanvas() throws {
+        let config = EventConfig(
+            canvasWidth: 160,
+            canvasHeight: 200,
+            slots: [SharedPhotoSlot(
+                normalizedRect: CGRect(x: 0, y: 0, width: 0.5, height: 0.5),
+                photoIndex: 0
+            )],
+            qrCodeElements: [SharedQRCodeElement(
+                id: "qr-1",
+                normalizedRect: CGRect(x: 0.65, y: 0.55, width: 0.3, height: 0.3)
+            )]
+        )
+        let frame = solidImage(width: 8, height: 10, color: Pixel(240, 210, 20, 255))
+        let overlay = makeImage(width: 160, height: 200) { x, y in
+            x < 40 && y < 40 ? (20, 40, 240, 255) : (0, 0, 0, 0)
+        }
+        let photo = solidImage(width: 12, height: 12, color: Pixel(240, 30, 20, 255))
+        let compositor = Compositor(config: config, framePNG: frame, foregroundOverlayPNG: overlay)
+        let payload = "https://example.invalid/s/preview-parity/"
+        let full = try compositor.render(images: [0: photo], qrPayload: payload)
+        let bounded = try compositor.render(images: [0: photo], qrPayload: payload, maxDimension: 100)
+        let equivalentPreview = try Compositor(
+            config: EventConfig(
+                canvasWidth: 80,
+                canvasHeight: 100,
+                slots: config.slots,
+                qrCodeElements: config.qrCodeElements
+            ),
+            framePNG: frame,
+            foregroundOverlayPNG: makeImage(width: 80, height: 100) { x, y in
+                x < 20 && y < 20 ? (20, 40, 240, 255) : (0, 0, 0, 0)
+            }
+        ).render(images: [0: photo], qrPayload: payload)
+
+        #expect(full.width == 160)
+        #expect(full.height == 200)
+        #expect(bounded.width == 80)
+        #expect(bounded.height == 100)
+        let equivalentPixels = try #require(rgbaPixels(equivalentPreview))
+        let boundedPixels = try #require(rgbaPixels(bounded))
+        #expect(equivalentPixels == boundedPixels)
+        try expectPixel(atX: 10, y: 10, in: bounded, equals: Pixel(20, 40, 240, 255))
+        try expectPixel(atX: 30, y: 30, in: bounded, equals: Pixel(240, 30, 20, 255))
+        try expectPixel(atX: 70, y: 10, in: bounded, equals: Pixel(240, 210, 20, 255))
+        #expect(darkPixelCount(in: bounded, rect: CGRect(x: 52, y: 55, width: 24, height: 30)) > 0)
+    }
+
+    @Test("low-level rendering accepts small canvases and preserves their dimensions")
+    func lowLevelRenderAcceptsSmallCanvases() throws {
+        let image = try Compositor(
+            config: EventConfig(canvasWidth: 4, canvasHeight: 3),
+            framePNG: nil
+        ).render(images: [:])
+
+        #expect(image.width == 4)
+        #expect(image.height == 3)
+    }
+
+    @Test("rejects malformed or unrepresentable low-level dimensions before rendering")
+    func rejectsMalformedCanvasDimensions() {
+        let malformedDimensions: [CGFloat] = [
+            0,
+            -1,
+            .nan,
+            .infinity,
+            -.infinity,
+            .greatestFiniteMagnitude,
+            1e20,
+            10_000.001
+        ]
+
+        for dimension in malformedDimensions {
+            let invalidWidth = EventConfig(canvasWidth: dimension, canvasHeight: 100)
+            #expect(throws: CompositorError.invalidCanvasDimensions) {
+                try Compositor(config: invalidWidth, framePNG: nil).render(images: [:])
+            }
+
+            let invalidHeight = EventConfig(canvasWidth: 100, canvasHeight: dimension)
+            #expect(throws: CompositorError.invalidCanvasDimensions) {
+                try Compositor(config: invalidHeight, framePNG: nil).render(images: [:])
+            }
+        }
+    }
+
+    @Test("rejects invalid output bounds before allocating a context")
+    func rejectsInvalidMaximumDimension() {
+        for maximum in [0, -1, CanvasDimensionPolicy.maximumRenderDimension + 1] {
+            #expect(throws: CompositorError.invalidMaximumDimension) {
+                try Compositor(config: EventConfig(canvasWidth: 80, canvasHeight: 100), framePNG: nil)
+                    .render(images: [:], maxDimension: maximum)
+            }
+        }
+    }
+}
+
+private func makeLargeWhitePNG(width: Int, height: Int) throws -> Data {
+    let rowByteCount = (width + 7) / 8
+    var scanlines = Data(count: height * (rowByteCount + 1))
+    scanlines.withUnsafeMutableBytes { rawBytes in
+        guard let bytes = rawBytes.baseAddress?.assumingMemoryBound(to: UInt8.self) else { return }
+        for row in 0..<height {
+            let offset = row * (rowByteCount + 1)
+            bytes[offset] = 0 // PNG filter: None
+            bytes.advanced(by: offset + 1).update(repeating: 0xFF, count: rowByteCount)
+        }
+    }
+
+    var compressed = Data(count: scanlines.count + 1_024)
+    let compressedCapacity = compressed.count
+    let compressedCount = compressed.withUnsafeMutableBytes { compressedBytes in
+        scanlines.withUnsafeBytes { sourceBytes in
+            guard let destination = compressedBytes.baseAddress?.assumingMemoryBound(to: UInt8.self),
+                  let source = sourceBytes.baseAddress?.assumingMemoryBound(to: UInt8.self) else { return 0 }
+            return compression_encode_buffer(
+                destination,
+                compressedCapacity,
+                source,
+                scanlines.count,
+                nil,
+                COMPRESSION_ZLIB
+            )
+        }
+    }
+    guard compressedCount > 0 else { throw CompositorError.renderFailed }
+    compressed.removeSubrange(compressedCount..<compressed.count)
+    var zlibStream = Data([0x78, 0x9C])
+    zlibStream.append(compressed)
+    zlibStream.appendBigEndian(adler32(scanlines))
+
+    var png = Data([137, 80, 78, 71, 13, 10, 26, 10])
+    var header = Data()
+    header.appendBigEndian(UInt32(width))
+    header.appendBigEndian(UInt32(height))
+    header.append(contentsOf: [1, 0, 0, 0, 0]) // 1-bit grayscale, no interlace
+    png.appendPNGChunk(type: "IHDR", payload: header)
+    png.appendPNGChunk(type: "IDAT", payload: zlibStream)
+    png.appendPNGChunk(type: "IEND", payload: Data())
+    return png
+}
+
+private func adler32(_ data: Data) -> UInt32 {
+    var first: UInt32 = 1
+    var second: UInt32 = 0
+    for byte in data {
+        first = (first + UInt32(byte)) % 65_521
+        second = (second + first) % 65_521
+    }
+    return (second << 16) | first
+}
+
+private extension Data {
+    mutating func appendBigEndian(_ value: UInt32) {
+        var value = value.bigEndian
+        Swift.withUnsafeBytes(of: &value) { append(contentsOf: $0) }
+    }
+
+    mutating func appendPNGChunk(type: String, payload: Data) {
+        appendBigEndian(UInt32(payload.count))
+        let typeData = Data(type.utf8)
+        append(typeData)
+        append(payload)
+        appendBigEndian(pngCRC32(typeData + payload))
+    }
+}
+
+private func pngCRC32(_ data: Data) -> UInt32 {
+    var crc: UInt32 = 0xFFFF_FFFF
+    for byte in data {
+        crc ^= UInt32(byte)
+        for _ in 0..<8 {
+            crc = (crc & 1) == 1 ? (crc >> 1) ^ 0xEDB8_8320 : crc >> 1
+        }
+    }
+    return crc ^ 0xFFFF_FFFF
 }
 
 private struct Pixel: Equatable, CustomStringConvertible {
@@ -257,4 +488,19 @@ private func pixel(atX x: Int, y: Int, in image: CGImage) -> Pixel? {
     ctx.draw(image, in: CGRect(x: 0, y: 0, width: image.width, height: image.height))
     let offset = (y * image.width + x) * 4
     return Pixel(data[offset], data[offset + 1], data[offset + 2], data[offset + 3])
+}
+
+private func rgbaPixels(_ image: CGImage) -> [UInt8]? {
+    var data = [UInt8](repeating: 0, count: image.width * image.height * 4)
+    guard let ctx = CGContext(
+        data: &data,
+        width: image.width,
+        height: image.height,
+        bitsPerComponent: 8,
+        bytesPerRow: image.width * 4,
+        space: CGColorSpaceCreateDeviceRGB(),
+        bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+    ) else { return nil }
+    ctx.draw(image, in: CGRect(x: 0, y: 0, width: image.width, height: image.height))
+    return data
 }

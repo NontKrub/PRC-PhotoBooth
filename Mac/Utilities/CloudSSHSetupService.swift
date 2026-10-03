@@ -97,13 +97,17 @@ enum CloudSSHConfigFile {
     }
 
     static func managedBlock(configuration: CloudSSHConfiguration, keyPath: String) -> String {
-        """
+        let escapedKeyPath = keyPath
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "\"", with: "\\\"")
+        let quotedKeyPath = "\"\(escapedKeyPath)\""
+        return """
         \(beginMarker)
         Host \(configuration.alias)
             HostName \(configuration.tunnelHostname)
             User \(configuration.username)
             ProxyCommand cloudflared access ssh --hostname \(configuration.tunnelHostname)
-            IdentityFile \(keyPath)
+            IdentityFile \(quotedKeyPath)
             IdentitiesOnly yes
         \(endMarker)
         """
@@ -321,7 +325,7 @@ final class CloudSSHSetupService {
         if executablePath(named: "brew") == nil {
             progressMessage = "Installing Homebrew…"
             let script = "NONINTERACTIVE=1 /bin/bash -c \"$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)\""
-            let result = await runCommand("/bin/bash", ["-c", script], timeout: 600)
+            let result = await runCloudSSHSetupCommand("/bin/bash", ["-c", script], timeout: 600)
             try requireSuccess(result, action: "Homebrew installation")
         }
         guard let brew = executablePath(named: "brew") else {
@@ -329,27 +333,30 @@ final class CloudSSHSetupService {
         }
         if executablePath(named: "cloudflared") == nil {
             progressMessage = "Installing cloudflared…"
-            let result = await runCommand(brew, ["install", "cloudflared"], timeout: 300)
+            let result = await runCloudSSHSetupCommand(brew, ["install", "cloudflared"], timeout: 300)
             try requireSuccess(result, action: "cloudflared installation")
         }
         guard fileManager.isExecutableFile(atPath: "/usr/bin/ssh") else { throw SetupError("macOS OpenSSH is unavailable.") }
         guard fileManager.isExecutableFile(atPath: "/usr/bin/rsync") else { throw SetupError("macOS rsync is unavailable.") }
     }
 
-    private func ensureKeyPair() async throws -> Bool {
+    func ensureKeyPair() async throws -> Bool {
         try fileManager.createDirectory(at: sshDirectoryURL, withIntermediateDirectories: true)
         try fileManager.setAttributes([.posixPermissions: 0o700], ofItemAtPath: sshDirectoryURL.path)
         var createdNewKey = false
         if !fileManager.fileExists(atPath: privateKeyURL.path) {
             progressMessage = "Generating a dedicated PhotoBooth SSH key…"
-            let result = await runCommand("/usr/bin/ssh-keygen", ["-t", "ed25519", "-f", privateKeyURL.path, "-N", "", "-C", "PRC PhotoBooth"], timeout: 20)
+            let result = await runCloudSSHSetupCommand("/usr/bin/ssh-keygen", ["-t", "ed25519", "-f", privateKeyURL.path, "-N", "", "-C", "PRC PhotoBooth"], timeout: 20)
             try requireSuccess(result, action: "SSH-key generation")
             createdNewKey = true
         }
         if !fileManager.fileExists(atPath: publicKeyURL.path) {
-            let result = await runCommand("/usr/bin/ssh-keygen", ["-y", "-f", privateKeyURL.path], timeout: 20)
+            let result = await runCloudSSHSetupCommand("/usr/bin/ssh-keygen", ["-y", "-f", privateKeyURL.path], timeout: 20)
             try requireSuccess(result, action: "public-key recovery")
-            try (result.output.trimmingCharacters(in: .whitespacesAndNewlines) + "\n").write(to: publicKeyURL, atomically: true, encoding: .utf8)
+            guard let standardOutput = result.standardOutput else {
+                throw SetupError("OpenSSH did not return the recovered public key on stdout.")
+            }
+            try (standardOutput.trimmingCharacters(in: .whitespacesAndNewlines) + "\n").write(to: publicKeyURL, atomically: true, encoding: .utf8)
             createdNewKey = true
         }
         try fileManager.setAttributes([.posixPermissions: 0o600], ofItemAtPath: privateKeyURL.path)
@@ -366,15 +373,19 @@ final class CloudSSHSetupService {
 
     private func testConnection() async throws {
         progressMessage = "Verifying Cloudflare Access and SSH connection to \(configuration.alias)…"
-        let result = await runCommand("/usr/bin/ssh", ["-o", "BatchMode=yes", "-o", "ConnectTimeout=15", configuration.alias, "echo OK"], timeout: 25)
+        let result = await runCloudSSHSetupCommand("/usr/bin/ssh", ["-o", "BatchMode=yes", "-o", "ConnectTimeout=15", configuration.alias, "echo OK"], timeout: 25)
         lastOutput = result.output
-        guard result.exitCode == 0, result.output.contains("OK") else {
+        guard result.exitCode == 0,
+              result.standardOutput?.trimmingCharacters(in: .whitespacesAndNewlines) == "OK" else {
+            if let message = CloudSSHSetupDiagnostic.hostKeyFailureMessage(for: result.output) {
+                throw SetupError(message)
+            }
             let detail = result.output.trimmingCharacters(in: .whitespacesAndNewlines)
             throw SetupError("Connection test failed. Add the displayed public key to the server’s authorized_keys, then retry.\(detail.isEmpty ? "" : "\n\n\(detail)")")
         }
     }
 
-    private func requireSuccess(_ result: CommandResult, action: String) throws {
+    private func requireSuccess(_ result: CloudCommandResult, action: String) throws {
         guard result.exitCode == 0 else {
             lastOutput = result.output
             let output = result.output.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -389,44 +400,31 @@ private struct SetupError: LocalizedError {
     var errorDescription: String? { message }
 }
 
-private struct CommandResult {
-    let exitCode: Int32
-    let output: String
+enum CloudSSHSetupDiagnostic {
+    static func hostKeyFailureMessage(for output: String) -> String? {
+        let normalized = output.lowercased()
+        if normalized.contains("remote host identification has changed")
+            || normalized.contains("possible dns spoofing detected") {
+            return "The SSH server identity has changed. Verify its new fingerprint with the server operator; only then remove the old known_hosts entry and retry."
+        }
+        if normalized.contains("host key verification failed")
+            || (normalized.contains("no ") && normalized.contains(" host key is known"))
+            || normalized.contains("authenticity of host") {
+            return "SSH server identity is not trusted on this Mac. Verify the server fingerprint with the operator, then run the configured SSH alias in Terminal and accept only the matching fingerprint."
+        }
+        return nil
+    }
 }
 
-private func runCommand(_ executable: String, _ arguments: [String], timeout: TimeInterval) async -> CommandResult {
-    await withCheckedContinuation { continuation in
-        DispatchQueue.global(qos: .userInitiated).async {
-            let process = Process()
-            process.executableURL = URL(fileURLWithPath: executable)
-            process.arguments = arguments
-            var environment = ProcessInfo.processInfo.environment
-            environment["PATH"] = "/opt/homebrew/bin:/usr/local/bin:" + (environment["PATH"] ?? "/usr/bin:/bin")
-            process.environment = environment
-            let pipe = Pipe()
-            process.standardOutput = pipe
-            process.standardError = pipe
-            do {
-                try process.run()
-            } catch {
-                continuation.resume(returning: CommandResult(exitCode: -1, output: error.localizedDescription))
-                return
-            }
-
-            let deadline = Date().addingTimeInterval(timeout)
-            while process.isRunning && Date() < deadline {
-                Thread.sleep(forTimeInterval: 0.1)
-            }
-            if process.isRunning {
-                process.terminate()
-                process.waitUntilExit()
-                let data = pipe.fileHandleForReading.readDataToEndOfFile()
-                let output = String(data: data, encoding: .utf8) ?? ""
-                continuation.resume(returning: CommandResult(exitCode: -1, output: "Timed out after \(Int(timeout)) seconds.\n\(output)"))
-                return
-            }
-            let data = pipe.fileHandleForReading.readDataToEndOfFile()
-            continuation.resume(returning: CommandResult(exitCode: process.terminationStatus, output: String(data: data, encoding: .utf8) ?? ""))
-        }
+func runCloudSSHSetupCommand(_ executable: String, _ arguments: [String], timeout: TimeInterval) async -> CloudCommandResult {
+    do {
+        let result = try await ProcessCloudCommandRunner().run(
+            executable: executable,
+            arguments: arguments,
+            timeout: timeout
+        )
+        return result
+    } catch {
+        return CloudCommandResult(exitCode: -1, output: error.localizedDescription)
     }
 }

@@ -37,6 +37,231 @@ struct DSLRCaptureAttemptTests {
         )
     }
 
+    @Test("Capture cancellation gates the shutter and resolves only its own camera generation")
+    func captureCancellationOwnsItsAttemptAndGeneration() {
+        let scope = DSLRCaptureAttemptScope(attemptID: UUID(), cameraGeneration: 4)
+        let control = DSLRCaptureAttemptControl(scope: scope)
+
+        #expect(control.cancel(scope))
+        #expect(!control.canContinue(scope))
+        #expect(!control.markShutterMayHaveBeenIssued(scope))
+        #expect(!control.shutterMayHaveBeenIssued(for: scope))
+        var dispatchCount = 0
+        let dispatched = control.performIfCurrent(scope) { dispatchCount += 1 }
+        #expect(!dispatched)
+        #expect(dispatchCount == 0)
+        #expect(!control.resolve(DSLRCaptureAttemptScope(
+            attemptID: scope.attemptID,
+            cameraGeneration: scope.cameraGeneration + 1
+        )))
+
+        #expect(control.resolve(scope))
+        #expect(!control.resolve(scope))
+        #expect(!control.cancel(scope))
+    }
+
+    @Test("Cancellation after shutter dispatch preserves uncertainty while blocking more commands")
+    func cancellationAfterShutterKeepsUncertainty() {
+        let scope = DSLRCaptureAttemptScope(attemptID: UUID(), cameraGeneration: 8)
+        let control = DSLRCaptureAttemptControl(scope: scope)
+
+        #expect(control.markShutterMayHaveBeenIssued(scope))
+        #expect(control.shutterMayHaveBeenIssued(for: scope))
+        #expect(control.cancel(scope))
+        #expect(control.shutterMayHaveBeenIssued(for: scope))
+        #expect(!control.canContinue(scope))
+        #expect(!control.markShutterMayHaveBeenIssued(scope))
+        var dispatchCount = 0
+        let dispatched = control.performIfCurrent(scope) { dispatchCount += 1 }
+        #expect(!dispatched)
+        #expect(dispatchCount == 0)
+    }
+
+    @Test("Cancellation cleans only Sony controls that were physically dispatched")
+    func cancellationCleansOnlyDispatchedSonyControls() {
+        let beforePressScope = DSLRCaptureAttemptScope(attemptID: UUID(), cameraGeneration: 20)
+        let beforePressControl = DSLRCaptureAttemptControl(scope: beforePressScope)
+        var beforePressState = DSLRSonyPhysicalControlState(cameraGeneration: 20)
+        #expect(beforePressControl.cancel(beforePressScope))
+        #expect(beforePressState.beginCleanup(laneQuarantined: false, generation: 20) == nil)
+
+        let afterAFPressScope = DSLRCaptureAttemptScope(attemptID: UUID(), cameraGeneration: 21)
+        let afterAFPressControl = DSLRCaptureAttemptControl(scope: afterAFPressScope)
+        var afterAFPressState = DSLRSonyPhysicalControlState(cameraGeneration: 21)
+        afterAFPressState.commandDispatched(property: 0xD2C1, value: 2, generation: 21)
+        #expect(afterAFPressControl.cancel(afterAFPressScope))
+        #expect(afterAFPressState.beginCleanup(laneQuarantined: false, generation: 21) == [0xD2C1])
+
+        let afterShutterScope = DSLRCaptureAttemptScope(attemptID: UUID(), cameraGeneration: 22)
+        let afterShutterControl = DSLRCaptureAttemptControl(scope: afterShutterScope)
+        var afterShutterState = DSLRSonyPhysicalControlState(cameraGeneration: 22)
+        afterShutterState.commandDispatched(property: 0xD2C1, value: 2, generation: 22)
+        afterShutterState.commandDispatched(property: 0xD2C2, value: 2, generation: 22)
+        #expect(afterShutterControl.markShutterMayHaveBeenIssued(afterShutterScope))
+        #expect(afterShutterControl.cancel(afterShutterScope))
+        #expect(afterShutterState.beginCleanup(laneQuarantined: true, generation: 22) == nil)
+        #expect(afterShutterState.beginCleanup(laneQuarantined: false, generation: 22) == [0xD2C2, 0xD2C1])
+    }
+
+    @Test("Sony control state tracks autofocus independently and cleans only dispatched controls")
+    func sonyPhysicalControlCleanupPlan() {
+        let generation: UInt64 = 31
+        var state = DSLRSonyPhysicalControlState(cameraGeneration: generation)
+        state.commandDispatched(property: 0xD2C1, value: 2, generation: generation)
+        #expect(state.needsNeutralization)
+        #expect(state.beginCleanup(laneQuarantined: false, generation: generation) == [0xD2C1])
+        #expect(state.beginCleanup(laneQuarantined: false, generation: generation) == nil)
+
+        state.commandDispatched(property: 0xD2C1, value: 1, generation: generation)
+        state.commandCompleted(
+            property: 0xD2C1,
+            value: 1,
+            responseCode: 0x2001,
+            failed: false,
+            generation: generation
+        )
+        state.finishCleanup(generation: generation)
+        #expect(!state.needsNeutralization)
+        #expect(state.beginCleanup(laneQuarantined: false, generation: generation) == nil)
+    }
+
+    @Test("Sony shutter cleanup releases shutter before autofocus and never dispatches another press")
+    func sonyShutterAndAutofocusCleanupOrdering() {
+        let generation: UInt64 = 32
+        var state = DSLRSonyPhysicalControlState(cameraGeneration: generation)
+        state.commandDispatched(property: 0xD2C1, value: 2, generation: generation)
+        state.commandDispatched(property: 0xD2C2, value: 2, generation: generation)
+        #expect(state.beginCleanup(laneQuarantined: false, generation: generation) == [0xD2C2, 0xD2C1])
+
+        state.commandDispatched(property: 0xD2C2, value: 1, generation: generation)
+        state.commandCompleted(
+            property: 0xD2C2,
+            value: 1,
+            responseCode: 0x2001,
+            failed: false,
+            generation: generation
+        )
+        #expect(state.shutterMayBeEngaged == false)
+        #expect(state.autofocusMayBeEngaged)
+        state.commandDispatched(property: 0xD2C1, value: 1, generation: generation)
+        state.commandCompleted(
+            property: 0xD2C1,
+            value: 1,
+            responseCode: 0x2001,
+            failed: false,
+            generation: generation
+        )
+        state.finishCleanup(generation: generation)
+        #expect(!state.needsNeutralization)
+    }
+
+    @Test("Sony control state stays uncertain after failed release and ignores stale-generation callbacks")
+    func sonyReleaseFailureAndStaleGeneration() {
+        var state = DSLRSonyPhysicalControlState(cameraGeneration: 44)
+        state.commandDispatched(property: 0xD2C2, value: 2, generation: 44)
+        state.commandDispatched(property: 0xD2C2, value: 1, generation: 44)
+        #expect(state.shutterReleaseInFlight)
+        state.commandCompleted(
+            property: 0xD2C2,
+            value: 1,
+            responseCode: 0,
+            failed: true,
+            generation: 44
+        )
+        #expect(!state.shutterReleaseInFlight)
+        #expect(state.shutterMayBeEngaged)
+        #expect(state.beginCleanup(laneQuarantined: true, generation: 44) == nil)
+        #expect(state.beginCleanup(laneQuarantined: false, generation: 45) == nil)
+
+        state.commandCompleted(
+            property: 0xD2C2,
+            value: 1,
+            responseCode: 0x2001,
+            failed: false,
+            generation: 43
+        )
+        #expect(state.shutterMayBeEngaged)
+    }
+
+    @Test("PTP recovery admits one camera session cycle at a time")
+    func oneRecoveryCycleAtATime() {
+        #expect(DSLRCameraSessionRecoveryPolicy.mayScheduleCycle(
+            requestedGeneration: 8,
+            currentGeneration: 8,
+            captureIsActive: false,
+            closingGeneration: nil,
+            openingGeneration: nil
+        ))
+        #expect(!DSLRCameraSessionRecoveryPolicy.mayScheduleCycle(
+            requestedGeneration: 8,
+            currentGeneration: 8,
+            captureIsActive: true,
+            closingGeneration: nil,
+            openingGeneration: nil
+        ))
+        #expect(!DSLRCameraSessionRecoveryPolicy.mayScheduleCycle(
+            requestedGeneration: 8,
+            currentGeneration: 8,
+            captureIsActive: false,
+            closingGeneration: 8,
+            openingGeneration: nil
+        ))
+        #expect(!DSLRCameraSessionRecoveryPolicy.mayScheduleCycle(
+            requestedGeneration: 8,
+            currentGeneration: 8,
+            captureIsActive: false,
+            closingGeneration: nil,
+            openingGeneration: 9
+        ))
+        #expect(!DSLRCameraSessionRecoveryPolicy.mayScheduleCycle(
+            requestedGeneration: 7,
+            currentGeneration: 8,
+            captureIsActive: false,
+            closingGeneration: nil,
+            openingGeneration: nil
+        ))
+        #expect(DSLRCameraSessionRecoveryPolicy.closeIsConfirmed(errorOccurred: false))
+        #expect(!DSLRCameraSessionRecoveryPolicy.closeIsConfirmed(errorOccurred: true))
+    }
+
+    @Test("manual stop keeps a pending session close bounded and fails closed")
+    func stoppedSessionCloseDeadlineRequiresItsPendingGeneration() {
+        #expect(DSLRCameraSessionRecoveryPolicy.closeDeadlineCanReportFailure(
+            generation: 12,
+            currentGeneration: 13,
+            cameraStillConnected: false,
+            closeIsPending: true
+        ))
+        #expect(!DSLRCameraSessionRecoveryPolicy.closeDeadlineCanReportFailure(
+            generation: 12,
+            currentGeneration: 13,
+            cameraStillConnected: false,
+            closeIsPending: false
+        ))
+        #expect(!DSLRCameraSessionRecoveryPolicy.closeDeadlineCanReportFailure(
+            generation: 12,
+            currentGeneration: 13,
+            cameraStillConnected: true,
+            closeIsPending: true
+        ))
+    }
+
+    @Test("a definitive busy refusal clears uncertainty before cancellation can suppress fallback")
+    func busyRefusalThenCancellationSuppressesFallback() {
+        let scope = DSLRCaptureAttemptScope(attemptID: UUID(), cameraGeneration: 12)
+        let control = DSLRCaptureAttemptControl(scope: scope)
+        #expect(control.markShutterMayHaveBeenIssued(scope))
+        control.confirmShutterRejected(scope)
+        #expect(!control.shutterMayHaveBeenIssued(for: scope))
+
+        #expect(control.cancel(scope))
+        var fallbackCount = 0
+        let dispatched = control.performIfCurrent(scope) { fallbackCount += 1 }
+        #expect(!dispatched)
+        #expect(fallbackCount == 0)
+        #expect(!control.shutterMayHaveBeenIssued(for: scope))
+    }
+
     @Test("Failed transfer retains the original baseline for Retry Receive")
     func failedTransferRetainsOriginalContext() {
         let requestedAt = Date(timeIntervalSince1970: 1_800_000_000)

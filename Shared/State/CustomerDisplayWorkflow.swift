@@ -123,3 +123,38 @@ public enum CustomerDisplayAuthority: Equatable, Sendable {
     }
 }
 
+public enum SessionSetupDeliveryPolicy {
+    public enum DuplicateStartDisposition: Equatable {
+        case notDuplicate
+        case accepted(sessionID: String, resumeSetup: Bool)
+    }
+
+    public static func duplicateStartDisposition(
+        requestID: UUID,
+        lastRequestID: UUID?,
+        lastSessionID: String?,
+        currentSessionID: String?,
+        phase: BoothPhase
+    ) -> DuplicateStartDisposition {
+        guard requestID == lastRequestID, let lastSessionID else { return .notDuplicate }
+        return .accepted(
+            sessionID: lastSessionID,
+            resumeSetup: currentSessionID == lastSessionID && phase == .readyToStart
+        )
+    }
+
+    public static func shouldDeliverSetup(
+        phase: BoothPhase,
+        sessionID: String?,
+        stateMachineSessionID: String,
+        hasPresentation: Bool,
+        authority: CustomerDisplayAuthority
+    ) -> Bool {
+        phase == .readyToStart
+            && sessionID != nil
+            && sessionID == stateMachineSessionID
+            && hasPresentation
+            && authority.requiresIPadSetupSend
+    }
+
+}

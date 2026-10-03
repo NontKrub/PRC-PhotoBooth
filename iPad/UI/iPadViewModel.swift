@@ -6,6 +6,16 @@ import CoreGraphics
 import SwiftUI
 import UIKit
 
+struct iPadTemplatePreviewPolicy {
+    static func accepts(_ reference: BoothAssetReference, catalog: CustomerExperienceCatalog?) -> Bool {
+        guard reference.sessionID == nil,
+              reference.kind == .templatePreview,
+              let catalog,
+              reference.revision == catalog.revision else { return false }
+        return catalog.templates.contains { $0.previewAssetID == reference.assetID }
+    }
+}
+
 // iPad-side coordinator — receives messages from Mac, drives local UI state.
 @MainActor
 final class iPadViewModel: ObservableObject {
@@ -54,9 +64,16 @@ final class iPadViewModel: ObservableObject {
     private var previewFramesReceived = 0
     private var previewFramesCoalesced = 0
     private var previewFramesDisplayed = 0
+    var startupReceiptHandlerForTesting: ((Message) -> Void)?
+    var beforeAssetDecodeForTesting: (@Sendable () async -> Void)?
 #endif
     private var sessionRequestTimeoutTask: Task<Void, Never>?
     private var pendingSessionStartRequestID: UUID?
+    var hasUnresolvedSessionStartRequest: Bool {
+        pendingSessionStartRequestID != nil || acceptedStartupRequestID != nil
+    }
+    private var acceptedStartupRequestID: UUID?
+    private var acceptedStartupSessionID: String?
     private var reviewDecisionTimeoutTask: Task<Void, Never>?
     private var pendingReviewDecision: (state: ReviewStateToken, requestID: UUID, action: ReviewAction)?
     private var recoveryActionTimeoutTask: Task<Void, Never>?
@@ -67,6 +84,19 @@ final class iPadViewModel: ObservableObject {
     private var countdownTask: Task<Void, Never>?
     private var connectionRecoveryTask: Task<Void, Never>?
     private var sessionMessageGate = SessionMessageGate()
+    private struct AppliedSessionSetup {
+        let context: SessionMessageContext
+        let deliveryID: UUID
+        let config: EventConfig
+        let presentation: SessionPresentation
+    }
+    private struct InstalledCountdown {
+        let context: SessionMessageContext
+        let deliveryID: UUID
+        let descriptor: CountdownDescriptor
+    }
+    private var appliedSessionSetup: AppliedSessionSetup?
+    private var installedCountdown: InstalledCountdown?
     private let assetReceivePipeline = BoothAssetReceivePipeline()
     private var assetProcessingGeneration: UInt64 = 0
     private var assetRequestPump = BoothAssetRequestPump()
@@ -222,8 +252,8 @@ final class iPadViewModel: ObservableObject {
         }
     }
 
-    init() {
-        multipeer = NetworkBoothTransport(role: .iPad)
+    init(transport: BoothTransport? = nil) {
+        multipeer = transport ?? NetworkBoothTransport(role: .iPad)
         stateMachine = SessionStateMachine()
         stateMachine.objectWillChange
             .sink { [weak self] _ in self?.objectWillChange.send() }
@@ -358,6 +388,16 @@ final class iPadViewModel: ObservableObject {
         return true
     }
 
+    private func sendStartupReceipt(_ message: Message) {
+#if DEBUG
+        if let startupReceiptHandlerForTesting {
+            startupReceiptHandlerForTesting(message)
+            return
+        }
+#endif
+        multipeer.sendControl(message)
+    }
+
     private func handleSessionStartResult(
         requestID: UUID,
         result: CustomerSessionStartResult
@@ -369,16 +409,24 @@ final class iPadViewModel: ObservableObject {
             sessionRequestError = nil
             armSessionRequestTimeout(generation: transientRequestGeneration)
         case .accepted:
+            acceptedStartupRequestID = requestID
+            if stateMachine.phase == .readyToStart {
+                acceptedStartupSessionID = stateMachine.currentSessionID
+            }
             pendingSessionStartRequestID = nil
             clearTransientRequestState()
         case .rejected(let reason):
             pendingSessionStartRequestID = nil
             clearTransientRequestState()
+            acceptedStartupRequestID = nil
+            acceptedStartupSessionID = nil
             setSessionRequestError(reason)
             stateMachine.beginSelectingExperience()
         case .persistenceFailed:
             pendingSessionStartRequestID = nil
             clearTransientRequestState()
+            acceptedStartupRequestID = nil
+            acceptedStartupSessionID = nil
             setSessionRequestError(LocalizedText(
                 english: "The booth could not save the session. Please try again.",
                 thai: "บูธไม่สามารถบันทึกเซสชันได้ กรุณาลองอีกครั้ง"
@@ -407,6 +455,17 @@ final class iPadViewModel: ObservableObject {
             experienceCatalog = catalog
             if !sameRevision {
                 experienceAssets = [:]
+                resetAssetProcessing()
+                let obsoletePreviews = receivedAssetReferences.values.filter {
+                    $0.kind == .templatePreview
+                        && !iPadTemplatePreviewPolicy.accepts($0, catalog: catalog)
+                }
+                for reference in obsoletePreviews {
+                    receivedAssets.removeValue(forKey: reference.assetID)
+                    receivedAssetReferences.removeValue(forKey: reference.assetID)
+                    assetRequestPump.markCompleted(reference)
+                    assetRetryTracker.remove(reference)
+                }
                 selectedTemplateID = nil
                 selectedFilterID = nil
             }
@@ -426,9 +485,17 @@ final class iPadViewModel: ObservableObject {
         case .sessionStart(let context):
             guard let context,
                   acceptSessionChange(context, message: "sessionStart") else { break }
+            if stateMachine.phase == .readyToStart,
+               stateMachine.currentSessionID == context.sessionID,
+               sessionPresentation?.sessionID == context.sessionID {
+                break
+            }
+            let acceptedRequestID = acceptedStartupRequestID
             cancelCountdown()
             clearSessionMedia()
             stateMachine.startSession(config: eventConfig, sessionID: context.sessionID)
+            acceptedStartupRequestID = acceptedRequestID
+            acceptedStartupSessionID = acceptedRequestID == nil ? nil : context.sessionID
 
         case .sessionRequestRejected(let reason):
             cancelCountdown()
@@ -436,8 +503,41 @@ final class iPadViewModel: ObservableObject {
             setSessionRequestError(reason)
             stateMachine.beginSelectingExperience()
 
-        case .sessionPrepared(let config, let presentation, let context):
+        case .sessionPrepared(let config, let presentation, let context, let deliveryID):
+            guard presentation.sessionID == context.sessionID else { break }
+            if let applied = appliedSessionSetup,
+               applied.context == context,
+               applied.deliveryID == deliveryID,
+               applied.config == config,
+               applied.presentation == presentation {
+                guard stateMachine.phase == .readyToStart,
+                      stateMachine.currentSessionID == context.sessionID,
+                      sessionPresentation == presentation else { break }
+                if acceptedStartupRequestID != nil {
+                    acceptedStartupSessionID = context.sessionID
+                }
+                sendStartupReceipt(.sessionSetupApplied(context: context, deliveryID: deliveryID))
+                break
+            }
             guard acceptSessionChange(context, message: "sessionPrepared") else { break }
+            if stateMachine.phase == .readyToStart,
+               stateMachine.currentSessionID == context.sessionID,
+               sessionPresentation?.sessionID == presentation.sessionID {
+                guard eventConfig == config,
+                      sessionPresentation == presentation else { break }
+                appliedSessionSetup = AppliedSessionSetup(
+                    context: context,
+                    deliveryID: deliveryID,
+                    config: config,
+                    presentation: presentation
+                )
+                if acceptedStartupRequestID != nil {
+                    acceptedStartupSessionID = context.sessionID
+                }
+                sendStartupReceipt(.sessionSetupApplied(context: context, deliveryID: deliveryID))
+                break
+            }
+            let acceptedRequestID = acceptedStartupRequestID
             cancelCountdown()
             clearSessionMedia()
             eventConfig = config
@@ -447,11 +547,35 @@ final class iPadViewModel: ObservableObject {
             requestMissingExpectedAssets()
             selectedLanguage = presentation.language
             installPresentationImages(presentation)
+            acceptedStartupRequestID = acceptedRequestID
+            acceptedStartupSessionID = acceptedRequestID == nil ? nil : context.sessionID
+            guard stateMachine.phase == .readyToStart,
+                  stateMachine.currentSessionID == context.sessionID,
+                  sessionPresentation == presentation else { break }
+            appliedSessionSetup = AppliedSessionSetup(
+                context: context,
+                deliveryID: deliveryID,
+                config: config,
+                presentation: presentation
+            )
+            sendStartupReceipt(.sessionSetupApplied(context: context, deliveryID: deliveryID))
 
         case .customerSessionStartResult(let requestID, let result):
             handleSessionStartResult(requestID: requestID, result: result)
 
-        case .beginCountdown(let context, let descriptor):
+        case .beginCountdown(let context, let deliveryID, let descriptor):
+            if let installed = installedCountdown,
+               installed.context == context,
+               installed.deliveryID == deliveryID,
+               installed.descriptor == descriptor,
+               sessionMessageGate.currentSessionID == context.sessionID {
+                sendStartupReceipt(.countdownInstalled(
+                    context: context,
+                    deliveryID: deliveryID,
+                    descriptor: descriptor
+                ))
+                break
+            }
             guard accept(context, message: "beginCountdown") else { break }
             clearTransientRequestState()
             stateMachine.applyAuthoritativePhase(
@@ -459,7 +583,22 @@ final class iPadViewModel: ObservableObject {
                 countdownDeadline: descriptor.captureAt
             )
             clearReviewImage()
+            guard case .countdown(let index, _) = stateMachine.phase,
+                  index == descriptor.photoIndex,
+                  stateMachine.currentSessionID == context.sessionID else { break }
+            installedCountdown = InstalledCountdown(
+                context: context,
+                deliveryID: deliveryID,
+                descriptor: descriptor
+            )
+            acceptedStartupRequestID = nil
+            acceptedStartupSessionID = nil
             runCountdown(descriptor)
+            sendStartupReceipt(.countdownInstalled(
+                context: context,
+                deliveryID: deliveryID,
+                descriptor: descriptor
+            ))
 
         case .shotCaptured(let context, let index, let thumbData):
             guard accept(context, message: "shotCaptured") else { break }
@@ -618,6 +757,8 @@ final class iPadViewModel: ObservableObject {
 
     private func clearSessionMedia() {
         pendingSessionStartRequestID = nil
+        acceptedStartupRequestID = nil
+        acceptedStartupSessionID = nil
         clearTransientRequestState()
         previewDecodeTask?.cancel()
         previewDecodeTask = nil
@@ -641,6 +782,8 @@ final class iPadViewModel: ObservableObject {
         assetRequestPump.reset()
         currentCaptureRecoveryStateToken = nil
         pendingCaptureRecovery = nil
+        appliedSessionSetup = nil
+        installedCountdown = nil
     }
 
     private func clearTransientRequestState() {
@@ -782,7 +925,7 @@ final class iPadViewModel: ObservableObject {
             guard let self else { return }
             guard self.assetProcessingGeneration == processingGeneration,
                   self.sessionMessageGate.currentSessionID == sessionID,
-                  self.assetRetryTracker.currentGeneration == channelGeneration else { return }
+                  (self.assetRetryTracker.currentGeneration ?? 0) == channelGeneration else { return }
             guard outcome == .sent else {
                 self.assetRequestPump.markSendFailed(batch)
                 self.handleAssetFailure(batch, channelGeneration: channelGeneration)
@@ -836,6 +979,8 @@ final class iPadViewModel: ObservableObject {
     private func handleAssetChunk(_ chunk: BoothAssetChunk) {
         let activeSessionID = sessionMessageGate.currentSessionID
         guard chunk.metadata.sessionID == nil || chunk.metadata.sessionID == activeSessionID else { return }
+        if chunk.metadata.kind == .templatePreview,
+           !iPadTemplatePreviewPolicy.accepts(chunk.metadata.reference, catalog: experienceCatalog) { return }
         if cachedAsset(for: chunk.metadata.reference) != nil { return }
         if let expected = expectedAssetReferences[chunk.metadata.assetID] {
             guard expected == chunk.metadata.reference else { return }
@@ -851,8 +996,14 @@ final class iPadViewModel: ObservableObject {
                     chunk,
                     generation: generation
                 ) else { return }
+#if DEBUG
+                let beforeDecode = self?.beforeAssetDecodeForTesting
+#else
+                let beforeDecode: (@Sendable () async -> Void)? = nil
+#endif
                 let image = await Task.detached(priority: .userInitiated) {
-                    Self.decodeAsset(data, kind: chunk.metadata.kind)
+                    if let beforeDecode { await beforeDecode() }
+                    return Self.decodeAsset(data, kind: chunk.metadata.kind)
                 }.value
                 guard let self else { return }
                 guard let image else {
@@ -888,6 +1039,8 @@ final class iPadViewModel: ObservableObject {
     ) {
         guard generation == assetProcessingGeneration,
               reference.sessionID == nil || reference.sessionID == activeSessionID else { return }
+        if reference.kind == .templatePreview,
+           !iPadTemplatePreviewPolicy.accepts(reference, catalog: experienceCatalog) { return }
         if let expected = expectedAssetReferences[reference.assetID], expected != reference { return }
         if cachedAsset(for: reference) != nil { return }
         assetRequestPump.markCompleted(reference)
@@ -976,7 +1129,7 @@ final class iPadViewModel: ObservableObject {
     ) {
         guard processingGeneration == assetProcessingGeneration,
               sessionMessageGate.currentSessionID == sessionID,
-              assetRetryTracker.currentGeneration == channelGeneration else { return }
+              (assetRetryTracker.currentGeneration ?? 0) == channelGeneration else { return }
         let missing = missingExpectedAssets()
         let timedOut = references.filter {
             missing.contains($0) && assetRequestPump.inFlight.contains($0)
@@ -1327,7 +1480,8 @@ final class iPadViewModel: ObservableObject {
     // MARK: - Customer decisions
 
     func customerTappedToBegin() {
-        guard CustomerDisplayWorkflow.canApply(.begin, in: stateMachine.phase) else { return }
+        guard isConnectionReady,
+              CustomerDisplayWorkflow.canApply(.begin, in: stateMachine.phase) else { return }
         if requiresExperienceSelection {
             beginExperienceSelection()
         } else {
@@ -1339,6 +1493,11 @@ final class iPadViewModel: ObservableObject {
     func customerTappedStart() {
         guard !isSessionRequestPending,
               CustomerDisplayWorkflow.canApply(.start, in: stateMachine.phase) else { return }
+        if let requestID = acceptedStartupRequestID,
+           acceptedStartupSessionID == stateMachine.currentSessionID {
+            sendSessionStartRequest(selection: nil, requestID: requestID)
+            return
+        }
         requestMacToStartSession()
     }
 
@@ -1369,8 +1528,8 @@ final class iPadViewModel: ObservableObject {
         sendSessionStartRequest(selection: selection)
     }
 
-    private func sendSessionStartRequest(selection: CustomerSessionSelection?) {
-        let requestID = pendingSessionStartRequestID ?? UUID()
+    private func sendSessionStartRequest(selection: CustomerSessionSelection?, requestID requestedID: UUID? = nil) {
+        let requestID = requestedID ?? pendingSessionStartRequestID ?? UUID()
         pendingSessionStartRequestID = requestID
         let generation = beginTransientRequest()
         isSessionRequestPending = true
@@ -1399,16 +1558,27 @@ final class iPadViewModel: ObservableObject {
             }
             guard let self,
                   !Task.isCancelled,
-                  self.transientRequestGeneration == generation,
-                  self.isSessionRequestPending else { return }
-            self.sessionRequestTimeoutTask = nil
-            self.isSessionRequestPending = false
-            self.setSessionRequestError(LocalizedText(
-                english: "Still checking the booth. Tap Retry to reconnect to this session.",
-                thai: "กำลังตรวจสอบบูธ แตะลองใหม่เพื่อเชื่อมต่อเซสชันนี้อีกครั้ง"
-            ).value(for: self.selectedLanguage))
+                  self.transientRequestGeneration == generation else { return }
+            self.sessionStartRequestTimedOut(generation: generation)
         }
     }
+
+    private func sessionStartRequestTimedOut(generation: UInt64) {
+        guard transientRequestGeneration == generation,
+              isSessionRequestPending else { return }
+        sessionRequestTimeoutTask = nil
+        isSessionRequestPending = false
+        setSessionRequestError(LocalizedText(
+            english: "Still checking the booth. Tap Retry to reconnect to this session.",
+            thai: "กำลังตรวจสอบบูธ แตะลองใหม่เพื่อเชื่อมต่อเซสชันนี้อีกครั้ง"
+        ).value(for: selectedLanguage))
+    }
+
+#if DEBUG
+    func expireSessionStartRequestTimeoutForTesting() {
+        sessionStartRequestTimedOut(generation: transientRequestGeneration)
+    }
+#endif
 
     var requiresExperienceSelection: Bool {
         guard let catalog = experienceCatalog else { return false }
@@ -1424,23 +1594,33 @@ final class iPadViewModel: ObservableObject {
     }
 
     func selectTemplate(_ id: String) {
+        guard !hasUnresolvedSessionStartRequest else { return }
         guard experienceCatalog?.templates.contains(where: { $0.id == id }) == true else { return }
         selectedTemplateID = id
     }
 
     func selectFilter(_ filter: PhotoFilterID) {
+        guard !hasUnresolvedSessionStartRequest else { return }
         guard experienceCatalog?.allowedFilterIDs.contains(filter) == true else { return }
         selectedFilterID = filter
     }
 
     func selectLanguage(_ language: CustomerLanguage) {
+        guard !hasUnresolvedSessionStartRequest else { return }
         guard experienceCatalog?.guestLanguageSelectionEnabled == true || language == experienceCatalog?.defaultLanguage else { return }
         selectedLanguage = language
     }
 
     func confirmExperienceSelection() {
-        guard CustomerDisplayWorkflow.canApply(.confirmSelection, in: stateMachine.phase),
-              let catalog = experienceCatalog,
+        guard !isSessionRequestPending,
+              CustomerDisplayWorkflow.canApply(.confirmSelection, in: stateMachine.phase) else { return }
+        if let acceptedRequestID = acceptedStartupRequestID {
+            // The Mac has durably created this session; retry its original request
+            // until setup is applied, rather than issuing a new request ID.
+            sendSessionStartRequest(selection: nil, requestID: acceptedRequestID)
+            return
+        }
+        guard let catalog = experienceCatalog,
               let templateID = selectedTemplateID,
               let filterID = selectedFilterID,
               catalog.templates.contains(where: { $0.id == templateID }),
@@ -1472,6 +1652,16 @@ final class iPadViewModel: ObservableObject {
     func returnToExperienceSelection() {
         guard CustomerDisplayWorkflow.canApply(.back, in: stateMachine.phase) else { return }
         beginExperienceSelection()
+    }
+
+    func customerBackFromExperienceSelection() {
+        guard !hasUnresolvedSessionStartRequest,
+              !isSessionRequestPending,
+              stateMachine.phase == .selectingExperience,
+              CustomerDisplayWorkflow.canApply(.back, in: stateMachine.phase) else { return }
+        pendingSessionStartRequestID = nil
+        clearTransientRequestState()
+        stateMachine.reset()
     }
 
     func currentPrompt(for photoIndex: Int) -> SessionPromptPresentation? {

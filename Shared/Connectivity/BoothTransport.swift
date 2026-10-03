@@ -778,9 +778,63 @@ enum BoothSecondaryChannelAdmissionDecision: Equatable {
     case rejectCandidate
 }
 
+enum BoothSecondaryChannelAdmissionState: Equatable {
+    case none
+    case handshaking
+    case verified
+    case failed
+}
+
 enum BoothSecondaryChannelAdmissionPolicy {
+    static func failureCount(
+        afterFailureCount count: Int,
+        lastFailureAt: Date?,
+        now: Date,
+        quietPeriod: TimeInterval = 60
+    ) -> Int {
+        guard let lastFailureAt,
+              now.timeIntervalSince(lastFailureAt) >= quietPeriod else { return max(0, count) }
+        return 0
+    }
+
+    static func cooldownExpired(until: Date?, now: Date) -> Bool {
+        guard let until else { return true }
+        return now >= until
+    }
+
+    static func cooldownDuration(afterFailureCount failureCount: Int) -> TimeInterval {
+        switch max(0, failureCount) {
+        case 0: 0
+        case 1: 1
+        case 2: 2
+        case 3: 4
+        case 4: 8
+        case 5: 16
+        default: 30
+        }
+    }
+
+    static func shouldAdmitPreviewCandidate(
+        existingState: BoothSecondaryChannelAdmissionState,
+        controlIsAuthenticated: Bool
+    ) -> Bool {
+        controlIsAuthenticated
+            && decision(existingState: existingState) == .acceptCandidate
+    }
+
+    static func decision(existingState: BoothSecondaryChannelAdmissionState) -> BoothSecondaryChannelAdmissionDecision {
+        switch existingState {
+        case .none, .failed: .acceptCandidate
+        case .handshaking, .verified: .rejectCandidate
+        }
+    }
+
     static func decision(existingVerified: Bool) -> BoothSecondaryChannelAdmissionDecision {
-        existingVerified ? .rejectCandidate : .acceptCandidate
+        decision(existingState: existingVerified ? .verified : .none)
+    }
+
+    static func handshakeTimedOut(startedAt: Date, now: Date, timeout: TimeInterval) -> Bool {
+        now.timeIntervalSince(startedAt) >= timeout
     }
 }
 

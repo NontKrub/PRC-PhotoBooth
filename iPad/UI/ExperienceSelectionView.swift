@@ -22,6 +22,7 @@ struct ExperienceSelectionView: View {
                     Spacer()
                     if catalog?.guestLanguageSelectionEnabled == true {
                         CustomerLanguagePicker()
+                            .disabled(vm.hasUnresolvedSessionStartRequest)
                     }
                 }
 
@@ -42,6 +43,7 @@ struct ExperienceSelectionView: View {
                                 }
                             }
                         }
+                        .disabled(vm.hasUnresolvedSessionStartRequest)
                     }
                 }
 
@@ -57,6 +59,7 @@ struct ExperienceSelectionView: View {
                                 }
                             }
                         }
+                        .disabled(vm.hasUnresolvedSessionStartRequest)
                     }
                 }
 
@@ -67,17 +70,22 @@ struct ExperienceSelectionView: View {
                 }
 
                 HStack(spacing: 14) {
-                    Button("Back") {
-                        vm.customerDone()
+                    Button(role: .cancel) {
+                        vm.customerBackFromExperienceSelection()
+                    } label: {
+                        Text("Back")
                     }
                     .buttonStyle(.bordered)
                     .tint(.white)
+                    .frame(minHeight: 44)
+                    .accessibilityLabel("Back to idle screen")
+                    .disabled(vm.hasUnresolvedSessionStartRequest)
 
-                    Button("Continue") {
+                    Button(vm.isSessionRequestPending ? "Starting…" : vm.hasUnresolvedSessionStartRequest ? "Retry" : "Continue") {
                         vm.confirmExperienceSelection()
                     }
                     .buttonStyle(.borderedProminent)
-                    .disabled(vm.selectedTemplateID == nil || vm.selectedFilterID == nil)
+                    .disabled(vm.isSessionRequestPending || vm.selectedTemplateID == nil || vm.selectedFilterID == nil)
                 }
             }
             .padding(.horizontal, 44)

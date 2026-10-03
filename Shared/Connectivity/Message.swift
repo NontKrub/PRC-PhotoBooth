@@ -231,7 +231,7 @@ public enum CaptureRecoveryAction: Codable, Sendable, Equatable {
 }
 
 public struct BoothTransportHello: Codable, Sendable, Equatable {
-    public static let currentProtocolVersion = 11
+    public static let currentProtocolVersion = 12
 
     public var protocolVersion: Int
     public var appVersion: String
@@ -253,7 +253,8 @@ public struct BoothTransportHello: Codable, Sendable, Equatable {
             "preview-identity",
             "pairing-v2",
             "secure-channel-v1",
-            "asset-channel-v2"
+            "asset-channel-v2",
+            "startup-receipts-v1"
         ],
         networkPreference: BoothNetworkPreference? = .wifi
     ) {
@@ -798,8 +799,10 @@ public enum Message: Codable, Sendable, Equatable {
     case customerSessionStartResult(requestID: UUID, result: CustomerSessionStartResult)
     case customerSessionRequest(selection: CustomerSessionSelection)
     case sessionRequestRejected(reason: String)
-    case sessionPrepared(config: EventConfig, presentation: SessionPresentation, context: SessionMessageContext)
-    case beginCountdown(context: SessionMessageContext, descriptor: CountdownDescriptor)
+    case sessionPrepared(config: EventConfig, presentation: SessionPresentation, context: SessionMessageContext, deliveryID: UUID)
+    case sessionSetupApplied(context: SessionMessageContext, deliveryID: UUID)
+    case beginCountdown(context: SessionMessageContext, deliveryID: UUID, descriptor: CountdownDescriptor)
+    case countdownInstalled(context: SessionMessageContext, deliveryID: UUID, descriptor: CountdownDescriptor)
     case shotCaptured(context: SessionMessageContext, index: Int, thumbnailData: Data)
     case shotCapturedAsset(context: SessionMessageContext, index: Int, asset: BoothAssetReference)
     case captureRecovery(context: SessionMessageContext, photoIndex: Int, failure: CaptureFailureSummary)
@@ -881,7 +884,9 @@ extension Message {
         case .customerSessionRequest: return "customerSessionRequest"
         case .sessionRequestRejected: return "sessionRequestRejected"
         case .sessionPrepared: return "sessionPrepared"
+        case .sessionSetupApplied: return "sessionSetupApplied"
         case .beginCountdown: return "beginCountdown"
+        case .countdownInstalled: return "countdownInstalled"
         case .shotCaptured: return "shotCaptured"
         case .shotCapturedAsset: return "shotCapturedAsset"
         case .captureRecovery: return "captureRecovery"

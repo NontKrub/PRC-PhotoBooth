@@ -6,6 +6,10 @@ struct ReviewView: View {
 
     private var isThai: Bool { vm.selectedLanguage == .thai }
     private var retryAction: ReviewAction? { vm.reviewActionToRetry }
+    private var photoAspectRatio: CGFloat? {
+        vm.captureFraming(for: photoIndex)?.aspectRatio
+            ?? vm.reviewImage.map { CGFloat($0.width) / CGFloat($0.height) }
+    }
 
     var body: some View {
         ZStack {
@@ -30,10 +34,11 @@ struct ReviewView: View {
                     RoundedRectangle(cornerRadius: 18)
                         .fill(Color(white: 0.1))
                     if let img = vm.reviewImage {
-                        Image(img, scale: 1, label: Text("Shot"))
-                            .resizable()
-                            .scaledToFit()
-                            .clipShape(RoundedRectangle(cornerRadius: 18))
+                        Color.clear.overlay {
+                            Image(img, scale: 1, label: Text("Shot"))
+                                .resizable()
+                                .scaledToFill()
+                        }
                     } else if vm.reviewImageDecodeFailed {
                         VStack(spacing: 14) {
                             Image(systemName: "exclamationmark.triangle")
@@ -71,8 +76,9 @@ struct ReviewView: View {
                         )
                     }
                 }
+                .clipShape(RoundedRectangle(cornerRadius: 18))
+                .aspectRatio(photoAspectRatio, contentMode: .fit)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .aspectRatio(contentMode: .fit)
                 .padding(.horizontal, 36)
                 .shadow(color: .black.opacity(0.5), radius: 24, y: 8)
 

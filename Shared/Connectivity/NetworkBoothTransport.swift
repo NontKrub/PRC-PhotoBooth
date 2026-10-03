@@ -134,6 +134,7 @@ public final class NetworkBoothTransport: BoothTransport {
     private static let previewIdentityCapability = "preview-identity"
     private static let heartbeatInterval: TimeInterval = 2
     private static let heartbeatTimeout: TimeInterval = 8
+    private static let previewIdentityHandshakeTimeout: TimeInterval = 12
     private static let transportQueueLabel = "PRC-PhotoBooth.Transport"
 
     private struct PendingPairingCommit: Equatable, Sendable {
@@ -211,6 +212,7 @@ public final class NetworkBoothTransport: BoothTransport {
         set {
             guard requestedPreference != newValue else { return }
             cancelLANRecovery()
+            cancelAuthenticatedLANDisconnectFallback()
             let oldValue = requestedPreference
             requestedPreference = newValue
             refreshControlCoreCredentials()
@@ -304,6 +306,12 @@ public final class NetworkBoothTransport: BoothTransport {
     private var routeDiscoveryFallbackToken = 0
     private var routeDiscoveryGate = BoothRouteDiscoveryGenerationGate()
     private var callbackGate = BoothTransportCallbackGate()
+    private var authenticatedLANDisconnectFallbackSource: DispatchSourceTimer?
+    private var authenticatedLANDisconnectFallbackToken = 0
+    private var authenticatedLANDisconnectFallbackPending = false
+#if DEBUG
+    private var authenticatedLANDisconnectGracePeriodForTesting: TimeInterval?
+#endif
     private var controlConnection: NWConnection?
     private var controlConnectionGeneration = 0
     /// A trusted control socket promoted by the runtime remains runtime-owned.
@@ -346,6 +354,10 @@ public final class NetworkBoothTransport: BoothTransport {
     private var previewPeerSupportsIdentity = false
     private var didSendPreviewHello = false
     private var previewIdentityVerified = false
+    private var previewIdentityHandshakeTask: Task<Void, Never>?
+    private var previewAdmissionFailureCount = 0
+    private var previewAdmissionLastFailureAt: Date?
+    private var previewAdmissionCooldownUntil: Date?
     private var lanPathMonitor: NWPathMonitor?
     private var wifiPathMonitor: NWPathMonitor?
     private var pathMonitorGeneration = 0
@@ -1124,6 +1136,7 @@ public final class NetworkBoothTransport: BoothTransport {
     private func handleCoreOwnedControlDisconnect(generation: Int, reason: String?) {
         guard coreOwnedControlGeneration == generation,
               controlConnectionGeneration == generation else { return }
+        let shouldScheduleLANFallback = hasEstablishedManualLANControl
         coreOwnedControlGeneration = nil
         invalidateReceiveToken(for: .control)
         controlConnectionIsViable = false
@@ -1151,7 +1164,16 @@ public final class NetworkBoothTransport: BoothTransport {
         connectedPeerNames = []
         peerDeviceID = nil
         connectionState = role == .iPad && shouldReconnect ? .connecting : .disconnected
+        if retainsManualLANListener {
+            routeMachine = BoothNetworkRouteMachine(preference: requestedPreference)
+        }
         emitTransportEvent(.transportDisconnected, channel: .control, reason: reason)
+        if shouldScheduleLANFallback {
+            scheduleAuthenticatedLANDisconnectFallback()
+        }
+        if authenticatedLANDisconnectFallbackPending {
+            attemptAuthenticatedLANDisconnectFallback()
+        }
         publishStatus()
     }
 
@@ -1198,6 +1220,7 @@ public final class NetworkBoothTransport: BoothTransport {
             transportRuntime.invalidateControlConnection(generation: generation)
             return
         }
+        authenticatedManualLANControlDidRecover()
         if let interface, role == .iPad {
             activeInterface = interface
             fallbackActive = interface == .wifi && requestedPreference == .lan
@@ -1996,6 +2019,7 @@ public final class NetworkBoothTransport: BoothTransport {
     public func start() {
         shouldReconnect = true
         cancelLANRecovery()
+        cancelAuthenticatedLANDisconnectFallback()
         reconnectAttempt = 0
         connectionStatus.publishReconnectState(inProgress: false)
         emitTransportEvent(.transportDiscoveryStarted, attempt: reconnectAttempt)
@@ -2017,6 +2041,7 @@ public final class NetworkBoothTransport: BoothTransport {
 
     public func disconnect() {
         shouldReconnect = false
+        cancelAuthenticatedLANDisconnectFallback()
         connectionStatus.publishReconnectState(inProgress: false)
         cancelLANRecovery()
         cancelRouteDiscovery()
@@ -2363,6 +2388,10 @@ public final class NetworkBoothTransport: BoothTransport {
             return
         }
         if available {
+            if authenticatedLANDisconnectFallbackPending {
+                attemptAuthenticatedLANDisconnectFallback()
+                return
+            }
             guard role == .mac, activeInterface == nil else { return }
             let command = routeMachine.wifiPathChanged(
                 isAvailable: true,
@@ -2401,6 +2430,79 @@ public final class NetworkBoothTransport: BoothTransport {
         case .none:
             break
         }
+    }
+
+    private var hasEstablishedManualLANControl: Bool {
+        role == .mac
+            && requestedPreference == .lan
+            && activeInterface == .wiredEthernet
+            && shouldReconnect
+            && peerAuthenticated
+            && secureChannelEstablished
+            && pendingCorePairingCandidate == nil
+            && !hasEphemeralPairingState
+    }
+
+    private var authenticatedLANDisconnectGracePeriod: TimeInterval {
+#if DEBUG
+        authenticatedLANDisconnectGracePeriodForTesting ?? Self.lanHandshakeTimeout
+#else
+        Self.lanHandshakeTimeout
+#endif
+    }
+
+    private func scheduleAuthenticatedLANDisconnectFallback() {
+        guard retainsManualLANListener,
+              shouldReconnect,
+              authenticatedLANDisconnectFallbackSource == nil,
+              !authenticatedLANDisconnectFallbackPending else { return }
+
+        authenticatedLANDisconnectFallbackToken &+= 1
+        let token = authenticatedLANDisconnectFallbackToken
+        let callbackGeneration = callbackGate.generation
+        let source = DispatchSource.makeTimerSource(queue: transportQueue)
+        source.schedule(deadline: .now() + authenticatedLANDisconnectGracePeriod)
+        source.setEventHandler(handler: BoothTransportTimerDispatch.onMainActor { [weak self] in
+            guard let self,
+                  self.authenticatedLANDisconnectFallbackToken == token,
+                  self.callbackGate.accepts(callbackGeneration) else { return }
+            self.authenticatedLANDisconnectFallbackSource = nil
+            self.authenticatedLANDisconnectFallbackPending = true
+            self.attemptAuthenticatedLANDisconnectFallback()
+        })
+        authenticatedLANDisconnectFallbackSource = source
+        source.resume()
+    }
+
+    private func attemptAuthenticatedLANDisconnectFallback() {
+        guard authenticatedLANDisconnectFallbackPending,
+              retainsManualLANListener,
+              shouldReconnect,
+              !peerAuthenticated,
+              pendingCorePairingCandidate == nil,
+              !hasEphemeralPairingState,
+              didReceiveWiFiPathUpdate,
+              isWiFiPathAvailable else { return }
+
+        let command = routeMachine.transportDisconnected(
+            lanAvailable: false,
+            wifiAvailable: true
+        )
+        guard command == .startWiFi(fallback: true) else { return }
+        print("[NetworkRoute] Authenticated LAN disconnected; falling back to Wi-Fi")
+        apply(command, reason: "Authenticated LAN control disconnected")
+    }
+
+    private func cancelAuthenticatedLANDisconnectFallback() {
+        authenticatedLANDisconnectFallbackToken &+= 1
+        authenticatedLANDisconnectFallbackSource?.cancel()
+        authenticatedLANDisconnectFallbackSource = nil
+        authenticatedLANDisconnectFallbackPending = false
+    }
+
+    private func authenticatedManualLANControlDidRecover() {
+        guard role == .mac, activeInterface == .wiredEthernet else { return }
+        cancelAuthenticatedLANDisconnectFallback()
     }
 
     private func activateWiFiFallback(reason: String) {
@@ -3059,6 +3161,7 @@ public final class NetworkBoothTransport: BoothTransport {
     }
 
     private func tearDownActiveTransport() {
+        cancelAuthenticatedLANDisconnectFallback()
         activeInterface = nil
         directLANControlAttemptInFlight = false
         callbackGate.invalidate()
@@ -3081,6 +3184,8 @@ public final class NetworkBoothTransport: BoothTransport {
 
     private func cancelTransportObjects() {
         cancelUnauthenticatedIdleTimer()
+        previewIdentityHandshakeTask?.cancel()
+        previewIdentityHandshakeTask = nil
         invalidateReceiveToken(for: .control)
         invalidateReceiveToken(for: .preview)
         invalidateReceiveToken(for: .asset)
@@ -3569,13 +3674,16 @@ public final class NetworkBoothTransport: BoothTransport {
             return
         }
         if channel == .preview,
-           BoothSecondaryChannelAdmissionPolicy.decision(existingVerified: previewIdentityVerified)
-                == .rejectCandidate {
+           !shouldAdmitPreviewCandidate(existingState: previewAdmissionState) {
             connection.cancel()
             emitTransportEvent(
                 .secondaryCandidateRejected,
                 channel: .preview,
-                reason: "Verified preview channel is already active."
+                reason: previewAdmissionIsCoolingDown
+                    ? "Preview admission is cooling down after failed identity handshakes."
+                    : peerAuthenticated && secureChannelEstablished
+                        ? "Preview channel candidate is already active."
+                        : "Preview candidate arrived before secure control authentication."
             )
             return
         }
@@ -3627,6 +3735,7 @@ public final class NetworkBoothTransport: BoothTransport {
             previewConnection = connection
             previewEndpointDescription = connection.endpoint.debugDescription
             resetPreviewIdentity()
+            schedulePreviewIdentityHandshakeTimeout(connection, generation: previewConnectionGeneration)
             previewWritePump.bind(connection, generation: previewConnectionGeneration)
         } else {
             assetConnectionGeneration &+= 1
@@ -3721,14 +3830,21 @@ public final class NetworkBoothTransport: BoothTransport {
                 )
             }
         } else if channel == .preview {
-            guard previewConnection == nil || previewEndpointDescription != description else { return }
-            if BoothSecondaryChannelAdmissionPolicy.decision(existingVerified: previewIdentityVerified)
-                    == .rejectCandidate {
+            let admissionState = previewAdmissionState
+            if previewConnection != nil,
+               previewEndpointDescription == description,
+               admissionState != .failed { return }
+            if !shouldAdmitPreviewCandidate(existingState: admissionState) {
                 emitTransportEvent(
                     .secondaryCandidateRejected,
                     channel: .preview,
-                    reason: "Verified preview channel is already active."
+                    reason: previewAdmissionIsCoolingDown
+                        ? "Preview admission is cooling down after failed identity handshakes."
+                        : peerAuthenticated && secureChannelEstablished
+                            ? "Preview channel candidate is already active."
+                            : "Preview candidate deferred until secure control authentication."
                 )
+                if previewAdmissionIsCoolingDown { scheduleReconnect() }
                 return
             }
             invalidateReceiveToken(for: .preview)
@@ -3743,6 +3859,7 @@ public final class NetworkBoothTransport: BoothTransport {
             previewEndpointDescription = description
             resetPreviewIdentity()
             if let connection = previewConnection {
+                schedulePreviewIdentityHandshakeTimeout(connection, generation: previewConnectionGeneration)
                 previewWritePump.bind(connection, generation: previewConnectionGeneration)
                 configure(connection, channel: channel, provenance: provenance)
             }
@@ -4450,6 +4567,7 @@ public final class NetworkBoothTransport: BoothTransport {
         }
         guard hello.capabilities.contains("secure-channel-v1"),
               hello.capabilities.contains("asset-channel-v2"),
+              hello.capabilities.contains("startup-receipts-v1"),
               hello.capabilities.contains(Self.previewIdentityCapability) else {
             rejectControlConnection(BoothPairingError.incompatibleProtocol.localizedDescription)
             return
@@ -5625,6 +5743,7 @@ public final class NetworkBoothTransport: BoothTransport {
         secureNegotiationTimeoutSource = nil
         try? secureNegotiator.markEstablished(generation: controlConnectionGeneration)
         secureChannelEstablished = true
+        authenticatedManualLANControlDidRecover()
         setFrameDecoderHandshake(true, channel: .control)
         connectionStatus.publishSecureChannel(ready: true)
         emitTransportEvent(.secureChannelEstablished, channel: .control)
@@ -6057,6 +6176,11 @@ public final class NetworkBoothTransport: BoothTransport {
         }
         let wasPreviewIdentityVerified = previewIdentityVerified
         previewIdentityVerified = true
+        previewAdmissionFailureCount = 0
+        previewAdmissionLastFailureAt = nil
+        previewAdmissionCooldownUntil = nil
+        previewIdentityHandshakeTask?.cancel()
+        previewIdentityHandshakeTask = nil
         connectionStatus.publishPreviewChannel(connected: true)
         if !wasPreviewIdentityVerified {
             emitTransportEvent(.previewReady, channel: .preview)
@@ -6252,6 +6376,7 @@ public final class NetworkBoothTransport: BoothTransport {
         if let reason { lastNetworkError = reason }
         if channel == .control {
             guard let connection, connection === controlConnection else { return }
+            let shouldScheduleLANFallback = hasEstablishedManualLANControl
             invalidateReceiveToken(for: .control)
             controlConnectionIsViable = false
             cancelWaitingRecovery(for: channel)
@@ -6322,6 +6447,13 @@ public final class NetworkBoothTransport: BoothTransport {
                 resetControlAuthentication()
                 connectionState = .disconnected
                 lanHandshakeState = .waiting
+                routeMachine = BoothNetworkRouteMachine(preference: requestedPreference)
+                if shouldScheduleLANFallback {
+                    scheduleAuthenticatedLANDisconnectFallback()
+                }
+                if authenticatedLANDisconnectFallbackPending {
+                    attemptAuthenticatedLANDisconnectFallback()
+                }
                 if controlListener == nil { startListener(channel: .control) }
                 if previewListener == nil { startListener(channel: .preview) }
                 if assetListener == nil { startListener(channel: .asset) }
@@ -6335,6 +6467,13 @@ public final class NetworkBoothTransport: BoothTransport {
             apply(command, reason: command == .startWiFi(fallback: true) ? "LAN unavailable" : nil)
         } else if channel == .preview {
             guard let connection, connection === previewConnection else { return }
+            if !previewIdentityVerified {
+                // Count every failed unverified candidate, including malformed
+                // frames and peers that connect then immediately disappear.
+                recordPreviewAdmissionFailure()
+            }
+            previewIdentityHandshakeTask?.cancel()
+            previewIdentityHandshakeTask = nil
             invalidateReceiveToken(for: .preview)
             cancelWaitingRecovery(for: channel)
             emitTransportEvent(.previewDisconnected, channel: channel, reason: reason)
@@ -6430,6 +6569,8 @@ public final class NetworkBoothTransport: BoothTransport {
     }
 
     private func resetPreviewConnection() {
+        previewIdentityHandshakeTask?.cancel()
+        previewIdentityHandshakeTask = nil
         invalidateReceiveToken(for: .preview)
         previewConnectionGeneration &+= 1
         previewConnection?.cancel()
@@ -6541,6 +6682,82 @@ public final class NetworkBoothTransport: BoothTransport {
         previewIdentityVerified = false
     }
 
+    private var previewAdmissionState: BoothSecondaryChannelAdmissionState {
+        guard let previewConnection else { return .none }
+        if previewIdentityVerified { return .verified }
+        switch previewConnection.state {
+        case .failed, .cancelled: return .failed
+        default: return .handshaking
+        }
+    }
+
+    private var previewAdmissionIsCoolingDown: Bool {
+        !BoothSecondaryChannelAdmissionPolicy.cooldownExpired(
+            until: previewAdmissionCooldownUntil,
+            now: Date()
+        )
+    }
+
+    private func shouldAdmitPreviewCandidate(existingState: BoothSecondaryChannelAdmissionState) -> Bool {
+        let now = Date()
+        previewAdmissionFailureCount = BoothSecondaryChannelAdmissionPolicy.failureCount(
+            afterFailureCount: previewAdmissionFailureCount,
+            lastFailureAt: previewAdmissionLastFailureAt,
+            now: now
+        )
+        if previewAdmissionFailureCount == 0 {
+            previewAdmissionLastFailureAt = nil
+            previewAdmissionCooldownUntil = nil
+        }
+        return !previewAdmissionIsCoolingDown
+            && BoothSecondaryChannelAdmissionPolicy.shouldAdmitPreviewCandidate(
+                existingState: existingState,
+                controlIsAuthenticated: peerAuthenticated && secureChannelEstablished
+            )
+    }
+
+    private func recordPreviewAdmissionFailure() {
+        previewAdmissionFailureCount = min(previewAdmissionFailureCount + 1, 6)
+        previewAdmissionLastFailureAt = Date()
+        let delay = BoothSecondaryChannelAdmissionPolicy.cooldownDuration(
+            afterFailureCount: previewAdmissionFailureCount
+        )
+        previewAdmissionCooldownUntil = Date().addingTimeInterval(delay)
+        emitTransportEvent(
+            .secondaryCandidateRejected,
+            channel: .preview,
+            reason: "Preview identity handshake failed; bounded admission cooldown applied."
+        )
+    }
+
+    private func schedulePreviewIdentityHandshakeTimeout(
+        _ connection: NWConnection,
+        generation: Int
+    ) {
+        let startedAt = Date()
+        previewIdentityHandshakeTask?.cancel()
+        previewIdentityHandshakeTask = Task { @MainActor [weak self, weak connection] in
+            do {
+                try await Task.sleep(for: .seconds(Self.previewIdentityHandshakeTimeout))
+            } catch {
+                return
+            }
+            guard let self,
+                  let connection,
+                  self.previewConnectionGeneration == generation,
+                  self.previewConnection === connection,
+                  self.previewAdmissionState == .handshaking,
+                  BoothSecondaryChannelAdmissionPolicy.handshakeTimedOut(
+                    startedAt: startedAt,
+                    now: Date(),
+                    timeout: Self.previewIdentityHandshakeTimeout
+                  ) else { return }
+            let reason = "Preview identity handshake timed out."
+            self.emitTransportEvent(.secondaryCandidateRejected, channel: .preview, reason: reason)
+            self.connectionDidClose(connection, channel: .preview, reason: reason)
+        }
+    }
+
     private func resetControlAuthentication() {
         cancelUnauthenticatedIdleTimer()
         didReceiveHello = false
@@ -6618,6 +6835,104 @@ public final class NetworkBoothTransport: BoothTransport {
             if previewBrowser == nil { startBrowser(channel: .preview) }
         }
     }
+
+#if DEBUG
+    struct LANFallbackSnapshotForTesting: Equatable {
+        let activeInterface: BoothNetworkInterfacePolicy?
+        let fallbackActive: Bool
+        let routeState: BoothNetworkRouteState
+        let controlListenerGeneration: Int
+        let controlConnectionGeneration: Int
+        let didObserveWiFiPath: Bool
+        let isWiFiPathAvailable: Bool
+        let fallbackPending: Bool
+    }
+
+    func prepareAuthenticatedLANDisconnectForTesting(
+        wifiPathAvailable: Bool?,
+        pairingPending: Bool = false,
+        legacyControlPath: Bool = false,
+        gracePeriod: TimeInterval = 0.05
+    ) -> Int {
+        cancelAuthenticatedLANDisconnectFallback()
+        shouldReconnect = true
+        requestedPreference = .lan
+        activeInterface = .wiredEthernet
+        fallbackActive = false
+        fallbackReason = nil
+        routeMachine = BoothNetworkRouteMachine(preference: .lan)
+        _ = routeMachine.beginLANAttempt()
+        _ = routeMachine.lanHandshakeSucceeded(peer: "Test iPad")
+        controlConnectionGeneration = 100
+        coreOwnedControlGeneration = controlConnectionGeneration
+        coreControlListenerGeneration = 1
+        controlConnectionIsViable = true
+        peerAuthenticated = true
+        secureChannelEstablished = true
+        connectionState = .connected(peerName: "Test iPad")
+        didReceiveWiFiPathUpdate = wifiPathAvailable != nil
+        isWiFiPathAvailable = wifiPathAvailable ?? false
+        authenticatedLANDisconnectGracePeriodForTesting = gracePeriod
+        if pairingPending {
+            pendingPairingIntent = BoothPairingIntent(
+                iPadIdentity: BoothDeviceIdentity(
+                    id: UUID().uuidString,
+                    displayName: "Pairing iPad",
+                    role: .iPad
+                ),
+                targetMacDeviceID: localIdentity.id
+            )
+        }
+        if legacyControlPath {
+            // The legacy close handler ordinarily recreates a fixed-port LAN
+            // listeners immediately. Keep non-started placeholders so this
+            // deterministic test exercises that handler without reserving
+            // process-global test ports while suites run in parallel.
+            controlListener = try? NWListener(using: .tcp)
+            previewListener = try? NWListener(using: .tcp)
+            assetListener = try? NWListener(using: .tcp)
+        }
+        publishStatus()
+        return coreControlListenerGeneration
+    }
+
+    func closeAuthenticatedLANControlForTesting(coreOwned: Bool = true) {
+        let generation = controlConnectionGeneration
+        if coreOwned {
+            coreOwnedControlGeneration = generation
+            handleCoreOwnedControlDisconnect(generation: generation, reason: "test control disconnect")
+        } else {
+            coreOwnedControlGeneration = nil
+            let connection = NWConnection(host: "127.0.0.1", port: 1, using: .tcp)
+            controlConnection = connection
+            connectionDidClose(connection, channel: .control, reason: "test control disconnect")
+        }
+    }
+
+    func restoreAuthenticatedLANControlForTesting() {
+        peerAuthenticated = true
+        secureChannelEstablished = true
+        controlConnectionIsViable = true
+        authenticatedManualLANControlDidRecover()
+    }
+
+    func updateWiFiPathForTesting(_ available: Bool) {
+        handleWiFiPathUpdate(available)
+    }
+
+    var lanFallbackSnapshotForTesting: LANFallbackSnapshotForTesting {
+        LANFallbackSnapshotForTesting(
+            activeInterface: activeInterface,
+            fallbackActive: fallbackActive,
+            routeState: routeMachine.state,
+            controlListenerGeneration: coreControlListenerGeneration,
+            controlConnectionGeneration: controlConnectionGeneration,
+            didObserveWiFiPath: didReceiveWiFiPathUpdate,
+            isWiFiPathAvailable: isWiFiPathAvailable,
+            fallbackPending: authenticatedLANDisconnectFallbackPending
+        )
+    }
+#endif
 
     private static func localDeviceName(for role: DeviceRole) -> String {
 #if os(iOS)

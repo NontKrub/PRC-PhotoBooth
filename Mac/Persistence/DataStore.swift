@@ -272,7 +272,7 @@ final class DataStore {
     }
 
     func fetchSessions(finishedBefore date: Date) -> [BoothSession] {
-        let pred = #Predicate<BoothSession> { s in s.finishedAt != nil && s.finishedAt! < date }
+        let pred = #Predicate<BoothSession> { s in (s.finishedAt ?? date) < date }
         do { return try context.fetch(FetchDescriptor<BoothSession>(predicate: pred)) }
         catch { record(error); return [] }
     }
@@ -302,7 +302,7 @@ final class DataStore {
 
 }
 
-private enum DataStorePersistenceError: LocalizedError {
+enum DataStorePersistenceError: LocalizedError {
     case unavailable(String)
 
     var errorDescription: String? {

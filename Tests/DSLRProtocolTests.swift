@@ -4,6 +4,382 @@ import Testing
 
 @Suite("Sony DSLR protocol")
 struct DSLRProtocolTests {
+    @Test("a PTP reply delivered at the deadline wins exactly once")
+    @MainActor
+    func replyAtDeadlineWins() async throws {
+        let lane = DSLRCameraPTPCommandLane()
+        let scope = DSLRCameraPTPScope(attemptID: UUID(), cameraGeneration: 3)
+        let (sent, sentContinuation) = AsyncStream<DSLRCameraPTPCommandLane.Ticket>.makeStream()
+        var replies: [UUID: @Sendable (DSLRCameraPTPReply) -> Void] = [:]
+        let command = Task { @MainActor in
+            await lane.execute(
+                scope: scope,
+                priority: 2,
+                timeout: .seconds(60),
+                isCurrent: { _ in true },
+                send: { ticket, completion in
+                    replies[ticket.id] = completion
+                    sentContinuation.yield(ticket)
+                }
+            )
+        }
+        var iterator = sent.makeAsyncIterator()
+        let ticket = try #require(await iterator.next())
+        let reply = DSLRCameraPTPReply(data: Data([1, 2, 3]), responseCode: 0x2001, errorDescription: nil)
+        replies[ticket.id]?(reply)
+
+        let result = await command.value
+        lane.deadlineReached(ticket)
+        guard case .success(let received) = result else {
+            Issue.record("The reply should resolve the command before its deadline.")
+            return
+        }
+        #expect(received.data == reply.data)
+        #expect(received.responseCode == reply.responseCode)
+        #expect(lane.owner == nil)
+        #expect(!lane.isQuarantined)
+    }
+
+    @Test("cancellation before the baseline query sends no PTP command")
+    @MainActor
+    func cancellationBeforeBaselineSuppressesPTPRequest() async {
+        let lane = DSLRCameraPTPCommandLane()
+        let scope = DSLRCaptureAttemptScope(attemptID: UUID(), cameraGeneration: 4)
+        let control = DSLRCaptureAttemptControl(scope: scope)
+        #expect(control.cancel(scope))
+        var sendCount = 0
+
+        let result = await lane.execute(
+            scope: DSLRCameraPTPScope(attemptID: scope.attemptID, cameraGeneration: scope.cameraGeneration),
+            priority: 2,
+            timeout: .seconds(60),
+            isCurrent: { _ in control.canContinue(scope) },
+            send: { _, _ in sendCount += 1 }
+        )
+
+        #expect(sendCount == 0)
+        if case .success = result {
+            Issue.record("A cancelled attempt must not start its PTP baseline query.")
+        }
+    }
+
+    @Test("a never-replying baseline times out, quarantines late work, then permits the next capture")
+    @MainActor
+    func baselineTimeoutQuarantinesLateCallbackAndAllowsNextCapture() async throws {
+        let lane = DSLRCameraPTPCommandLane()
+        let firstScope = DSLRCameraPTPScope(attemptID: UUID(), cameraGeneration: 5)
+        let nextScope = DSLRCameraPTPScope(attemptID: UUID(), cameraGeneration: 5)
+        let (sent, sentContinuation) = AsyncStream<DSLRCameraPTPCommandLane.Ticket>.makeStream()
+        var replies: [UUID: @Sendable (DSLRCameraPTPReply) -> Void] = [:]
+        func start(_ scope: DSLRCameraPTPScope) -> Task<Result<DSLRCameraPTPReply, DSLRCameraPTPFailure>, Never> {
+            Task { @MainActor in
+                await lane.execute(
+                    scope: scope,
+                    priority: 2,
+                    timeout: .seconds(60),
+                    isCurrent: { _ in true },
+                    send: { ticket, completion in
+                        replies[ticket.id] = completion
+                        sentContinuation.yield(ticket)
+                    }
+                )
+            }
+        }
+
+        var iterator = sent.makeAsyncIterator()
+        let firstCommand = start(firstScope)
+        let timedOutTicket = try #require(await iterator.next())
+        lane.deadlineReached(timedOutTicket)
+        let firstResult = await firstCommand.value
+        guard case .failure(.timedOut) = firstResult else {
+            Issue.record("A baseline with no callback must time out.")
+            return
+        }
+        #expect(lane.owner == timedOutTicket)
+        #expect(lane.isQuarantined)
+
+        let nextCommand = start(nextScope)
+        replies[timedOutTicket.id]?(DSLRCameraPTPReply(
+            data: Data([0xAA]),
+            responseCode: 0x2001,
+            errorDescription: nil
+        ))
+        replies[timedOutTicket.id]?(DSLRCameraPTPReply(
+            data: Data([0xBB]),
+            responseCode: 0x2001,
+            errorDescription: nil
+        ))
+
+        let nextTicket = try #require(await iterator.next())
+        #expect(nextTicket.scope == nextScope)
+        #expect(!lane.isQuarantined)
+        replies[nextTicket.id]?(DSLRCameraPTPReply(
+            data: Data([0xCC]),
+            responseCode: 0x2001,
+            errorDescription: nil
+        ))
+        let nextResult = await nextCommand.value
+        guard case .success(let nextReply) = nextResult else {
+            Issue.record("A subsequent capture command should succeed after the old callback drains.")
+            return
+        }
+        #expect(nextReply.data == Data([0xCC]))
+        #expect(lane.owner == nil)
+    }
+
+    @Test("cancelling an in-flight baseline returns promptly while retaining its late-response quarantine")
+    @MainActor
+    func cancelledBaselineRetainsQuarantine() async throws {
+        let lane = DSLRCameraPTPCommandLane()
+        let scope = DSLRCameraPTPScope(attemptID: UUID(), cameraGeneration: 6)
+        let (sent, sentContinuation) = AsyncStream<DSLRCameraPTPCommandLane.Ticket>.makeStream()
+        var reply: (@Sendable (DSLRCameraPTPReply) -> Void)?
+        let baseline = Task { @MainActor in
+            await lane.execute(
+                scope: scope,
+                priority: 2,
+                timeout: .seconds(60),
+                isCurrent: { _ in true },
+                send: { ticket, completion in
+                    reply = completion
+                    sentContinuation.yield(ticket)
+                }
+            )
+        }
+        var iterator = sent.makeAsyncIterator()
+        let ticket = try #require(await iterator.next())
+
+        lane.cancel(scope: scope)
+        let result = await baseline.value
+        guard case .failure(.cancelled) = result else {
+            Issue.record("Cancelling a baseline should resolve its caller promptly.")
+            return
+        }
+        #expect(lane.owner == ticket)
+        #expect(lane.isQuarantined)
+
+        reply?(DSLRCameraPTPReply(data: Data([0x01]), responseCode: 0x2001, errorDescription: nil))
+        reply = nil
+        // The callback's main-actor barrier proves the old PTP owner was released.
+        let nextScope = DSLRCameraPTPScope(attemptID: UUID(), cameraGeneration: scope.cameraGeneration)
+        let next = Task { @MainActor in
+            await lane.execute(
+                scope: nextScope,
+                priority: 2,
+                timeout: .seconds(60),
+                isCurrent: { _ in true },
+                send: { nextTicket, completion in
+                    reply = completion
+                    sentContinuation.yield(nextTicket)
+                }
+            )
+        }
+        let nextTicket = try #require(await iterator.next())
+        #expect(nextTicket.scope == nextScope)
+        reply?(DSLRCameraPTPReply(data: Data([0x02]), responseCode: 0x2001, errorDescription: nil))
+        guard case .success(let response) = await next.value else {
+            Issue.record("A new baseline can run after the late old response releases the lane.")
+            return
+        }
+        #expect(response.data == Data([0x02]))
+    }
+
+    @Test("cancellation before shutter dispatch prevents the PTP command from being sent")
+    @MainActor
+    func cancellationBeforeShutterSuppressesDispatch() async {
+        let lane = DSLRCameraPTPCommandLane()
+        let scope = DSLRCaptureAttemptScope(attemptID: UUID(), cameraGeneration: 7)
+        let control = DSLRCaptureAttemptControl(scope: scope)
+        #expect(control.cancel(scope))
+        var sendCount = 0
+        var beforeSendCount = 0
+
+        let result = await lane.execute(
+            scope: DSLRCameraPTPScope(attemptID: scope.attemptID, cameraGeneration: scope.cameraGeneration),
+            priority: 2,
+            timeout: .seconds(60),
+            isCurrent: { _ in control.canContinue(scope) },
+            beforeSend: {
+                beforeSendCount += 1
+                return true
+            },
+            send: { _, _ in sendCount += 1 }
+        )
+
+        #expect(sendCount == 0)
+        #expect(beforeSendCount == 0)
+        if case .success = result {
+            Issue.record("A cancelled attempt must not dispatch a shutter command.")
+        }
+    }
+
+    @Test("shutter command is not sent when the attempt cannot record its dispatch")
+    @MainActor
+    func shutterDispatchRequiresAttemptAuthorization() async {
+        let lane = DSLRCameraPTPCommandLane()
+        var sendCount = 0
+        let result = await lane.execute(
+            scope: DSLRCameraPTPScope(attemptID: UUID(), cameraGeneration: 8),
+            priority: 2,
+            timeout: .seconds(60),
+            isCurrent: { _ in true },
+            beforeSend: { false },
+            send: { _, _ in sendCount += 1 }
+        )
+
+        #expect(sendCount == 0)
+        if case .success = result {
+            Issue.record("An attempt that cannot record shutter ownership must not send the command.")
+        }
+    }
+
+    @Test("cancellation after shutter authorization but before send clears dispatch uncertainty")
+    @MainActor
+    func cancellationBetweenShutterAuthorizationAndSendClearsUncertainty() async {
+        let lane = DSLRCameraPTPCommandLane()
+        let scope = DSLRCaptureAttemptScope(attemptID: UUID(), cameraGeneration: 9)
+        let control = DSLRCaptureAttemptControl(scope: scope)
+        var sendCount = 0
+
+        let result = await lane.execute(
+            scope: DSLRCameraPTPScope(attemptID: scope.attemptID, cameraGeneration: scope.cameraGeneration),
+            priority: 2,
+            timeout: .seconds(60),
+            isCurrent: { _ in control.canContinue(scope) },
+            beforeSend: {
+                guard control.markShutterMayHaveBeenIssued(scope) else { return false }
+                // Model cancellation winning after authorization but before the
+                // command lane reaches its physical send closure.
+                _ = control.cancel(scope)
+                return true
+            },
+            onNotSent: { control.confirmShutterWasNotDispatched(scope) },
+            send: { _, _ in sendCount += 1 }
+        )
+
+        #expect(sendCount == 0)
+        #expect(!control.shutterMayHaveBeenIssued(for: scope))
+        if case .success = result {
+            Issue.record("A cancelled shutter authorization must be withdrawn before the send closure.")
+        }
+    }
+
+    @Test("cancelling an in-flight shutter returns promptly and retains its late callback quarantine")
+    @MainActor
+    func cancelledShutterRemainsQuarantinedUntilCallback() async throws {
+        let lane = DSLRCameraPTPCommandLane()
+        let scope = DSLRCaptureAttemptScope(attemptID: UUID(), cameraGeneration: 9)
+        let ptpScope = DSLRCameraPTPScope(attemptID: scope.attemptID, cameraGeneration: scope.cameraGeneration)
+        let control = DSLRCaptureAttemptControl(scope: scope)
+        #expect(control.markShutterMayHaveBeenIssued(scope))
+        let (sent, sentContinuation) = AsyncStream<DSLRCameraPTPCommandLane.Ticket>.makeStream()
+        var replies: [UUID: @Sendable (DSLRCameraPTPReply) -> Void] = [:]
+        let command = Task { @MainActor in
+            await lane.execute(
+                scope: ptpScope,
+                priority: 2,
+                timeout: .seconds(60),
+                isCurrent: { _ in control.canContinue(scope) },
+                send: { ticket, completion in
+                    replies[ticket.id] = completion
+                    sentContinuation.yield(ticket)
+                }
+            )
+        }
+        var iterator = sent.makeAsyncIterator()
+        let ticket = try #require(await iterator.next())
+        #expect(control.cancel(scope))
+        lane.cancel(scope: ptpScope)
+        let result = await command.value
+        guard case .failure(.cancelled) = result else {
+            Issue.record("Cancellation must resolve the command caller promptly.")
+            return
+        }
+        #expect(control.shutterMayHaveBeenIssued(for: scope))
+        #expect(lane.owner == ticket)
+        #expect(lane.isQuarantined)
+
+        replies[ticket.id]?(DSLRCameraPTPReply(data: Data(), responseCode: 0x2001, errorDescription: nil))
+        let nextScope = DSLRCameraPTPScope(attemptID: UUID(), cameraGeneration: scope.cameraGeneration)
+        let nextCommand = Task { @MainActor in
+            await lane.execute(
+                scope: nextScope,
+                priority: 2,
+                timeout: .seconds(60),
+                isCurrent: { _ in true },
+                send: { nextTicket, completion in
+                    replies[nextTicket.id] = completion
+                    sentContinuation.yield(nextTicket)
+                }
+            )
+        }
+        let nextTicket = try #require(await iterator.next())
+        #expect(nextTicket.scope == nextScope)
+        replies[nextTicket.id]?(DSLRCameraPTPReply(data: Data([1]), responseCode: 0x2001, errorDescription: nil))
+        guard case .success(let nextReply) = await nextCommand.value else {
+            Issue.record("The next capture command should run after the old callback drains.")
+            return
+        }
+        #expect(nextReply.data == Data([1]))
+    }
+
+    @Test("a late timed-out callback cannot resolve a command after camera-generation recovery")
+    @MainActor
+    func oldGenerationCallbackCannotResolveReconnect() async throws {
+        let lane = DSLRCameraPTPCommandLane()
+        let oldScope = DSLRCameraPTPScope(attemptID: UUID(), cameraGeneration: 10)
+        let newScope = DSLRCameraPTPScope(attemptID: UUID(), cameraGeneration: 11)
+        let (sent, sentContinuation) = AsyncStream<DSLRCameraPTPCommandLane.Ticket>.makeStream()
+        var replies: [UUID: @Sendable (DSLRCameraPTPReply) -> Void] = [:]
+        func start(_ scope: DSLRCameraPTPScope) -> Task<Result<DSLRCameraPTPReply, DSLRCameraPTPFailure>, Never> {
+            Task { @MainActor in
+                await lane.execute(
+                    scope: scope,
+                    priority: 2,
+                    timeout: .seconds(60),
+                    isCurrent: { _ in true },
+                    send: { ticket, completion in
+                        replies[ticket.id] = completion
+                        sentContinuation.yield(ticket)
+                    }
+                )
+            }
+        }
+
+        var iterator = sent.makeAsyncIterator()
+        let oldCommand = start(oldScope)
+        let oldTicket = try #require(await iterator.next())
+        lane.deadlineReached(oldTicket)
+        let oldResult = await oldCommand.value
+        guard case .failure(.timedOut) = oldResult else {
+            Issue.record("The unanswered old generation must time out before session recovery.")
+            return
+        }
+        #expect(lane.isQuarantined)
+        lane.retire(cameraGeneration: oldScope.cameraGeneration)
+
+        let newCommand = start(newScope)
+        let newTicket = try #require(await iterator.next())
+        replies[oldTicket.id]?(DSLRCameraPTPReply(
+            data: Data([0x10]),
+            responseCode: 0x2001,
+            errorDescription: nil
+        ))
+        #expect(lane.owner == newTicket)
+        #expect(!lane.isQuarantined)
+        replies[newTicket.id]?(DSLRCameraPTPReply(
+            data: Data([0x11]),
+            responseCode: 0x2001,
+            errorDescription: nil
+        ))
+        let newResult = await newCommand.value
+        guard case .success(let reply) = newResult else {
+            Issue.record("The reconnected generation should accept its own response.")
+            return
+        }
+        #expect(reply.data == Data([0x11]))
+    }
+
     @Test("pacing subtracts completed work from target interval")
     func previewPacingUsesRemainingInterval() {
         let remaining = DSLRCameraSource.previewSleepInterval(

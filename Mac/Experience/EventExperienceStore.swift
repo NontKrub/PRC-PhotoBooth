@@ -5,6 +5,7 @@ import UniformTypeIdentifiers
 actor EventExperienceStore {
     private let baseDirectory: URL
     private let fileManager = FileManager.default
+    private var lastValidEditingPreviews: [String: Data] = [:]
 
     init(baseDirectory: URL) {
         self.baseDirectory = baseDirectory.appendingPathComponent("EventExperiences", isDirectory: true)
@@ -57,7 +58,7 @@ actor EventExperienceStore {
             templates: [template],
             gallery: EventGalleryConfiguration(title: LocalizedText(english: event.name), language: .english)
         )
-        let frame = frameFileName.flatMap { loadCGImage(from: templateDirectory.appendingPathComponent($0)) }
+        let frame = frameFileName.flatMap { loadTemplatePreviewImage(from: templateDirectory.appendingPathComponent($0)) }
         let preview = try TemplatePreviewRenderer().render(template: template, frame: frame, foregroundOverlay: nil)
         try TemplatePreviewRenderer().saveJPEG(preview, to: templateDirectory.appendingPathComponent("preview.jpg"))
         try save(document)
@@ -117,6 +118,7 @@ actor EventExperienceStore {
     func discardEditing(_ session: EventExperienceEditingSession) throws {
         let directory = try editingSessionURL(session)
         if fileManager.fileExists(atPath: directory.path) { try fileManager.removeItem(at: directory) }
+        removeLastValidEditingPreviews(for: session)
     }
 
     func importTemplateFrame(
@@ -126,7 +128,7 @@ actor EventExperienceStore {
         editingSession: EventExperienceEditingSession? = nil
     ) throws -> ImportedTemplateFrame {
         guard fileManager.fileExists(atPath: sourceURL.path) else { throw EventExperienceError.missingAsset(sourceURL) }
-        guard loadCGImage(from: sourceURL) != nil else { throw EventExperienceError.importFailed("Frame must be a readable image.") }
+        guard loadTemplatePreviewImage(from: sourceURL) != nil else { throw EventExperienceError.importFailed("Frame must be a readable image.") }
         if let editingSession { try validateEditingSession(editingSession, eventID: eventID) }
         let directory = try editingSession.map { try stagingTemplateURL($0, templateID: templateID) }
             ?? templateURL(eventID: eventID, templateID: templateID)
@@ -145,7 +147,7 @@ actor EventExperienceStore {
         guard fileManager.fileExists(atPath: sourceURL.path),
               let source = CGImageSourceCreateWithURL(sourceURL as CFURL, nil),
               CGImageSourceGetType(source) == UTType.png.identifier as CFString,
-              let image = CGImageSourceCreateImageAtIndex(source, 0, nil),
+              let image = loadTemplatePreviewImage(from: sourceURL),
               image.alphaInfo != .none,
               image.alphaInfo != .noneSkipFirst,
               image.alphaInfo != .noneSkipLast else {
@@ -274,7 +276,7 @@ actor EventExperienceStore {
                   ) else { return nil }
             return try Data(contentsOf: url)
         }
-        guard let fileName = template.previewFileName else { return nil }
+        guard let fileName = template.previewFileName ?? (editingSession == nil ? nil : "preview.jpg") else { return nil }
         try Task.checkCancellation()
         return try readTemplatePreviewData(
             eventID: eventID,
@@ -293,7 +295,7 @@ actor EventExperienceStore {
         var previews: [String: Data] = [:]
         for template in templates {
             try Task.checkCancellation()
-            guard let fileName = template.previewFileName else { continue }
+            guard let fileName = template.previewFileName ?? (editingSession == nil ? nil : "preview.jpg") else { continue }
             guard let data = try readTemplatePreviewData(
                 eventID: eventID,
                 template: template,
@@ -380,6 +382,7 @@ actor EventExperienceStore {
         }
 
         try? fileManager.removeItem(at: stagingDirectory)
+        removeLastValidEditingPreviews(for: session)
     }
 
     func readPromptImage(eventID: String, fileName: String) throws -> Data? {
@@ -398,11 +401,11 @@ actor EventExperienceStore {
         let directory = try templateURL(eventID: eventID, templateID: templateID)
         let frame = template.frameFileName
             .flatMap { try? templateAssetURL($0, in: directory) }
-            .flatMap { loadCGImage(from: $0) }
+            .flatMap { loadTemplatePreviewImage(from: $0) }
         let previewURL = directory.appendingPathComponent("preview.jpg")
         let foreground = template.foregroundOverlayFileName
             .flatMap { try? templateAssetURL($0, in: directory) }
-            .flatMap { loadCGImage(from: $0) }
+            .flatMap { loadTemplatePreviewImage(from: $0) }
         let image = try TemplatePreviewRenderer().render(template: template, frame: frame, foregroundOverlay: foreground)
         try TemplatePreviewRenderer().saveJPEG(image, to: previewURL)
         document.templates[index].previewFileName = "preview.jpg"
@@ -431,7 +434,9 @@ actor EventExperienceStore {
             throw EventExperienceError.unsupportedSchema(document.schemaVersion)
         }
         guard !document.id.isEmpty, !document.eventID.isEmpty else { throw EventExperienceError.invalidEventID }
-        guard (1...8).contains(document.templates.count) else { throw EventExperienceError.invalid("An event needs between one and eight templates.") }
+        guard (1...EventExperienceDocument.maximumTemplateCount).contains(document.templates.count) else {
+            throw EventExperienceError.invalid("An event needs between one and \(EventExperienceDocument.maximumTemplateCount) templates.")
+        }
         guard document.templates.contains(where: { $0.id == document.defaultTemplateID }) else { throw EventExperienceError.invalid("Default template is missing.") }
         guard document.templates.contains(where: { $0.id == document.defaultTemplateID && $0.isEnabled }) else { throw EventExperienceError.invalid("Default template must be enabled.") }
         guard document.templates.contains(where: \.isEnabled) else { throw EventExperienceError.invalid("At least one template must be enabled.") }
@@ -444,7 +449,7 @@ actor EventExperienceStore {
             guard templateIDs.insert(template.id).inserted else { throw EventExperienceError.invalid("Template IDs must be unique.") }
             guard !template.name.english.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !template.name.thai.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { throw EventExperienceError.invalid("Template name is required.") }
             guard (1...8).contains(template.photoCount) else { throw EventExperienceError.invalid("Template photo count must be between one and eight.") }
-            guard (300...10_000).contains(template.canvasWidth), (300...10_000).contains(template.canvasHeight) else { throw EventExperienceError.invalid("Template canvas must be between 300 and 10,000 pixels.") }
+            guard CanvasDimensionPolicy.isValidDocument(width: template.canvasWidth, height: template.canvasHeight) else { throw EventExperienceError.invalid("Template canvas width and height must each be between 300 and 10,000 pixels.") }
             guard !template.slots.isEmpty else { throw EventExperienceError.invalid("Template needs at least one slot.") }
             guard template.slots.allSatisfy({ $0.normalizedRect.width > 0 && $0.normalizedRect.height > 0 && (0..<template.photoCount).contains($0.photoIndex) }) else { throw EventExperienceError.invalid("Template has an invalid slot.") }
             let slotIndexes = Set(template.slots.map(\.photoIndex))
@@ -624,7 +629,26 @@ actor EventExperienceStore {
         fileName: String,
         editingSession: EventExperienceEditingSession?
     ) throws -> Data? {
-        if editingSession != nil {
+        guard isSafePathComponent(template.id) else { throw EventExperienceError.invalid("Invalid template ID.") }
+        guard isSafePathComponent(fileName) else { throw EventExperienceError.invalid("Invalid template preview asset name.") }
+        if let editingSession {
+            try validateEditingSession(editingSession, eventID: eventID)
+            let cacheKey = editingPreviewCacheKey(
+                eventID: eventID,
+                templateID: template.id,
+                session: editingSession
+            )
+            guard CanvasDimensionPolicy.isValidDocument(width: template.canvasWidth, height: template.canvasHeight) else {
+                if let preview = lastValidEditingPreviews[cacheKey] { return preview }
+                guard let url = try resolvedTemplateAssetURL(
+                    eventID: eventID,
+                    templateID: template.id,
+                    fileName: fileName,
+                    editingSession: editingSession
+                ) else { return nil }
+                return try Data(contentsOf: url)
+            }
+
             let frame = template.frameFileName
                 .flatMap { try? resolvedTemplateAssetURL(
                     eventID: eventID,
@@ -632,7 +656,7 @@ actor EventExperienceStore {
                     fileName: $0,
                     editingSession: editingSession
                 ) }
-                .flatMap { loadCGImage(from: $0) }
+                .flatMap { loadTemplatePreviewImage(from: $0) }
             let foreground = template.foregroundOverlayFileName
                 .flatMap { try? resolvedTemplateAssetURL(
                     eventID: eventID,
@@ -640,14 +664,13 @@ actor EventExperienceStore {
                     fileName: $0,
                     editingSession: editingSession
                 ) }
-                .flatMap { loadCGImage(from: $0) }
-            if frame != nil || foreground != nil {
-                let preview = try TemplatePreviewRenderer().render(template: template, frame: frame, foregroundOverlay: foreground)
-                guard let data = jpegData(from: preview, quality: 0.82) else {
-                    throw TemplatePreviewError.encodingFailed
-                }
-                return data
+                .flatMap { loadTemplatePreviewImage(from: $0) }
+            let preview = try TemplatePreviewRenderer().render(template: template, frame: frame, foregroundOverlay: foreground)
+            guard let data = jpegData(from: preview, quality: 0.82) else {
+                throw TemplatePreviewError.encodingFailed
             }
+            lastValidEditingPreviews[cacheKey] = data
+            return data
         }
 
         guard let url = try resolvedTemplateAssetURL(
@@ -657,6 +680,23 @@ actor EventExperienceStore {
             editingSession: editingSession
         ) else { return nil }
         return try Data(contentsOf: url)
+    }
+
+    private func loadTemplatePreviewImage(from url: URL) -> CGImage? {
+        loadOrientedImageThumbnail(from: url, maxDimension: TemplatePreviewRenderer.maxDimension)
+    }
+
+    private func editingPreviewCacheKey(
+        eventID: String,
+        templateID: String,
+        session: EventExperienceEditingSession
+    ) -> String {
+        "\(session.id)\u{0}\(eventID)\u{0}\(templateID)"
+    }
+
+    private func removeLastValidEditingPreviews(for session: EventExperienceEditingSession) {
+        let prefix = "\(session.id)\u{0}"
+        lastValidEditingPreviews = lastValidEditingPreviews.filter { !$0.key.hasPrefix(prefix) }
     }
 
     private func atomicCopy(_ source: URL, to destination: URL) throws {

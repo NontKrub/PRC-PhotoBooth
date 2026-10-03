@@ -2,6 +2,13 @@ import SwiftUI
 import AppKit
 
 struct ExternalReviewLayout {
+    static func previewSize(for displaySize: CGSize, aspectRatio: CGFloat?) -> CGSize {
+        guard let aspectRatio, aspectRatio.isFinite, aspectRatio > 0,
+              displaySize.width > 0, displaySize.height > 0 else { return displaySize }
+        let width = min(displaySize.width, displaySize.height * aspectRatio)
+        return CGSize(width: width, height: width / aspectRatio)
+    }
+
     static func imageSize(for displaySize: CGSize, image: CGSize) -> CGSize {
         guard displaySize.width.isFinite, displaySize.height.isFinite,
               image.width.isFinite, image.height.isFinite,
@@ -61,7 +68,7 @@ struct ExternalDisplayView: View {
 
     private var idleContent: some View {
         ZStack {
-            cameraPreview
+            cameraPreview()
             RadialGradient(colors: [.clear, .black.opacity(0.55)], center: .center, startRadius: 180, endRadius: 620)
                 .ignoresSafeArea()
 
@@ -137,7 +144,7 @@ struct ExternalDisplayView: View {
 
     private func countdownContent(photoIndex: Int, secondsRemaining: Int) -> some View {
         ZStack {
-            cameraPreview
+            cameraPreview(photoIndex: photoIndex)
             Color.black.opacity(0.2).ignoresSafeArea()
 
             VStack {
@@ -214,7 +221,8 @@ struct ExternalDisplayView: View {
         GeometryReader { geometry in
             let image = coordinator.currentFilteredReviewImages[photoIndex]
                 ?? coordinator.capture.capturedStills[photoIndex]
-            let sourceSize = image.map { CGSize(width: $0.width, height: $0.height) }
+            let sourceSize = CaptureFramingGeometry.framing(for: photoIndex, in: sm.config)?.pixelSize
+                ?? image.map { CGSize(width: $0.width, height: $0.height) }
                 ?? CGSize(width: 4, height: 3)
             let imageSize = ExternalReviewLayout.imageSize(for: geometry.size, image: sourceSize)
             let buttonHeight = ExternalReviewLayout.buttonHeight(for: geometry.size)
@@ -231,14 +239,16 @@ struct ExternalDisplayView: View {
                 ZStack {
                     RoundedRectangle(cornerRadius: 18).fill(Color(white: 0.1))
                     if let image {
-                        Image(nsImage: flipSafeImage(image))
-                            .resizable()
-                            .interpolation(.high)
-                            .scaledToFit()
-                            .clipShape(RoundedRectangle(cornerRadius: 18))
+                        Color.clear.overlay {
+                            Image(nsImage: flipSafeImage(image))
+                                .resizable()
+                                .interpolation(.high)
+                                .scaledToFill()
+                        }
                     }
                 }
                 .frame(width: imageSize.width, height: imageSize.height)
+                .clipShape(RoundedRectangle(cornerRadius: 18))
                 .shadow(color: .black.opacity(0.5), radius: 24, y: 8)
 
                 Spacer(minLength: 0)
@@ -384,13 +394,29 @@ struct ExternalDisplayView: View {
 
     // MARK: - Shared
 
-    private var cameraPreview: some View {
-        ActiveCameraPreviewView(
-            preview: ActiveCameraPreviewResolver.resolve(
-                capture: coordinator.capture,
-                source: coordinator.cameraSourceKind
+    private func cameraPreview(photoIndex: Int? = nil) -> some View {
+        let aspectRatio = photoIndex.flatMap {
+            CaptureFramingGeometry.framing(for: $0, in: sm.config)?.aspectRatio
+        }
+        return GeometryReader { geometry in
+            let viewport = ExternalReviewLayout.previewSize(for: geometry.size, aspectRatio: aspectRatio)
+            ActiveCameraPreviewView(
+                preview: ActiveCameraPreviewResolver.resolve(
+                    capture: coordinator.capture,
+                    source: coordinator.cameraSourceKind
+                ),
+                contentMode: aspectRatio == nil ? .fit : .fill
             )
-        )
+            .frame(width: viewport.width, height: viewport.height)
+            .clipped()
+            .overlay {
+                if aspectRatio != nil {
+                    RoundedRectangle(cornerRadius: 2)
+                        .stroke(.white.opacity(0.7), lineWidth: 2)
+                }
+            }
+            .frame(width: geometry.size.width, height: geometry.size.height)
+        }
         .ignoresSafeArea()
     }
 

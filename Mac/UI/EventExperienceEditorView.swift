@@ -240,7 +240,7 @@ struct EventExperienceEditorView: View {
     }
 
     private func duplicate(_ id: String) {
-        guard document.templates.count < 8,
+        guard document.templates.count < EventExperienceDocument.maximumTemplateCount,
               let source = document.templates.first(where: { $0.id == id }) else { return }
         var copy = source
         copy.id = UUID().uuidString
@@ -282,7 +282,7 @@ struct EventExperienceEditorView: View {
     }
 
     private func addTemplate() {
-        guard document.templates.count < 8,
+        guard document.templates.count < EventExperienceDocument.maximumTemplateCount,
               let source = document.templates.first(where: { $0.id == document.defaultTemplateID }) ?? document.templates.first else { return }
         let template = EventTemplateDefinition(
             name: LocalizedText(english: "New Template", thai: "เทมเพลตใหม่"),

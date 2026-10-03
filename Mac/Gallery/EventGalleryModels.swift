@@ -90,6 +90,7 @@ struct GalleryRouteSession: Sendable, Equatable {
 enum EventGalleryStoreError: LocalizedError, Equatable {
     case invalidEventID
     case corrupt(URL, backup: URL)
+    case unreadable(URL, reason: String)
     case missingSession(String)
 
     var errorDescription: String? {
@@ -97,6 +98,8 @@ enum EventGalleryStoreError: LocalizedError, Equatable {
         case .invalidEventID: return "Invalid gallery event ID."
         case .corrupt(let url, let backup):
             return "Corrupt gallery index \(url.path). Preserved copy: \(backup.path)"
+        case .unreadable(let url, let reason):
+            return "Gallery index could not be read at \(url.path): \(reason)"
         case .missingSession(let id): return "Gallery session not found: \(id)"
         }
     }

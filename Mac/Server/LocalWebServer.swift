@@ -175,6 +175,10 @@ actor LocalWebServer {
     func setBeforeFileResponseForTesting(_ handler: (@Sendable () async -> Void)?) {
         beforeFileResponseForTesting = handler
     }
+
+    func hasGalleryRouteForTesting(eventToken: String) -> Bool {
+        galleryRoutes[eventToken] != nil
+    }
 #endif
 
     func statusSnapshot() -> LocalWebServerStatus {

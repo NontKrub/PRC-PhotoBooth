@@ -1,8 +1,15 @@
 import Foundation
+import Darwin
 
 enum SessionManifestLoadResult: Sendable {
     case loaded(SessionManifest)
     case failed(fileURL: URL, message: String)
+}
+
+enum SessionManifestLookupResult: Sendable {
+    case missing
+    case loaded(SessionManifest)
+    case unreadable(fileURL: URL, message: String)
 }
 
 actor SessionManifestStore {
@@ -32,6 +39,49 @@ actor SessionManifestStore {
             throw SessionManifestError.missing(url)
         }
         return try decode(from: url)
+    }
+
+    func lookup(sessionID: String) -> SessionManifestLookupResult {
+        let url: URL
+        do {
+            try validate(sessionID: sessionID)
+            url = baseDirectory
+                .appendingPathComponent("Sessions", isDirectory: true)
+                .appendingPathComponent("\(sessionID).json", isDirectory: false)
+        } catch {
+            return .unreadable(
+                fileURL: baseDirectory.appendingPathComponent("Sessions/\(sessionID).json"),
+                message: error.localizedDescription
+            )
+        }
+        var sessionsDirectoryInfo = stat()
+        let sessionsDirectoryResult = url.deletingLastPathComponent().path.withCString {
+            lstat($0, &sessionsDirectoryInfo)
+        }
+        guard sessionsDirectoryResult == 0 else {
+            return errno == ENOENT || errno == ENOTDIR
+                ? .missing
+                : .unreadable(fileURL: url, message: "Could not inspect the manifest directory.")
+        }
+        guard sessionsDirectoryInfo.st_mode & mode_t(S_IFMT) == mode_t(S_IFDIR) else {
+            return .unreadable(fileURL: url, message: "The manifest directory is not a regular directory.")
+        }
+
+        var manifestInfo = stat()
+        let manifestResult = url.path.withCString { lstat($0, &manifestInfo) }
+        guard manifestResult == 0 else {
+            return errno == ENOENT || errno == ENOTDIR
+                ? .missing
+                : .unreadable(fileURL: url, message: "Could not inspect the manifest file.")
+        }
+        guard manifestInfo.st_mode & mode_t(S_IFMT) == mode_t(S_IFREG) else {
+            return .unreadable(fileURL: url, message: "The manifest path is not a regular file.")
+        }
+        do {
+            return .loaded(try decode(from: url))
+        } catch {
+            return .unreadable(fileURL: url, message: error.localizedDescription)
+        }
     }
 
     func save(

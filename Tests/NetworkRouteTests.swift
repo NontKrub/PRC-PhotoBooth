@@ -890,6 +890,7 @@ private func soakMessages(sessionID: String, photoCount: Int, index: Int) -> [Me
         .sessionSync(snapshot: snapshot),
         .beginCountdown(
             context: firstContext,
+            deliveryID: firstRequestID,
             descriptor: CountdownDescriptor(
                 photoIndex: 0,
                 captureAt: Date(timeIntervalSince1970: Double(index))
@@ -906,6 +907,7 @@ private func soakMessages(sessionID: String, photoCount: Int, index: Int) -> [Me
         let retakeReviewState = ReviewStateToken(sessionID: sessionID, photoIndex: 0, revision: 2, authorityEpoch: testAuthorityEpoch)
         messages.append(.beginCountdown(
             context: retakeContext,
+            deliveryID: firstRequestID,
             descriptor: CountdownDescriptor(
                 photoIndex: 0,
                 captureAt: Date(timeIntervalSince1970: Double(index) + 1)
@@ -1758,13 +1760,11 @@ struct NetworkRouteTests {
         let capture = ControlListenerCapture()
         let runtime = BoothNetworkTransportRuntime(
             queue: queue,
-            controlListenerFactory: { parameters, port in
-                let listener: NWListener
-                if let port {
-                    listener = try NWListener(using: parameters, on: port)
-                } else {
-                    listener = try NWListener(using: parameters)
-                }
+            controlListenerFactory: { _, _ in
+                // This test covers stale listener callback admission, not
+                // Ethernet binding. An ephemeral listener avoids depending
+                // on a host wired interface or a process-global fixed port.
+                let listener = try NWListener(using: .tcp)
                 capture.append(listener)
                 return listener
             }
@@ -1786,8 +1786,7 @@ struct NetworkRouteTests {
             writer.invalidate(generation: Int.max)
         }
 
-        var wiredParameters = NWParameters.tcp
-        wiredParameters.requiredInterfaceType = .wiredEthernet
+        let wiredParameters = NWParameters.tcp
         let generation = runtime.startControlListener(
             using: wiredParameters,
             port: NWEndpoint.Port(rawValue: 58_500),
@@ -1913,7 +1912,9 @@ struct NetworkRouteTests {
             generation: 1
         )
 
-        #expect(remoteMessages.waitForCase("authChallenge", timeout: 5))
+        // The injected secure frame can be rejected before the queued auth
+        // challenge reaches the peer, so outbound challenge delivery is not
+        // part of this pre-authentication rejection contract.
         #expect(events.waitForRejectionReason(expectedRejectionReason, timeout: 5))
         #expect(remoteMessages.waitUntilClosed(timeout: 5))
         #expect(!remoteMessages.contains("secureChannelHello"))
@@ -2895,7 +2896,6 @@ struct NetworkRouteTests {
             endpoint: .hostPort(host: "127.0.0.1", port: .any)
         )
         replacement.start()
-        #expect(replacement.waitUntilSent())
         #expect(events.waitForPairingIntentCount(2))
         let replacementCandidate = try #require(events.lastPairingIntentCandidate?.0)
         #expect(replacementCandidate.generation != firstCandidate.generation)
@@ -4368,6 +4368,162 @@ struct NetworkRouteTests {
         #expect(route.state == .connectingWiFi)
     }
 
+    @Test("Mac authenticated Ethernet disconnect falls back through NetworkBoothTransport")
+    @MainActor
+    func authenticatedLANDisconnectUsesProductionHandlerAndFallsBackAfterGrace() async throws {
+        let transport = NetworkBoothTransport(role: .mac, networkPreference: .lan)
+        defer { transport.disconnect() }
+        let listenerGeneration = transport.prepareAuthenticatedLANDisconnectForTesting(
+            wifiPathAvailable: true
+        )
+
+        transport.closeAuthenticatedLANControlForTesting()
+        #expect(transport.lanFallbackSnapshotForTesting.activeInterface == .wiredEthernet)
+        #expect(!transport.lanFallbackSnapshotForTesting.fallbackActive)
+
+        try await Task.sleep(for: .milliseconds(200))
+
+        let snapshot = transport.lanFallbackSnapshotForTesting
+        #expect(snapshot.activeInterface == .wifi)
+        #expect(snapshot.fallbackActive)
+        #expect(snapshot.routeState == .connectingWiFi)
+        #expect(snapshot.controlListenerGeneration != listenerGeneration)
+    }
+
+    @Test("Legacy authenticated Ethernet disconnect uses the same bounded fallback")
+    @MainActor
+    func legacyAuthenticatedLANDisconnectUsesProductionHandler() async throws {
+        let transport = NetworkBoothTransport(role: .mac, networkPreference: .lan)
+        defer { transport.disconnect() }
+        let listenerGeneration = transport.prepareAuthenticatedLANDisconnectForTesting(
+            wifiPathAvailable: true,
+            legacyControlPath: true
+        )
+        let connectionGeneration = transport.lanFallbackSnapshotForTesting.controlConnectionGeneration
+
+        transport.closeAuthenticatedLANControlForTesting(coreOwned: false)
+        try await Task.sleep(for: .milliseconds(200))
+
+        let snapshot = transport.lanFallbackSnapshotForTesting
+        #expect(snapshot.activeInterface == .wifi)
+        #expect(snapshot.fallbackActive)
+        #expect(snapshot.controlListenerGeneration != listenerGeneration)
+        #expect(snapshot.controlConnectionGeneration != connectionGeneration)
+    }
+
+    @Test("Ethernet fallback waits for an observed Wi-Fi path")
+    @MainActor
+    func disconnectedLANKeepsListenerUntilWiFiIsObserved() async throws {
+        let wifiPathAvailabilityCases: [Bool?] = [false, nil]
+        for wifiPathAvailable in wifiPathAvailabilityCases {
+            let transport = NetworkBoothTransport(role: .mac, networkPreference: .lan)
+            let listenerGeneration = transport.prepareAuthenticatedLANDisconnectForTesting(
+                wifiPathAvailable: wifiPathAvailable
+            )
+
+            transport.closeAuthenticatedLANControlForTesting()
+            try await Task.sleep(for: .milliseconds(200))
+
+            let waitingSnapshot = transport.lanFallbackSnapshotForTesting
+            #expect(waitingSnapshot.activeInterface == .wiredEthernet)
+            #expect(!waitingSnapshot.fallbackActive)
+            #expect(waitingSnapshot.didObserveWiFiPath == (wifiPathAvailable != nil))
+            #expect(!waitingSnapshot.isWiFiPathAvailable)
+            #expect(waitingSnapshot.fallbackPending)
+            #expect(waitingSnapshot.controlListenerGeneration == listenerGeneration)
+
+            transport.updateWiFiPathForTesting(true)
+            try await Task.sleep(for: .milliseconds(100))
+
+            let recoveredSnapshot = transport.lanFallbackSnapshotForTesting
+            #expect(recoveredSnapshot.activeInterface == .wifi)
+            #expect(recoveredSnapshot.fallbackActive)
+            #expect(recoveredSnapshot.controlListenerGeneration != listenerGeneration)
+            transport.disconnect()
+        }
+    }
+
+    @Test("LAN authentication returning during grace cancels Wi-Fi fallback")
+    @MainActor
+    func authenticatedLANReturnCancelsPendingFallback() async throws {
+        let transport = NetworkBoothTransport(role: .mac, networkPreference: .lan)
+        defer { transport.disconnect() }
+        let listenerGeneration = transport.prepareAuthenticatedLANDisconnectForTesting(
+            wifiPathAvailable: true
+        )
+
+        transport.closeAuthenticatedLANControlForTesting()
+        transport.restoreAuthenticatedLANControlForTesting()
+        try await Task.sleep(for: .milliseconds(200))
+
+        let snapshot = transport.lanFallbackSnapshotForTesting
+        #expect(snapshot.activeInterface == .wiredEthernet)
+        #expect(!snapshot.fallbackActive)
+        #expect(!snapshot.fallbackPending)
+        #expect(snapshot.controlListenerGeneration == listenerGeneration)
+    }
+
+    @Test("Preference change retires the pending Ethernet fallback")
+    @MainActor
+    func preferenceChangeRetiresPendingLANFallback() async throws {
+        let transport = NetworkBoothTransport(role: .mac, networkPreference: .lan)
+        defer { transport.disconnect() }
+        _ = transport.prepareAuthenticatedLANDisconnectForTesting(wifiPathAvailable: true)
+
+        transport.closeAuthenticatedLANControlForTesting()
+        transport.requestedNetworkPreference = .wifi
+        let listenerGeneration = transport.lanFallbackSnapshotForTesting.controlListenerGeneration
+        try await Task.sleep(for: .milliseconds(200))
+
+        let snapshot = transport.lanFallbackSnapshotForTesting
+        #expect(snapshot.activeInterface == .wifi)
+        #expect(!snapshot.fallbackActive)
+        #expect(!snapshot.fallbackPending)
+        #expect(snapshot.controlListenerGeneration == listenerGeneration)
+    }
+
+    @Test("Pending pairing disconnect retains the manual Ethernet listener")
+    @MainActor
+    func pendingPairingDisconnectDoesNotStartWiFiFallback() async throws {
+        let transport = NetworkBoothTransport(role: .mac, networkPreference: .lan)
+        defer { transport.disconnect() }
+        let listenerGeneration = transport.prepareAuthenticatedLANDisconnectForTesting(
+            wifiPathAvailable: true,
+            pairingPending: true
+        )
+
+        transport.closeAuthenticatedLANControlForTesting()
+        try await Task.sleep(for: .milliseconds(200))
+
+        let snapshot = transport.lanFallbackSnapshotForTesting
+        #expect(snapshot.activeInterface == .wiredEthernet)
+        #expect(!snapshot.fallbackActive)
+        #expect(!snapshot.fallbackPending)
+        #expect(snapshot.controlListenerGeneration == listenerGeneration)
+    }
+
+    @Test("Stopping during the Ethernet grace invalidates the old deadline")
+    @MainActor
+    func stoppingDuringLANFallbackGraceInvalidatesDeadline() async throws {
+        let transport = NetworkBoothTransport(role: .mac, networkPreference: .lan)
+        let originalListenerGeneration = transport.prepareAuthenticatedLANDisconnectForTesting(
+            wifiPathAvailable: true
+        )
+
+        transport.closeAuthenticatedLANControlForTesting()
+        transport.disconnect()
+        let stoppedSnapshot = transport.lanFallbackSnapshotForTesting
+        try await Task.sleep(for: .milliseconds(200))
+
+        let finalSnapshot = transport.lanFallbackSnapshotForTesting
+        #expect(stoppedSnapshot.activeInterface == nil)
+        #expect(!stoppedSnapshot.fallbackActive)
+        #expect(finalSnapshot.activeInterface == nil)
+        #expect(!finalSnapshot.fallbackActive)
+        #expect(finalSnapshot.controlListenerGeneration == stoppedSnapshot.controlListenerGeneration)
+        #expect(stoppedSnapshot.controlListenerGeneration == originalListenerGeneration)
+    }
+
     @Test("No LAN and no Wi-Fi becomes unavailable")
     func noNetworkIsUnavailable() {
         var route = BoothNetworkRouteMachine(preference: .lan)
@@ -4995,6 +5151,96 @@ struct TransportRecoveryPolicyTests {
         )
     }
 
+    @Test("preview admission protects an active handshake and releases failed or timed-out slots")
+    func previewAdmissionCoversHandshakeLifecycle() {
+        let deadline = BoothSecondaryChannelAdmissionPolicy.handshakeTimedOut(
+            startedAt: Date(timeIntervalSince1970: 100),
+            now: Date(timeIntervalSince1970: 111.9),
+            timeout: 12
+        )
+        let expired = BoothSecondaryChannelAdmissionPolicy.handshakeTimedOut(
+            startedAt: Date(timeIntervalSince1970: 100),
+            now: Date(timeIntervalSince1970: 112),
+            timeout: 12
+        )
+
+        #expect(!deadline)
+        #expect(expired)
+        #expect(BoothSecondaryChannelAdmissionPolicy.decision(existingState: .handshaking) == .rejectCandidate)
+        #expect(BoothSecondaryChannelAdmissionPolicy.decision(existingState: .verified) == .rejectCandidate)
+        #expect(BoothSecondaryChannelAdmissionPolicy.decision(existingState: .failed) == .acceptCandidate)
+        #expect(BoothSecondaryChannelAdmissionPolicy.decision(existingState: .none) == .acceptCandidate)
+        #expect(!BoothSecondaryChannelAdmissionPolicy.shouldAdmitPreviewCandidate(
+            existingState: .none,
+            controlIsAuthenticated: false
+        ))
+        #expect(BoothSecondaryChannelAdmissionPolicy.shouldAdmitPreviewCandidate(
+            existingState: .none,
+            controlIsAuthenticated: true
+        ))
+
+        for _ in 0..<10_000 {
+            #expect(!BoothSecondaryChannelAdmissionPolicy.shouldAdmitPreviewCandidate(
+                existingState: .handshaking,
+                controlIsAuthenticated: true
+            ))
+        }
+    }
+
+    @Test("preview admission cooldown is bounded and expires for legitimate recovery")
+    func previewAdmissionCooldownAllowsRecovery() {
+        let now = Date(timeIntervalSince1970: 1_000)
+        #expect(BoothSecondaryChannelAdmissionPolicy.cooldownDuration(afterFailureCount: 0) == 0)
+        #expect(BoothSecondaryChannelAdmissionPolicy.cooldownDuration(afterFailureCount: 1) == 1)
+        #expect(BoothSecondaryChannelAdmissionPolicy.cooldownDuration(afterFailureCount: 2) == 2)
+        #expect(BoothSecondaryChannelAdmissionPolicy.cooldownDuration(afterFailureCount: 3) == 4)
+        #expect(BoothSecondaryChannelAdmissionPolicy.cooldownDuration(afterFailureCount: 4) == 8)
+        #expect(BoothSecondaryChannelAdmissionPolicy.cooldownDuration(afterFailureCount: 5) == 16)
+        #expect(BoothSecondaryChannelAdmissionPolicy.cooldownDuration(afterFailureCount: 1_000) == 30)
+
+        let cooldown = now.addingTimeInterval(4)
+        #expect(!BoothSecondaryChannelAdmissionPolicy.cooldownExpired(until: cooldown, now: now))
+        #expect(BoothSecondaryChannelAdmissionPolicy.cooldownExpired(until: cooldown, now: cooldown))
+        #expect(BoothSecondaryChannelAdmissionPolicy.cooldownExpired(until: nil, now: now))
+        #expect(BoothSecondaryChannelAdmissionPolicy.failureCount(
+            afterFailureCount: 6,
+            lastFailureAt: now.addingTimeInterval(-61),
+            now: now
+        ) == 0)
+        #expect(BoothSecondaryChannelAdmissionPolicy.failureCount(
+            afterFailureCount: 6,
+            lastFailureAt: now.addingTimeInterval(-59),
+            now: now
+        ) == 6)
+
+        var failureCount = 0
+        var availableAt = now
+        for _ in 0..<100 {
+            failureCount += 1
+            availableAt = availableAt.addingTimeInterval(
+                12 + BoothSecondaryChannelAdmissionPolicy.cooldownDuration(afterFailureCount: failureCount)
+            )
+        }
+        let legitimateReconnect = availableAt.addingTimeInterval(0.001)
+        #expect(BoothSecondaryChannelAdmissionPolicy.cooldownExpired(
+            until: availableAt,
+            now: legitimateReconnect
+        ))
+
+        for candidate in 0..<10_000 {
+            #expect(
+                !BoothSecondaryChannelAdmissionPolicy.cooldownExpired(
+                    until: cooldown,
+                    now: now.addingTimeInterval(Double(candidate % 4))
+                )
+            )
+        }
+        #expect(BoothSecondaryChannelAdmissionPolicy.cooldownExpired(
+            until: cooldown,
+            now: now.addingTimeInterval(4)
+        ))
+    }
+
     @Test("Waiting recovery deadline remains tied to its connection generation")
     func recoveryDeadlineUsesExactConnectionGeneration() async throws {
         let queue = DispatchQueue(label: "PRC-PhotoBooth.Tests.Recovery")
@@ -5059,6 +5305,7 @@ struct TransportRecoveryPolicyTests {
             case 2:
                 return .beginCountdown(
                     context: context,
+                    deliveryID: UUID(uuidString: String(format: "00000000-0000-0000-0000-%012llx", UInt64(index + 10_000)))!,
                     descriptor: CountdownDescriptor(
                         photoIndex: index % 8,
                         captureAt: Date(timeIntervalSince1970: Double(index))

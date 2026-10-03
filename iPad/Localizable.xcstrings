@@ -150,12 +150,22 @@
       }
     },
     "Back" : {
-      "extractionState" : "stale",
       "localizations" : {
         "th" : {
           "stringUnit" : {
             "state" : "translated",
             "value" : "ย้อนกลับ"
+          }
+        }
+      }
+    },
+    "Back to idle screen" : {
+      "extractionState" : "stale",
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "กลับไปหน้าพร้อมใช้งาน"
           }
         }
       }
@@ -1423,6 +1433,17 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "เริ่ม"
+          }
+        }
+      }
+    },
+    "Starting…" : {
+      "extractionState" : "stale",
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "กำลังเริ่ม…"
           }
         }
       }
