@@ -9,6 +9,39 @@ import UniformTypeIdentifiers
 
 @Suite("EventExperienceStore")
 struct EventExperienceStoreTests {
+    @Test("events with eight through ten templates persist and the last template is selectable", arguments: [8, 9, 10])
+    func supportsTenTemplates(count: Int) async throws {
+        let root = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = EventExperienceStore(baseDirectory: root)
+        var document = document(for: validTemplate())
+        document.templates = (0..<count).map { validTemplate(id: "template-\($0)") }
+        document.defaultTemplateID = document.templates[0].id
+        try await store.save(document)
+        let loaded = try await store.load(eventID: document.eventID)
+        #expect(loaded.templates.map(\.id) == document.templates.map(\.id))
+        let last = try #require(loaded.templates.last)
+        let selection = CustomerSessionSelection(
+            eventID: loaded.eventID,
+            experienceRevision: loaded.revision,
+            templateID: last.id,
+            filterID: .original,
+            language: .english
+        )
+        #expect(try CustomerSelectionValidator().validate(selection, against: loaded).template.id == last.id)
+    }
+
+    @Test("events with eleven templates exceed the supported limit")
+    func rejectsElevenTemplates() async throws {
+        let root = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = EventExperienceStore(baseDirectory: root)
+        var document = document(for: validTemplate())
+        document.templates = (0..<11).map { validTemplate(id: "template-\($0)") }
+        document.defaultTemplateID = document.templates[0].id
+        try await expectInvalid(store: store, document: document, containing: "10 templates")
+    }
+
     @Test("SwiftData session origin defaults normal and restoration backfills soak metadata")
     @MainActor
     func sessionOriginPersistenceAndRestoration() {

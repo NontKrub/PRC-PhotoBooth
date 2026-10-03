@@ -925,7 +925,7 @@ final class iPadViewModel: ObservableObject {
             guard let self else { return }
             guard self.assetProcessingGeneration == processingGeneration,
                   self.sessionMessageGate.currentSessionID == sessionID,
-                  self.assetRetryTracker.currentGeneration == channelGeneration else { return }
+                  (self.assetRetryTracker.currentGeneration ?? 0) == channelGeneration else { return }
             guard outcome == .sent else {
                 self.assetRequestPump.markSendFailed(batch)
                 self.handleAssetFailure(batch, channelGeneration: channelGeneration)
@@ -1129,7 +1129,7 @@ final class iPadViewModel: ObservableObject {
     ) {
         guard processingGeneration == assetProcessingGeneration,
               sessionMessageGate.currentSessionID == sessionID,
-              assetRetryTracker.currentGeneration == channelGeneration else { return }
+              (assetRetryTracker.currentGeneration ?? 0) == channelGeneration else { return }
         let missing = missingExpectedAssets()
         let timedOut = references.filter {
             missing.contains($0) && assetRequestPump.inFlight.contains($0)

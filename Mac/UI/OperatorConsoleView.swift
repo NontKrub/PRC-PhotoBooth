@@ -10,6 +10,7 @@ struct OperatorConsoleView: View {
     @State private var showPrintPrompt = false
     @State private var showPrintAgainConfirmation = false
     @State private var showGrid = false
+    @State private var selectedTemplateID = ""
     @AppStorage("selphyAutoPrintAfterSession") private var autoPrint = false
 
     var body: some View {
@@ -43,6 +44,9 @@ struct OperatorConsoleView: View {
         }
         .onChange(of: sm.phase) { _, newPhase in
             if case .finished = newPhase { showPrintPrompt = !autoPrint }
+        }
+        .onChange(of: coordinator.activeEvent?.id) { _, _ in
+            selectedTemplateID = ""
         }
         .alert("Print Photo Strip?", isPresented: $showPrintPrompt) {
             Button("Print") { coordinator.printCurrentStrip() }
@@ -648,14 +652,48 @@ struct OperatorConsoleView: View {
 
     // MARK: - Session controls
 
+    private var operatorSessionSelection: CustomerSessionSelection? {
+        guard let catalog = coordinator.experienceCatalog,
+              catalog.eventID == coordinator.activeEvent?.id,
+              !catalog.templates.isEmpty else { return nil }
+        let templateID = catalog.templates.contains(where: { $0.id == selectedTemplateID })
+            ? selectedTemplateID : catalog.defaultTemplateID
+        return CustomerSessionSelection(
+            eventID: catalog.eventID,
+            experienceRevision: catalog.revision,
+            templateID: templateID,
+            filterID: catalog.defaultFilterID,
+            language: catalog.defaultLanguage
+        )
+    }
+
     var sessionControls: some View {
         VStack(spacing: 8) {
-            Button(action: { coordinator.startSession() }) {
+            if let catalog = coordinator.experienceCatalog,
+               let selection = operatorSessionSelection {
+                Picker("Template", selection: Binding(
+                    get: { operatorSessionSelection?.templateID ?? selection.templateID },
+                    set: { selectedTemplateID = $0 }
+                )) {
+                    ForEach(catalog.templates) { template in
+                        Text(template.name.value(for: operatorCustomerLanguage(for: locale)))
+                            .tag(template.id)
+                    }
+                }
+                .pickerStyle(.menu)
+                .disabled(sm.phase != .idle && sm.phase != .readyToStart)
+            }
+
+            Button(action: {
+                guard let selection = operatorSessionSelection else { return }
+                coordinator.startSession(selection: selection)
+            }) {
                 Label("Start Session", systemImage: "play.fill")
                     .frame(maxWidth: .infinity)
             }
             .buttonStyle(.borderedProminent)
             .disabled(coordinator.activeEvent == nil
+                      || operatorSessionSelection == nil
                       || (sm.phase != .idle && sm.phase != .readyToStart)
                       || !coordinator.selectedCaptureSourceReady
                       || !coordinator.isCustomerDisplayReady
@@ -783,6 +821,7 @@ enum ActiveCameraPreviewResolver {
 
 struct ActiveCameraPreviewView: View {
     let preview: ActiveCameraPreview
+    var contentMode: ContentMode = .fit
     var showGrid = false
     var onStart: (() -> Void)?
 
@@ -790,10 +829,14 @@ struct ActiveCameraPreviewView: View {
         Group {
             switch preview {
             case .image(let image):
-                CapturedImagePreview(cgImage: image)
+                CapturedImagePreview(cgImage: image, contentMode: contentMode)
             case .session(let session, let mirrored):
-                CameraPreviewView(captureSession: session, isMirrored: mirrored)
-                    .aspectRatio(4 / 3, contentMode: .fit)
+                if contentMode == .fill {
+                    CameraPreviewView(captureSession: session, isMirrored: mirrored, fillsFrame: true)
+                } else {
+                    CameraPreviewView(captureSession: session, isMirrored: mirrored)
+                        .aspectRatio(4 / 3, contentMode: .fit)
+                }
             case .unavailable(let title, let detail):
                 VStack(spacing: 12) {
                     Image(systemName: "camera.slash.fill")
@@ -819,6 +862,7 @@ struct ActiveCameraPreviewView: View {
 
 private struct CapturedImagePreview: View {
     let cgImage: CGImage
+    var contentMode: ContentMode = .fit
 
     var body: some View {
         let rep = NSBitmapImageRep(cgImage: cgImage)
@@ -826,7 +870,7 @@ private struct CapturedImagePreview: View {
         nsImage.addRepresentation(rep)
         return Image(nsImage: nsImage)
             .resizable()
-            .aspectRatio(contentMode: .fit)
+            .aspectRatio(contentMode: contentMode)
             .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 }
@@ -836,9 +880,10 @@ private struct CapturedImagePreview: View {
 struct CameraPreviewView: NSViewRepresentable {
     let captureSession: AVCaptureSession?
     var isMirrored = false
+    var fillsFrame = false
     func makeNSView(context: Context) -> PreviewNSView { PreviewNSView() }
     func updateNSView(_ view: PreviewNSView, context: Context) {
-        view.updateSession(captureSession, isMirrored: isMirrored)
+        view.updateSession(captureSession, isMirrored: isMirrored, fillsFrame: fillsFrame)
     }
 }
 
@@ -847,7 +892,7 @@ final class PreviewNSView: NSView {
     override var wantsUpdateLayer: Bool { true }
     override func makeBackingLayer() -> CALayer { CALayer() }
 
-    func updateSession(_ session: AVCaptureSession?, isMirrored: Bool = false) {
+    func updateSession(_ session: AVCaptureSession?, isMirrored: Bool = false, fillsFrame: Bool = false) {
         if layer_?.session !== session {
             layer_?.removeFromSuperlayer()
             guard let session else { return }
@@ -858,6 +903,7 @@ final class PreviewNSView: NSView {
             self.layer?.addSublayer(l)
             layer_ = l
         }
+        layer_?.videoGravity = fillsFrame ? .resizeAspectFill : .resizeAspect
         // ponytail: CATransform3D flip avoids AVCaptureConnection_Tundra crash on Continuity Camera
         layer_?.transform = isMirrored
             ? CATransform3DMakeScale(-1, 1, 1)

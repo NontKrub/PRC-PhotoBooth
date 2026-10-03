@@ -2615,14 +2615,15 @@ final class BoothCoordinator {
 
     var productionSoakPhotoCount: Int? {
         guard let document = activeExperienceDocument else { return nil }
-        return document.templates.first(where: { $0.id == document.defaultTemplateID })?.photoCount
+        let templateIDs = Set(BoothSoakTemplateSelection.candidates(in: document).map(\.templateID))
+        return document.templates.filter { templateIDs.contains($0.id) }.map(\.photoCount).max()
     }
 
     func productionSoakReadinessIssues(config: BoothSoakTestConfig) -> [String] {
         var issues: [String] = []
         if activeEvent == nil { issues.append("An active event is required.") }
         if activeEvent != nil, productionSoakPhotoCount == nil {
-            issues.append("The active event’s default photo template is not ready.")
+            issues.append("The active event has no ready, enabled photo templates.")
         }
         if !selectedCaptureSourceReady { issues.append("The selected physical camera is not ready.") }
         if !isCustomerDisplayReady { issues.append("Connect the paired iPad or activate the external customer display.") }
@@ -2717,11 +2718,16 @@ final class BoothCoordinator {
         guard currentSession == nil, currentManifest == nil, finishedAwaitingCustomerAckSessionID == nil else {
             throw BoothSoakTestError.productionRunUnavailable("a previous session has not reached its safe boundary")
         }
+        guard let document = activeExperienceDocument,
+              let selection = BoothSoakTemplateSelection.candidates(in: document).randomElement() else {
+            throw BoothSoakTestError.productionRunUnavailable("the active event has no ready, enabled photo templates")
+        }
+        NSLog("%@", "[Soak] Run \(runID), cycle \(cycleIndex): selected template \(selection.templateID)")
 
         soakCloudUploadOverride = config.testCloudUpload
         soakAutomaticPrintOverride = printEnabled
         errorMessage = nil
-        startSession(origin: .soakTest, soakRunID: runID, soakCycleIndex: cycleIndex)
+        startSession(selection: selection, origin: .soakTest, soakRunID: runID, soakCycleIndex: cycleIndex)
         var lastPublishedStage: String?
         func publishStage(_ stage: String) async {
             guard stage != lastPublishedStage else { return }

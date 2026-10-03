@@ -183,6 +183,7 @@
       }
     },
     "%@ sessions × (%@ photos + 1–4 retakes) = %@–%@ camera captures." : {
+      "extractionState" : "stale",
       "localizations" : {
         "en" : {
           "stringUnit" : {
@@ -211,6 +212,22 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "%1$@ เซสชัน × %2$@ ภาพ = %3$@ ภาพที่บันทึกจากกล้อง"
+          }
+        }
+      }
+    },
+    "%@ sessions with random event templates: up to %@ photos plus 1–4 retakes per session. At most %@ camera captures." : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "%1$@ sessions with random event templates: up to %2$@ photos plus 1–4 retakes per session. At most %3$@ camera captures."
+          }
+        },
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%1$@ รอบโดยสุ่มแม่แบบของงาน: สูงสุด %2$@ รูป พร้อมถ่ายใหม่ 1–4 ครั้งต่อรอบ รวมการถ่ายภาพสูงสุด %3$@ ครั้ง"
           }
         }
       }
@@ -894,6 +911,16 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "จำนวนครั้ง: %1$@"
+          }
+        }
+      }
+    },
+    "Authenticated Ethernet transport is active; Network.framework path status is advisory." : {
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "การเชื่อมต่อ Ethernet ที่ยืนยันตัวตนแล้วกำลังทำงาน สถานะเส้นทางจาก Network.framework เป็นเพียงข้อมูลประกอบ"
           }
         }
       }
@@ -2042,6 +2069,7 @@
       }
     },
     "Connecting…" : {
+      "extractionState" : "stale",
       "localizations" : {
         "th" : {
           "stringUnit" : {
@@ -2873,11 +2901,22 @@
       }
     },
     "Estimated new output: about %@; estimate uses 10 MiB per photo plus 10 MiB per session." : {
+      "extractionState" : "stale",
       "localizations" : {
         "th" : {
           "stringUnit" : {
             "state" : "translated",
             "value" : "คาดว่าข้อมูลใหม่ประมาณ %1$@ โดยประเมินจากภาพละ 10 MiB และเซสชันละ 10 MiB"
+          }
+        }
+      }
+    },
+    "Estimated new output: up to %@; estimate uses the largest enabled template, 10 MiB per photo plus 10 MiB per session." : {
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "พื้นที่สำหรับไฟล์ใหม่โดยประมาณ: สูงสุด %@; คำนวณจากแม่แบบที่มีจำนวนรูปมากที่สุดในแม่แบบที่เปิดใช้งาน โดยใช้ 10 MiB ต่อรูป และเพิ่ม 10 MiB ต่อรอบ"
           }
         }
       }
@@ -3751,6 +3790,16 @@
         }
       }
     },
+    "Inactive (Ethernet connection is active)." : {
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ไม่ได้ทำงาน เนื่องจากการเชื่อมต่อ Ethernet กำลังใช้งานอยู่"
+          }
+        }
+      }
+    },
     "Incoming iPad" : {
       "localizations" : {
         "th" : {
@@ -3772,22 +3821,23 @@
         }
       }
     },
-    "Initializing camera…" : {
-      "localizations" : {
-        "th" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "กำลังเตรียมกล้อง…"
-          }
-        }
-      }
-    },
     "Individual download pages will remain available." : {
       "localizations" : {
         "th" : {
           "stringUnit" : {
             "state" : "translated",
             "value" : "หน้าดาวน์โหลดแต่ละเซสชันยังใช้งานได้"
+          }
+        }
+      }
+    },
+    "Initializing camera…" : {
+      "extractionState" : "stale",
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "กำลังเตรียมกล้อง…"
           }
         }
       }
@@ -4258,6 +4308,7 @@
       }
     },
     "Manual reconnect required" : {
+      "extractionState" : "stale",
       "localizations" : {
         "th" : {
           "stringUnit" : {
@@ -5993,6 +6044,7 @@
       }
     },
     "Recovering camera connection…" : {
+      "extractionState" : "stale",
       "localizations" : {
         "th" : {
           "stringUnit" : {
@@ -7296,6 +7348,16 @@
         }
       }
     },
+    "SSH server identity is not trusted on this Mac. Verify the server fingerprint with the operator, then run the configured SSH alias in Terminal and accept only the matching fingerprint." : {
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Mac เครื่องนี้ยังไม่เชื่อถือข้อมูลระบุตัวตนของเซิร์ฟเวอร์ SSH โปรดตรวจสอบลายนิ้วมือกับผู้ดูแลเซิร์ฟเวอร์ แล้วเรียกชื่อแทน SSH ที่ตั้งค่าไว้ใน Terminal และยอมรับเฉพาะลายนิ้วมือที่ตรงกัน"
+          }
+        }
+      }
+    },
     "Start" : {
       "extractionState" : "manual",
       "localizations" : {
@@ -7866,6 +7928,16 @@
         }
       }
     },
+    "The SSH server identity has changed. Verify its new fingerprint with the server operator; only then remove the old known_hosts entry and retry." : {
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ข้อมูลระบุตัวตนของเซิร์ฟเวอร์ SSH เปลี่ยนไป โปรดตรวจสอบลายนิ้วมือใหม่กับผู้ดูแลเซิร์ฟเวอร์ก่อนลบรายการ known_hosts เดิม แล้วจึงลองอีกครั้ง"
+          }
+        }
+      }
+    },
     "These test sessions are kept for operator review and excluded from production history and public gallery routes." : {
       "localizations" : {
         "th" : {
@@ -8039,6 +8111,16 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "ไม่พร้อมใช้งาน"
+          }
+        }
+      }
+    },
+    "Unavailable (monitor hint; authenticated Ethernet is active)." : {
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ตัวตรวจสอบแจ้งว่าไม่พร้อมใช้งาน แต่การเชื่อมต่อ Ethernet ที่ยืนยันตัวตนแล้วกำลังทำงาน"
           }
         }
       }
@@ -8257,6 +8339,7 @@
       }
     },
     "Waiting for camera…" : {
+      "extractionState" : "stale",
       "localizations" : {
         "th" : {
           "stringUnit" : {

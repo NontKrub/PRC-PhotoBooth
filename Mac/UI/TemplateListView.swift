@@ -30,7 +30,7 @@ struct TemplateListView: View {
                 Text("Templates")
                 Spacer()
                 Button("Add Template", systemImage: "plus") { onAdd() }
-                    .disabled(templates.count >= 8)
+                    .disabled(templates.count >= EventExperienceDocument.maximumTemplateCount)
             }
         }
     }
@@ -75,6 +75,7 @@ struct TemplateListView: View {
                     Text(LocalizedStringKey(template.isEnabled ? "Disable" : "Enable"))
                 }
                 Button("Duplicate") { onDuplicate(template.id) }
+                    .disabled(templates.count >= EventExperienceDocument.maximumTemplateCount)
                 Button("Move Up") { onMove(template.id, -1) }
                 Button("Move Down") { onMove(template.id, 1) }
                 Divider()

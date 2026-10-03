@@ -5,6 +5,64 @@ import Foundation
 
 @Suite("Soak Test Harness")
 struct SoakTests {
+    @Test("production soak can choose every enabled valid event template")
+    func productionTemplateCandidates() throws {
+        let first = EventTemplateDefinition(
+            id: "first", name: LocalizedText(english: "First"), photoCount: 1,
+            canvasWidth: 400, canvasHeight: 600,
+            slots: [SharedPhotoSlot(normalizedRect: CGRect(x: 0, y: 0, width: 1, height: 1), photoIndex: 0)]
+        )
+        var second = first
+        second.id = "second"
+        second.photoCount = 2
+        second.slots.append(SharedPhotoSlot(normalizedRect: CGRect(x: 0, y: 0, width: 1, height: 1), photoIndex: 1))
+        var disabled = first
+        disabled.id = "disabled"
+        disabled.isEnabled = false
+        var invalid = first
+        invalid.id = "invalid"
+        invalid.slots = []
+        let document = EventExperienceDocument(
+            id: "event", eventID: "event", revision: "revision",
+            defaultTemplateID: first.id, guestTemplateSelectionEnabled: false,
+            defaultCustomerLanguage: .thai,
+            templates: [first, second, disabled, invalid], gallery: EventGalleryConfiguration()
+        )
+        let candidates = BoothSoakTemplateSelection.candidates(in: document)
+        #expect(Set(candidates.map(\.templateID)) == ["first", "second"])
+        for selection in candidates {
+            #expect(selection.eventID == "event")
+            #expect(selection.experienceRevision == "revision")
+            #expect(selection.filterID == document.defaultFilterID)
+            #expect(selection.language == .thai)
+            let validated = try CustomerSelectionValidator().validate(selection, against: document)
+            #expect(validated.template.photoCount == (selection.templateID == "first" ? 1 : 2))
+        }
+        var generator = SystemRandomNumberGenerator()
+        for _ in 0..<20 {
+            let selection = try #require(candidates.randomElement(using: &generator))
+            #expect(["first", "second"].contains(selection.templateID))
+        }
+    }
+
+    @Test("production soak has no fallback when no template is eligible")
+    func productionTemplatesRequireEligibleSelection() {
+        var document = EventExperienceDocument(
+            id: "event", eventID: "event", defaultTemplateID: "missing",
+            templates: [], gallery: EventGalleryConfiguration()
+        )
+        #expect(BoothSoakTemplateSelection.candidates(in: document).isEmpty)
+        let template = EventTemplateDefinition(
+            id: "only", name: LocalizedText(english: "Only"), photoCount: 1,
+            canvasWidth: 400, canvasHeight: 600,
+            slots: [SharedPhotoSlot(normalizedRect: CGRect(x: 0, y: 0, width: 1, height: 1), photoIndex: 0)]
+        )
+        document.templates = [template]
+        #expect(BoothSoakTemplateSelection.candidates(in: document).map(\.templateID) == ["only"])
+        document.allowedFilterIDs = []
+        #expect(BoothSoakTemplateSelection.candidates(in: document).isEmpty)
+    }
+
     @Test("report statistics computation calculates latency and RSS samples")
     func reportStatisticsComputation() {
         let metrics = [

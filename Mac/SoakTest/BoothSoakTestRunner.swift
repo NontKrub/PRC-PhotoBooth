@@ -432,6 +432,7 @@ actor BoothSoakTestRunner {
             "Mode": config.mode.rawValue,
             "Target sessions": String(config.targetCycles),
             "Photos per session": String(config.photosPerSession),
+            "Production templates": "Random enabled template from the active event each session",
             "Production retakes": "Random 1–4 per session across the active template’s photo slots",
             "Delay between sessions (seconds)": String(config.delayBetweenCyclesSeconds),
             "Physical print enabled": String(config.enablePhysicalPrint),

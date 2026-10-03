@@ -434,7 +434,9 @@ actor EventExperienceStore {
             throw EventExperienceError.unsupportedSchema(document.schemaVersion)
         }
         guard !document.id.isEmpty, !document.eventID.isEmpty else { throw EventExperienceError.invalidEventID }
-        guard (1...8).contains(document.templates.count) else { throw EventExperienceError.invalid("An event needs between one and eight templates.") }
+        guard (1...EventExperienceDocument.maximumTemplateCount).contains(document.templates.count) else {
+            throw EventExperienceError.invalid("An event needs between one and \(EventExperienceDocument.maximumTemplateCount) templates.")
+        }
         guard document.templates.contains(where: { $0.id == document.defaultTemplateID }) else { throw EventExperienceError.invalid("Default template is missing.") }
         guard document.templates.contains(where: { $0.id == document.defaultTemplateID && $0.isEnabled }) else { throw EventExperienceError.invalid("Default template must be enabled.") }
         guard document.templates.contains(where: \.isEnabled) else { throw EventExperienceError.invalid("At least one template must be enabled.") }

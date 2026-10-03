@@ -160,6 +160,7 @@
       }
     },
     "Back to idle screen" : {
+      "extractionState" : "stale",
       "localizations" : {
         "th" : {
           "stringUnit" : {
@@ -1367,16 +1368,6 @@
         }
       }
     },
-    "Starting…" : {
-      "localizations" : {
-        "th" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "กำลังเริ่ม…"
-          }
-        }
-      }
-    },
     "Secure connection failed. Reconnecting…" : {
       "extractionState" : "manual",
       "localizations" : {
@@ -1442,6 +1433,17 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "เริ่ม"
+          }
+        }
+      }
+    },
+    "Starting…" : {
+      "extractionState" : "stale",
+      "localizations" : {
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "กำลังเริ่ม…"
           }
         }
       }

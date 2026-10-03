@@ -2,6 +2,7 @@ import Foundation
 
 struct EventExperienceDocument: Codable, Sendable, Equatable, Identifiable {
     static let currentSchemaVersion = 1
+    static let maximumTemplateCount = 10
 
     var schemaVersion: Int
     var id: String

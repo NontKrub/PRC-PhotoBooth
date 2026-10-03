@@ -37,6 +37,63 @@ private actor AssetDecodeTestBarrier {
 
 @Suite("iPad smoke tests")
 struct iPadSmokeTests {
+    @Test("lost review response after session reset retries and restores actionable review")
+    @MainActor
+    func reviewResponseRetriesAfterSessionReset() async throws {
+        let transport = RecordingIPadTransport()
+        let viewModel = iPadViewModel(transport: transport)
+        defer { transport.disconnect() }
+        transport.onTransportEvent?(BoothTransportDiagnosticEvent(
+            kind: .transportReady, channel: "asset", generation: 41
+        ))
+        let sessionID = "review-retry"
+        let config = EventConfig(photoCount: 1)
+        let setupContext = SessionMessageContext(
+            sessionID: sessionID, sequence: 1, authorityEpoch: iPadTestAuthorityEpoch
+        )
+        transport.onControlMessage?(.sessionPrepared(
+            config: config,
+            presentation: SessionPresentation(
+                sessionID: sessionID, language: .english,
+                templateDisplayName: "Test", filterID: .original, prompts: []
+            ),
+            context: setupContext,
+            deliveryID: UUID()
+        ))
+        let data = try previewPNG(color: .blue)
+        let reference = BoothAssetReference(
+            assetID: "review-retry-image", sessionID: sessionID,
+            revision: "review-v1", kind: .reviewImage,
+            byteCount: data.count, sha256: Data(SHA256.hash(data: data))
+        )
+        transport.onControlMessage?(.shotCapturedAsset(
+            context: SessionMessageContext(
+                sessionID: sessionID, sequence: 2, authorityEpoch: iPadTestAuthorityEpoch
+            ),
+            index: 0, asset: reference
+        ))
+        func requestCount() -> Int {
+            transport.messages.filter {
+                guard case .assetRequest(let references) = $0 else { return false }
+                return references.contains(reference)
+            }.count
+        }
+        #expect(requestCount() == 1)
+        for _ in 0..<650 where requestCount() < 2 {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        #expect(requestCount() >= 2)
+        for chunk in try BoothAssetTransfer.chunks(data: data, reference: reference) {
+            transport.onAssetChunk?(chunk)
+        }
+        for _ in 0..<200 where !viewModel.isReviewMediaReady {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        #expect(viewModel.stateMachine.phase == .review(photoIndex: 0))
+        #expect(viewModel.isReviewMediaReady)
+        #expect(viewModel.assetRecoveryStatus == .idle)
+    }
+
     private func experienceCatalog(revision: String = "revision-a") -> CustomerExperienceCatalog {
         CustomerExperienceCatalog(
             eventID: "event-1",
